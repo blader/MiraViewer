@@ -1,1 +1,10 @@
 mri_scans/
+exported_images/
+dicom_metadata.db
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.venv/
+venv/
