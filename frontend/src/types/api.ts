@@ -3,6 +3,9 @@ export interface Series {
   series_description: string;
   series_number: number;
   modality: string;
+  plane: string | null;
+  weight: string | null;
+  sequence_type: string | null;
   instance_count: number;
   instances?: Instance[];
 }
@@ -58,4 +61,34 @@ export interface CompareState {
   rightSeriesUid: string | null;
   rightInstanceIndex: number;
   syncScroll: boolean;
+}
+
+// Comparison view types
+export interface SequenceCombo {
+  id: string;
+  plane: string | null;
+  weight: string | null;
+  sequence: string | null;
+  label: string;
+  date_count: number;
+}
+
+export interface SeriesRef {
+  study_id: string;
+  series_uid: string;
+  instance_count: number;
+}
+
+export interface ComparisonData {
+  planes: string[];
+  dates: string[]; // ISO date strings
+  sequences: SequenceCombo[];
+  series_map: Record<string, Record<string, SeriesRef>>; // comboId -> dateISO -> ref
+}
+
+export interface PanelSettings {
+  offset: number;
+  zoom: number;
+  rotation: number;
+  progress?: number | null; // normalized 0..1 last viewed global slice position for this date
 }

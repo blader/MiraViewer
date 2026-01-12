@@ -1,4 +1,4 @@
-import type { Study, Series, ImageMetadata } from '../types/api';
+import type { Study, Series, ImageMetadata, ComparisonData, PanelSettings } from '../types/api';
 
 const API_BASE = '/api';
 
@@ -63,6 +63,35 @@ export function formatDate(dateString: string | null): string {
     month: 'short',
     day: 'numeric',
   });
+}
+
+export async function fetchComparisonData(): Promise<ComparisonData> {
+  const response = await fetch(`${API_BASE}/comparison-data`);
+  if (!response.ok) {
+    throw new Error('Failed to fetch comparison data');
+  }
+  return response.json();
+}
+
+export async function fetchPanelSettings(comboId: string): Promise<Record<string, PanelSettings>> {
+  const res = await fetch(`${API_BASE}/panel-settings/${encodeURIComponent(comboId)}`);
+  if (!res.ok) throw new Error('Failed to fetch panel settings');
+  const data = await res.json();
+  return (data && data.settings) || {};
+}
+
+export async function savePanelSettings(comboId: string, dateIso: string, settings: PanelSettings): Promise<void> {
+  const payload: any = { combo_id: comboId, date_iso: dateIso };
+  if (typeof settings.offset === 'number') payload.offset = settings.offset;
+  if (typeof settings.zoom === 'number') payload.zoom = settings.zoom;
+  if (typeof settings.rotation === 'number') payload.rotation = settings.rotation;
+  if (typeof settings.progress === 'number') payload.progress = settings.progress;
+  const res = await fetch(`${API_BASE}/panel-settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error('Failed to save panel settings');
 }
 
 export function formatSeriesDescription(description: string): string {

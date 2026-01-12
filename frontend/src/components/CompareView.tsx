@@ -1,8 +1,23 @@
 import { useState, useEffect } from 'react';
 import type { Study, Series } from '../types/api';
 import { DicomViewer } from './DicomViewer';
-import { formatDate, formatSeriesDescription } from '../utils/api';
+import { formatDate } from '../utils/api';
 import { Link2, Link2Off, ChevronDown } from 'lucide-react';
+
+/** Build a display name from parsed metadata, falling back to description */
+function formatSeriesName(series: Series): string {
+  const parts: string[] = [];
+  
+  if (series.plane) parts.push(series.plane);
+  if (series.weight) parts.push(series.weight);
+  if (series.sequence_type) parts.push(series.sequence_type);
+  
+  if (parts.length > 0) {
+    return parts.join(' ');
+  }
+  
+  return series.series_description || 'Unknown';
+}
 
 interface CompareViewProps {
   studies: Study[];
@@ -111,7 +126,6 @@ export function CompareView({ studies, leftStudyId, rightStudyId, onClose }: Com
                 instanceIndex={leftInstanceIndex}
                 instanceCount={leftSeries.instance_count}
                 onInstanceChange={handleLeftInstanceChange}
-                label="Before"
               />
             </div>
           )}
@@ -143,7 +157,6 @@ export function CompareView({ studies, leftStudyId, rightStudyId, onClose }: Com
                 instanceIndex={rightInstanceIndex}
                 instanceCount={rightSeries.instance_count}
                 onInstanceChange={handleRightInstanceChange}
-                label="After"
               />
             </div>
           )}
@@ -170,7 +183,7 @@ function SeriesDropdown({ series, selectedUid, onSelect }: SeriesDropdownProps) 
         className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--bg-secondary)] hover:bg-[var(--border-color)] text-sm transition-colors"
       >
         <span className="max-w-[200px] truncate">
-          {selected ? formatSeriesDescription(selected.series_description) : 'Select series'}
+          {selected ? formatSeriesName(selected) : 'Select series'}
         </span>
         <ChevronDown className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
@@ -190,7 +203,7 @@ function SeriesDropdown({ series, selectedUid, onSelect }: SeriesDropdownProps) 
                   s.series_uid === selectedUid ? 'bg-[var(--bg-tertiary)]' : ''
                 }`}
               >
-                <div className="truncate">{formatSeriesDescription(s.series_description)}</div>
+              <div className="truncate">{formatSeriesName(s)}</div>
                 <div className="text-xs text-[var(--text-secondary)]">
                   {s.instance_count} slices
                 </div>

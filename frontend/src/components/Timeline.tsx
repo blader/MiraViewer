@@ -69,14 +69,11 @@ export function Timeline({
                             {formatDate(study.study_date)}
                           </div>
                           <div className={`text-xs truncate ${isSelected ? 'text-blue-100' : 'text-[var(--text-secondary)]'}`}>
-                            {study.series_count} series · {study.total_instances} images
+                            {study.total_instances} images
                           </div>
                         </div>
                       </div>
                       <ChevronRight className={`w-4 h-4 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ${isSelected ? 'opacity-100' : ''}`} />
-                    </div>
-                    <div className={`text-xs mt-1 truncate ${isSelected ? 'text-blue-100' : 'text-[var(--text-secondary)]'}`}>
-                      {study.scan_type}
                     </div>
                   </button>
                 );

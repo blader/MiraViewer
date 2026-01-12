@@ -69,44 +69,63 @@ input[type="range"] {
   appearance: none;
   background: transparent;
   cursor: pointer;
+  height: 20px;
 }
 
-input[type="range"]::-webkit-slider-track {
-  background: var(--border-color);
-  height: 4px;
-  border-radius: 2px;
+input[type="range"]::-webkit-slider-runnable-track {
+  background: var(--bg-tertiary);
+  height: 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
 }
 
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 16px;
-  height: 16px;
-  background: var(--accent);
+  width: 18px;
+  height: 18px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
   border-radius: 50%;
-  margin-top: -6px;
-  transition: transform 0.15s ease;
+  margin-top: -7px;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.4), 0 0 0 2px rgba(59, 130, 246, 0.1);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.6), 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(1.05);
 }
 
 input[type="range"]::-moz-range-track {
-  background: var(--border-color);
-  height: 4px;
-  border-radius: 2px;
+  background: var(--bg-tertiary);
+  height: 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
 }
 
 input[type="range"]::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  background: var(--accent);
+  width: 18px;
+  height: 18px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
   border-radius: 50%;
   border: none;
-  transition: transform 0.15s ease;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.4), 0 0 0 2px rgba(59, 130, 246, 0.1);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
 input[type="range"]::-moz-range-thumb:hover {
-  transform: scale(1.2);
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.6), 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+input[type="range"]:focus {
+  outline: none;
+}
+
+input[type="range"]:focus::-webkit-slider-thumb {
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.6), 0 0 0 3px rgba(59, 130, 246, 0.2);
 }

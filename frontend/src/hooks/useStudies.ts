@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Study, Series } from '../types/api';
 import { fetchStudies, fetchStudy, fetchSeries } from '../utils/api';
 
@@ -54,7 +54,7 @@ export function useStudy(studyId: string | null) {
     async function load() {
       try {
         setLoading(true);
-        const data = await fetchStudy(studyId);
+        const data = await fetchStudy(studyId!);
         if (mounted) {
           setStudy(data);
           setError(null);
@@ -95,7 +95,7 @@ export function useSeries(studyId: string | null, seriesUid: string | null) {
     async function load() {
       try {
         setLoading(true);
-        const data = await fetchSeries(studyId, seriesUid);
+        const data = await fetchSeries(studyId!, seriesUid!);
         if (mounted) {
           setSeries(data);
           setError(null);

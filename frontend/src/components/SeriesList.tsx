@@ -1,11 +1,26 @@
 import type { Series } from '../types/api';
-import { formatSeriesDescription } from '../utils/api';
 import { Layers, Image as ImageIcon } from 'lucide-react';
 
 interface SeriesListProps {
   series: Series[];
   selectedSeriesUid: string | null;
   onSelectSeries: (seriesUid: string) => void;
+}
+
+/** Build a display name from parsed metadata, falling back to description */
+function formatSeriesName(series: Series): string {
+  const parts: string[] = [];
+  
+  if (series.plane) parts.push(series.plane);
+  if (series.weight) parts.push(series.weight);
+  if (series.sequence_type) parts.push(series.sequence_type);
+  
+  if (parts.length > 0) {
+    return parts.join(' ');
+  }
+  
+  // Fallback to original description
+  return series.series_description || 'Unknown';
 }
 
 export function SeriesList({ series, selectedSeriesUid, onSelectSeries }: SeriesListProps) {
@@ -45,7 +60,7 @@ export function SeriesList({ series, selectedSeriesUid, onSelectSeries }: Series
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-medium truncate">
-                    {formatSeriesDescription(s.series_description)}
+                    {formatSeriesName(s)}
                   </div>
                   <div className={`text-xs ${isSelected ? 'text-blue-100' : 'text-[var(--text-secondary)]'}`}>
                     #{s.series_number} · {s.instance_count} slices

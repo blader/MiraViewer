@@ -99,6 +99,11 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             inversion_time REAL,
             flip_angle REAL,
             
+            -- Parsed from series description
+            plane TEXT,
+            weight TEXT,
+            sequence_type TEXT,
+            
             -- Timestamps
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             
@@ -214,7 +219,70 @@ def extract_metadata(ds, source_path: str, study_folder: str) -> dict:
         'echo_time': safe_get(ds, 'EchoTime'),
         'inversion_time': safe_get(ds, 'InversionTime'),
         'flip_angle': safe_get(ds, 'FlipAngle'),
+        
+        # Parsed from series description
+        'plane': parse_plane(safe_get(ds, 'SeriesDescription')),
+        'weight': parse_weight(safe_get(ds, 'SeriesDescription')),
+        'sequence_type': parse_sequence_type(safe_get(ds, 'SeriesDescription')),
     }
+
+
+def parse_plane(description: str) -> Optional[str]:
+    """Extract imaging plane from series description."""
+    if not description:
+        return None
+    desc_upper = description.upper()
+    
+    if ' AX ' in desc_upper or desc_upper.startswith('AX ') or '_AX_' in desc_upper or 'AXIAL' in desc_upper:
+        return 'Axial'
+    elif ' COR ' in desc_upper or desc_upper.startswith('COR ') or '_COR_' in desc_upper or 'CORONAL' in desc_upper:
+        return 'Coronal'
+    elif ' SAG ' in desc_upper or desc_upper.startswith('SAG ') or '_SAG_' in desc_upper or 'SAGITTAL' in desc_upper:
+        return 'Sagittal'
+    return None
+
+
+def parse_weight(description: str) -> Optional[str]:
+    """Extract T1/T2 weighting from series description."""
+    if not description:
+        return None
+    desc_upper = description.upper()
+    
+    # Check for T1 (but not T10, T11, etc.)
+    if 'T1_' in desc_upper or 'T1 ' in desc_upper or '_T1' in desc_upper or desc_upper.endswith('T1'):
+        return 'T1'
+    # Check for T2
+    if 'T2_' in desc_upper or 'T2 ' in desc_upper or '_T2' in desc_upper or desc_upper.endswith('T2'):
+        return 'T2'
+    return None
+
+
+def parse_sequence_type(description: str) -> Optional[str]:
+    """Extract sequence type from series description."""
+    if not description:
+        return None
+    desc_upper = description.upper()
+    
+    # Order matters - check more specific sequences first
+    sequences = [
+        ('FLAIR', 'FLAIR'),
+        ('SSFSE', 'SSFSE'),
+        ('SWI', 'SWI'),
+        ('SWAN', 'SWAN'),
+        ('DWI', 'DWI'),
+        ('DTI', 'DTI'),
+        ('ASL', 'ASL'),
+        ('ADC', 'ADC'),
+        ('GRE', 'GRE'),
+        ('SE', 'SE'),  # Spin Echo - check last as it's common substring
+        ('LOC', 'Localizer'),
+        ('LOCALIZER', 'Localizer'),
+    ]
+    
+    for pattern, name in sequences:
+        if pattern in desc_upper:
+            return name
+    return None
 
 
 def sanitize_filename(name: str) -> str:
