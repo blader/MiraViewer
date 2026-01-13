@@ -53,16 +53,28 @@ def init_db():
                 offset INTEGER DEFAULT 0,
                 zoom REAL DEFAULT 1.0,
                 rotation REAL DEFAULT 0.0,
+                brightness REAL DEFAULT 100.0,
+                contrast REAL DEFAULT 100.0,
+                pan_x REAL DEFAULT 0.0,
+                pan_y REAL DEFAULT 0.0,
                 progress REAL,
                 PRIMARY KEY (combo_id, date_iso)
             )
             """
         )
-        # Migration: add progress column if missing
+        # Migration: add columns if missing
         cur.execute("PRAGMA table_info(panel_settings)")
         cols = {row[1] for row in cur.fetchall()}
         if "progress" not in cols:
             cur.execute("ALTER TABLE panel_settings ADD COLUMN progress REAL")
+        if "brightness" not in cols:
+            cur.execute("ALTER TABLE panel_settings ADD COLUMN brightness REAL DEFAULT 100.0")
+        if "contrast" not in cols:
+            cur.execute("ALTER TABLE panel_settings ADD COLUMN contrast REAL DEFAULT 100.0")
+        if "pan_x" not in cols:
+            cur.execute("ALTER TABLE panel_settings ADD COLUMN pan_x REAL DEFAULT 0.0")
+        if "pan_y" not in cols:
+            cur.execute("ALTER TABLE panel_settings ADD COLUMN pan_y REAL DEFAULT 0.0")
         conn.commit()
 
 
@@ -534,12 +546,12 @@ async def get_comparison_data():
 @app.get("/api/panel-settings/{combo_id}")
 async def get_panel_settings(combo_id: str):
     """Return all saved panel settings for a given combo (sequence id).
-    Response: { "combo_id": str, "settings": { date_iso: {offset, zoom, rotation, progress} } }
+    Response: { "combo_id": str, "settings": { date_iso: {offset, zoom, rotation, brightness, contrast, panX, panY, progress} } }
     """
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT date_iso, offset, zoom, rotation, progress FROM panel_settings WHERE combo_id = ?",
+            "SELECT date_iso, offset, zoom, rotation, brightness, contrast, pan_x, pan_y, progress FROM panel_settings WHERE combo_id = ?",
             (combo_id,)
         )
         settings = {}
@@ -548,7 +560,11 @@ async def get_panel_settings(combo_id: str):
                 "offset": row[1],
                 "zoom": row[2],
                 "rotation": row[3],
-                "progress": row[4],
+                "brightness": row[4],
+                "contrast": row[5],
+                "panX": row[6],
+                "panY": row[7],
+                "progress": row[8],
             }
         return {"combo_id": combo_id, "settings": settings}
 
@@ -556,7 +572,7 @@ async def get_panel_settings(combo_id: str):
 @app.post("/api/panel-settings")
 async def upsert_panel_settings(payload: dict = Body(...)):
     """Upsert a single panel setting.
-    Body: { combo_id: str, date_iso: str, offset?: int, zoom?: float, rotation?: float, progress?: float }
+    Body: { combo_id: str, date_iso: str, offset?: int, zoom?: float, rotation?: float, brightness?: float, contrast?: float, panX?: float, panY?: float, progress?: float }
     """
     required = ["combo_id", "date_iso"]
     for k in required:
@@ -567,6 +583,10 @@ async def upsert_panel_settings(payload: dict = Body(...)):
     offset = int(payload.get("offset", 0))
     zoom = float(payload.get("zoom", 1.0))
     rotation = float(payload.get("rotation", 0.0))
+    brightness = float(payload.get("brightness", 100.0))
+    contrast = float(payload.get("contrast", 100.0))
+    pan_x = float(payload.get("panX", 0.0))
+    pan_y = float(payload.get("panY", 0.0))
     progress = payload.get("progress")
     progress_val = float(progress) if progress is not None else None
 
@@ -574,15 +594,19 @@ async def upsert_panel_settings(payload: dict = Body(...)):
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO panel_settings (combo_id, date_iso, offset, zoom, rotation, progress)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO panel_settings (combo_id, date_iso, offset, zoom, rotation, brightness, contrast, pan_x, pan_y, progress)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(combo_id, date_iso) DO UPDATE SET
                 offset=excluded.offset,
                 zoom=excluded.zoom,
                 rotation=excluded.rotation,
+                brightness=excluded.brightness,
+                contrast=excluded.contrast,
+                pan_x=excluded.pan_x,
+                pan_y=excluded.pan_y,
                 progress=COALESCE(excluded.progress, panel_settings.progress)
             """,
-            (combo_id, date_iso, offset, zoom, rotation, progress_val)
+            (combo_id, date_iso, offset, zoom, rotation, brightness, contrast, pan_x, pan_y, progress_val)
         )
         conn.commit()
         return {"status": "ok"}

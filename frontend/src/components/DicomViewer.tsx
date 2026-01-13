@@ -12,6 +12,9 @@ interface DicomViewerProps {
   contrast?: number;    // 0-200, 100 = normal
   zoom?: number;        // 1 = 100%
   rotation?: number;    // degrees
+  panX?: number;        // pan offset in pixels
+  panY?: number;        // pan offset in pixels
+  onPanChange?: (panX: number, panY: number) => void;
 }
 
 export function DicomViewer({
@@ -24,16 +27,15 @@ export function DicomViewer({
   contrast = 100,
   zoom = 1,
   rotation = 0,
+  panX = 0,
+  panY = 0,
+  onPanChange,
 }: DicomViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [imageLoading, setImageLoading] = useState(true);
   const [showSpinner, setShowSpinner] = useState(false);
   const [imageError, setImageError] = useState(false);
   const spinnerTimeoutRef = useRef<number | null>(null);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-
   // Mouse wheel navigation for slices
   useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
 
@@ -43,33 +45,36 @@ export function DicomViewer({
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
   
-  // Combined transform
-  const imageTransform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotate(${rotation}deg)`;
+  // Combined transform - pan is applied to move the clicked point to center
+  const imageTransform = `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`;
 
-  // Mouse handlers for panning
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button === 0) {
-      setIsDragging(true);
-      dragStartRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
-    }
-  }, [pan]);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isDragging) {
-      const dx = e.clientX - dragStartRef.current.x;
-      const dy = e.clientY - dragStartRef.current.y;
-      setPan({ x: dragStartRef.current.panX + dx, y: dragStartRef.current.panY + dy });
-    }
-  }, [isDragging]);
-
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+  // Click to set center - calculates offset to move clicked point to viewport center
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    if (!containerRef.current || !onPanChange) return;
+    
+    const rect = containerRef.current.getBoundingClientRect();
+    const viewportCenterX = rect.width / 2;
+    const viewportCenterY = rect.height / 2;
+    
+    // Where user clicked relative to viewport
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    // Calculate offset needed to move clicked point to center
+    // Account for existing pan and zoom
+    const offsetX = viewportCenterX - clickX + panX;
+    const offsetY = viewportCenterY - clickY + panY;
+    
+    onPanChange(offsetX, offsetY);
+  }, [onPanChange, panX, panY]);
 
   // Double-click to reset pan
-  const handleDoubleClick = useCallback(() => {
-    setPan({ x: 0, y: 0 });
-  }, []);
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (onPanChange) {
+      onPanChange(0, 0);
+    }
+  }, [onPanChange]);
 
   const handleImageLoad = useCallback(() => {
     setImageLoading(false);
@@ -115,11 +120,8 @@ export function DicomViewer({
       {/* Viewport */}
       <div
         ref={containerRef}
-        className={`h-full overflow-hidden relative ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        className="h-full overflow-hidden relative cursor-crosshair"
+        onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >
         {showSpinner && imageLoading && (
@@ -136,7 +138,7 @@ export function DicomViewer({
 
         <div 
           className="w-full h-full flex items-center justify-center"
-          style={{ transform: imageTransform, transition: isDragging ? 'none' : 'transform 0.1s ease-out' }}
+          style={{ transform: imageTransform }}
         >
           <img
             src={imageUrl}

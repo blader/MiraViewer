@@ -90,5 +90,9 @@ export interface PanelSettings {
   offset: number;
   zoom: number;
   rotation: number;
+  brightness: number;  // 0-200, 100 = normal
+  contrast: number;    // 0-200, 100 = normal
+  panX: number;        // pan offset in pixels
+  panY: number;        // pan offset in pixels
   progress?: number | null; // normalized 0..1 last viewed global slice position for this date
 }

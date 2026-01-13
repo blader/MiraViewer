@@ -85,6 +85,10 @@ export async function savePanelSettings(comboId: string, dateIso: string, settin
   if (typeof settings.offset === 'number') payload.offset = settings.offset;
   if (typeof settings.zoom === 'number') payload.zoom = settings.zoom;
   if (typeof settings.rotation === 'number') payload.rotation = settings.rotation;
+  if (typeof settings.brightness === 'number') payload.brightness = settings.brightness;
+  if (typeof settings.contrast === 'number') payload.contrast = settings.contrast;
+  if (typeof settings.panX === 'number') payload.panX = settings.panX;
+  if (typeof settings.panY === 'number') payload.panY = settings.panY;
   if (typeof settings.progress === 'number') payload.progress = settings.progress;
   const res = await fetch(`${API_BASE}/panel-settings`, {
     method: 'POST',
