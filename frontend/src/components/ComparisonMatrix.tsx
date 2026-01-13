@@ -872,105 +872,103 @@ export function ComparisonMatrix() {
                         <span className="text-[var(--text-secondary)] truncate">{formatDate(date)}</span>
                         <div className="flex items-center">
                           {/* Slice offset */}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { offset: settings.offset - 1 }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { offset: settings.offset - 1 })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronLeft className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           <span className="text-[var(--text-primary)] text-[10px] w-8 text-center font-mono">
                             {idx + 1}/{ref.instance_count}
                           </span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { offset: settings.offset + 1 }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { offset: settings.offset + 1 })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
-                          <ChevronRight className="w-3 h-3" />
-                          </button>
+                            <ChevronRight className="w-3 h-3" />
+                          </RepeatButton>
                           
                           <div className="w-px h-3 bg-[var(--border-color)] mx-1" />
                           
                           {/* Zoom */}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { zoom: Math.max(0.1, settings.zoom - 0.01) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { zoom: Math.max(0.1, settings.zoom - 0.01) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronLeft className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           <span className="text-[var(--text-primary)] text-[10px] w-8 text-center font-mono">
                             {Math.round(settings.zoom * 100)}%
                           </span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { zoom: Math.min(10, settings.zoom + 0.01) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { zoom: Math.min(10, settings.zoom + 0.01) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronRight className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           
                           {/* Rotation */}
-                          <button
-                            onClick={(e) => { 
-                              e.stopPropagation(); 
+                          <RepeatButton
+                            onAction={() => {
                               let val = settings.rotation - 1;
                               val = ((val + 180) % 360 + 360) % 360 - 180;
-                              updatePanelSetting(date, { rotation: val }); 
+                              updatePanelSetting(date, { rotation: val });
                             }}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronLeft className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           <span className="text-[var(--text-primary)] text-[10px] w-7 text-center font-mono">
                             {settings.rotation}°
                           </span>
-                          <button
-                            onClick={(e) => { 
-                              e.stopPropagation(); 
+                          <RepeatButton
+                            onAction={() => {
                               let val = settings.rotation + 1;
                               val = ((val + 180) % 360 + 360) % 360 - 180;
-                              updatePanelSetting(date, { rotation: val }); 
+                              updatePanelSetting(date, { rotation: val });
                             }}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronRight className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           
                           <div className="w-px h-3 bg-[var(--border-color)] mx-1" />
                           
                           {/* Brightness */}
                           <span className="text-[var(--text-secondary)] text-[10px]">B</span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { brightness: Math.max(0, settings.brightness - 1) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { brightness: Math.max(0, settings.brightness - 1) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronLeft className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           <span className="text-[var(--text-primary)] text-[10px] w-6 text-center font-mono">
                             {settings.brightness}
                           </span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { brightness: Math.min(200, settings.brightness + 1) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { brightness: Math.min(200, settings.brightness + 1) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronRight className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           
                           {/* Contrast */}
                           <span className="text-[var(--text-secondary)] text-[10px] ml-1">C</span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { contrast: Math.max(0, settings.contrast - 1) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { contrast: Math.max(0, settings.contrast - 1) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronLeft className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                           <span className="text-[var(--text-primary)] text-[10px] w-6 text-center font-mono">
                             {settings.contrast}
                           </span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); updatePanelSetting(date, { contrast: Math.min(200, settings.contrast + 1) }); }}
+                          <RepeatButton
+                            onAction={() => updatePanelSetting(date, { contrast: Math.min(200, settings.contrast + 1) })}
                             className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                           >
                             <ChevronRight className="w-3 h-3" />
-                          </button>
+                          </RepeatButton>
                         </div>
                       </div>
                       <div className="flex-1 min-h-0 bg-black">
@@ -1068,48 +1066,48 @@ export function ComparisonMatrix() {
                       
                       {/* Slice offset */}
                       <div className="flex items-center" title="Slice">
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { offset: settings.offset - 1 })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { offset: settings.offset - 1 })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                         <span className="text-xs text-[var(--text-primary)] w-12 text-center font-mono">
                           {idx + 1}/{ref.instance_count}
                         </span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { offset: settings.offset + 1 })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { offset: settings.offset + 1 })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                       </div>
                       
                       <div className="w-px h-5 bg-[var(--border-color)]" />
                       
                       {/* Zoom */}
                       <div className="flex items-center" title="Zoom">
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { zoom: Math.max(0.1, settings.zoom - 0.01) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { zoom: Math.max(0.1, settings.zoom - 0.01) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                         <span className="text-xs text-[var(--text-primary)] w-10 text-center font-mono">
                           {Math.round(settings.zoom * 100)}%
                         </span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { zoom: Math.min(10, settings.zoom + 0.01) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { zoom: Math.min(10, settings.zoom + 0.01) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                       </div>
                       
                       {/* Rotation */}
                       <div className="flex items-center" title="Rotation">
-                        <button
-                          onClick={() => {
+                        <RepeatButton
+                          onAction={() => {
                             let val = settings.rotation - 1;
                             val = ((val + 180) % 360 + 360) % 360 - 180;
                             updatePanelSetting(currentDate, { rotation: val });
@@ -1117,12 +1115,12 @@ export function ComparisonMatrix() {
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                         <span className="text-xs text-[var(--text-primary)] w-8 text-center font-mono">
                           {settings.rotation}°
                         </span>
-                        <button
-                          onClick={() => {
+                        <RepeatButton
+                          onAction={() => {
                             let val = settings.rotation + 1;
                             val = ((val + 180) % 360 + 360) % 360 - 180;
                             updatePanelSetting(currentDate, { rotation: val });
@@ -1130,7 +1128,7 @@ export function ComparisonMatrix() {
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                       </div>
                       
                       <div className="w-px h-5 bg-[var(--border-color)]" />
@@ -1138,41 +1136,41 @@ export function ComparisonMatrix() {
                       {/* Brightness */}
                       <div className="flex items-center" title="Brightness">
                         <span className="text-xs text-[var(--text-secondary)] mr-1">B</span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { brightness: Math.max(0, settings.brightness - 1) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { brightness: Math.max(0, settings.brightness - 1) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                         <span className="text-xs text-[var(--text-primary)] w-7 text-center font-mono">
                           {settings.brightness}
                         </span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { brightness: Math.min(200, settings.brightness + 1) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { brightness: Math.min(200, settings.brightness + 1) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                       </div>
                       
                       {/* Contrast */}
                       <div className="flex items-center" title="Contrast">
                         <span className="text-xs text-[var(--text-secondary)] mr-1">C</span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { contrast: Math.max(0, settings.contrast - 1) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { contrast: Math.max(0, settings.contrast - 1) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                         <span className="text-xs text-[var(--text-primary)] w-7 text-center font-mono">
                           {settings.contrast}
                         </span>
-                        <button
-                          onClick={() => updatePanelSetting(currentDate, { contrast: Math.min(200, settings.contrast + 1) })}
+                        <RepeatButton
+                          onAction={() => updatePanelSetting(currentDate, { contrast: Math.min(200, settings.contrast + 1) })}
                           className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
                         >
                           <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
+                        </RepeatButton>
                       </div>
                     </>
                   );
