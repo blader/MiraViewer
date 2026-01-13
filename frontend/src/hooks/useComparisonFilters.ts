@@ -10,12 +10,52 @@ type FiltersState = {
   enabledDates: string[] | null;
 };
 
-function pickDefaultPlane(data: ComparisonData): string | null {
-  return data.planes.includes('Axial') ? 'Axial' : (data.planes[0] || null);
+const OTHER_PLANE = 'Other';
+
+function normalizePlane(plane: string | null): string {
+  return plane && plane.trim() ? plane : OTHER_PLANE;
+}
+
+function getAvailablePlanes(data: ComparisonData): string[] {
+  const hasOther =
+    data.planes.some((p) => p === OTHER_PLANE || !p.trim()) ||
+    data.sequences.some((s) => !s.plane || !s.plane.trim());
+
+  const planes: string[] = [];
+  const seen = new Set<string>();
+
+  // Keep backend plane ordering, but move Other to the end.
+  for (const p of data.planes) {
+    if (p === OTHER_PLANE || !p.trim()) continue;
+    if (!seen.has(p)) {
+      seen.add(p);
+      planes.push(p);
+    }
+  }
+
+  // Defensive: include any planes that appear on sequences but not in data.planes.
+  for (const seq of data.sequences) {
+    const p = normalizePlane(seq.plane);
+    if (p === OTHER_PLANE) continue;
+    if (!seen.has(p)) {
+      seen.add(p);
+      planes.push(p);
+    }
+  }
+
+  if (hasOther) planes.push(OTHER_PLANE);
+
+  return planes;
+}
+
+function pickDefaultPlane(planes: string[]): string | null {
+  if (planes.length === 0) return null;
+  if (planes.includes('Axial')) return 'Axial';
+  return planes.find((p) => p !== OTHER_PLANE) ?? planes[0];
 }
 
 function pickDefaultSequence(data: ComparisonData, plane: string): string | null {
-  const seq = data.sequences.find((s) => s.plane === plane) || data.sequences[0];
+  const seq = data.sequences.find((s) => normalizePlane(s.plane) === plane) || data.sequences[0];
   return seq ? seq.id : null;
 }
 
@@ -28,12 +68,15 @@ function findMatchingSequence(data: ComparisonData, newPlane: string, currentSeq
 
   // Try to find a sequence in the new plane with same weight and sequence type
   const exactMatch = data.sequences.find(
-    (s) => s.plane === newPlane && s.weight === currentSeq.weight && s.sequence === currentSeq.sequence
+    (s) =>
+      normalizePlane(s.plane) === newPlane && s.weight === currentSeq.weight && s.sequence === currentSeq.sequence
   );
   if (exactMatch) return exactMatch.id;
 
   // Try matching just the weight
-  const weightMatch = data.sequences.find((s) => s.plane === newPlane && s.weight === currentSeq.weight);
+  const weightMatch = data.sequences.find(
+    (s) => normalizePlane(s.plane) === newPlane && s.weight === currentSeq.weight
+  );
   if (weightMatch) return weightMatch.id;
 
   return pickDefaultSequence(data, newPlane);
@@ -67,15 +110,22 @@ export function useComparisonFilters(data: ComparisonData | null) {
     return [...data.dates].sort((a, b) => b.localeCompare(a));
   }, [data]);
 
+  const availablePlanes = useMemo(() => {
+    if (!data) return [] as string[];
+    return getAvailablePlanes(data);
+  }, [data]);
+
   const selectedPlane = useMemo(() => {
     if (!data) return null;
-    const defaultPlane = pickDefaultPlane(data);
-    return filters.plane && data.planes.includes(filters.plane) ? filters.plane : defaultPlane;
-  }, [data, filters.plane]);
+    const defaultPlane = pickDefaultPlane(availablePlanes);
+    return filters.plane && availablePlanes.includes(filters.plane) ? filters.plane : defaultPlane;
+  }, [data, filters.plane, availablePlanes]);
 
   const selectedSeqId = useMemo(() => {
     if (!data || !selectedPlane) return null;
-    const seqIdsForPlane = new Set(data.sequences.filter((s) => s.plane === selectedPlane).map((s) => s.id));
+    const seqIdsForPlane = new Set(
+      data.sequences.filter((s) => normalizePlane(s.plane) === selectedPlane).map((s) => s.id)
+    );
     return filters.seqId && seqIdsForPlane.has(filters.seqId)
       ? filters.seqId
       : pickDefaultSequence(data, selectedPlane);
@@ -160,6 +210,7 @@ export function useComparisonFilters(data: ComparisonData | null) {
   );
 
   return {
+    availablePlanes,
     selectedPlane,
     selectedSeqId,
     enabledDates,

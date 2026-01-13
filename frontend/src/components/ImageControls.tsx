@@ -8,6 +8,14 @@ function normalizeRotationDegrees(degrees: number): number {
   return ((degrees + 180) % 360 + 360) % 360 - 180;
 }
 
+function formatRotationDegrees(degrees: number) {
+  // Keep the UI compact while still representing 0.25° steps.
+  return degrees
+    .toFixed(2)
+    .replace(/\.00$/, '')
+    .replace(/(\.\d)0$/, '$1');
+}
+
 interface ImageControlsProps {
   settings: PanelSettings;
   instanceIndex: number;
@@ -19,28 +27,28 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
   return (
     <div className="flex items-center">
       {/* Slice offset */}
-      <div className="flex items-center" title="Slice">
+      <div className="flex items-center gap-0.5" title="Slice offset">
         <RepeatButton
           onAction={() => onUpdate({ offset: settings.offset - 1 })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
+          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100"
         >
           <ChevronLeft className="w-3 h-3" />
         </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-8 text-center font-mono">
+        <span className="text-[var(--text-primary)] text-[10px] w-16 text-center font-mono tabular-nums">
           {instanceIndex + 1}/{instanceCount}
         </span>
         <RepeatButton
           onAction={() => onUpdate({ offset: settings.offset + 1 })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
+          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100"
         >
           <ChevronRight className="w-3 h-3" />
         </RepeatButton>
       </div>
-      
-      <div className="w-px h-3 bg-[var(--border-color)] mx-1" />
-      
+
+      <div className="w-px h-3 bg-[var(--border-color)] mx-3" />
+
       {/* Zoom */}
-      <div className="flex items-center" title="Zoom">
+      <div className="flex items-center gap-0.5" title="Zoom">
         <RepeatButton
           onAction={() => onUpdate({ zoom: Math.max(CONTROL_LIMITS.ZOOM.MIN, settings.zoom - CONTROL_LIMITS.ZOOM.STEP) })}
           className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
@@ -57,9 +65,11 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
           <ChevronRight className="w-3 h-3" />
         </RepeatButton>
       </div>
-      
+
+      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+
       {/* Rotation */}
-      <div className="flex items-center" title="Rotation">
+      <div className="flex items-center gap-0.5" title="Rotation">
         <RepeatButton
           onAction={() => {
             const val = normalizeRotationDegrees(settings.rotation - CONTROL_LIMITS.ROTATION.STEP);
@@ -69,8 +79,8 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
         >
           <ChevronLeft className="w-3 h-3" />
         </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-7 text-center font-mono">
-          {settings.rotation}°
+        <span className="text-[var(--text-primary)] text-[10px] w-12 text-center font-mono tabular-nums">
+          {formatRotationDegrees(settings.rotation)}°
         </span>
         <RepeatButton
           onAction={() => {
@@ -82,11 +92,11 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
           <ChevronRight className="w-3 h-3" />
         </RepeatButton>
       </div>
-      
-      <div className="w-px h-3 bg-[var(--border-color)] mx-1" />
-      
+
+      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+
       {/* Brightness */}
-      <div className="flex items-center" title="Brightness">
+      <div className="flex items-center gap-0.5" title="Brightness">
         <span className="text-[var(--text-secondary)] text-[10px]">B</span>
         <RepeatButton
           onAction={() => onUpdate({ brightness: Math.max(CONTROL_LIMITS.BRIGHTNESS.MIN, settings.brightness - CONTROL_LIMITS.BRIGHTNESS.STEP) })}
@@ -104,10 +114,12 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
           <ChevronRight className="w-3 h-3" />
         </RepeatButton>
       </div>
-      
+
+      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+
       {/* Contrast */}
-      <div className="flex items-center" title="Contrast">
-        <span className="text-[var(--text-secondary)] text-[10px] ml-1">C</span>
+      <div className="flex items-center gap-0.5" title="Contrast">
+        <span className="text-[var(--text-secondary)] text-[10px]">C</span>
         <RepeatButton
           onAction={() => onUpdate({ contrast: Math.max(CONTROL_LIMITS.CONTRAST.MIN, settings.contrast - CONTROL_LIMITS.CONTRAST.STEP) })}
           className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"

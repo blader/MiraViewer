@@ -42,6 +42,7 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
 export function ComparisonMatrix() {
   const { data, loading, error } = useComparisonData();
   const {
+    availablePlanes,
     selectedPlane,
     selectedSeqId,
     enabledDates,
@@ -63,8 +64,11 @@ export function ComparisonMatrix() {
 
   const sequencesForPlane = useMemo(() => {
     if (!data || !selectedPlane) return [] as SequenceCombo[];
+
+    const planeKey = (plane: string | null) => (plane && plane.trim() ? plane : 'Other');
+
     return data.sequences
-      .filter(s => s.plane === selectedPlane)
+      .filter(s => planeKey(s.plane) === selectedPlane)
       .sort((a, b) => formatSequenceLabel(b).localeCompare(formatSequenceLabel(a))); // reverse alpha
   }, [data, selectedPlane]);
 
@@ -230,13 +234,15 @@ export function ComparisonMatrix() {
               <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center gap-2">
                 <Layers className="w-4 h-4" />Plane
               </div>
-              <div className="space-y-1">
-                {data.planes.map(p => (
+              <div className="grid grid-cols-2 gap-1">
+                {availablePlanes.map(p => (
                   <button
                     key={p}
                     onClick={() => selectPlane(p)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${selectedPlane === p ? 'bg-[var(--accent)] text-white' : 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'}`}
-                  >{p}</button>
+                    className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate ${selectedPlane === p ? 'bg-[var(--accent)] text-white' : 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'}`}
+                  >
+                    {p}
+                  </button>
                 ))}
               </div>
             </div>
@@ -349,12 +355,12 @@ export function ComparisonMatrix() {
             /* Overlay View */
             <div className="flex-1 flex flex-col">
               {/* Date selector strip */}
-              <div className="flex-shrink-0 px-4 py-2 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center gap-3">
+              <div className="flex-shrink-0 px-4 py-2 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center gap-4">
                 {/* Play/Pause button */}
                 <button
                   onClick={() => setIsPlaying(!isPlaying)}
-                  className={`p-2 rounded-lg transition-colors ${isPlaying ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-                  title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                  className={`p-2 rounded-lg transition-colors focus:outline-none ${isPlaying ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+                  title={isPlaying ? 'Pause' : 'Play'}
                 >
                   {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                 </button>
@@ -380,11 +386,12 @@ export function ComparisonMatrix() {
                 {overlayColumns.map((col, idx) => (
                   <button
                     key={col.date}
-                    onClick={() => { 
-                      setOverlayDateIndex(idx); 
-                      setIsPlaying(false); 
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setOverlayDateIndex(idx);
+                      setIsPlaying(false);
                     }}
-                    className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-colors flex items-center gap-2 ${idx === overlayDateIndex ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+                    className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-colors flex items-center gap-2 focus:outline-none ${idx === overlayDateIndex ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
                   >
                     <span className="w-5 h-5 rounded bg-black/20 flex items-center justify-center text-xs font-mono">
                       {idx + 1}
@@ -396,15 +403,14 @@ export function ComparisonMatrix() {
               
               {/* Image adjustment controls for current date */}
               {overlayControlRef && overlayControlDate && (
-                <>
-                  <div className="w-px h-6 bg-[var(--border-color)]" />
+                <div className="flex items-center flex-shrink-0 bg-[var(--bg-primary)] rounded-lg px-2 py-1">
                   <ImageControls
                     settings={overlayControlSettings}
                     instanceIndex={overlayControlSliceIndex}
                     instanceCount={overlayControlRef.instance_count}
                     onUpdate={(update) => updatePanelSetting(overlayControlDate, update)}
                   />
-                </>
+                </div>
               )}
               </div>
               
@@ -497,8 +503,9 @@ export function ComparisonMatrix() {
                 return (
                   <button
                     key={d}
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => toggleDate(d)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 ${enabled ? (hasData ? 'bg-[var(--accent)] text-white' : 'bg-[var(--accent)] text-white opacity-50') : hasData ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] opacity-50'}`}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 focus:outline-none ${enabled ? (hasData ? 'bg-[var(--accent)] text-white' : 'bg-[var(--accent)] text-white opacity-50') : hasData ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] opacity-50'}`}
                     title={hasData ? undefined : 'No data for selected sequence'}
                   >
                     <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${enabled ? 'bg-white text-[var(--accent)] border-white' : 'border-[var(--border-color)]'}`}>

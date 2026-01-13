@@ -13,7 +13,7 @@ export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
 
 export const CONTROL_LIMITS = {
   ZOOM: { MIN: 0.1, MAX: 10, STEP: 0.01 },
-  ROTATION: { MIN: -180, MAX: 180, STEP: 1 },
+  ROTATION: { MIN: -180, MAX: 180, STEP: 0.25 },
   BRIGHTNESS: { MIN: 0, MAX: 200, STEP: 1, DEFAULT: 100 },
   CONTRAST: { MIN: 0, MAX: 200, STEP: 1, DEFAULT: 100 },
   SLICE_NAV: { MAX_RANGE: 1000 }, // For the bottom slider

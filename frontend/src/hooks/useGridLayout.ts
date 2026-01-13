@@ -1,12 +1,18 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 
 export function useGridLayout(itemCount: number) {
   const [gridSize, setGridSize] = useState({ width: 0, height: 0 });
-  const containerRef = useRef<HTMLDivElement>(null);
-  
+  const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
+
+  // Use a callback ref so we can attach the observer even if the container is rendered later
+  // (e.g. after a loading state).
+  const containerRef = useCallback((node: HTMLDivElement | null) => {
+    setContainerNode(node);
+  }, []);
+
   // Track grid container size
   useEffect(() => {
-    const node = containerRef.current;
+    const node = containerNode;
     if (!node) return;
 
     const updateSize = () => {
@@ -20,7 +26,7 @@ export function useGridLayout(itemCount: number) {
     observer.observe(node);
 
     return () => observer.disconnect();
-  }, []);
+  }, [containerNode]);
 
   // Compute optimal grid dimensions for square cells
   const gridLayout = useMemo(() => {

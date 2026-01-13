@@ -3,6 +3,14 @@ import type { PanelSettings } from '../types/api';
 import { fetchPanelSettings, savePanelSettings } from '../utils/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 
+type PanelSettingsHistoryEntry = {
+  date: string;
+  before: PanelSettings;
+  after: PanelSettings;
+};
+
+const MAX_HISTORY = 200;
+
 export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: string) {
   // Per-panel settings: Map<date, PanelSettings>
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
@@ -24,11 +32,85 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   const prevSeqIdRef = useRef<string | null>(null);
   const prevDatesRef = useRef<Set<string>>(new Set());
 
+  // Undo/redo stacks for panel settings changes (pan/zoom/rotation/etc).
+  // Stored in refs to avoid re-rendering on every adjustment.
+  const undoStackRef = useRef<PanelSettingsHistoryEntry[]>([]);
+  const redoStackRef = useRef<PanelSettingsHistoryEntry[]>([]);
+
   // Keep refs up to date
   useEffect(() => {
     panelSettingsRef.current = panelSettings;
     selectedSeqIdRef.current = selectedSeqId;
   }, [panelSettings, selectedSeqId]);
+
+  // Clear undo/redo when the sequence changes (different settings universe).
+  useEffect(() => {
+    undoStackRef.current.length = 0;
+    redoStackRef.current.length = 0;
+  }, [selectedSeqId]);
+
+  const applyPanelSettings = useCallback((date: string, settings: PanelSettings) => {
+    const seqId = selectedSeqIdRef.current;
+    if (!seqId) return;
+
+    setPanelSettings((prev) => {
+      const next = new Map(prev);
+      next.set(date, settings);
+      return next;
+    });
+
+    // Persist to backend (fire-and-forget)
+    savePanelSettings(seqId, date, settings).catch(() => {});
+  }, []);
+
+  const undoLastPanelSetting = useCallback(() => {
+    const entry = undoStackRef.current.pop();
+    if (!entry) return;
+
+    redoStackRef.current.push(entry);
+    applyPanelSettings(entry.date, entry.before);
+  }, [applyPanelSettings]);
+
+  const redoLastPanelSetting = useCallback(() => {
+    const entry = redoStackRef.current.pop();
+    if (!entry) return;
+
+    undoStackRef.current.push(entry);
+    applyPanelSettings(entry.date, entry.after);
+  }, [applyPanelSettings]);
+
+  // Keyboard shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redo.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tagName = target?.tagName;
+      if (tagName === 'INPUT' || tagName === 'SELECT' || tagName === 'TEXTAREA') {
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      const isUndo = key === 'z' && !e.shiftKey;
+      const isRedo = (key === 'z' && e.shiftKey) || key === 'y';
+
+      if (isUndo) {
+        if (undoStackRef.current.length === 0) return;
+        e.preventDefault();
+        undoLastPanelSetting();
+      }
+
+      if (isRedo) {
+        if (redoStackRef.current.length === 0) return;
+        e.preventDefault();
+        redoLastPanelSetting();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [undoLastPanelSetting, redoLastPanelSetting]);
 
   // Load panel settings from backend when sequence or dates change
   useEffect(() => {
@@ -121,11 +203,38 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   // Update a panel's settings
   const updatePanelSetting = useCallback((date: string, update: Partial<PanelSettings>) => {
     if (!selectedSeqId) return;
-    setPanelSettings(prev => {
+
+    const updateKeys = Object.keys(update);
+    const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
+
+    setPanelSettings((prev) => {
       const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
       const updated = { ...current, ...update };
+
+      // Avoid pushing no-ops into history (e.g., clamped buttons).
+      const updatedAny = updated as unknown as Record<string, unknown>;
+      const currentAny = current as unknown as Record<string, unknown>;
+      const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
+
+      if (shouldRecordHistory && isMeaningfulChange) {
+        undoStackRef.current.push({
+          date,
+          before: { ...current },
+          after: { ...updated },
+        });
+
+        // New action invalidates redo stack.
+        redoStackRef.current.length = 0;
+
+        // Cap memory.
+        if (undoStackRef.current.length > MAX_HISTORY) {
+          undoStackRef.current.shift();
+        }
+      }
+
       // Persist to backend (fire-and-forget)
       savePanelSettings(selectedSeqId, date, updated).catch(() => {});
+
       const next = new Map(prev);
       next.set(date, updated);
       return next;
