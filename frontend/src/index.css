@@ -50,19 +50,6 @@ body {
   background: #3a3a4a;
 }
 
-/* Medical imaging specific */
-.dicom-viewport {
-  background: #000;
-  image-rendering: pixelated;
-  image-rendering: -moz-crisp-edges;
-  image-rendering: crisp-edges;
-}
-
-/* Timeline styles */
-.timeline-track {
-  background: linear-gradient(90deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
-}
-
 /* Slider styling */
 input[type="range"] {
   -webkit-appearance: none;

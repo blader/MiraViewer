@@ -1,6 +1,6 @@
-import { useRef, useState, useLayoutEffect, useCallback } from 'react';
+import { useEffect, useRef, useState, useLayoutEffect, useCallback } from 'react';
 import { getImageUrl } from '../utils/api';
-import { useWheelNavigation } from '../hooks/useStudies';
+import { useWheelNavigation } from '../hooks/useWheelNavigation';
 
 interface DicomViewerProps {
   studyId: string;
@@ -8,13 +8,85 @@ interface DicomViewerProps {
   instanceIndex: number;
   instanceCount: number;
   onInstanceChange: (index: number) => void;
-  brightness?: number;  // 0-200, 100 = normal
-  contrast?: number;    // 0-200, 100 = normal
-  zoom?: number;        // 1 = 100%
-  rotation?: number;    // degrees
-  panX?: number;        // normalized pan (-1 to 1, as fraction of viewport)
-  panY?: number;        // normalized pan (-1 to 1, as fraction of viewport)
+  brightness?: number; // 0-200, 100 = normal
+  contrast?: number; // 0-200, 100 = normal
+  zoom?: number; // 1 = 100%
+  rotation?: number; // degrees
+  panX?: number; // normalized pan (-1 to 1, as fraction of viewport)
+  panY?: number; // normalized pan (-1 to 1, as fraction of viewport)
   onPanChange?: (panX: number, panY: number) => void;
+}
+
+interface ImageContentProps {
+  imageUrl: string;
+  imageFilter: string;
+  imageTransform: string;
+  alt: string;
+}
+
+function ImageContent({ imageUrl, imageFilter, imageTransform, alt }: ImageContentProps) {
+  const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [showSpinner, setShowSpinner] = useState(false);
+  const spinnerTimeoutRef = useRef<number | null>(null);
+
+  // Delay the spinner slightly to avoid flicker for fast loads.
+  useEffect(() => {
+    spinnerTimeoutRef.current = window.setTimeout(() => {
+      setShowSpinner(true);
+    }, 150);
+
+    return () => {
+      if (spinnerTimeoutRef.current) {
+        clearTimeout(spinnerTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleLoad = useCallback(() => {
+    setStatus('loaded');
+    setShowSpinner(false);
+    if (spinnerTimeoutRef.current) {
+      clearTimeout(spinnerTimeoutRef.current);
+      spinnerTimeoutRef.current = null;
+    }
+  }, []);
+
+  const handleError = useCallback(() => {
+    setStatus('error');
+    setShowSpinner(false);
+    if (spinnerTimeoutRef.current) {
+      clearTimeout(spinnerTimeoutRef.current);
+      spinnerTimeoutRef.current = null;
+    }
+  }, []);
+
+  return (
+    <>
+      {showSpinner && status === 'loading' && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+
+      {status === 'error' && (
+        <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
+          Failed to load image
+        </div>
+      )}
+
+      <div className="w-full h-full flex items-center justify-center" style={{ transform: imageTransform }}>
+        <img
+          src={imageUrl}
+          alt={alt}
+          className="w-full h-full object-contain select-none"
+          style={{ filter: imageFilter }}
+          onLoad={handleLoad}
+          onError={handleError}
+          draggable={false}
+        />
+      </div>
+    </>
+  );
 }
 
 export function DicomViewer({
@@ -32,10 +104,6 @@ export function DicomViewer({
   onPanChange,
 }: DicomViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [imageLoading, setImageLoading] = useState(true);
-  const [showSpinner, setShowSpinner] = useState(false);
-  const [imageError, setImageError] = useState(false);
-  const spinnerTimeoutRef = useRef<number | null>(null);
   // Mouse wheel navigation for slices
   useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
 
@@ -107,44 +175,6 @@ export function DicomViewer({
     }
   }, [onPanChange]);
 
-  const handleImageLoad = useCallback(() => {
-    setImageLoading(false);
-    setShowSpinner(false);
-    setImageError(false);
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-      spinnerTimeoutRef.current = null;
-    }
-  }, []);
-
-  const handleImageError = useCallback(() => {
-    setImageLoading(false);
-    setShowSpinner(false);
-    setImageError(true);
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-      spinnerTimeoutRef.current = null;
-    }
-  }, []);
-
-  // Reset loading state when image changes - useLayoutEffect to run before onLoad can fire
-  useLayoutEffect(() => {
-    setImageLoading(true);
-    setImageError(false);
-    // Only show spinner if loading takes more than 150ms
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-    }
-    spinnerTimeoutRef.current = window.setTimeout(() => {
-      setShowSpinner(true);
-    }, 150);
-    
-    return () => {
-      if (spinnerTimeoutRef.current) {
-        clearTimeout(spinnerTimeoutRef.current);
-      }
-    };
-  }, [studyId, seriesUid, instanceIndex]);
 
   return (
     <div className="h-full bg-black">
@@ -155,32 +185,13 @@ export function DicomViewer({
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >
-        {showSpinner && imageLoading && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
-          </div>
-        )}
-        
-        {imageError && (
-          <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
-            Failed to load image
-          </div>
-        )}
-
-        <div 
-          className="w-full h-full flex items-center justify-center"
-          style={{ transform: imageTransform }}
-        >
-          <img
-            src={imageUrl}
-            alt={`Slice ${instanceIndex + 1}`}
-            className="w-full h-full object-contain select-none"
-            style={{ filter: imageFilter }}
-            onLoad={handleImageLoad}
-            onError={handleImageError}
-            draggable={false}
-          />
-        </div>
+        <ImageContent
+          key={imageUrl}
+          imageUrl={imageUrl}
+          imageFilter={imageFilter}
+          imageTransform={imageTransform}
+          alt={`Slice ${instanceIndex + 1}`}
+        />
       </div>
     </div>
   );

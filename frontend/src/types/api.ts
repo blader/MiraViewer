@@ -1,68 +1,3 @@
-export interface Series {
-  series_uid: string;
-  series_description: string;
-  series_number: number;
-  modality: string;
-  plane: string | null;
-  weight: string | null;
-  sequence_type: string | null;
-  instance_count: number;
-  instances?: Instance[];
-}
-
-export interface Instance {
-  file_path: string;
-  instance_number: number;
-  slice_location: number;
-}
-
-export interface Study {
-  study_id: string;
-  folder_name: string;
-  study_date: string | null;
-  scan_type: string;
-  series: Series[];
-  series_count: number;
-  total_instances: number;
-}
-
-export interface ImageMetadata {
-  series_uid: string;
-  series_description: string;
-  series_number: number;
-  instance_number: number;
-  slice_location: number;
-  rows: number;
-  columns: number;
-  patient_name: string;
-  study_date: string;
-  modality: string;
-  window_center: number | number[] | null;
-  window_width: number | number[] | null;
-}
-
-export interface ViewerState {
-  studyId: string | null;
-  seriesUid: string | null;
-  instanceIndex: number;
-  windowCenter: number;
-  windowWidth: number;
-  zoom: number;
-  panX: number;
-  panY: number;
-}
-
-export interface CompareState {
-  enabled: boolean;
-  leftStudyId: string | null;
-  leftSeriesUid: string | null;
-  leftInstanceIndex: number;
-  rightStudyId: string | null;
-  rightSeriesUid: string | null;
-  rightInstanceIndex: number;
-  syncScroll: boolean;
-}
-
 // Comparison view types
 export interface SequenceCombo {
   id: string;
@@ -86,13 +21,26 @@ export interface ComparisonData {
   series_map: Record<string, Record<string, SeriesRef>>; // comboId -> dateISO -> ref
 }
 
+// Persisted per-date viewer settings for a specific sequence combo.
 export interface PanelSettings {
   offset: number;
-  zoom: number;
-  rotation: number;
-  brightness: number;  // 0-200, 100 = normal
-  contrast: number;    // 0-200, 100 = normal
-  panX: number;        // pan offset in pixels
-  panY: number;        // pan offset in pixels
-  progress?: number | null; // normalized 0..1 last viewed global slice position for this date
+  zoom: number; // 1 = 100%
+  rotation: number; // degrees, typically [-180, 180]
+  brightness: number; // 0-200, 100 = normal
+  contrast: number; // 0-200, 100 = normal
+  panX: number; // normalized pan (-1..1), as fraction of viewport width
+  panY: number; // normalized pan (-1..1), as fraction of viewport height
+  progress: number; // normalized 0..1, last viewed global slice position for this date
 }
+
+// What the backend may return (values may be missing or null).
+export type PanelSettingsFromApi = Partial<{
+  offset: number | null;
+  zoom: number | null;
+  rotation: number | null;
+  brightness: number | null;
+  contrast: number | null;
+  panX: number | null;
+  panY: number | null;
+  progress: number | null;
+}>;

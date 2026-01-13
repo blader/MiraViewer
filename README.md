@@ -1,18 +1,17 @@
 # MiraViewer
 
-A modern web-based DICOM viewer for MRI brain scans with timeline comparison capabilities.
+A web-based DICOM viewer for MRI brain scans, optimized for comparing the same sequence across multiple dates.
 
-![MiraViewer](https://img.shields.io/badge/React-18-blue) ![Python](https://img.shields.io/badge/Python-3.11+-green) ![License](https://img.shields.io/badge/License-Private-red)
+![MiraViewer](https://img.shields.io/badge/React-19-blue) ![Python](https://img.shields.io/badge/Python-3.11+-green) ![License](https://img.shields.io/badge/License-Private-red)
 
 ## Features
 
-- **Timeline View**: Navigate through scan history organized by date
-- **Series Navigation**: Browse different MRI sequences within each study
-- **Slice Navigation**: Scroll through slices using mouse wheel or keyboard
-- **Window/Level Controls**: Adjust brightness and contrast with medical imaging presets
-- **Compare Mode**: Side-by-side comparison of scans from different dates with synchronized scrolling
-- **Zoom & Pan**: Interactive image manipulation
-- **Keyboard Shortcuts**: Efficient navigation with arrow keys, Page Up/Down, Home/End
+- **Comparison Matrix**: View the selected sequence across multiple dates in a synchronized grid.
+- **Overlay Mode**: Flip between dates quickly for visual comparison (including hold-to-compare).
+- **Synchronized Slice Navigation**: Use the bottom slider (or scroll) to keep anatomical position aligned across dates.
+- **Per-date Panel Settings**: Persist slice offset, zoom, rotation, brightness/contrast, and pan per date.
+- **Interaction**: Scroll to change slices, click to center on a point, double-click to reset pan.
+- **Clinical Tooltips**: Hover sequence names for concise sequence descriptions.
 
 ## Quick Start
 
@@ -69,33 +68,24 @@ MiraViewer/
 
 ## Keyboard Shortcuts
 
-| Action | Shortcut |
-|--------|----------|
-| Previous slice | ↑ or ← |
-| Next slice | ↓ or → |
-| First slice | Home |
-| Last slice | End |
-| Jump 10 slices back | Page Up |
-| Jump 10 slices forward | Page Down |
-| Scroll through slices | Mouse wheel |
+- **Scroll** on image — navigate slices
+- **Click** on image — center on point
+- **Double-click** — reset pan
+
+Overlay mode:
+- **1-9** — jump to date by number
+- **← / →** — previous / next date
+- **Hold Space** — quick compare with previously viewed date
 
 ## API Endpoints
 
-- `GET /api/studies` - List all studies
-- `GET /api/studies/{study_id}` - Get study details
-- `GET /api/studies/{study_id}/series/{series_uid}` - Get series details
-- `GET /api/image/{study_id}/{series_uid}/{instance_index}` - Get image as PNG
-- `GET /api/image-metadata/{study_id}/{series_uid}/{instance_index}` - Get image DICOM metadata
+- `GET /api/comparison-data` - Sequences/dates + mapping for the comparison matrix
+- `GET /api/panel-settings/{combo_id}` - Load per-date panel settings for a sequence combo
+- `POST /api/panel-settings` - Save per-date panel settings
+- `GET /api/image/{study_id}/{series_uid}/{instance_index}` - Fetch a pre-exported image
+- `GET /api/stats` - Basic DB stats
 
-## Window Presets
-
-| Preset | Window Center | Window Width |
-|--------|--------------|--------------|
-| Brain | 40 | 80 |
-| Subdural | 75 | 215 |
-| Stroke | 32 | 8 |
-| Bone | 600 | 2800 |
-| Soft Tissue | 50 | 350 |
+Legacy endpoints still exist in the backend (e.g. `/api/studies`) but are not currently used by the main UI.
 
 ## Tech Stack
 
