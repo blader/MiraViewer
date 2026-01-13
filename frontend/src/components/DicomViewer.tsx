@@ -12,8 +12,8 @@ interface DicomViewerProps {
   contrast?: number;    // 0-200, 100 = normal
   zoom?: number;        // 1 = 100%
   rotation?: number;    // degrees
-  panX?: number;        // pan offset in pixels
-  panY?: number;        // pan offset in pixels
+  panX?: number;        // normalized pan (-1 to 1, as fraction of viewport)
+  panY?: number;        // normalized pan (-1 to 1, as fraction of viewport)
   onPanChange?: (panX: number, panY: number) => void;
 }
 
@@ -45,8 +45,32 @@ export function DicomViewer({
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
   
+  // Convert normalized pan to pixels for transform
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  
+  // Track viewport size
+  useLayoutEffect(() => {
+    if (!containerRef.current) return;
+    const updateSize = () => {
+      if (containerRef.current) {
+        setViewportSize({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight,
+        });
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+  
+  // Convert normalized pan to pixels
+  const panXPx = panX * viewportSize.width;
+  const panYPx = panY * viewportSize.height;
+  
   // Combined transform - pan is applied to move the clicked point to center
-  const imageTransform = `translate(${panX}px, ${panY}px) scale(${zoom}) rotate(${rotation}deg)`;
+  const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg)`;
 
   // Click to set center - calculates offset to move clicked point to viewport center
   const handleClick = useCallback((e: React.MouseEvent) => {
@@ -60,12 +84,19 @@ export function DicomViewer({
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
     
-    // Calculate offset needed to move clicked point to center
-    // Account for existing pan and zoom
-    const offsetX = viewportCenterX - clickX + panX;
-    const offsetY = viewportCenterY - clickY + panY;
+    // Current pan in pixels
+    const currentPanXPx = panX * rect.width;
+    const currentPanYPx = panY * rect.height;
     
-    onPanChange(offsetX, offsetY);
+    // Calculate offset needed to move clicked point to center (in pixels)
+    const offsetXPx = viewportCenterX - clickX + currentPanXPx;
+    const offsetYPx = viewportCenterY - clickY + currentPanYPx;
+    
+    // Convert back to normalized values
+    const normalizedX = offsetXPx / rect.width;
+    const normalizedY = offsetYPx / rect.height;
+    
+    onPanChange(normalizedX, normalizedY);
   }, [onPanChange, panX, panY]);
 
   // Double-click to reset pan

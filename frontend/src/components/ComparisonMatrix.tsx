@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import type { ComparisonData, SequenceCombo, SeriesRef } from '../types/api';
 import { fetchComparisonData, formatDate } from '../utils/api';
-import { Brain, Layers, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Play, Pause } from 'lucide-react';
+import { Brain, Layers, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Play, Pause, HelpCircle, X } from 'lucide-react';
 import { DicomViewer } from './DicomViewer';
 
 // Tooltip - uses direct DOM manipulation for instant mouse tracking
@@ -119,6 +119,12 @@ function RepeatButton({ onAction, className, title, children, onClick }: RepeatB
   const intervalRef = useRef<number | null>(null);
   const timeoutRef = useRef<number | null>(null);
   const countRef = useRef(0);
+  const onActionRef = useRef(onAction);
+  
+  // Keep ref up to date with latest onAction
+  useEffect(() => {
+    onActionRef.current = onAction;
+  }, [onAction]);
   
   const stop = useCallback(() => {
     if (intervalRef.current) {
@@ -134,14 +140,14 @@ function RepeatButton({ onAction, className, title, children, onClick }: RepeatB
   
   const start = useCallback(() => {
     // Fire immediately on press
-    onAction();
+    onActionRef.current();
     countRef.current = 1;
     
     // Start repeating after initial delay
     timeoutRef.current = window.setTimeout(() => {
       // Start with slow interval, speed up over time
       const tick = () => {
-        onAction();
+        onActionRef.current();
         countRef.current++;
         
         // Calculate next interval based on count (accelerate)
@@ -153,7 +159,7 @@ function RepeatButton({ onAction, className, title, children, onClick }: RepeatB
       };
       tick();
     }, 300); // Initial delay before repeat starts
-  }, [onAction]);
+  }, []);
   
   useEffect(() => {
     return stop;
@@ -418,53 +424,98 @@ export function ComparisonMatrix() {
   const [overlayDateIndex, setOverlayDateIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1000); // ms between frames
+  const [helpOpen, setHelpOpen] = useState(false);
   
   // Stable stringified version of enabledDates to prevent effect re-runs on Set reference changes
   const enabledDatesKey = useMemo(() => Array.from(enabledDates).sort().join(','), [enabledDates]);
   
   // Load panel settings from backend when sequence or dates change
+  // Only fetch settings for newly added dates; preserve existing local settings
+  const prevSeqIdRef = useRef<string | null>(null);
+  const prevDatesRef = useRef<Set<string>>(new Set());
+  
   useEffect(() => {
     if (!selectedSeqId) return;
-    const currentDates = enabledDatesKey.split(',').filter(Boolean);
-    if (currentDates.length === 0) return;
+    const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
+    if (currentDates.size === 0) return;
+    
+    // Determine if sequence changed or which dates are new
+    const seqChanged = selectedSeqId !== prevSeqIdRef.current;
+    const newDates = seqChanged 
+      ? currentDates 
+      : new Set([...currentDates].filter(d => !prevDatesRef.current.has(d)));
+    
+    // Update refs
+    prevSeqIdRef.current = selectedSeqId;
+    prevDatesRef.current = currentDates;
+    
+    // If no new dates to fetch, nothing to do (keep all settings in memory)
+    if (newDates.size === 0) {
+      return;
+    }
     
     let cancelled = false;
     (async () => {
       try {
         const server = await apiFetchPanelSettings(selectedSeqId);
         if (cancelled) return;
-        const newSettings = new Map<string, PanelSettings>();
-        currentDates.forEach(date => {
-          const s = server[date] || {};
-          // Merge with defaults, ensuring no undefined values overwrite defaults
-          newSettings.set(date, {
-            offset: typeof s.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
-            zoom: typeof s.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
-            rotation: typeof s.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
-            brightness: typeof s.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
-            contrast: typeof s.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
-            panX: typeof s.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
-            panY: typeof s.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
-            progress: typeof s.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
-          });
+        
+        setPanelSettings(prev => {
+          const next = new Map<string, PanelSettings>();
+          
+          // Keep existing settings for dates that are still enabled (unless seq changed)
+          if (!seqChanged) {
+            for (const [date, settings] of prev) {
+              if (currentDates.has(date)) {
+                next.set(date, settings);
+              }
+            }
+          }
+          
+          // Add settings for new dates (or all dates if seq changed)
+          for (const date of newDates) {
+            if (!next.has(date)) {
+              const s = server[date] || {};
+              next.set(date, {
+                offset: typeof s.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
+                zoom: typeof s.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
+                rotation: typeof s.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
+                brightness: typeof s.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
+                contrast: typeof s.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
+                panX: typeof s.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
+                panY: typeof s.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
+                progress: typeof s.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
+              });
+            }
+          }
+          
+          return next;
         });
-        setPanelSettings(newSettings);
-        // Set initial active panel and progress to newest enabled date
-        const sortedDates = [...currentDates].sort((a, b) => b.localeCompare(a));
-        const initial = sortedDates[0];
-        if (initial) {
-          setActivePanel(initial);
-          const ps = newSettings.get(initial);
-          if (ps && typeof ps.progress === 'number') {
-            setProgress(Math.max(0, Math.min(1, ps.progress)));
+        
+        // Set initial active panel if none or if seq changed
+        if (seqChanged) {
+          const sortedDates = [...currentDates].sort((a, b) => b.localeCompare(a));
+          const initial = sortedDates[0];
+          if (initial) {
+            setActivePanel(initial);
+            const s = server[initial] || {};
+            if (typeof s.progress === 'number') {
+              setProgress(Math.max(0, Math.min(1, s.progress)));
+            }
           }
         }
       } catch (e) {
         if (cancelled) return;
-        // Fallback to defaults on error
-        const newSettings = new Map<string, PanelSettings>();
-        currentDates.forEach(date => newSettings.set(date, { ...DEFAULT_PANEL_SETTINGS }));
-        setPanelSettings(newSettings);
+        // Fallback: add defaults for new dates only
+        setPanelSettings(prev => {
+          const next = new Map(prev);
+          for (const date of newDates) {
+            if (!next.has(date)) {
+              next.set(date, { ...DEFAULT_PANEL_SETTINGS });
+            }
+          }
+          return next;
+        });
       }
     })();
     return () => { cancelled = true; };
@@ -493,11 +544,41 @@ export function ComparisonMatrix() {
   useEffect(() => {
     if (!selectedSeqId || !activePanel) return;
     const handle = setTimeout(() => {
-      const s = panelSettings.get(activePanel) || DEFAULT_PANEL_SETTINGS;
       updatePanelSetting(activePanel, { progress });
     }, 200);
     return () => clearTimeout(handle);
   }, [progress, activePanel, selectedSeqId]);
+  
+  // Persist all panel settings periodically and on page unload
+  const panelSettingsRef = useRef(panelSettings);
+  const selectedSeqIdRef = useRef(selectedSeqId);
+  useEffect(() => {
+    panelSettingsRef.current = panelSettings;
+    selectedSeqIdRef.current = selectedSeqId;
+  }, [panelSettings, selectedSeqId]);
+  
+  useEffect(() => {
+    const saveAll = () => {
+      const seqId = selectedSeqIdRef.current;
+      const settings = panelSettingsRef.current;
+      if (!seqId || settings.size === 0) return;
+      for (const [date, s] of settings) {
+        apiSavePanelSettings(seqId, date, s).catch(() => {});
+      }
+    };
+    
+    // Save on beforeunload
+    const handleUnload = () => saveAll();
+    window.addEventListener('beforeunload', handleUnload);
+    
+    // Also save periodically (every 10 seconds)
+    const interval = setInterval(saveAll, 10000);
+    
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      clearInterval(interval);
+    };
+  }, []);
   
   // Update a panel's settings
   const updatePanelSetting = useCallback((date: string, update: Partial<PanelSettings>) => {
@@ -609,12 +690,12 @@ export function ComparisonMatrix() {
     return selectedDates.map(date => ({ date, ref: map[date] }));
   }, [data, selectedSeqId, enabledDates]);
   
-  // For overlay mode: columns sorted newest to oldest
+  // For overlay mode: columns sorted oldest to newest (earliest left, latest right)
   const overlayColumns = useMemo(() => {
     if (!data || !selectedSeqId) return [] as { date: string; ref?: SeriesRef }[];
     const map = data.series_map[selectedSeqId] || {};
-    // Sort by date descending (newest first)
-    const selectedDates = [...enabledDates].sort((a, b) => b.localeCompare(a));
+    // Sort by date ascending (oldest first)
+    const selectedDates = [...enabledDates].sort((a, b) => a.localeCompare(b));
     return selectedDates.map(date => ({ date, ref: map[date] })).filter(c => c.ref);
   }, [data, selectedSeqId, enabledDates]);
   
@@ -633,6 +714,26 @@ export function ComparisonMatrix() {
     }, playSpeed);
     return () => clearInterval(interval);
   }, [isPlaying, viewMode, overlayColumns.length, playSpeed]);
+  
+  // Track spacebar held state for compare feature
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  
+  // Track previous index for comparison history
+  const previousIndexRef = useRef<number | null>(null);
+  const currentIndexRef = useRef(overlayDateIndex);
+  
+  useEffect(() => {
+    // When index changes, update history
+    if (currentIndexRef.current !== overlayDateIndex) {
+      previousIndexRef.current = currentIndexRef.current;
+      currentIndexRef.current = overlayDateIndex;
+    }
+  }, [overlayDateIndex]);
+  
+  // The actual displayed index - show history previous when space is held
+  const displayedOverlayIndex = spaceHeld && previousIndexRef.current !== null
+    ? previousIndexRef.current 
+    : overlayDateIndex;
   
   // Keyboard shortcuts for overlay mode
   useEffect(() => {
@@ -661,14 +762,28 @@ export function ComparisonMatrix() {
         setOverlayDateIndex(prev => Math.min(overlayColumns.length - 1, prev + 1));
         setIsPlaying(false);
       }
-      // Space to toggle play/pause
-      if (e.key === ' ') {
+      // Space: hold to show previous date for comparison
+      if (e.key === ' ' && !e.repeat) {
         e.preventDefault();
-        setIsPlaying(prev => !prev);
+        setIsPlaying(false);
+        if (previousIndexRef.current !== null) {
+          setSpaceHeld(true);
+        }
       }
     };
+    
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === ' ') {
+        setSpaceHeld(false);
+      }
+    };
+    
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
   }, [viewMode, overlayColumns.length]);
 
   // Compute optimal grid dimensions for square cells
@@ -743,6 +858,60 @@ export function ComparisonMatrix() {
 
   return (
     <div className="h-screen flex flex-col">
+      {/* Help Modal */}
+      {helpOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setHelpOpen(false)}>
+          <div 
+            className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl shadow-2xl max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-color)]">
+              <h2 className="text-lg font-semibold">Keyboard Shortcuts & Controls</h2>
+              <button onClick={() => setHelpOpen(false)} className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-4 text-sm">
+              <div>
+                <h3 className="font-semibold text-[var(--text-primary)] mb-2">Navigation</h3>
+                <ul className="space-y-1 text-[var(--text-secondary)]">
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Scroll</kbd> on image — Navigate slices</li>
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Click</kbd> on image — Center on point</li>
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Double-click</kbd> — Reset pan</li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold text-[var(--text-primary)] mb-2">Overlay Mode</h3>
+                <ul className="space-y-1 text-[var(--text-secondary)]">
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">1-9</kbd> — Jump to date by number</li>
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">←</kbd> <kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">→</kbd> — Previous / next date</li>
+                  <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Hold Space</kbd> — Quick compare with previous date</li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold text-[var(--text-primary)] mb-2">Controls</h3>
+                <ul className="space-y-1 text-[var(--text-secondary)]">
+                  <li><span className="text-[var(--text-primary)]">Slice</span> — Offset from synchronized position</li>
+                  <li><span className="text-[var(--text-primary)]">Zoom %</span> — Magnification level</li>
+                  <li><span className="text-[var(--text-primary)]">Rotation °</span> — Image rotation</li>
+                  <li><span className="text-[var(--text-primary)]">B</span> — Brightness (0-200)</li>
+                  <li><span className="text-[var(--text-primary)]">C</span> — Contrast (0-200)</li>
+                  <li className="text-xs italic">Hold arrows for rapid adjustment</li>
+                </ul>
+              </div>
+              <div>
+                <h3 className="font-semibold text-[var(--text-primary)] mb-2">Tips</h3>
+                <ul className="space-y-1 text-[var(--text-secondary)]">
+                  <li>• Hover over sequence names for clinical descriptions</li>
+                  <li>• Slice slider syncs anatomical position across dates</li>
+                  <li>• All settings persist automatically</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="px-4 py-3 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -774,6 +943,15 @@ export function ComparisonMatrix() {
               Overlay
             </button>
           </div>
+          
+          {/* Help button */}
+          <button
+            onClick={() => setHelpOpen(true)}
+            className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            title="Help & keyboard shortcuts"
+          >
+            <HelpCircle className="w-5 h-5" />
+          </button>
         </div>
       </div>
 
@@ -1034,25 +1212,32 @@ export function ComparisonMatrix() {
                 
                 <div className="w-px h-6 bg-[var(--border-color)]" />
                 
-                {/* Date buttons */}
-                <div className="flex items-center gap-1 flex-1 overflow-x-auto">
-                  {overlayColumns.map((col, idx) => (
-                    <button
-                      key={col.date}
-                      onClick={() => { setOverlayDateIndex(idx); setIsPlaying(false); }}
-                      className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-colors flex items-center gap-2 ${idx === overlayDateIndex ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-                    >
-                      <span className="w-5 h-5 rounded bg-black/20 flex items-center justify-center text-xs font-mono">
-                        {idx + 1}
-                      </span>
-                      {formatDate(col.date)}
-                    </button>
-                  ))}
-                </div>
-                
-                {/* Image adjustment controls for current date */}
-                {overlayColumns.length > 0 && (() => {
-                  const currentCol = overlayColumns[overlayDateIndex];
+              {/* Date buttons */}
+              <div className="flex items-center gap-1 flex-1 overflow-x-auto">
+                {overlayColumns.map((col, idx) => (
+                  <button
+                    key={col.date}
+                    onClick={() => { 
+                      setOverlayDateIndex(idx); 
+                      setIsPlaying(false); 
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-colors flex items-center gap-2 ${idx === overlayDateIndex ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+                  >
+                    <span className="w-5 h-5 rounded bg-black/20 flex items-center justify-center text-xs font-mono">
+                      {idx + 1}
+                    </span>
+                    {formatDate(col.date)}
+                  </button>
+                ))}
+              </div>
+              
+              {/* Image adjustment controls for current date */}
+              {overlayColumns.length > 0 && (() => {
+                // Show controls for the DISPLAYED date (so you can tweak the compared image too if you want)
+                // OR should controls stay locked to current? Let's stay locked to current to avoid confusion.
+                // Actually, if you're comparing, you might want to see settings for what you're looking at.
+                // Let's stick to current (selected) date for controls to be stable.
+                const currentCol = overlayColumns[overlayDateIndex];
                   if (!currentCol?.ref) return null;
                   const currentDate = currentCol.date;
                   const settings = panelSettings.get(currentDate) || DEFAULT_PANEL_SETTINGS;
@@ -1182,7 +1367,7 @@ export function ComparisonMatrix() {
                 {overlayColumns.length === 0 ? (
                   <div className="text-[var(--text-secondary)]">Select dates to view</div>
                 ) : (() => {
-                  const currentCol = overlayColumns[overlayDateIndex];
+                  const currentCol = overlayColumns[displayedOverlayIndex];
                   if (!currentCol?.ref) return <div className="text-[var(--text-secondary)]">No data</div>;
                   
                   const ref = currentCol.ref;
@@ -1200,6 +1385,7 @@ export function ComparisonMatrix() {
                       style={{ width: viewerSize, height: viewerSize }}
                     >
                       <DicomViewer
+                        key={`${ref.study_id}-${ref.series_uid}`}
                         studyId={ref.study_id}
                         seriesUid={ref.series_uid}
                         instanceIndex={idx}
@@ -1245,8 +1431,26 @@ export function ComparisonMatrix() {
           className={`flex-shrink-0 bg-[var(--bg-secondary)] border-l border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${rightSidebarOpen ? 'w-56' : 'w-0'}`}
         >
           <div className="w-56 h-full overflow-y-auto p-4">
-            <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center gap-2">
-              <CalendarDays className="w-4 h-4" />Dates
+            <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CalendarDays className="w-4 h-4" />Dates
+              </div>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setEnabledDates(new Set(sortedDates))}
+                  className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                  title="Select all dates"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setEnabledDates(new Set())}
+                  className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                  title="Deselect all dates"
+                >
+                  None
+                </button>
+              </div>
             </div>
             <div className="space-y-1">
               {sortedDates.map(d => {
