@@ -282,7 +282,8 @@ export async function runAcpAnnotateClient(params: {
     );
   }
 
-  const analysisModel = params.analysisModel || import.meta.env.VITE_GEMINI_ANALYSIS_MODEL || 'gemini-3-pro-preview';
+  // Default to a speed-optimized model; override via VITE_GEMINI_ANALYSIS_MODEL.
+  const analysisModel = params.analysisModel || import.meta.env.VITE_GEMINI_ANALYSIS_MODEL || 'gemini-1.5-flash';
   const nanoBananaModel = params.nanoBananaModel || import.meta.env.VITE_NANO_BANANA_PRO_MODEL || 'nano-banana-pro-preview';
 
   const tPrompt0 = performance.now();
