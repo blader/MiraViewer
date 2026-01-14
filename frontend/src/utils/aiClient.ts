@@ -249,6 +249,11 @@ async function callGenerateContent(params: {
     }
 
     return (await res.json()) as GenerateContentResponse;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('AI request was aborted (likely timed out or cancelled). Please retry.');
+    }
+    throw err;
   } finally {
     window.clearTimeout(timeout);
   }
