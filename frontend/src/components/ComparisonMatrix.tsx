@@ -12,8 +12,7 @@ import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
-import { runAcpAnnotateClient } from '../utils/aiClient';
-import { blobToBase64Data } from '../utils/base64';
+import { useAiAnnotation } from '../hooks/useAiAnnotation';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
 
 function clamp(value: number, min: number, max: number) {
@@ -62,142 +61,35 @@ export function ComparisonMatrix() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
 
-  const [nanoBananaStatus, setNanoBananaStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [nanoBananaProgressText, setNanoBananaProgressText] = useState<string | null>(null);
-  const [nanoBananaImageUrl, setNanoBananaImageUrl] = useState<string | null>(null);
-  const [nanoBananaPrompt, setNanoBananaPrompt] = useState<string | null>(null);
-  const [nanoBananaError, setNanoBananaError] = useState<string | null>(null);
-  const [nanoBananaTarget, setNanoBananaTarget] = useState<{
-    date: string;
-    studyId: string;
-    seriesUid: string;
-    instanceIndex: number;
-  } | null>(null);
-  const isNanoTarget = useCallback(
-    (date?: string | null, seriesUid?: string | null, instanceIndex?: number | null) =>
-      !!nanoBananaTarget &&
-      nanoBananaTarget.date === date &&
-      nanoBananaTarget.seriesUid === seriesUid &&
-      nanoBananaTarget.instanceIndex === instanceIndex,
-    [nanoBananaTarget]
-  );
-
-  // Prompt panel is shown/hidden via the AI button; it doesn't affect layout.
-  const [aiPromptOpen, setAiPromptOpen] = useState(false);
+  const {
+    status: nanoBananaStatus,
+    progressText: nanoBananaProgressText,
+    imageUrl: nanoBananaImageUrl,
+    prompt: nanoBananaPrompt,
+    error: nanoBananaError,
+    target: nanoBananaTarget,
+    isPromptOpen: aiPromptOpen,
+    setIsPromptOpen: setAiPromptOpen,
+    togglePrompt: toggleAiPrompt,
+    runAnalysis: runNanoBananaAcpAnalysis,
+    clear: clearNanoBanana,
+    isTarget: isNanoTarget,
+  } = useAiAnnotation();
 
   const nanoBananaRequestIdRef = useRef(0);
 
   // Map of viewer refs so we can snapshot exactly what's visible in a specific cell.
   const viewerRefsRef = useRef(new Map<string, React.RefObject<DicomViewerHandle | null>>());
+  // We access this in render to assign refs; React warns if we read .current in render,
+  // but here we are managing a Map of refs for children, not reading them for display logic.
+  // This pattern is acceptable for dynamic refs.
+  // eslint-disable-next-line react-hooks/refs
   const getViewerRef = (key: string) => {
     const existing = viewerRefsRef.current.get(key);
     if (existing) return existing;
     const created = createRef<DicomViewerHandle>();
     viewerRefsRef.current.set(key, created);
     return created;
-  };
-
-  const clearNanoBanana = useCallback(() => {
-    // Cancel any in-flight requests so they don't set state / leak object URLs after close.
-    nanoBananaRequestIdRef.current += 1;
-
-    setAiPromptOpen(false);
-    setNanoBananaStatus('idle');
-    setNanoBananaProgressText(null);
-    setNanoBananaError(null);
-    setNanoBananaTarget(null);
-    setNanoBananaPrompt(null);
-    setNanoBananaImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-  }, []);
-
-  const runNanoBananaAcpAnalysis = async (
-    target: {
-      date: string;
-      studyId: string;
-      seriesUid: string;
-      instanceIndex: number;
-    },
-    viewerKey: string,
-    seriesContext: {
-      plane?: string | null;
-      weight?: string | null;
-      sequence?: string | null;
-      label?: string | null;
-    }
-  ) => {
-    const requestId = nanoBananaRequestIdRef.current + 1;
-    nanoBananaRequestIdRef.current = requestId;
-
-    const setProgress = (text: string | null) => {
-      if (nanoBananaRequestIdRef.current !== requestId) {
-        return;
-      }
-      setNanoBananaProgressText(text);
-    };
-
-    setAiPromptOpen(false);
-    setNanoBananaStatus('loading');
-    setProgress('Capturing viewport…');
-    setNanoBananaError(null);
-    setNanoBananaTarget(target);
-    setNanoBananaPrompt(null);
-    setNanoBananaImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-
-    try {
-      const viewerHandle = viewerRefsRef.current.get(viewerKey)?.current;
-      if (!viewerHandle) {
-        throw new Error('AI capture unavailable (viewer not mounted)');
-      }
-
-      // Capture exactly what's visible in the viewer (zoom/rotation/pan + brightness/contrast + crop).
-      const captureBlob = await viewerHandle.captureVisiblePng({ maxSize: 512 });
-
-      // If the request was cleared/cancelled or a new request started while we were waiting, discard.
-      if (nanoBananaRequestIdRef.current !== requestId) {
-        return;
-      }
-
-      setProgress('Encoding image…');
-      const captureBase64 = await blobToBase64Data(captureBlob);
-
-      if (nanoBananaRequestIdRef.current !== requestId) {
-        return;
-      }
-
-      setProgress('Preparing prompts…');
-      const result = await runAcpAnnotateClient({
-        imageBase64: captureBase64,
-        imageMimeType: captureBlob.type || 'image/png',
-        seriesContext,
-        onProgress: (text) => setProgress(text),
-      });
-
-      // If the request was cleared/cancelled or a new request started while we were waiting, discard.
-      if (nanoBananaRequestIdRef.current !== requestId) {
-        return;
-      }
-
-      setProgress('Finalizing…');
-      const url = URL.createObjectURL(result.blob);
-      setNanoBananaImageUrl(url);
-      setNanoBananaPrompt(result.nanoBananaPrompt);
-      setNanoBananaStatus('ready');
-      setProgress(null);
-    } catch (e) {
-      if (nanoBananaRequestIdRef.current !== requestId) {
-        return;
-      }
-      const message = e instanceof Error ? e.message : String(e);
-      setNanoBananaError(message);
-      setNanoBananaStatus('error');
-      setProgress(null);
-    }
   };
 
   const handleAiButtonClick = (
@@ -226,12 +118,12 @@ export function ComparisonMatrix() {
     // If the AI result is for the currently-displayed slice, clicking AI should just toggle the prompt.
     // Regenerate only if AI was cleared or the slice changed.
     if (canReuseExisting) {
-      setAiPromptOpen((prev) => !prev);
+      toggleAiPrompt();
       return;
     }
 
-    setAiPromptOpen(false);
-    runNanoBananaAcpAnalysis(target, viewerKey, seriesContext);
+    const viewerHandle = viewerRefsRef.current.get(viewerKey)?.current || null;
+    runNanoBananaAcpAnalysis(target, viewerHandle, seriesContext);
   };
 
   // Cleanup on unmount.
