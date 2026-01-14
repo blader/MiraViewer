@@ -283,7 +283,9 @@ export async function runAcpAnnotateClient(params: {
   }
 
   // Default to a speed-optimized model; override via VITE_GEMINI_ANALYSIS_MODEL.
-  const analysisModel = params.analysisModel || import.meta.env.VITE_GEMINI_ANALYSIS_MODEL || 'gemini-1.5-flash';
+  // Note: model availability varies by API/version; we also have a small fallback list below.
+  const analysisModel =
+    params.analysisModel || import.meta.env.VITE_GEMINI_ANALYSIS_MODEL || 'gemini-3-flash-preview';
   const nanoBananaModel = params.nanoBananaModel || import.meta.env.VITE_NANO_BANANA_PRO_MODEL || 'nano-banana-pro-preview';
 
   const tPrompt0 = performance.now();
@@ -291,31 +293,67 @@ export async function runAcpAnnotateClient(params: {
   const tPrompt1 = performance.now();
   params.onTiming?.({ name: 'prompt.build_analysis', ms: tPrompt1 - tPrompt0 });
 
+  const isModelNotFoundError = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    // This is intentionally string-based because fetch errors are surfaced as plain Error.
+    return msg.includes('AI request failed (404)') && msg.includes('models/');
+  };
+
+  const analysisModelCandidates = [
+    analysisModel,
+    // Common fallback names (keep short; only used if the primary model 404s).
+    'gemini-3-flash',
+    'gemini-3-flash-preview',
+    'gemini-3-pro-preview',
+  ];
+
   params.onProgress?.('Gemini analyzing…');
-  const analysisRaw = await callGenerateContent({
-    apiKey,
-    model: analysisModel,
-    request: {
-      contents: [
-        {
-          parts: [
-            { text: analysisPrompt },
+  let analysisRaw: GenerateContentResponse | null = null;
+  let lastErr: unknown = null;
+
+  for (const m of analysisModelCandidates) {
+    try {
+      analysisRaw = await callGenerateContent({
+        apiKey,
+        model: m,
+        request: {
+          contents: [
             {
-              inlineData: {
-                mimeType: params.imageMimeType,
-                data: params.imageBase64,
-              },
+              parts: [
+                { text: analysisPrompt },
+                {
+                  inlineData: {
+                    mimeType: params.imageMimeType,
+                    data: params.imageBase64,
+                  },
+                },
+              ],
             },
           ],
+          generationConfig: {
+            temperature: 0.2,
+          },
         },
-      ],
-      generationConfig: {
-        temperature: 0.2,
-      },
-    },
-    onTiming: params.onTiming,
-    timingName: 'gemini.analyze',
-  });
+        onTiming: params.onTiming,
+        timingName: 'gemini.analyze',
+      });
+      if (m !== analysisModel) {
+        params.onTiming?.({ name: 'gemini.model_fallback', ms: 0, detail: `used ${m}` });
+      }
+      break;
+    } catch (e) {
+      lastErr = e;
+      if (isModelNotFoundError(e)) {
+        // Try the next candidate.
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  if (!analysisRaw) {
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  }
 
   params.onProgress?.('Parsing analysis…');
   const tExtract0 = performance.now();
