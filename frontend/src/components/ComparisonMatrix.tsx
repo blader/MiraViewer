@@ -163,7 +163,7 @@ export function ComparisonMatrix() {
       }
 
       // Capture exactly what's visible in the viewer (zoom/rotation/pan + brightness/contrast + crop).
-      const captureBlob = await viewerHandle.captureVisiblePng({ maxSize: 1024 });
+      const captureBlob = await viewerHandle.captureVisiblePng({ maxSize: 512 });
 
       // If the request was cleared/cancelled or a new request started while we were waiting, discard.
       if (nanoBananaRequestIdRef.current !== requestId) {

@@ -135,7 +135,7 @@ function buildAcpAnalysisPrompt(opts: {
 
   return (
     'You are analyzing a single MRI brain slice image.\n'
-    + 'The provided image is a capture of the viewer viewport (it may already include zoom/rotation/pan, brightness/contrast adjustments, and cropping to what is visible in the cell).\n\n'
+    + 'The provided image is a capture of the viewer viewport (it may already include zoom/rotation/pan, brightness/contrast adjustments, and cropping to what is visible in the cell). The capture is capped at ~512 px on its longest side for speed; keep output around this resolution (≈512 px max dimension).\n\n'
     + 'Series context (use as a hint; if metadata conflicts with image appearance, trust the image):\n'
     + contextBlock
     + '\n\n'
@@ -153,7 +153,8 @@ function buildAcpAnalysisPrompt(opts: {
     + '(5) for every label, include a concise clinical-impact annotation in a smaller font beneath the label (e.g., mass effect direction/degree, compression/encasement, obstruction risk, cystic vs solid, uncertainty); '
     + '(6) if visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate any displacement/compression; '
     + '(7) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); '
-    + '(8) request ONLY the edited/annotated image as output.\n\n'
+    + '(8) keep the output image around 512 px on its longest side (match input aspect as best you can); '
+    + '(9) request ONLY the edited/annotated image as output.\n\n'
     + 'Constraints:\n'
     + '- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.\n'
     + '- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.\n'
@@ -317,6 +318,7 @@ export async function runAcpAnnotateClient(params: {
       + 'Add subtle outlines and small text labels with arrows/leader lines for each element, and include a concise clinical-impact annotation in a smaller font beneath each label (e.g., direction/degree of mass effect, compression/encasement, cystic vs solid, obstruction risk, or uncertainty). '
       + 'If visible or relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate displacement/compression. '
       + 'If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible (each with distinct color/outline). '
+      + 'Keep the output image around 512 px on its longest side (match input aspect as best you can). '
       + 'Return only the edited/annotated image.';
   }
 

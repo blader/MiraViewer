@@ -11,7 +11,7 @@ import { getImageUrl } from '../utils/api';
 import { useWheelNavigation } from '../hooks/useWheelNavigation';
 
 export type DicomViewerCaptureOptions = {
-  /** Max dimension (in CSS pixels) used for the capture output. */
+  /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
   maxSize?: number;
 };
 
@@ -214,7 +214,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
       const img = await waitForImageLoad();
 
-      const maxSize = options?.maxSize ?? 1024;
+      const maxSize = options?.maxSize ?? 512;
       const maxCssDim = Math.max(cssWidth, cssHeight);
       const deviceScale = window.devicePixelRatio || 1;
       const renderScale = Math.min(deviceScale, maxSize / maxCssDim);
