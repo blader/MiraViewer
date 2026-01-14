@@ -66,3 +66,71 @@ export async function savePanelSettings(comboId: string, dateIso: string, settin
   });
   if (!res.ok) throw new Error('Failed to save panel settings');
 }
+
+type NanoBananaProAcpAnnotateRequest = {
+  studyId: string;
+  seriesUid: string;
+  instanceIndex: number;
+  /** Base64 (no data: prefix) of the exact pixels visible in the viewer viewport. */
+  imageBase64?: string;
+  /** MIME type for imageBase64 (typically image/png). */
+  imageMimeType?: string;
+};
+
+type NanoBananaProAcpAnnotateResponse = {
+  analysis_text: string;
+  analysis_json: unknown | null;
+  nano_banana_prompt: string;
+  mime_type: string;
+  image_base64: string;
+};
+
+export type NanoBananaProAcpAnnotateResult = {
+  blob: Blob;
+  analysisText: string;
+  analysisJson: unknown | null;
+  nanoBananaPrompt: string;
+  mimeType: string;
+};
+
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
+export async function fetchNanoBananaProAcpAnnotation(
+  req: NanoBananaProAcpAnnotateRequest
+): Promise<NanoBananaProAcpAnnotateResult> {
+  const res = await fetch(`${API_BASE}/nano-banana-pro/acp-annotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      study_id: req.studyId,
+      series_uid: req.seriesUid,
+      instance_index: req.instanceIndex,
+      image_base64: req.imageBase64,
+      image_mime_type: req.imageMimeType,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const details = text ? `: ${text}` : '';
+    throw new Error(`Nano Banana Pro request failed (${res.status})${details}`);
+  }
+
+  const data = (await res.json()) as NanoBananaProAcpAnnotateResponse;
+  const blob = base64ToBlob(data.image_base64, data.mime_type);
+
+  return {
+    blob,
+    analysisText: data.analysis_text,
+    analysisJson: data.analysis_json,
+    nanoBananaPrompt: data.nano_banana_prompt,
+    mimeType: data.mime_type,
+  };
+}

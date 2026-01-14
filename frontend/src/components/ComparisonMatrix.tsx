@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react';
+import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
 import { Brain, Layers, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Play, Pause, HelpCircle } from 'lucide-react';
-import { DicomViewer } from './DicomViewer';
+import { DicomViewer, type DicomViewerHandle } from './DicomViewer';
 import { ImageControls } from './ImageControls';
 import { HelpModal } from './HelpModal';
 import { TooltipTrigger } from './TooltipTrigger';
@@ -12,6 +12,7 @@ import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
+import { fetchNanoBananaProAcpAnnotation } from '../utils/api';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
 
 function clamp(value: number, min: number, max: number) {
@@ -39,6 +40,23 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
   return Math.max(300, maxSize);
 }
 
+function blobToBase64Data(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = typeof reader.result === 'string' ? reader.result : '';
+      const comma = res.indexOf(',');
+      if (comma === -1) {
+        reject(new Error('Failed to encode image'));
+        return;
+      }
+      resolve(res.slice(comma + 1));
+    };
+    reader.onerror = () => reject(new Error('Failed to encode image'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function ComparisonMatrix() {
   const { data, loading, error } = useComparisonData();
   const {
@@ -58,6 +76,151 @@ export function ComparisonMatrix() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
+
+  const [nanoBananaStatus, setNanoBananaStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [nanoBananaImageUrl, setNanoBananaImageUrl] = useState<string | null>(null);
+  const [nanoBananaPrompt, setNanoBananaPrompt] = useState<string | null>(null);
+  const [nanoBananaError, setNanoBananaError] = useState<string | null>(null);
+  const [nanoBananaTarget, setNanoBananaTarget] = useState<{
+    date: string;
+    studyId: string;
+    seriesUid: string;
+    instanceIndex: number;
+  } | null>(null);
+
+  // Prompt panel is shown/hidden via the AI button; it doesn't affect layout.
+  const [aiPromptOpen, setAiPromptOpen] = useState(false);
+
+  const nanoBananaRequestIdRef = useRef(0);
+
+  // Map of viewer refs so we can snapshot exactly what's visible in a specific cell.
+  const viewerRefsRef = useRef(new Map<string, React.RefObject<DicomViewerHandle | null>>());
+  const getViewerRef = (key: string) => {
+    const existing = viewerRefsRef.current.get(key);
+    if (existing) return existing;
+    const created = createRef<DicomViewerHandle>();
+    viewerRefsRef.current.set(key, created);
+    return created;
+  };
+
+  const clearNanoBanana = useCallback(() => {
+    // Cancel any in-flight requests so they don't set state / leak object URLs after close.
+    nanoBananaRequestIdRef.current += 1;
+
+    setAiPromptOpen(false);
+    setNanoBananaStatus('idle');
+    setNanoBananaError(null);
+    setNanoBananaTarget(null);
+    setNanoBananaPrompt(null);
+    setNanoBananaImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+  }, []);
+
+  const runNanoBananaAcpAnalysis = async (
+    target: {
+      date: string;
+      studyId: string;
+      seriesUid: string;
+      instanceIndex: number;
+    },
+    viewerKey: string
+  ) => {
+    const requestId = nanoBananaRequestIdRef.current + 1;
+    nanoBananaRequestIdRef.current = requestId;
+
+    setAiPromptOpen(false);
+    setNanoBananaStatus('loading');
+    setNanoBananaError(null);
+    setNanoBananaTarget(target);
+    setNanoBananaPrompt(null);
+    setNanoBananaImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+
+    try {
+      const viewerHandle = viewerRefsRef.current.get(viewerKey)?.current;
+      if (!viewerHandle) {
+        throw new Error('AI capture unavailable (viewer not mounted)');
+      }
+
+      // Capture exactly what's visible in the viewer (zoom/rotation/pan + brightness/contrast + crop).
+      const captureBlob = await viewerHandle.captureVisiblePng({ maxSize: 1024 });
+
+      // If the request was cleared/cancelled or a new request started while we were waiting, discard.
+      if (nanoBananaRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const captureBase64 = await blobToBase64Data(captureBlob);
+
+      if (nanoBananaRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const result = await fetchNanoBananaProAcpAnnotation({
+        studyId: target.studyId,
+        seriesUid: target.seriesUid,
+        instanceIndex: target.instanceIndex,
+        imageBase64: captureBase64,
+        imageMimeType: captureBlob.type || 'image/png',
+      });
+
+      // If the request was cleared/cancelled or a new request started while we were waiting, discard.
+      if (nanoBananaRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const url = URL.createObjectURL(result.blob);
+      setNanoBananaImageUrl(url);
+      setNanoBananaPrompt(result.nanoBananaPrompt);
+      setNanoBananaStatus('ready');
+    } catch (e) {
+      if (nanoBananaRequestIdRef.current !== requestId) {
+        return;
+      }
+      const message = e instanceof Error ? e.message : String(e);
+      setNanoBananaError(message);
+      setNanoBananaStatus('error');
+    }
+  };
+
+  const handleAiButtonClick = (
+    target: {
+      date: string;
+      studyId: string;
+      seriesUid: string;
+      instanceIndex: number;
+    },
+    viewerKey: string
+  ) => {
+    const canReuseExisting =
+      nanoBananaStatus === 'ready' &&
+      !!nanoBananaImageUrl &&
+      !!nanoBananaPrompt &&
+      nanoBananaTarget?.date === target.date &&
+      nanoBananaTarget?.seriesUid === target.seriesUid &&
+      nanoBananaTarget?.instanceIndex === target.instanceIndex;
+
+    // If the AI result is for the currently-displayed slice, clicking AI should just toggle the prompt.
+    // Regenerate only if AI was cleared or the slice changed.
+    if (canReuseExisting) {
+      setAiPromptOpen((prev) => !prev);
+      return;
+    }
+
+    setAiPromptOpen(false);
+    runNanoBananaAcpAnalysis(target, viewerKey);
+  };
+
+  // Cleanup on unmount.
+  useEffect(() => {
+    return () => {
+      clearNanoBanana();
+    };
+  }, [clearNanoBanana]);
 
   // Custom hooks
   const { panelSettings, progress, setProgress, updatePanelSetting } = usePanelSettings(selectedSeqId, enabledDatesKey);
@@ -131,6 +294,16 @@ export function ComparisonMatrix() {
     setPlaySpeed,
   } = useOverlayNavigation(overlayColumns);
 
+  const setProgressWithClearAi = useCallback(
+    (nextProgress: number) => {
+      if (nanoBananaStatus !== 'idle') {
+        clearNanoBanana();
+      }
+      setProgress(nextProgress);
+    },
+    [nanoBananaStatus, clearNanoBanana, setProgress]
+  );
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center bg-[var(--bg-primary)]">
@@ -172,12 +345,26 @@ export function ComparisonMatrix() {
     ? getSliceIndex(overlayDisplayedRef.instance_count, progress, overlayDisplayedSettings.offset)
     : 0;
 
+  const overlayIsNanoBananaTarget =
+    !!nanoBananaTarget &&
+    !!overlayDisplayedRef &&
+    !!overlayDisplayedDate &&
+    nanoBananaTarget.date === overlayDisplayedDate &&
+    nanoBananaTarget.seriesUid === overlayDisplayedRef.series_uid &&
+    nanoBananaTarget.instanceIndex === overlayDisplayedSliceIndex;
+
+  const overlayNanoBananaOverrideUrl =
+    nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlayIsNanoBananaTarget
+      ? nanoBananaImageUrl
+      : undefined;
+
   const overlayViewerSize = getOverlayViewerSize(gridSize);
 
   return (
     <div className="h-screen flex flex-col">
       {/* Help Modal */}
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+
 
       {/* Header */}
       <div className="px-4 py-3 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between">
@@ -282,7 +469,7 @@ export function ComparisonMatrix() {
         </button>
 
         {/* Main content area - Grid or Overlay */}
-        <div ref={gridContainerRef} className="flex-1 overflow-hidden bg-black flex flex-col">
+        <div ref={gridContainerRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
           {viewMode === 'grid' ? (
             /* Grid View */
             <div className="flex-1 flex items-center justify-center">
@@ -306,7 +493,18 @@ export function ComparisonMatrix() {
                   }
                   
                   const idx = getSliceIndex(ref.instance_count, progress, settings.offset);
-                  
+                  const viewerKey = `grid:${date}`;
+
+                  const isNanoBananaTarget =
+                    nanoBananaTarget?.date === date &&
+                    nanoBananaTarget?.seriesUid === ref.series_uid &&
+                    nanoBananaTarget?.instanceIndex === idx;
+
+                  const nanoBananaOverrideUrl =
+                    nanoBananaStatus === 'ready' && nanoBananaImageUrl && isNanoBananaTarget
+                      ? nanoBananaImageUrl
+                      : undefined;
+
                   return (
                     <div 
                       key={date} 
@@ -319,29 +517,74 @@ export function ComparisonMatrix() {
                           settings={settings}
                           instanceIndex={idx}
                           instanceCount={ref.instance_count}
-                          onUpdate={(update) => updatePanelSetting(date, update)}
+                          onUpdate={(update) => {
+                            if (nanoBananaStatus !== 'idle' && isNanoBananaTarget) {
+                              clearNanoBanana();
+                            }
+                            updatePanelSetting(date, update);
+                          }}
+                          onAcpAnalyze={() =>
+                            handleAiButtonClick(
+                              {
+                                date,
+                                studyId: ref.study_id,
+                                seriesUid: ref.series_uid,
+                                instanceIndex: idx,
+                              },
+                              viewerKey
+                            )
+                          }
+                          acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
                         />
                       </div>
-                      <div className="flex-1 min-h-0 bg-black">
+                      <div className="flex-1 min-h-0 bg-black relative">
                         <DicomViewer
+                          ref={getViewerRef(viewerKey)}
                           studyId={ref.study_id}
                           seriesUid={ref.series_uid}
                           instanceIndex={idx}
                           instanceCount={ref.instance_count}
+                          imageUrlOverride={nanoBananaOverrideUrl}
                           onInstanceChange={(i) => {
                             // When scrolling on a panel, update the global progress.
-                            setProgress(getProgressFromSliceIndex(i, ref.instance_count, settings.offset));
+                            setProgressWithClearAi(getProgressFromSliceIndex(i, ref.instance_count, settings.offset));
                           }}
-                          brightness={settings.brightness}
-                          contrast={settings.contrast}
-                          zoom={settings.zoom}
-                          rotation={settings.rotation}
-                          panX={settings.panX}
-                          panY={settings.panY}
-                          onPanChange={(newPanX, newPanY) => {
-                            updatePanelSetting(date, { panX: newPanX, panY: newPanY });
-                          }}
+                          brightness={nanoBananaOverrideUrl ? 100 : settings.brightness}
+                          contrast={nanoBananaOverrideUrl ? 100 : settings.contrast}
+                          zoom={nanoBananaOverrideUrl ? 1 : settings.zoom}
+                          rotation={nanoBananaOverrideUrl ? 0 : settings.rotation}
+                          panX={nanoBananaOverrideUrl ? 0 : settings.panX}
+                          panY={nanoBananaOverrideUrl ? 0 : settings.panY}
+                          onPanChange={
+                            nanoBananaOverrideUrl
+                              ? undefined
+                              : (newPanX, newPanY) => {
+                                  updatePanelSetting(date, { panX: newPanX, panY: newPanY });
+                                }
+                          }
                         />
+
+                        {nanoBananaStatus === 'loading' && isNanoBananaTarget && (
+                          <div className="absolute top-2 right-2">
+                            <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                          </div>
+                        )}
+
+                        {nanoBananaStatus === 'ready' && isNanoBananaTarget && (
+                          <button
+                            type="button"
+                            onClick={clearNanoBanana}
+                            className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-[10px] hover:bg-black/80"
+                            title="Clear AI annotation"
+                          >
+                            Clear AI
+                          </button>
+                        )}
+
+                        {/* Date overlay (matches overlay view style) */}
+                        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
+                          {formatDate(date)}
+                        </div>
                       </div>
                     </div>
                   );
@@ -408,7 +651,32 @@ export function ComparisonMatrix() {
                     settings={overlayControlSettings}
                     instanceIndex={overlayControlSliceIndex}
                     instanceCount={overlayControlRef.instance_count}
-                    onUpdate={(update) => updatePanelSetting(overlayControlDate, update)}
+                    onUpdate={(update) => {
+                      const isOverlayTarget =
+                        nanoBananaStatus !== 'idle' &&
+                        nanoBananaTarget?.date === overlayControlDate &&
+                        nanoBananaTarget?.seriesUid === overlayControlRef.series_uid &&
+                        nanoBananaTarget?.instanceIndex === overlayControlSliceIndex;
+
+                      if (isOverlayTarget) {
+                        clearNanoBanana();
+                      }
+
+                      updatePanelSetting(overlayControlDate, update);
+                    }}
+                    onAcpAnalyze={() => {
+                      if (!overlayDisplayedRef || !overlayDisplayedDate) return;
+                      handleAiButtonClick(
+                        {
+                          date: overlayDisplayedDate,
+                          studyId: overlayDisplayedRef.study_id,
+                          seriesUid: overlayDisplayedRef.series_uid,
+                          instanceIndex: overlayDisplayedSliceIndex,
+                        },
+                        'overlay'
+                      );
+                    }}
+                    acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
                   />
                 </div>
               )}
@@ -424,13 +692,15 @@ export function ComparisonMatrix() {
                     style={{ width: overlayViewerSize, height: overlayViewerSize }}
                   >
                     <DicomViewer
+                      ref={getViewerRef('overlay')}
                       key={`${overlayDisplayedRef.study_id}-${overlayDisplayedRef.series_uid}`}
                       studyId={overlayDisplayedRef.study_id}
                       seriesUid={overlayDisplayedRef.series_uid}
                       instanceIndex={overlayDisplayedSliceIndex}
                       instanceCount={overlayDisplayedRef.instance_count}
+                      imageUrlOverride={overlayNanoBananaOverrideUrl}
                       onInstanceChange={(i) => {
-                        setProgress(
+                        setProgressWithClearAi(
                           getProgressFromSliceIndex(
                             i,
                             overlayDisplayedRef.instance_count,
@@ -438,16 +708,38 @@ export function ComparisonMatrix() {
                           )
                         );
                       }}
-                      brightness={overlayDisplayedSettings.brightness}
-                      contrast={overlayDisplayedSettings.contrast}
-                      zoom={overlayDisplayedSettings.zoom}
-                      rotation={overlayDisplayedSettings.rotation}
-                      panX={overlayDisplayedSettings.panX}
-                      panY={overlayDisplayedSettings.panY}
-                      onPanChange={(newPanX, newPanY) => {
-                        updatePanelSetting(overlayDisplayedDate, { panX: newPanX, panY: newPanY });
-                      }}
+                      brightness={overlayNanoBananaOverrideUrl ? 100 : overlayDisplayedSettings.brightness}
+                      contrast={overlayNanoBananaOverrideUrl ? 100 : overlayDisplayedSettings.contrast}
+                      zoom={overlayNanoBananaOverrideUrl ? 1 : overlayDisplayedSettings.zoom}
+                      rotation={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.rotation}
+                      panX={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.panX}
+                      panY={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.panY}
+                      onPanChange={
+                        overlayNanoBananaOverrideUrl
+                          ? undefined
+                          : (newPanX, newPanY) => {
+                              updatePanelSetting(overlayDisplayedDate, { panX: newPanX, panY: newPanY });
+                            }
+                      }
                     />
+
+                    {nanoBananaStatus === 'loading' && overlayIsNanoBananaTarget && (
+                      <div className="absolute top-3 right-3">
+                        <div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                      </div>
+                    )}
+
+                    {nanoBananaStatus === 'ready' && overlayIsNanoBananaTarget && (
+                      <button
+                        type="button"
+                        onClick={clearNanoBanana}
+                        className="absolute top-3 right-3 px-3 py-1.5 rounded bg-black/70 text-white text-xs hover:bg-black/80"
+                        title="Clear AI annotation"
+                      >
+                        Clear AI
+                      </button>
+                    )}
+
                     {/* Date overlay */}
                     <div className="absolute bottom-4 left-4 px-3 py-2 bg-black/70 rounded-lg text-white text-sm font-medium">
                       {formatDate(overlayDisplayedDate)}
@@ -456,6 +748,58 @@ export function ComparisonMatrix() {
                 ) : (
                   <div className="text-[var(--text-secondary)]">No data</div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* AI prompt panel (shown on AI button click; does not affect layout) */}
+          {aiPromptOpen && nanoBananaStatus === 'ready' && nanoBananaPrompt && (
+            <div className="absolute bottom-3 right-3 z-30 w-[420px] max-w-[calc(100%-24px)] rounded-xl border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-2xl">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--border-color)]">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-[var(--text-primary)] truncate">AI prompt</div>
+                  {nanoBananaTarget && (
+                    <div className="text-[10px] text-[var(--text-tertiary)] truncate">
+                      {formatDate(nanoBananaTarget.date)} · slice {nanoBananaTarget.instanceIndex + 1}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setAiPromptOpen(false)}
+                    className="px-2 py-1 rounded text-[10px] bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                    title="Close"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div className="px-3 py-3 max-h-[60vh] overflow-auto">
+                <pre className="text-xs text-[var(--text-secondary)] whitespace-pre-wrap">{nanoBananaPrompt}</pre>
+                <div className="mt-2 text-[10px] text-[var(--text-tertiary)]">
+                  Not persisted — temporary and clears when you navigate slices.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* AI error panel */}
+          {nanoBananaStatus === 'error' && nanoBananaError && (
+            <div className="absolute bottom-3 right-3 z-30 w-[420px] max-w-[calc(100%-24px)] rounded-xl border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-2xl">
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--border-color)]">
+                <div className="text-xs font-semibold text-red-400">AI annotation failed</div>
+                <button
+                  type="button"
+                  onClick={clearNanoBanana}
+                  className="px-2 py-1 rounded text-[10px] bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                  title="Dismiss"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="px-3 py-3 max-h-[50vh] overflow-auto">
+                <pre className="text-xs text-[var(--text-secondary)] whitespace-pre-wrap">{nanoBananaError}</pre>
               </div>
             </div>
           )}
@@ -529,7 +873,9 @@ export function ComparisonMatrix() {
           max={CONTROL_LIMITS.SLICE_NAV.MAX_RANGE}
           step={1}
           value={Math.round(progress * CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
-          onChange={(e) => setProgress(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
+          onChange={(e) =>
+            setProgressWithClearAi(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)
+          }
           className="flex-1"
         />
       </div>

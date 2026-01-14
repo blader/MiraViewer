@@ -4,6 +4,11 @@ MiraViewer Backend - Serves pre-exported images and metadata from SQLite
 
 import sqlite3
 import hashlib
+import os
+import json
+import base64
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -11,7 +16,7 @@ from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi import Body
 
 app = FastAPI(title="MiraViewer API", version="2.0.0")
@@ -27,6 +32,12 @@ app.add_middleware(
 # Configuration
 DB_PATH = Path(__file__).parent.parent / "dicom_metadata.db"
 EXPORTED_IMAGES_PATH = Path(__file__).parent.parent / "exported_images"
+
+# Optional external AI integration (Gemini)
+# - Analysis: Gemini 3 Pro (text) produces a detailed description + a segmentation/annotation prompt
+# - Annotation: Nano Banana Pro model (image) returns an annotated image
+NANO_BANANA_PRO_MODEL = os.environ.get("NANO_BANANA_PRO_MODEL", "nano-banana-pro-preview")
+GEMINI_ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-3-pro-preview")
 
 
 @contextmanager
@@ -610,6 +621,436 @@ async def upsert_panel_settings(payload: dict = Body(...)):
         )
         conn.commit()
         return {"status": "ok"}
+
+
+def _get_exported_image_path(series_uid: str, instance_index: int) -> Path:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT exported_jpeg_path
+            FROM dicom_images
+            WHERE series_instance_uid = ?
+                AND exported_jpeg_path IS NOT NULL
+            ORDER BY instance_number, slice_location
+            """,
+            (series_uid,),
+        )
+        instances = cursor.fetchall()
+
+        if not instances or instance_index < 0 or instance_index >= len(instances):
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        image_path = Path(instances[instance_index]["exported_jpeg_path"])
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail=f"Image file not found: {image_path}")
+
+        return image_path
+
+
+def _guess_image_mime_type(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    # Conservative default.
+    return "image/png"
+
+
+def _normalize_model_name(model: str) -> str:
+    m = (model or "").strip()
+    if m.startswith("models/"):
+        return m[len("models/"):]
+    return m
+
+
+def _get_google_api_key() -> str:
+    # Support either env var name.
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="External AI is not configured (missing GEMINI_API_KEY or GOOGLE_API_KEY env var)",
+        )
+    return api_key
+
+
+def _extract_text_response(raw_json: str) -> str:
+    data = json.loads(raw_json)
+    candidates = data.get("candidates") or []
+    texts: list[str] = []
+    for cand in candidates:
+        parts = ((cand.get("content") or {}).get("parts") or [])
+        for part in parts:
+            text = part.get("text")
+            if text:
+                texts.append(text)
+    return "\n".join(texts).strip()
+
+
+def _try_parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except json.JSONDecodeError:
+        # Best-effort extraction if the model wraps JSON in extra prose.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
+def _call_gemini_analysis(image_bytes: bytes, image_mime_type: str, prompt: str) -> str:
+    api_key = _get_google_api_key()
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{_normalize_model_name(GEMINI_ANALYSIS_MODEL)}:generateContent"
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inlineData": {
+                            "mimeType": image_mime_type,
+                            "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+        },
+    }
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise HTTPException(status_code=502, detail=f"Gemini analysis error: {body or e.reason}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Gemini analysis connection error: {e.reason}")
+
+    text = _extract_text_response(raw)
+    if not text:
+        raise HTTPException(status_code=502, detail="Gemini analysis returned no text")
+    return text
+
+
+def _build_acp_analysis_prompt(
+    *,
+    plane: Optional[str],
+    weight: Optional[str],
+    sequence_type: Optional[str],
+    series_description: Optional[str],
+    is_viewport_capture: bool,
+) -> str:
+    context_lines: list[str] = []
+    if plane:
+        context_lines.append(f"- Plane: {plane}")
+    if weight:
+        context_lines.append(f"- Weighting: {weight}")
+    if sequence_type:
+        context_lines.append(f"- Sequence type: {sequence_type}")
+    if series_description:
+        context_lines.append(f"- Series description: {series_description}")
+
+    context_block = "\n".join(context_lines) if context_lines else "(none)"
+    viewport_note = (
+        "The provided image is a capture of the viewer viewport (it may already include zoom/rotation/pan, "
+        "brightness/contrast adjustments, and cropping to what is visible in the cell)."
+        if is_viewport_capture
+        else "The provided image is the raw exported slice image."
+    )
+
+    return (
+        "You are analyzing a single MRI brain slice image. "
+        + viewport_note
+        + "\n\n"
+        "Series context (use as a hint; if metadata conflicts with image appearance, trust the image):\n"
+        + context_block
+        + "\n\n"
+        "Your goal is to help an image-editing model (Nano Banana Pro) create a subtle, clinically legible overlay annotation focused on "
+        "ACP (Adamantinomatous Craniopharyngioma) / craniopharyngioma-related findings in the sellar/suprasellar region.\n\n"
+        "Prioritize assessment of tumor impact on critical/eloquent structures when visible: pituitary gland, pituitary stalk, hypothalamus, optic chiasm, optic nerves/tracts, third ventricle floor, cavernous sinus and adjacent internal carotid arteries. "
+        "Describe mass effect, displacement, compression, encasement, or effacement, and explicitly state uncertainty when needed.\n\n"
+        "Return ONLY valid JSON (no markdown, no code fences) with these keys:\n"
+        "- detailed_description: a detailed description of what is visible in the slice (sequence/orientation if inferable, key anatomy, and the series context if relevant)\n"
+        "- suspected_findings: any possible findings suggestive of craniopharyngioma/ACP (e.g., cystic components, solid nodules, calcification/hemorrhage cues), but be explicit about uncertainty\n"
+        "- segmentation_guide: step-by-step segmentation and annotation guidance. Make it HIGHLY SPECIFIC and LOCALIZING: "
+        "use concrete anatomical landmarks (sella turcica/pituitary fossa, pituitary stalk, optic chiasm, third ventricle, midline). "
+        "State where in the image to search (e.g., center/inferior midline vs superior midline), expected shapes, and what to trace first. "
+        "Include how to distinguish cystic vs solid components and how to mark calcification/hemorrhage cues when visible. "
+        "Also include guidance for assessing/marking involvement of critical structures (e.g., stalk/chiasm/hypothalamus displacement or compression).\n"
+        "- nano_banana_prompt: a single prompt string to send to Nano Banana Pro. It MUST: "
+        "(1) explicitly mention 'Adamantinomatous Craniopharyngioma (ACP)' and must NOT refer to the anterior clinoid process; "
+        "(2) include localizing instructions (where to look and which landmarks to use); "
+        "(3) include explicit segmentation instructions (what boundaries/components to outline); "
+        "(4) ALWAYS include labeling instructions: add small text labels (at least 2 labels) with arrows/leader lines, even if findings are subtle or absent; "
+        "(5) if visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate any displacement/compression; "
+        "(6) request ONLY the edited/annotated image as output.\n\n"
+        "Constraints:\n"
+        "- Do not include protected health information.\n"
+        "- Do not make definitive diagnoses; describe appearance and uncertainty.\n"
+        "- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.\n"
+        "- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.\n"
+    )
+
+
+def _call_nano_banana_pro(image_bytes: bytes, image_mime_type: str, prompt: str) -> tuple[bytes, str]:
+    api_key = _get_google_api_key()
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{_normalize_model_name(NANO_BANANA_PRO_MODEL)}:generateContent"
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inlineData": {
+                            "mimeType": image_mime_type,
+                            "data": base64.b64encode(image_bytes).decode("utf-8"),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"],
+        },
+    }
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise HTTPException(status_code=502, detail=f"Nano Banana Pro error: {body or e.reason}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Nano Banana Pro connection error: {e.reason}")
+
+    data = json.loads(raw)
+    candidates = data.get("candidates") or []
+    for cand in candidates:
+        parts = ((cand.get("content") or {}).get("parts") or [])
+        for part in parts:
+            inline = part.get("inlineData")
+            if inline and inline.get("data"):
+                mime = inline.get("mimeType") or "image/png"
+                out_bytes = base64.b64decode(inline["data"])
+                return out_bytes, mime
+
+    raise HTTPException(status_code=502, detail="Nano Banana Pro did not return an image")
+
+
+def _get_series_context(series_uid: str) -> dict:
+    """Fetch best-effort metadata for a series to help guide the AI prompt."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                MAX(plane) AS plane,
+                MAX(weight) AS weight,
+                MAX(sequence_type) AS sequence_type,
+                MAX(series_description) AS series_description
+            FROM dicom_images
+            WHERE series_instance_uid = ?
+            """,
+            (series_uid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {}
+
+        def _clean(val: Any) -> Optional[str]:
+            if val is None:
+                return None
+            s = str(val).strip()
+            return s if s else None
+
+        return {
+            "plane": _clean(row["plane"]),
+            "weight": _clean(row["weight"]),
+            "sequence_type": _clean(row["sequence_type"]),
+            "series_description": _clean(row["series_description"]),
+        }
+
+
+@app.post("/api/nano-banana-pro/acp-annotate")
+def nano_banana_pro_acp_annotate(payload: dict = Body(...)):
+    """Analyze/segment/annotate a single slice.
+
+    Flow:
+      1) Gemini 3 Pro produces a detailed description + segmentation/annotation prompt.
+      2) Nano Banana Pro generates an annotated image using that prompt.
+
+    This endpoint is intentionally non-persistent: it does not write the generated output to disk or the DB.
+
+    Body:
+      {
+        study_id: str,
+        series_uid: str,
+        instance_index: int,
+        image_base64?: str,        # optional base64 image bytes (no data: prefix)
+        image_mime_type?: str,     # optional mime type (e.g., image/png)
+      }
+
+    Returns:
+      JSON containing the analysis + the annotated image (base64).
+    """
+
+    series_uid = payload.get("series_uid")
+    instance_index = payload.get("instance_index")
+
+    if not isinstance(series_uid, str) or not series_uid:
+        raise HTTPException(status_code=400, detail="Missing field: series_uid")
+    if not isinstance(instance_index, int):
+        raise HTTPException(status_code=400, detail="Missing field: instance_index")
+
+    series_ctx = _get_series_context(series_uid)
+
+    supplied_b64 = payload.get("image_base64")
+    supplied_mime = payload.get("image_mime_type")
+
+    image_bytes: bytes
+    image_mime_type: str
+
+    if supplied_b64 is not None:
+        if not isinstance(supplied_b64, str) or not supplied_b64:
+            raise HTTPException(status_code=400, detail="Invalid field: image_base64")
+
+        image_mime_type = (
+            supplied_mime.strip() if isinstance(supplied_mime, str) and supplied_mime.strip() else "image/png"
+        )
+
+        try:
+            image_bytes = base64.b64decode(supplied_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 in image_base64")
+    else:
+        image_path = _get_exported_image_path(series_uid, instance_index)
+        image_bytes = image_path.read_bytes()
+        image_mime_type = _guess_image_mime_type(image_path)
+
+    # 1) Analyze with Gemini (text)
+    analysis_text = _call_gemini_analysis(
+        image_bytes,
+        image_mime_type,
+        _build_acp_analysis_prompt(
+            plane=series_ctx.get("plane"),
+            weight=series_ctx.get("weight"),
+            sequence_type=series_ctx.get("sequence_type"),
+            series_description=series_ctx.get("series_description"),
+            is_viewport_capture=supplied_b64 is not None,
+        ),
+    )
+    analysis_obj = _try_parse_json_object(analysis_text)
+
+    nano_banana_prompt: str
+    if analysis_obj and isinstance(analysis_obj.get("nano_banana_prompt"), str) and analysis_obj.get("nano_banana_prompt").strip():
+        nano_banana_prompt = analysis_obj.get("nano_banana_prompt").strip()
+    else:
+        # Fallback prompt (should be rare).
+        nano_banana_prompt = (
+            "Analyze this MRI slice for ACP (adamantinomatous craniopharyngioma) / craniopharyngioma-related findings. "
+            "If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible), "
+            "and add subtle outlines and small labels with arrows/leader lines. "
+            "If visible or relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate displacement/compression. "
+            "If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible. "
+            "Return only the edited/annotated image."
+        )
+
+    # Ensure the downstream prompt is unambiguous and sufficiently directive.
+    prompt_lc = nano_banana_prompt.lower()
+
+    if "craniopharyngioma" not in prompt_lc and "adamantinomatous" not in prompt_lc:
+        nano_banana_prompt = (
+            "Focus on ACP (adamantinomatous craniopharyngioma) / craniopharyngioma findings. "
+            + nano_banana_prompt
+        )
+        prompt_lc = nano_banana_prompt.lower()
+
+    # Always require labels.
+    if "label" not in prompt_lc:
+        nano_banana_prompt = (
+            "Always add small text labels (at least 2) with arrows/leader lines (e.g., 'Cystic component', 'Solid nodule', 'Calcification' if visible). "
+            + nano_banana_prompt
+        )
+        prompt_lc = nano_banana_prompt.lower()
+
+    # Encourage more localizing guidance if missing.
+    if "sella" not in prompt_lc and "suprasellar" not in prompt_lc and "optic" not in prompt_lc:
+        nano_banana_prompt = (
+            "Localize using landmarks: midline sellar/suprasellar region (sella turcica/pituitary fossa), pituitary stalk, optic chiasm. "
+            + nano_banana_prompt
+        )
+        prompt_lc = nano_banana_prompt.lower()
+
+    # Encourage explicit mention of critical structures.
+    if (
+        "pituitary" not in prompt_lc
+        and "stalk" not in prompt_lc
+        and "optic" not in prompt_lc
+        and "chiasm" not in prompt_lc
+        and "hypothalam" not in prompt_lc
+    ):
+        nano_banana_prompt = (
+            "If visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus) and indicate any displacement/compression. "
+            + nano_banana_prompt
+        )
+
+    # 2) Annotate with Nano Banana Pro (image)
+    out_bytes, mime = _call_nano_banana_pro(image_bytes, image_mime_type, nano_banana_prompt)
+
+    return JSONResponse(
+        {
+            "analysis_text": analysis_text,
+            "analysis_json": analysis_obj,
+            "nano_banana_prompt": nano_banana_prompt,
+            "mime_type": mime,
+            "image_base64": base64.b64encode(out_bytes).decode("utf-8"),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/stats")

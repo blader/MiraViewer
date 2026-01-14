@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
 import { RepeatButton } from './RepeatButton';
 import { CONTROL_LIMITS } from '../utils/constants';
@@ -21,9 +21,20 @@ interface ImageControlsProps {
   instanceIndex: number;
   instanceCount: number;
   onUpdate: (update: Partial<PanelSettings>) => void;
+  onAcpAnalyze?: () => void;
+  acpAnalyzeLoading?: boolean;
+  acpAnalyzeDisabled?: boolean;
 }
 
-export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate }: ImageControlsProps) {
+export function ImageControls({
+  settings,
+  instanceIndex,
+  instanceCount,
+  onUpdate,
+  onAcpAnalyze,
+  acpAnalyzeLoading = false,
+  acpAnalyzeDisabled = false,
+}: ImageControlsProps) {
   return (
     <div className="flex items-center">
       {/* Slice offset */}
@@ -136,6 +147,27 @@ export function ImageControls({ settings, instanceIndex, instanceCount, onUpdate
           <ChevronRight className="w-3 h-3" />
         </RepeatButton>
       </div>
+
+      {/* AI annotation */}
+      {onAcpAnalyze && (
+        <>
+          <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+          <button
+            type="button"
+            onClick={onAcpAnalyze}
+            disabled={acpAnalyzeDisabled || acpAnalyzeLoading}
+            className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
+              acpAnalyzeDisabled || acpAnalyzeLoading
+                ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
+                : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+            title="AI: analyze/segment/annotate this slice (not persisted)"
+          >
+            <Sparkles className="w-3 h-3" />
+            AI
+          </button>
+        </>
+      )}
     </div>
   );
 }
