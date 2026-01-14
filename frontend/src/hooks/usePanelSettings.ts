@@ -1,7 +1,20 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import type { PanelSettings } from '../types/api';
+import type { PanelSettings, PanelSettingsFromApi } from '../types/api';
 import { fetchPanelSettings, savePanelSettings } from '../utils/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
+
+function normalizePanelSettingsFromApi(s: PanelSettingsFromApi | undefined): PanelSettings {
+  return {
+    offset: typeof s?.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
+    zoom: typeof s?.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
+    rotation: typeof s?.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
+    brightness: typeof s?.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
+    contrast: typeof s?.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
+    panX: typeof s?.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
+    panY: typeof s?.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
+    progress: typeof s?.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
+  };
+}
 
 type PanelSettingsHistoryEntry = {
   date: string;
@@ -153,16 +166,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
 
           // Hydrate all server settings (not just enabled dates) so toggling dates later preserves saved values.
           for (const [date, s] of Object.entries(server)) {
-            next.set(date, {
-              offset: typeof s.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
-              zoom: typeof s.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
-              rotation: typeof s.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
-              brightness: typeof s.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
-              contrast: typeof s.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
-              panX: typeof s.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
-              panY: typeof s.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
-              progress: typeof s.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
-            });
+            next.set(date, normalizePanelSettingsFromApi(s));
           }
 
           // Ensure enabled dates not present on server still get defaults.
