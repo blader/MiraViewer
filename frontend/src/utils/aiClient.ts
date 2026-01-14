@@ -120,45 +120,37 @@ function extractInlineDataImage(raw: GenerateContentResponse): { mimeType: strin
   return null;
 }
 
-function buildAcpAnalysisPrompt(opts: {
-  seriesContext: AiSeriesContext;
-}): string {
-  const { seriesContext } = opts;
-
-  const contextLines: string[] = [];
-  if (seriesContext.plane) contextLines.push(`- Plane: ${seriesContext.plane}`);
-  if (seriesContext.weight) contextLines.push(`- Weighting: ${seriesContext.weight}`);
-  if (seriesContext.sequence) contextLines.push(`- Sequence: ${seriesContext.sequence}`);
-  if (seriesContext.label) contextLines.push(`- Label: ${seriesContext.label}`);
+function buildAcpAnalysisPrompt(opts: { seriesContext: AiSeriesContext }): string {
+  const contextLines = [
+    opts.seriesContext.plane ? `- Plane: ${opts.seriesContext.plane}` : null,
+    opts.seriesContext.weight ? `- Weighting: ${opts.seriesContext.weight}` : null,
+    opts.seriesContext.sequence ? `- Sequence: ${opts.seriesContext.sequence}` : null,
+    opts.seriesContext.label ? `- Label: ${opts.seriesContext.label}` : null,
+  ].filter(Boolean) as string[];
 
   const contextBlock = contextLines.length ? contextLines.join('\n') : '(none)';
 
-  return (
-    'You are analyzing a single MRI brain slice image.\n'
-    + 'The provided image is a capture of the viewer viewport (it may already include zoom/rotation/pan, brightness/contrast adjustments, and cropping to what is visible in the cell). The capture is capped at ~512 px on its longest side for speed; keep output around this resolution (≈512 px max dimension).\n\n'
-    + 'Series context (use as a hint; if metadata conflicts with image appearance, trust the image):\n'
-    + contextBlock
-    + '\n\n'
-    + 'Your goal is to help an image-editing model (Nano Banana Pro) create a subtle, clinically legible overlay annotation focused on ACP (Adamantinomatous Craniopharyngioma) / craniopharyngioma-related findings in the sellar/suprasellar region.\n\n'
-    + 'Prioritize assessment of tumor impact on critical/eloquent structures when visible: pituitary gland, pituitary stalk, hypothalamus, optic chiasm, optic nerves/tracts, third ventricle floor, cavernous sinus and adjacent internal carotid arteries. Describe mass effect, displacement, compression, encasement, or effacement, and explicitly state uncertainty when needed.\n\n'
-    + 'Return ONLY valid JSON (no markdown, no code fences) with these keys:\n'
-    + '- detailed_description: a detailed description of what is visible in the slice (sequence/orientation if inferable, key anatomy, and the series context if relevant)\n'
-    + '- suspected_findings: any possible findings suggestive of craniopharyngioma/ACP (e.g., cystic components, solid nodules, calcification/hemorrhage cues), but be explicit about uncertainty\n'
-    + '- segmentation_guide: step-by-step segmentation and annotation guidance. Make it EXTREMELY SPECIFIC, VISUAL, AND LAYPERSON-FRIENDLY so a non-clinical image editor can place overlays correctly: describe concrete 2D locations on the visible slice using relative screen positions (top/bottom/left/right/center, anterior/posterior if inferable), shapes (round/ovoid/lobulated), sizes (small/moderate/large relative to the visible brain), and colors to use. Name landmarks on the screen in plain visual terms (e.g., "bright round spot near the lower center", "darker curved band above the bright spot") and tell exactly where to draw outlines and labels. Include how to distinguish cystic vs solid components and how to mark calcification/hemorrhage cues when visible. Also include guidance for assessing/marking nearby midline structures with explicit on-screen placement instructions (describe their visible appearance/brightness/position instead of medical jargon). FINAL LABEL TEXTS SHOULD STILL USE THE MEDICAL TERMS PROVIDED (e.g., ACP lesion, optic chiasm, pituitary stalk, hypothalamus), but placement directions must stay plain-visual.\\n'
-    + '- nano_banana_prompt: a single prompt string to send to Nano Banana Pro. It MUST: '
-    + '(1) explicitly mention \'Adamantinomatous Craniopharyngioma (ACP)\' and must NOT refer to the anterior clinoid process; '
-    + '(2) assume the image editor has minimal MRI/medical knowledge: include highly visual, layperson localizing instructions (where on the visible image to look: top/bottom/left/right/center, anterior/posterior if inferable, relative to bright/dark landmarks); keep placement directions free of anatomy terms, but labels themselves should use the proper medical names (e.g., ACP lesion, optic chiasm, pituitary stalk, hypothalamus); '
-    + '(3) include explicit segmentation instructions (what boundaries/components to outline) with on-screen placement cues (e.g., "draw a thin cyan outline around the bright cystic area just above the lower-center bright spot; place its label just above and to the right, outside the outline"); '
-    + '(4) ALWAYS include labeling instructions: add small text labels (at least 2 labels) with arrows/leader lines, even if findings are subtle or absent; '
-    + '(5) for every label, include a concise clinical-impact annotation in a smaller font beneath the label (e.g., push direction/degree, compression/encasement, obstruction risk, cystic vs solid, uncertainty); '
-    + '(6) if you see nearby midline structures (e.g., thin crossing band above the center bright spot, vertical thin bright line below it, or surrounding darker fluid spaces), describe and label them using plain visual terms and note any displacement/compression; '
-    + '(7) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); '
-    + '(8) keep the output image around 512 px on its longest side (match input aspect as best you can); '
-    + '(9) request ONLY the edited/annotated image as output.\n\n'
-    + 'Constraints:\n'
-    + '- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.\n'
-    + '- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.\n'
-  );
+  return [
+    'You are analyzing a single MRI brain slice image.',
+    'The provided image is a capture of the viewer viewport (it may already include zoom/rotation/pan, brightness/contrast adjustments, and cropping to what is visible in the cell). The capture is capped at ~512 px on its longest side for speed; keep output around this resolution (≈512 px max dimension).',
+    '',
+    'Series context (use as a hint; if metadata conflicts with image appearance, trust the image):',
+    contextBlock,
+    '',
+    'Your goal is to help an image-editing model (Nano Banana Pro) create a subtle, clinically legible overlay annotation focused on ACP (Adamantinomatous Craniopharyngioma) / craniopharyngioma-related findings in the sellar/suprasellar region.',
+    '',
+    'Prioritize assessment of tumor impact on critical/eloquent structures when visible: pituitary gland, pituitary stalk, hypothalamus, optic chiasm, optic nerves/tracts, third ventricle floor, cavernous sinus and adjacent internal carotid arteries. Describe mass effect, displacement, compression, encasement, or effacement, and explicitly state uncertainty when needed.',
+    '',
+    'Return ONLY valid JSON (no markdown, no code fences) with these keys:',
+    '- detailed_description: a detailed description of what is visible in the slice (sequence/orientation if inferable, key anatomy, and the series context if relevant)',
+    '- suspected_findings: any possible findings suggestive of craniopharyngioma/ACP (e.g., cystic components, solid nodules, calcification/hemorrhage cues), but be explicit about uncertainty',
+    '- segmentation_guide: step-by-step segmentation and annotation guidance. Make it EXTREMELY SPECIFIC, VISUAL, AND LAYPERSON-FRIENDLY so a non-clinical image editor can place overlays correctly: describe concrete 2D locations on the visible slice using relative screen positions (top/bottom/left/right/center, anterior/posterior if inferable), shapes (round/ovoid/lobulated), sizes (small/moderate/large relative to the visible brain), and colors to use. Name landmarks on the screen in plain visual terms (e.g., "bright round spot near the lower center", "darker curved band above the bright spot") and tell exactly where to draw outlines and labels. Include how to distinguish cystic vs solid components and how to mark calcification/hemorrhage cues when visible. Also include guidance for assessing/marking nearby midline structures with explicit on-screen placement instructions (describe their visible appearance/brightness/position instead of medical jargon). FINAL LABEL TEXTS SHOULD STILL USE THE MEDICAL TERMS PROVIDED (e.g., ACP lesion, optic chiasm, pituitary stalk, hypothalamus), but placement directions must stay plain-visual.',
+    '- nano_banana_prompt: a single prompt string to send to Nano Banana Pro. It MUST: (1) explicitly mention \'Adamantinomatous Craniopharyngioma (ACP)\' and must NOT refer to the anterior clinoid process; (2) assume the image editor has minimal MRI/medical knowledge: include highly visual, layperson localizing instructions (where on the visible image to look: top/bottom/left/right/center, anterior/posterior if inferable, relative to bright/dark landmarks); keep placement directions free of anatomy terms, but labels themselves should use the proper medical names (e.g., ACP lesion, optic chiasm, pituitary stalk, hypothalamus); (3) include explicit segmentation instructions (what boundaries/components to outline) with on-screen placement cues (e.g., "draw a thin cyan outline around the bright cystic area just above the lower-center bright spot; place its label just above and to the right, outside the outline"); (4) ALWAYS include labeling instructions: add small text labels (at least 2 labels) with arrows/leader lines, even if findings are subtle or absent; (5) for every label, include a concise clinical-impact annotation in a smaller font beneath the label (e.g., push direction/degree, compression/encasement, obstruction risk, cystic vs solid, uncertainty); (6) if you see nearby midline structures (e.g., thin crossing band above the center bright spot, vertical thin bright line below it, or surrounding darker fluid spaces), describe and label them using plain visual terms and note any displacement/compression; (7) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); (8) keep the output image around 512 px on its longest side (match input aspect as best you can); (9) request ONLY the edited/annotated image as output.',
+    '',
+    'Constraints:',
+    '- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.',
+    '- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.',
+  ].join('\n');
 }
 
 function enforceNanoBananaPrompt(prompt: string): string {
@@ -316,15 +308,16 @@ export async function runAcpAnnotateClient(params: {
   if (typeof extracted === 'string' && extracted.trim()) {
     nanoBananaPrompt = extracted.trim();
   } else {
-    nanoBananaPrompt =
-      'Analyze this MRI slice for ACP (adamantinomatous craniopharyngioma) / craniopharyngioma-related findings. '
-      + 'If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible). '
-      + 'Outline each element separately with distinct colors (do not merge into one outline): e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures. Provide explicit visual placement cues for each outline and label (e.g., "draw a thin cyan outline around the bright cystic area just above the lower-center bright spot; place its label just above and to the right, outside the outline"). '
-      + 'Add subtle outlines and small text labels with arrows/leader lines for each element, and include a concise clinical-impact annotation in a smaller font beneath each label (e.g., push direction/degree, compression/encasement, cystic vs solid, obstruction risk, or uncertainty). '
-      + 'If visible or relevant, describe and label nearby midline structures in plain visual terms (e.g., thin crossing band above center bright spot, vertical thin bright line below it, surrounding darker fluid spaces) and note displacement/compression. Use medical names for the label text, but keep all placement directions in plain visual language. '
-      + 'If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible (each with distinct color/outline). '
-      + 'Keep the output image around 512 px on its longest side (match input aspect as best you can). '
-      + 'Return only the edited/annotated image.';
+    nanoBananaPrompt = [
+      'Analyze this MRI slice for ACP (adamantinomatous craniopharyngioma) / craniopharyngioma-related findings.',
+      'If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible).',
+      'Outline each element separately with distinct colors (do not merge into one outline): e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures. Provide explicit visual placement cues for each outline and label (e.g., "draw a thin cyan outline around the bright cystic area just above the lower-center bright spot; place its label just above and to the right, outside the outline").',
+      'Add subtle outlines and small text labels with arrows/leader lines for each element, and include a concise clinical-impact annotation in a smaller font beneath each label (e.g., push direction/degree, compression/encasement, cystic vs solid, obstruction risk, or uncertainty).',
+      'If visible or relevant, describe and label nearby midline structures in plain visual terms (e.g., thin crossing band above center bright spot, vertical thin bright line below it, surrounding darker fluid spaces) and note displacement/compression. Use medical names for the label text, but keep all placement directions in plain visual language.',
+      'If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible (each with distinct color/outline).',
+      'Keep the output image around 512 px on its longest side (match input aspect as best you can).',
+      'Return only the edited/annotated image.',
+    ].join(' ');
   }
 
   nanoBananaPrompt = enforceNanoBananaPrompt(nanoBananaPrompt);
