@@ -44,6 +44,12 @@ export type AiClientAnnotateResult = {
   nanoBananaPrompt: string;
 };
 
+export type AiTimingEntry = {
+  name: string;
+  ms: number;
+  detail?: string;
+};
+
 function getGoogleApiKey(): string | null {
   const key =
     import.meta.env.VITE_GOOGLE_API_KEY ||
@@ -213,6 +219,8 @@ async function callGenerateContent(params: {
   model: string;
   request: GenerateContentRequest;
   timeoutMs?: number;
+  onTiming?: (entry: AiTimingEntry) => void;
+  timingName?: string;
 }): Promise<GenerateContentResponse> {
   const model = normalizeModelName(params.model);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(params.apiKey)}`;
@@ -221,12 +229,14 @@ async function callGenerateContent(params: {
   const timeout = window.setTimeout(() => controller.abort(), params.timeoutMs ?? 120_000);
 
   try {
+    const tFetch0 = performance.now();
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params.request),
       signal: controller.signal,
     });
+    const tFetch1 = performance.now();
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -234,7 +244,18 @@ async function callGenerateContent(params: {
       throw new Error(`AI request failed (${res.status})${details}`);
     }
 
-    return (await res.json()) as GenerateContentResponse;
+    const tJson0 = performance.now();
+    const json = (await res.json()) as GenerateContentResponse;
+    const tJson1 = performance.now();
+
+    const base = params.timingName;
+    if (base && params.onTiming) {
+      params.onTiming({ name: `${base}.fetch`, ms: tFetch1 - tFetch0 });
+      params.onTiming({ name: `${base}.json`, ms: tJson1 - tJson0 });
+      params.onTiming({ name: base, ms: tJson1 - tFetch0 });
+    }
+
+    return json;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw new Error('AI request was aborted (likely timed out or cancelled). Please retry.');
@@ -252,6 +273,7 @@ export async function runAcpAnnotateClient(params: {
   analysisModel?: string;
   nanoBananaModel?: string;
   onProgress?: (text: string) => void;
+  onTiming?: (entry: AiTimingEntry) => void;
 }): Promise<AiClientAnnotateResult> {
   const apiKey = getGoogleApiKey();
   if (!apiKey) {
@@ -263,7 +285,10 @@ export async function runAcpAnnotateClient(params: {
   const analysisModel = params.analysisModel || import.meta.env.VITE_GEMINI_ANALYSIS_MODEL || 'gemini-3-pro-preview';
   const nanoBananaModel = params.nanoBananaModel || import.meta.env.VITE_NANO_BANANA_PRO_MODEL || 'nano-banana-pro-preview';
 
+  const tPrompt0 = performance.now();
   const analysisPrompt = buildAcpAnalysisPrompt({ seriesContext: params.seriesContext });
+  const tPrompt1 = performance.now();
+  params.onTiming?.({ name: 'prompt.build_analysis', ms: tPrompt1 - tPrompt0 });
 
   params.onProgress?.('Gemini analyzing…');
   const analysisRaw = await callGenerateContent({
@@ -287,15 +312,23 @@ export async function runAcpAnnotateClient(params: {
         temperature: 0.2,
       },
     },
+    onTiming: params.onTiming,
+    timingName: 'gemini.analyze',
   });
 
   params.onProgress?.('Parsing analysis…');
+  const tExtract0 = performance.now();
   const analysisText = extractTextResponse(analysisRaw);
+  const tExtract1 = performance.now();
+  params.onTiming?.({ name: 'gemini.extract_text', ms: tExtract1 - tExtract0 });
   if (!analysisText) {
     throw new Error('Gemini analysis returned no text');
   }
 
+  const tParse0 = performance.now();
   const analysisObj = tryParseJsonObject(analysisText);
+  const tParse1 = performance.now();
+  params.onTiming?.({ name: 'gemini.parse_json', ms: tParse1 - tParse0 });
 
   let nanoBananaPrompt: string;
   const extracted = analysisObj?.nano_banana_prompt;
@@ -314,7 +347,10 @@ export async function runAcpAnnotateClient(params: {
     ].join(' ');
   }
 
+  const tEnforce0 = performance.now();
   nanoBananaPrompt = enforceNanoBananaPrompt(nanoBananaPrompt);
+  const tEnforce1 = performance.now();
+  params.onTiming?.({ name: 'nano_banana.prompt_enforce', ms: tEnforce1 - tEnforce0 });
 
   params.onProgress?.('Nano Banana generating…');
   const imgRaw = await callGenerateContent({
@@ -338,14 +374,26 @@ export async function runAcpAnnotateClient(params: {
         responseModalities: ['IMAGE'],
       },
     },
+    onTiming: params.onTiming,
+    timingName: 'nano_banana.generate',
   });
 
+  const tExtractImg0 = performance.now();
   const inline = extractInlineDataImage(imgRaw);
+  const tExtractImg1 = performance.now();
+  params.onTiming?.({ name: 'nano_banana.extract_inline', ms: tExtractImg1 - tExtractImg0 });
   if (!inline) {
     throw new Error('Nano Banana Pro did not return an image');
   }
 
+  const tDecode0 = performance.now();
   const blob = base64ToBlob(inline.data, inline.mimeType);
+  const tDecode1 = performance.now();
+  params.onTiming?.({
+    name: 'nano_banana.decode_image',
+    ms: tDecode1 - tDecode0,
+    detail: `${Math.round(inline.data.length / 1024)} KB base64`,
+  });
 
   return {
     blob,

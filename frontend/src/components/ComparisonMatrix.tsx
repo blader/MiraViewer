@@ -22,6 +22,12 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
   return Math.max(300, maxSize);
 }
 
+function formatMs(ms: number): string {
+  if (!Number.isFinite(ms)) return '';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
 
 export function ComparisonMatrix() {
   const { data, loading, error } = useComparisonData();
@@ -49,6 +55,7 @@ export function ComparisonMatrix() {
     imageUrl: nanoBananaImageUrl,
     prompt: nanoBananaPrompt,
     error: nanoBananaError,
+    timings: nanoBananaTimings,
     target: nanoBananaTarget,
     isPromptOpen: aiPromptOpen,
     setIsPromptOpen: setAiPromptOpen,
@@ -684,6 +691,28 @@ export function ComparisonMatrix() {
               </div>
               <div className="px-3 py-3 max-h-[60vh] overflow-auto">
                 <pre className="text-xs text-[var(--text-secondary)] whitespace-pre-wrap">{nanoBananaPrompt}</pre>
+
+                {nanoBananaTimings.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-[var(--border-color)]">
+                    <div className="text-[10px] font-semibold text-[var(--text-primary)]">Timing breakdown</div>
+                    <div className="mt-1 space-y-1">
+                      {nanoBananaTimings.map((t, i) => (
+                        <div key={`${t.name}-${i}`} className="flex items-start justify-between gap-2 text-[10px]">
+                          <div className="min-w-0 text-[var(--text-secondary)] truncate">{t.name}</div>
+                          <div className="flex items-start gap-2 shrink-0">
+                            <div className="text-[var(--text-primary)] tabular-nums">{formatMs(t.ms)}</div>
+                            {t.detail && (
+                              <div className="text-[var(--text-tertiary)] max-w-[180px] truncate" title={t.detail}>
+                                {t.detail}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-2 text-[10px] text-[var(--text-tertiary)]">
                   Not persisted — temporary and clears when you navigate slices.
                 </div>
@@ -707,6 +736,27 @@ export function ComparisonMatrix() {
               </div>
               <div className="px-3 py-3 max-h-[50vh] overflow-auto">
                 <pre className="text-xs text-[var(--text-secondary)] whitespace-pre-wrap">{nanoBananaError}</pre>
+
+                {nanoBananaTimings.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-[var(--border-color)]">
+                    <div className="text-[10px] font-semibold text-[var(--text-primary)]">Timing breakdown</div>
+                    <div className="mt-1 space-y-1">
+                      {nanoBananaTimings.map((t, i) => (
+                        <div key={`${t.name}-${i}`} className="flex items-start justify-between gap-2 text-[10px]">
+                          <div className="min-w-0 text-[var(--text-secondary)] truncate">{t.name}</div>
+                          <div className="flex items-start gap-2 shrink-0">
+                            <div className="text-[var(--text-primary)] tabular-nums">{formatMs(t.ms)}</div>
+                            {t.detail && (
+                              <div className="text-[var(--text-tertiary)] max-w-[180px] truncate" title={t.detail}>
+                                {t.detail}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
