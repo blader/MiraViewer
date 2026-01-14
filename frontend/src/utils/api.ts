@@ -1,4 +1,5 @@
 import type { ComparisonData, PanelSettings, PanelSettingsFromApi } from '../types/api';
+import { base64ToBlob } from './base64';
 
 const API_BASE = '/api';
 
@@ -93,14 +94,6 @@ export type NanoBananaProAcpAnnotateResult = {
   mimeType: string;
 };
 
-function base64ToBlob(base64: string, mimeType: string): Blob {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return new Blob([bytes], { type: mimeType });
-}
 
 export async function fetchNanoBananaProAcpAnnotation(
   req: NanoBananaProAcpAnnotateRequest

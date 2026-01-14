@@ -13,6 +13,7 @@ import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
 import { runAcpAnnotateClient } from '../utils/aiClient';
+import { blobToBase64Data } from '../utils/base64';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
 
 function clamp(value: number, min: number, max: number) {
@@ -40,22 +41,6 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
   return Math.max(300, maxSize);
 }
 
-function blobToBase64Data(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const res = typeof reader.result === 'string' ? reader.result : '';
-      const comma = res.indexOf(',');
-      if (comma === -1) {
-        reject(new Error('Failed to encode image'));
-        return;
-      }
-      resolve(res.slice(comma + 1));
-    };
-    reader.onerror = () => reject(new Error('Failed to encode image'));
-    reader.readAsDataURL(blob);
-  });
-}
 
 export function ComparisonMatrix() {
   const { data, loading, error } = useComparisonData();
@@ -359,6 +344,13 @@ export function ComparisonMatrix() {
 
   const selectedSeq = data.sequences.find(s => s.id === selectedSeqId);
 
+  const aiSeriesContext = {
+    plane: selectedSeq?.plane ?? selectedPlane,
+    weight: selectedSeq?.weight,
+    sequence: selectedSeq?.sequence,
+    label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
+  };
+
   const overlayControlCol = overlayColumns[overlayDateIndex];
   const overlayControlRef = overlayControlCol?.ref;
   const overlayControlDate = overlayControlCol?.date;
@@ -563,12 +555,7 @@ export function ComparisonMatrix() {
                                 instanceIndex: idx,
                               },
                               viewerKey,
-                              {
-                                plane: selectedSeq?.plane ?? selectedPlane,
-                                weight: selectedSeq?.weight,
-                                sequence: selectedSeq?.sequence,
-                                label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
-                              }
+                              aiSeriesContext
                             )
                           }
                           acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
@@ -714,12 +701,7 @@ export function ComparisonMatrix() {
                           instanceIndex: overlayDisplayedSliceIndex,
                         },
                         'overlay',
-                        {
-                          plane: selectedSeq?.plane ?? selectedPlane,
-                          weight: selectedSeq?.weight,
-                          sequence: selectedSeq?.sequence,
-                          label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
-                        }
+                        aiSeriesContext
                       );
                     }}
                     acpAnalyzeDisabled={nanoBananaStatus === 'loading'}

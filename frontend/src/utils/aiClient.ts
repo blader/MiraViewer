@@ -1,3 +1,5 @@
+import { base64ToBlob } from './base64';
+
 export type AiSeriesContext = {
   plane?: string | null;
   weight?: string | null;
@@ -56,14 +58,6 @@ function normalizeModelName(model: string): string {
   return m.startsWith('models/') ? m.slice('models/'.length) : m;
 }
 
-function base64ToBlob(base64: string, mimeType: string): Blob {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return new Blob([bytes], { type: mimeType });
-}
 
 function extractTextResponse(raw: GenerateContentResponse): string {
   const candidates = raw.candidates || [];
