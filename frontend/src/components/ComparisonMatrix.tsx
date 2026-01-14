@@ -88,6 +88,14 @@ export function ComparisonMatrix() {
     seriesUid: string;
     instanceIndex: number;
   } | null>(null);
+  const isNanoTarget = useCallback(
+    (date?: string | null, seriesUid?: string | null, instanceIndex?: number | null) =>
+      !!nanoBananaTarget &&
+      nanoBananaTarget.date === date &&
+      nanoBananaTarget.seriesUid === seriesUid &&
+      nanoBananaTarget.instanceIndex === instanceIndex,
+    [nanoBananaTarget]
+  );
 
   // Prompt panel is shown/hidden via the AI button; it doesn't affect layout.
   const [aiPromptOpen, setAiPromptOpen] = useState(false);
@@ -521,10 +529,7 @@ export function ComparisonMatrix() {
                   const idx = getSliceIndex(ref.instance_count, progress, settings.offset);
                   const viewerKey = `grid:${date}`;
 
-                  const isNanoBananaTarget =
-                    nanoBananaTarget?.date === date &&
-                    nanoBananaTarget?.seriesUid === ref.series_uid &&
-                    nanoBananaTarget?.instanceIndex === idx;
+                  const isNanoBananaTarget = isNanoTarget(date, ref.series_uid, idx);
 
                   const nanoBananaOverrideUrl =
                     nanoBananaStatus === 'ready' && nanoBananaImageUrl && isNanoBananaTarget
@@ -691,9 +696,7 @@ export function ComparisonMatrix() {
                     onUpdate={(update) => {
                       const isOverlayTarget =
                         nanoBananaStatus !== 'idle' &&
-                        nanoBananaTarget?.date === overlayControlDate &&
-                        nanoBananaTarget?.seriesUid === overlayControlRef.series_uid &&
-                        nanoBananaTarget?.instanceIndex === overlayControlSliceIndex;
+                        isNanoTarget(overlayControlDate, overlayControlRef.series_uid, overlayControlSliceIndex);
 
                       if (isOverlayTarget) {
                         clearNanoBanana();
