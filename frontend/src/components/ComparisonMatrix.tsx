@@ -14,25 +14,7 @@ import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
 import { useAiAnnotation } from '../hooks/useAiAnnotation';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function clampInt(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, Math.trunc(value)));
-}
-
-function getSliceIndex(instanceCount: number, progress: number, offset: number) {
-  const max = Math.max(0, instanceCount - 1);
-  const base = max > 0 ? Math.round(clamp(progress, 0, 1) * max) : 0;
-  return clampInt(base + offset, 0, max);
-}
-
-function getProgressFromSliceIndex(instanceIndex: number, instanceCount: number, offset: number) {
-  const denom = Math.max(1, instanceCount - 1);
-  return clamp((instanceIndex - offset) / denom, 0, 1);
-}
+import { getSliceIndex, getProgressFromSlice } from '../utils/math';
 
 function getOverlayViewerSize(gridSize: { width: number; height: number }) {
   // Fill available space while leaving room for the top strip.
@@ -76,21 +58,18 @@ export function ComparisonMatrix() {
     isTarget: isNanoTarget,
   } = useAiAnnotation();
 
-  const nanoBananaRequestIdRef = useRef(0);
-
   // Map of viewer refs so we can snapshot exactly what's visible in a specific cell.
-  const viewerRefsRef = useRef(new Map<string, React.RefObject<DicomViewerHandle | null>>());
   // We access this in render to assign refs; React warns if we read .current in render,
   // but here we are managing a Map of refs for children, not reading them for display logic.
   // This pattern is acceptable for dynamic refs.
-  // eslint-disable-next-line react-hooks/refs
-  const getViewerRef = (key: string) => {
+  const viewerRefsRef = useRef(new Map<string, React.RefObject<DicomViewerHandle | null>>());
+  const getViewerRef = useCallback((key: string) => {
     const existing = viewerRefsRef.current.get(key);
     if (existing) return existing;
     const created = createRef<DicomViewerHandle>();
     viewerRefsRef.current.set(key, created);
     return created;
-  };
+  }, []);
 
   const handleAiButtonClick = (
     target: {
@@ -398,6 +377,7 @@ export function ComparisonMatrix() {
                   gridAutoRows: `${gridCellSize + 32}px`, // +32 for header
                 }}
               >
+                {/* eslint-disable react-hooks/refs -- Dynamic refs for viewer capture */}
                 {columns.map(({ date, ref }) => {
                   const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;
                   
@@ -463,7 +443,7 @@ export function ComparisonMatrix() {
                           imageUrlOverride={nanoBananaOverrideUrl}
                           onInstanceChange={(i) => {
                             // When scrolling on a panel, update the global progress.
-                            setProgressWithClearAi(getProgressFromSliceIndex(i, ref.instance_count, settings.offset));
+                            setProgressWithClearAi(getProgressFromSlice(i, ref.instance_count, settings.offset));
                           }}
                           brightness={nanoBananaOverrideUrl ? 100 : settings.brightness}
                           contrast={nanoBananaOverrideUrl ? 100 : settings.contrast}
@@ -510,6 +490,7 @@ export function ComparisonMatrix() {
                     </div>
                   );
                 })}
+                {/* eslint-enable react-hooks/refs */}
                 {columns.length === 0 && (
                   <div className="h-full flex items-center justify-center text-[var(--text-secondary)]">Select dates to view</div>
                 )}
@@ -612,6 +593,7 @@ export function ComparisonMatrix() {
                     style={{ width: overlayViewerSize, height: overlayViewerSize }}
                   >
                     <DicomViewer
+                      // eslint-disable-next-line react-hooks/refs -- Dynamic ref for viewer capture
                       ref={getViewerRef('overlay')}
                       key={`${overlayDisplayedRef.study_id}-${overlayDisplayedRef.series_uid}`}
                       studyId={overlayDisplayedRef.study_id}
@@ -621,7 +603,7 @@ export function ComparisonMatrix() {
                       imageUrlOverride={overlayNanoBananaOverrideUrl}
                       onInstanceChange={(i) => {
                         setProgressWithClearAi(
-                          getProgressFromSliceIndex(
+                          getProgressFromSlice(
                             i,
                             overlayDisplayedRef.instance_count,
                             overlayDisplayedSettings.offset

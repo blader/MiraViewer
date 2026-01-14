@@ -1,20 +1,9 @@
-import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
-import { RepeatButton } from './RepeatButton';
+import { StepControl } from './StepControl';
 import { CONTROL_LIMITS } from '../utils/constants';
-
-function normalizeRotationDegrees(degrees: number): number {
-  // Wrap into [-180, 180]
-  return ((degrees + 180) % 360 + 360) % 360 - 180;
-}
-
-function formatRotationDegrees(degrees: number) {
-  // Keep the UI compact while still representing 0.25° steps.
-  return degrees
-    .toFixed(2)
-    .replace(/\.00$/, '')
-    .replace(/(\.\d)0$/, '$1');
-}
+import { normalizeRotation } from '../utils/math';
+import { formatRotation } from '../utils/format';
 
 interface ImageControlsProps {
   settings: PanelSettings;
@@ -25,6 +14,10 @@ interface ImageControlsProps {
   acpAnalyzeLoading?: boolean;
   acpAnalyzeDisabled?: boolean;
 }
+
+const Divider = ({ wide = false }: { wide?: boolean }) => (
+  <div className={`w-px h-3 bg-[var(--border-color)] ${wide ? 'mx-3' : 'mx-2'}`} />
+);
 
 export function ImageControls({
   settings,
@@ -37,121 +30,84 @@ export function ImageControls({
 }: ImageControlsProps) {
   return (
     <div className="flex items-center">
-      {/* Slice offset */}
-      <div className="flex items-center gap-0.5" title="Slice offset">
-        <RepeatButton
-          onAction={() => onUpdate({ offset: settings.offset - 1 })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100"
-        >
-          <ChevronLeft className="w-3 h-3" />
-        </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-16 text-center font-mono tabular-nums">
-          {instanceIndex + 1}/{instanceCount}
-        </span>
-        <RepeatButton
-          onAction={() => onUpdate({ offset: settings.offset + 1 })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100"
-        >
-          <ChevronRight className="w-3 h-3" />
-        </RepeatButton>
-      </div>
+      <StepControl
+        title="Slice offset"
+        value={`${instanceIndex + 1}/${instanceCount}`}
+        valueWidth="w-16"
+        tabular
+        accent
+        onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
+        onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
+      />
 
-      <div className="w-px h-3 bg-[var(--border-color)] mx-3" />
+      <Divider wide />
 
-      {/* Zoom */}
-      <div className="flex items-center gap-0.5" title="Zoom">
-        <RepeatButton
-          onAction={() => onUpdate({ zoom: Math.max(CONTROL_LIMITS.ZOOM.MIN, settings.zoom - CONTROL_LIMITS.ZOOM.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronLeft className="w-3 h-3" />
-        </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-8 text-center font-mono">
-          {Math.round(settings.zoom * 100)}%
-        </span>
-        <RepeatButton
-          onAction={() => onUpdate({ zoom: Math.min(CONTROL_LIMITS.ZOOM.MAX, settings.zoom + CONTROL_LIMITS.ZOOM.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronRight className="w-3 h-3" />
-        </RepeatButton>
-      </div>
+      <StepControl
+        title="Zoom"
+        value={`${Math.round(settings.zoom * 100)}%`}
+        valueWidth="w-8"
+        onDecrement={() =>
+          onUpdate({ zoom: Math.max(CONTROL_LIMITS.ZOOM.MIN, settings.zoom - CONTROL_LIMITS.ZOOM.STEP) })
+        }
+        onIncrement={() =>
+          onUpdate({ zoom: Math.min(CONTROL_LIMITS.ZOOM.MAX, settings.zoom + CONTROL_LIMITS.ZOOM.STEP) })
+        }
+      />
 
-      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+      <Divider />
 
-      {/* Rotation */}
-      <div className="flex items-center gap-0.5" title="Rotation">
-        <RepeatButton
-          onAction={() => {
-            const val = normalizeRotationDegrees(settings.rotation - CONTROL_LIMITS.ROTATION.STEP);
-            onUpdate({ rotation: val });
-          }}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronLeft className="w-3 h-3" />
-        </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-12 text-center font-mono tabular-nums">
-          {formatRotationDegrees(settings.rotation)}°
-        </span>
-        <RepeatButton
-          onAction={() => {
-            const val = normalizeRotationDegrees(settings.rotation + CONTROL_LIMITS.ROTATION.STEP);
-            onUpdate({ rotation: val });
-          }}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronRight className="w-3 h-3" />
-        </RepeatButton>
-      </div>
+      <StepControl
+        title="Rotation"
+        value={`${formatRotation(settings.rotation)}°`}
+        valueWidth="w-12"
+        tabular
+        onDecrement={() =>
+          onUpdate({ rotation: normalizeRotation(settings.rotation - CONTROL_LIMITS.ROTATION.STEP) })
+        }
+        onIncrement={() =>
+          onUpdate({ rotation: normalizeRotation(settings.rotation + CONTROL_LIMITS.ROTATION.STEP) })
+        }
+      />
 
-      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+      <Divider />
 
-      {/* Brightness */}
-      <div className="flex items-center gap-0.5" title="Brightness">
-        <span className="text-[var(--text-secondary)] text-[10px]">B</span>
-        <RepeatButton
-          onAction={() => onUpdate({ brightness: Math.max(CONTROL_LIMITS.BRIGHTNESS.MIN, settings.brightness - CONTROL_LIMITS.BRIGHTNESS.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronLeft className="w-3 h-3" />
-        </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-6 text-center font-mono">
-          {settings.brightness}
-        </span>
-        <RepeatButton
-          onAction={() => onUpdate({ brightness: Math.min(CONTROL_LIMITS.BRIGHTNESS.MAX, settings.brightness + CONTROL_LIMITS.BRIGHTNESS.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronRight className="w-3 h-3" />
-        </RepeatButton>
-      </div>
+      <StepControl
+        label="B"
+        title="Brightness"
+        value={String(settings.brightness)}
+        onDecrement={() =>
+          onUpdate({
+            brightness: Math.max(CONTROL_LIMITS.BRIGHTNESS.MIN, settings.brightness - CONTROL_LIMITS.BRIGHTNESS.STEP),
+          })
+        }
+        onIncrement={() =>
+          onUpdate({
+            brightness: Math.min(CONTROL_LIMITS.BRIGHTNESS.MAX, settings.brightness + CONTROL_LIMITS.BRIGHTNESS.STEP),
+          })
+        }
+      />
 
-      <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+      <Divider />
 
-      {/* Contrast */}
-      <div className="flex items-center gap-0.5" title="Contrast">
-        <span className="text-[var(--text-secondary)] text-[10px]">C</span>
-        <RepeatButton
-          onAction={() => onUpdate({ contrast: Math.max(CONTROL_LIMITS.CONTRAST.MIN, settings.contrast - CONTROL_LIMITS.CONTRAST.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronLeft className="w-3 h-3" />
-        </RepeatButton>
-        <span className="text-[var(--text-primary)] text-[10px] w-6 text-center font-mono">
-          {settings.contrast}
-        </span>
-        <RepeatButton
-          onAction={() => onUpdate({ contrast: Math.min(CONTROL_LIMITS.CONTRAST.MAX, settings.contrast + CONTROL_LIMITS.CONTRAST.STEP) })}
-          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-        >
-          <ChevronRight className="w-3 h-3" />
-        </RepeatButton>
-      </div>
+      <StepControl
+        label="C"
+        title="Contrast"
+        value={String(settings.contrast)}
+        onDecrement={() =>
+          onUpdate({
+            contrast: Math.max(CONTROL_LIMITS.CONTRAST.MIN, settings.contrast - CONTROL_LIMITS.CONTRAST.STEP),
+          })
+        }
+        onIncrement={() =>
+          onUpdate({
+            contrast: Math.min(CONTROL_LIMITS.CONTRAST.MAX, settings.contrast + CONTROL_LIMITS.CONTRAST.STEP),
+          })
+        }
+      />
 
-      {/* AI annotation */}
       {onAcpAnalyze && (
         <>
-          <div className="w-px h-3 bg-[var(--border-color)] mx-2" />
+          <Divider />
           <button
             type="button"
             onClick={onAcpAnalyze}
