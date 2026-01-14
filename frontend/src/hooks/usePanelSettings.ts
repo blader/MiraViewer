@@ -141,7 +141,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
         
         setPanelSettings(prev => {
           const next = new Map<string, PanelSettings>();
-          
+
           // Keep existing settings for dates that are still enabled (unless seq changed)
           if (!seqChanged) {
             for (const [date, settings] of prev) {
@@ -150,24 +150,28 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
               }
             }
           }
-          
-          // Add settings for new dates (or all dates if seq changed)
-          for (const date of newDates) {
+
+          // Hydrate all server settings (not just enabled dates) so toggling dates later preserves saved values.
+          for (const [date, s] of Object.entries(server)) {
+            next.set(date, {
+              offset: typeof s.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
+              zoom: typeof s.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
+              rotation: typeof s.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
+              brightness: typeof s.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
+              contrast: typeof s.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
+              panX: typeof s.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
+              panY: typeof s.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
+              progress: typeof s.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
+            });
+          }
+
+          // Ensure enabled dates not present on server still get defaults.
+          for (const date of currentDates) {
             if (!next.has(date)) {
-              const s = server[date] || {};
-              next.set(date, {
-                offset: typeof s.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
-                zoom: typeof s.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
-                rotation: typeof s.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
-                brightness: typeof s.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
-                contrast: typeof s.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
-                panX: typeof s.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
-                panY: typeof s.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
-                progress: typeof s.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
-              });
+              next.set(date, { ...DEFAULT_PANEL_SETTINGS });
             }
           }
-          
+
           return next;
         });
         
