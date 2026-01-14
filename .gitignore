@@ -9,3 +9,14 @@ dist/
 .venv/
 venv/
 *.log
+
+# Local environment variables (API keys, etc.)
+.env
+.env.*
+frontend/.env
+frontend/.env.*
+backend/.env
+backend/.env.*
+
+# Allow example env files to be committed
+!frontend/.env.example

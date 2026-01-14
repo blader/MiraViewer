@@ -31,6 +31,13 @@ BACKEND_PID=$!
 cd ..
 
 echo "🚀 Starting frontend dev server..."
+
+# Vite only exposes environment variables to the browser when they're prefixed (VITE_*) unless configured.
+# If you already export GOOGLE_API_KEY/GEMINI_API_KEY in your shell (e.g. ~/.zshrc), map it through.
+if [ -z "${VITE_GOOGLE_API_KEY}" ]; then
+    export VITE_GOOGLE_API_KEY="${GOOGLE_API_KEY:-${GEMINI_API_KEY}}"
+fi
+
 cd frontend
 npm run dev &
 FRONTEND_PID=$!

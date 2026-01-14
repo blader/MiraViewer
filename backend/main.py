@@ -812,7 +812,8 @@ def _build_acp_analysis_prompt(
         "(3) include explicit segmentation instructions (what boundaries/components to outline); "
         "(4) ALWAYS include labeling instructions: add small text labels (at least 2 labels) with arrows/leader lines, even if findings are subtle or absent; "
         "(5) if visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate any displacement/compression; "
-        "(6) request ONLY the edited/annotated image as output.\n\n"
+        "(6) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., different colors for tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); "
+        "(7) request ONLY the edited/annotated image as output.\n\n"
         "Constraints:\n"
         "- Do not include protected health information.\n"
         "- Do not make definitive diagnoses; describe appearance and uncertainty.\n"
@@ -992,10 +993,11 @@ def nano_banana_pro_acp_annotate(payload: dict = Body(...)):
         # Fallback prompt (should be rare).
         nano_banana_prompt = (
             "Analyze this MRI slice for ACP (adamantinomatous craniopharyngioma) / craniopharyngioma-related findings. "
-            "If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible), "
-            "and add subtle outlines and small labels with arrows/leader lines. "
+            "If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible). "
+            "Outline each element separately with distinct colors (do not merge into one outline): e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures. "
+            "Add subtle outlines and small text labels with arrows/leader lines for each element. "
             "If visible or relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate displacement/compression. "
-            "If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible. "
+            "If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible (each with distinct color/outline). "
             "Return only the edited/annotated image."
         )
 
@@ -1035,6 +1037,20 @@ def nano_banana_pro_acp_annotate(payload: dict = Body(...)):
     ):
         nano_banana_prompt = (
             "If visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus) and indicate any displacement/compression. "
+            + nano_banana_prompt
+        )
+        prompt_lc = nano_banana_prompt.lower()
+
+    # Encourage separate, color-coded outlines.
+    color_ok = ("color" in prompt_lc) or ("colour" in prompt_lc)
+    separate_ok = ("separate" in prompt_lc) or ("distinct" in prompt_lc) or ("different" in prompt_lc)
+    outline_ok = ("outline" in prompt_lc) or ("contour" in prompt_lc) or ("boundary" in prompt_lc)
+
+    if not (color_ok and separate_ok and outline_ok):
+        nano_banana_prompt = (
+            "Use separate outlines/contours for each element/component and use DISTINCT COLORS per element (do not merge into one outline). "
+            "For example: tumor boundary = cyan, cystic component = magenta, solid component = orange, calcification markers = yellow, critical structures = green. "
+            "Add matching labels with leader lines for each element. "
             + nano_banana_prompt
         )
 

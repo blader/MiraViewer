@@ -12,7 +12,7 @@ import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
-import { fetchNanoBananaProAcpAnnotation } from '../utils/api';
+import { runAcpAnnotateClient } from '../utils/aiClient';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
 
 function clamp(value: number, min: number, max: number) {
@@ -78,6 +78,7 @@ export function ComparisonMatrix() {
   const [helpOpen, setHelpOpen] = useState(false);
 
   const [nanoBananaStatus, setNanoBananaStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [nanoBananaProgressText, setNanoBananaProgressText] = useState<string | null>(null);
   const [nanoBananaImageUrl, setNanoBananaImageUrl] = useState<string | null>(null);
   const [nanoBananaPrompt, setNanoBananaPrompt] = useState<string | null>(null);
   const [nanoBananaError, setNanoBananaError] = useState<string | null>(null);
@@ -109,6 +110,7 @@ export function ComparisonMatrix() {
 
     setAiPromptOpen(false);
     setNanoBananaStatus('idle');
+    setNanoBananaProgressText(null);
     setNanoBananaError(null);
     setNanoBananaTarget(null);
     setNanoBananaPrompt(null);
@@ -125,13 +127,27 @@ export function ComparisonMatrix() {
       seriesUid: string;
       instanceIndex: number;
     },
-    viewerKey: string
+    viewerKey: string,
+    seriesContext: {
+      plane?: string | null;
+      weight?: string | null;
+      sequence?: string | null;
+      label?: string | null;
+    }
   ) => {
     const requestId = nanoBananaRequestIdRef.current + 1;
     nanoBananaRequestIdRef.current = requestId;
 
+    const setProgress = (text: string | null) => {
+      if (nanoBananaRequestIdRef.current !== requestId) {
+        return;
+      }
+      setNanoBananaProgressText(text);
+    };
+
     setAiPromptOpen(false);
     setNanoBananaStatus('loading');
+    setProgress('Capturing viewport…');
     setNanoBananaError(null);
     setNanoBananaTarget(target);
     setNanoBananaPrompt(null);
@@ -154,18 +170,19 @@ export function ComparisonMatrix() {
         return;
       }
 
+      setProgress('Encoding image…');
       const captureBase64 = await blobToBase64Data(captureBlob);
 
       if (nanoBananaRequestIdRef.current !== requestId) {
         return;
       }
 
-      const result = await fetchNanoBananaProAcpAnnotation({
-        studyId: target.studyId,
-        seriesUid: target.seriesUid,
-        instanceIndex: target.instanceIndex,
+      setProgress('Preparing prompts…');
+      const result = await runAcpAnnotateClient({
         imageBase64: captureBase64,
         imageMimeType: captureBlob.type || 'image/png',
+        seriesContext,
+        onProgress: (text) => setProgress(text),
       });
 
       // If the request was cleared/cancelled or a new request started while we were waiting, discard.
@@ -173,10 +190,12 @@ export function ComparisonMatrix() {
         return;
       }
 
+      setProgress('Finalizing…');
       const url = URL.createObjectURL(result.blob);
       setNanoBananaImageUrl(url);
       setNanoBananaPrompt(result.nanoBananaPrompt);
       setNanoBananaStatus('ready');
+      setProgress(null);
     } catch (e) {
       if (nanoBananaRequestIdRef.current !== requestId) {
         return;
@@ -184,6 +203,7 @@ export function ComparisonMatrix() {
       const message = e instanceof Error ? e.message : String(e);
       setNanoBananaError(message);
       setNanoBananaStatus('error');
+      setProgress(null);
     }
   };
 
@@ -194,7 +214,13 @@ export function ComparisonMatrix() {
       seriesUid: string;
       instanceIndex: number;
     },
-    viewerKey: string
+    viewerKey: string,
+    seriesContext: {
+      plane?: string | null;
+      weight?: string | null;
+      sequence?: string | null;
+      label?: string | null;
+    }
   ) => {
     const canReuseExisting =
       nanoBananaStatus === 'ready' &&
@@ -212,7 +238,7 @@ export function ComparisonMatrix() {
     }
 
     setAiPromptOpen(false);
-    runNanoBananaAcpAnalysis(target, viewerKey);
+    runNanoBananaAcpAnalysis(target, viewerKey, seriesContext);
   };
 
   // Cleanup on unmount.
@@ -531,7 +557,13 @@ export function ComparisonMatrix() {
                                 seriesUid: ref.series_uid,
                                 instanceIndex: idx,
                               },
-                              viewerKey
+                              viewerKey,
+                              {
+                                plane: selectedSeq?.plane ?? selectedPlane,
+                                weight: selectedSeq?.weight,
+                                sequence: selectedSeq?.sequence,
+                                label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
+                              }
                             )
                           }
                           acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
@@ -565,8 +597,13 @@ export function ComparisonMatrix() {
                         />
 
                         {nanoBananaStatus === 'loading' && isNanoBananaTarget && (
-                          <div className="absolute top-2 right-2">
-                            <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                          <div className="absolute top-2 right-2 max-w-[70%]">
+                            <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/60">
+                              <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                              <div className="text-[10px] text-white/90 truncate">
+                                {nanoBananaProgressText || 'Working…'}
+                              </div>
+                            </div>
                           </div>
                         )}
 
@@ -673,7 +710,13 @@ export function ComparisonMatrix() {
                           seriesUid: overlayDisplayedRef.series_uid,
                           instanceIndex: overlayDisplayedSliceIndex,
                         },
-                        'overlay'
+                        'overlay',
+                        {
+                          plane: selectedSeq?.plane ?? selectedPlane,
+                          weight: selectedSeq?.weight,
+                          sequence: selectedSeq?.sequence,
+                          label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
+                        }
                       );
                     }}
                     acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
@@ -724,8 +767,13 @@ export function ComparisonMatrix() {
                     />
 
                     {nanoBananaStatus === 'loading' && overlayIsNanoBananaTarget && (
-                      <div className="absolute top-3 right-3">
-                        <div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                      <div className="absolute top-3 right-3 max-w-[70%]">
+                        <div className="flex items-center gap-2 px-3 py-2 rounded bg-black/60">
+                          <div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                          <div className="text-xs text-white/90 truncate">
+                            {nanoBananaProgressText || 'Working…'}
+                          </div>
+                        </div>
                       </div>
                     )}
 
