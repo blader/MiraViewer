@@ -815,11 +815,9 @@ def _build_acp_analysis_prompt(
         "(6) if visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate any displacement/compression; "
         "(7) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., different colors for tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); "
         "(8) request ONLY the edited/annotated image as output.\\n\\n"
-        "Constraints:\n"
-        "- Do not include protected health information.\n"
-        "- Do not make definitive diagnoses; describe appearance and uncertainty.\n"
-        "- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.\n"
-        "- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.\n"
+        "Constraints:\\n"
+        "- Do not hallucinate anatomy: only label structures you can reasonably localize on the slice; if uncertain, say so.\\n"
+        "- Keep annotations subtle: thin outlines, small labels, avoid obscuring anatomy.\\n"
     )
 
 
