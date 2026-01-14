@@ -1,6 +1,11 @@
 """
 DICOM Export Script
-Extracts all DICOM images to high-resolution JPEGs and stores metadata in SQLite.
+Extracts DICOM images to PNGs and stores metadata in SQLite.
+
+Usage:
+  python export_dicom.py                 # scans ./mri_scans
+  python export_dicom.py /path/to/dir    # scans a directory recursively
+  python export_dicom.py /path/to/file.dcm
 """
 
 import os
@@ -381,19 +386,29 @@ def dicom_to_image(ds, output_path: Path, upscale_factor: int = 1, use_16bit: bo
 
 
 def process_dicom_file(
-    dcm_path: Path, 
+    dcm_path: Path,
     study_folder: str,
     conn: sqlite3.Connection,
     output_base: Path,
     upscale_factor: int = 1,
-    use_16bit: bool = True
+    use_16bit: bool = True,
+    stats: Optional[dict] = None,
 ) -> bool:
     """Process a single DICOM file: extract metadata and export image."""
     try:
-        ds = pydicom.dcmread(str(dcm_path))
+        # force=True allows reading datasets that are missing the DICOM preamble.
+        ds = pydicom.dcmread(str(dcm_path), force=True)
         
         # Extract metadata
         metadata = extract_metadata(ds, str(dcm_path), study_folder)
+
+        if stats is not None:
+            study_uid = metadata.get('study_instance_uid')
+            series_uid = metadata.get('series_instance_uid')
+            if study_uid:
+                stats['studies'].add(study_uid)
+            if series_uid:
+                stats['series'].add(series_uid)
         
         # Build organized output path:
         # output_base/YYYY-MM-DD_StudyDescription/SeriesNumber_SeriesDescription/InstanceNumber.png
@@ -445,86 +460,217 @@ def process_dicom_file(
 
 
 def export_all_dicoms(
+    inputs: Optional[list[Path]] = None,
     scans_path: Path = MRI_SCANS_PATH,
     output_path: Path = OUTPUT_PATH,
     db_path: Path = DB_PATH,
     upscale_factor: int = 1,
-    use_16bit: bool = True
+    use_16bit: bool = True,
+    scan_all_files: bool = False,
+    group_by_top_level_folder: bool = False,
 ) -> dict:
-    """
-    Export all DICOM images to high-quality images and store metadata in database.
-    
+    """Export DICOM images to PNGs and store metadata in database.
+
+    - If `inputs` is omitted, scans `scans_path` (defaults to ./mri_scans) and uses the first path
+      segment under it as `study_folder`.
+    - If `inputs` is provided, each input path can be a file or directory. Directories are scanned
+      recursively.
+
     Args:
-        scans_path: Path to DICOM scans
-        output_path: Path for exported images
-        db_path: Path for SQLite database
-        upscale_factor: Upscale images by this factor using Lanczos interpolation (default 4x)
-        use_16bit: Preserve 16-bit depth for grayscale images (default True)
-    
+        inputs: File and/or directory paths to scan.
+        scans_path: Default scan root (used only when inputs is None).
+        output_path: Directory for exported images.
+        db_path: Path for SQLite database.
+        upscale_factor: Upscale images by this factor.
+        use_16bit: Preserve 16-bit depth for grayscale images.
+        scan_all_files: If True, attempt to read every file (slower, but may catch odd extensions).
+        group_by_top_level_folder: If True (and scanning a directory), use the first path component
+            under the directory as the "study_folder" label.
+
     Returns dict with statistics about the export.
     """
-    print(f"Scanning DICOM files in: {scans_path}")
-    print(f"Exporting JPEGs to: {output_path}")
+
+    allowed_suffixes = {'.dcm', '.dicom', '.ima'}
+
+    # Fast header-based detection (helps when scanning directories with many non-DICOM files).
+    try:
+        from pydicom.misc import is_dicom  # type: ignore
+    except Exception:  # pragma: no cover
+        is_dicom = None
+
+    if inputs is None:
+        inputs = [scans_path]
+        group_by_top_level_folder = True
+
+    print("Scanning DICOM inputs:")
+    for p in inputs:
+        print(f"  - {p}")
+    print(f"Exporting PNGs to: {output_path}")
     print(f"Database path: {db_path}")
-    
+
     # Initialize database
     conn = init_database(db_path)
-    
+
     stats = {
         'total_files': 0,
         'processed': 0,
         'failed': 0,
+        'skipped': 0,
         'studies': set(),
         'series': set(),
     }
-    
-    if not scans_path.exists():
-        print(f"Scans path does not exist: {scans_path}")
-        return stats
-    
-    # Find all DICOM files
-    for study_folder in sorted(scans_path.iterdir()):
-        if not study_folder.is_dir() or study_folder.name.startswith('.'):
+
+    def should_consider_file(path: Path) -> bool:
+        if scan_all_files:
+            return True
+
+        suffix = path.suffix.lower()
+        if suffix in allowed_suffixes:
+            return True
+
+        if suffix == '':
+            # Only consider extensionless files if they look like DICOM.
+            if is_dicom is None:
+                return False
+            try:
+                return bool(is_dicom(str(path)))
+            except Exception:
+                return False
+
+        return False
+
+    def derive_study_folder_for_file(scan_root: Path, file_path: Path) -> str:
+        if group_by_top_level_folder:
+            try:
+                rel = file_path.relative_to(scan_root)
+                if len(rel.parts) > 1:
+                    return rel.parts[0]
+            except Exception:
+                pass
+        return scan_root.name
+
+    for input_path in inputs:
+        if not input_path.exists():
+            print(f"Input path does not exist: {input_path}")
             continue
-        if study_folder.suffix == '.zip':
-            continue
-        
-        print(f"\nProcessing study: {study_folder.name}")
-        stats['studies'].add(study_folder.name)
-        
-        # Find DICOM directory
-        for subdir in study_folder.iterdir():
-            if not subdir.is_dir() or subdir.name.startswith('.'):
+
+        if input_path.is_file():
+            stats['total_files'] += 1
+            if not should_consider_file(input_path):
+                stats['skipped'] += 1
                 continue
-            
-            dcm_files = list(subdir.glob("*.DCM")) + list(subdir.glob("*.dcm"))
-            
-            for dcm_file in sorted(dcm_files):
-                stats['total_files'] += 1
-                
-                if process_dicom_file(dcm_file, study_folder.name, conn, output_path, upscale_factor, use_16bit):
-                    stats['processed'] += 1
-                    if stats['processed'] % 100 == 0:
-                        print(f"  Processed {stats['processed']} files...")
-                else:
-                    stats['failed'] += 1
-    
+
+            study_folder = input_path.parent.name
+            if process_dicom_file(input_path, study_folder, conn, output_path, upscale_factor, use_16bit, stats=stats):
+                stats['processed'] += 1
+            else:
+                stats['failed'] += 1
+            continue
+
+        # Directory scan (recursive)
+        scan_root = input_path
+
+        for file_path in scan_root.rglob('*'):
+            if not file_path.is_file():
+                continue
+
+            # Skip hidden files/dirs
+            rel_parts = file_path.relative_to(scan_root).parts
+            if any(part.startswith('.') for part in rel_parts):
+                continue
+
+            # Skip zip archives (unzip first)
+            if file_path.suffix.lower() == '.zip':
+                continue
+
+            stats['total_files'] += 1
+
+            if not should_consider_file(file_path):
+                stats['skipped'] += 1
+                continue
+
+            study_folder = derive_study_folder_for_file(scan_root, file_path)
+
+            if process_dicom_file(file_path, study_folder, conn, output_path, upscale_factor, use_16bit, stats=stats):
+                stats['processed'] += 1
+                if stats['processed'] % 200 == 0:
+                    print(f"  Processed {stats['processed']} files...")
+            else:
+                stats['failed'] += 1
+
     conn.close()
-    
+
     # Convert sets to counts for return
     stats['studies'] = len(stats['studies'])
-    
+    stats['series'] = len(stats['series'])
+
     print(f"\n{'='*50}")
-    print(f"Export complete!")
-    print(f"  Total files: {stats['total_files']}")
+    print("Export complete!")
+    print(f"  Total candidate files: {stats['total_files']}")
     print(f"  Processed: {stats['processed']}")
+    print(f"  Skipped: {stats['skipped']}")
     print(f"  Failed: {stats['failed']}")
     print(f"  Studies: {stats['studies']}")
-    print(f"\nJPEGs saved to: {output_path}")
+    print(f"  Series: {stats['series']}")
+    print(f"\nPNGs saved to: {output_path}")
     print(f"Database saved to: {db_path}")
-    
+
     return stats
 
 
 if __name__ == "__main__":
-    export_all_dicoms()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Export DICOM images to PNGs and build/update dicom_metadata.db for MiraViewer."
+    )
+    parser.add_argument(
+        'inputs',
+        nargs='*',
+        help="One or more DICOM files or directories. If omitted, scans ./mri_scans.",
+    )
+    parser.add_argument(
+        '--scan-all-files',
+        action='store_true',
+        help="Try reading every file (slower; useful when DICOMs have unusual extensions).",
+    )
+    parser.add_argument(
+        '--group-by-top-level-folder',
+        action='store_true',
+        help="When scanning directories, label study_folder by the first path component under the directory.",
+    )
+    parser.add_argument(
+        '--output',
+        default=str(OUTPUT_PATH),
+        help=f"Output directory for exported images (default: {OUTPUT_PATH}).",
+    )
+    parser.add_argument(
+        '--db',
+        default=str(DB_PATH),
+        help=f"SQLite DB path (default: {DB_PATH}).",
+    )
+    parser.add_argument(
+        '--upscale',
+        type=int,
+        default=1,
+        help="Upscale exported images by this factor (default: 1).",
+    )
+    parser.add_argument(
+        '--use-8bit',
+        action='store_true',
+        help="Export grayscale images as 8-bit (default is 16-bit).",
+    )
+
+    args = parser.parse_args()
+
+    input_paths = [Path(p).expanduser() for p in args.inputs] if args.inputs else None
+
+    export_all_dicoms(
+        inputs=input_paths,
+        output_path=Path(args.output).expanduser(),
+        db_path=Path(args.db).expanduser(),
+        upscale_factor=args.upscale,
+        use_16bit=not args.use_8bit,
+        scan_all_files=args.scan_all_files,
+        group_by_top_level_folder=args.group_by_top_level_folder,
+    )

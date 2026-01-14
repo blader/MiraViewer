@@ -48,12 +48,61 @@ npm install
 npm run dev
 ```
 
+## Importing DICOMs
+
+MiraViewer serves **pre-exported PNG images** and reads metadata from a local SQLite database (`dicom_metadata.db`).
+
+To use your own DICOMs, run the exporter to scan your DICOM files, extract metadata, and render per-slice PNGs.
+
+Make sure backend dependencies are installed first (e.g. run `./start.sh` once, or follow the Backend steps above).
+
+```bash
+# From the repo root (recommended: use the project venv)
+backend/venv/bin/python backend/export_dicom.py
+```
+
+This will:
+- Scan `mri_scans/` recursively
+- Write images to `exported_images/`
+- Write/update metadata in `dicom_metadata.db`
+
+### Import a folder (any structure)
+
+You can point the exporter at any directory containing DICOMs (it will scan recursively):
+
+```bash
+backend/venv/bin/python backend/export_dicom.py /path/to/dicom_folder
+```
+
+### Import one or more files
+
+```bash
+backend/venv/bin/python backend/export_dicom.py /path/to/image1.dcm /path/to/image2.dcm
+```
+
+### Tips
+
+- If your DICOMs have unusual/no extensions and aren’t being picked up, try:
+
+```bash
+backend/venv/bin/python backend/export_dicom.py --scan-all-files /path/to/dicom_folder
+```
+
+- If you want the `study_folder` label to come from the first directory under the scan root (useful when importing a directory containing multiple studies):
+
+```bash
+backend/venv/bin/python backend/export_dicom.py --group-by-top-level-folder /path/to/dicom_root
+```
+
+- To completely reset your local dataset, delete `exported_images/` and `dicom_metadata.db` and rerun the exporter.
+
 ## Project Structure
 
 ```
 MiraViewer/
 ├── backend/
-│   ├── main.py           # FastAPI server for DICOM processing
+│   ├── main.py           # FastAPI server (serves pre-exported images + metadata)
+│   ├── export_dicom.py   # Offline exporter/indexer (DICOM -> PNG + SQLite)
 │   └── requirements.txt  # Python dependencies
 ├── frontend/
 │   ├── src/
@@ -62,7 +111,9 @@ MiraViewer/
 │   │   ├── types/        # TypeScript type definitions
 │   │   └── utils/        # Utility functions
 │   └── ...
-├── mri_scans/            # DICOM data directory
+├── mri_scans/            # Place DICOMs here (optional; exporter can also scan arbitrary paths)
+├── exported_images/      # Generated (ignored by git)
+├── dicom_metadata.db     # Generated (ignored by git)
 └── start.sh              # Startup script
 ```
 
