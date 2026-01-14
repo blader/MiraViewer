@@ -150,7 +150,7 @@ function buildAcpAnalysisPrompt(opts: {
     + '(2) include localizing instructions (where to look and which landmarks to use); '
     + '(3) include explicit segmentation instructions (what boundaries/components to outline); '
     + '(4) ALWAYS include labeling instructions: add small text labels (at least 2 labels) with arrows/leader lines, even if findings are subtle or absent; '
-    + '(5) for every label, include a brief clinical annotation line beneath the label (e.g., mass effect direction, cystic vs solid, displacement/compression/encasement/uncertainty); '
+    + '(5) for every label, include a concise clinical-impact annotation in a smaller font beneath the label (e.g., mass effect direction/degree, compression/encasement, obstruction risk, cystic vs solid, uncertainty); '
     + '(6) if visible/relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate any displacement/compression; '
     + '(7) use separate outlines/contours for each element/component (do not merge into one outline) and use DISTINCT COLORS per element (e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures); '
     + '(8) request ONLY the edited/annotated image as output.\n\n'
@@ -184,10 +184,10 @@ function enforceNanoBananaPrompt(prompt: string): string {
     lc = p.toLowerCase();
   }
 
-  // Require brief clinical annotation under each label.
+  // Require concise clinical-impact annotation under each label (small font).
   if (!lc.includes('annotation') && !lc.includes('clinical')) {
     p =
-      'Add a brief clinical annotation line beneath each label (e.g., displacement/compression direction, cystic vs solid, encasement/effacement, or uncertainty). ' +
+      'Add a concise clinical-impact annotation in a smaller font beneath each label (e.g., direction/degree of displacement/compression/encasement, obstruction risk, cystic vs solid, or uncertainty). ' +
       p;
     lc = p.toLowerCase();
   }
@@ -316,7 +316,7 @@ export async function runAcpAnnotateClient(params: {
       'Analyze this MRI slice for ACP (adamantinomatous craniopharyngioma) / craniopharyngioma-related findings. '
       + 'If a lesion is suspected, segment the tumor boundary and visible components (cystic vs solid, calcification foci if visible). '
       + 'Outline each element separately with distinct colors (do not merge into one outline): e.g., tumor boundary vs cystic component vs solid nodule vs calcification markers vs critical structures. '
-      + 'Add subtle outlines and small text labels with arrows/leader lines for each element, and include a brief clinical annotation line beneath each label (e.g., compression of X, displaced Y, cystic vs solid, uncertainty). '
+      + 'Add subtle outlines and small text labels with arrows/leader lines for each element, and include a concise clinical-impact annotation in a smaller font beneath each label (e.g., direction/degree of mass effect, compression/encasement, cystic vs solid, obstruction risk, or uncertainty). '
       + 'If visible or relevant, label critical structures (pituitary stalk, optic chiasm, hypothalamus, third ventricle) and indicate displacement/compression. '
       + 'If no lesion is evident, add a small note indicating no clear ACP lesion on this slice, and still label at least two relevant anatomical landmarks if visible (each with distinct color/outline). '
       + 'Return only the edited/annotated image.';
