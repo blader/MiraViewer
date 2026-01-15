@@ -9,9 +9,9 @@ export default defineConfig({
   // Note: this still means the API key is available in the browser when using client-side AI.
   envPrefix: ['VITE_', 'GOOGLE_API_KEY', 'GEMINI_API_KEY'],
   server: {
-    port: 6173,
+    port: 43124,
     proxy: {
-      '/api': 'http://localhost:9000',
+      '/api': 'http://localhost:43123',
     },
   },
 })

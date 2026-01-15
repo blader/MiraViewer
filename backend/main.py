@@ -23,7 +23,7 @@ app = FastAPI(title="MiraViewer API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:6173", "http://localhost:6174", "http://127.0.0.1:6173", "http://127.0.0.1:6174"],
+    allow_origins=["http://localhost:43124", "http://localhost:43125", "http://127.0.0.1:43124", "http://127.0.0.1:43125"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1101,4 +1101,4 @@ async def get_stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    uvicorn.run(app, host="0.0.0.0", port=43123)
