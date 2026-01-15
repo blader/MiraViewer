@@ -1,4 +1,4 @@
-import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
 import { Brain, Layers, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Play, Pause, HelpCircle } from 'lucide-react';
@@ -34,8 +34,16 @@ type PersistedSliceLoopPlaybackSettings = {
   loopSpeed: 1 | 2 | 4;
 };
 
-const PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-const PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
+type PersistedSliceLoopPlaybackCookieV2 = {
+  bySeq: Record<string, (PersistedSliceLoopPlaybackSettings & { updatedAt?: number }) | undefined>;
+};
+
+const PLAYBACK_STORAGE_KEY_PREFIX = 'miraviewer:slice-loop-playback:v2:';
+const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
+
+// Legacy global settings (used to seed per-seq settings if present).
+const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
+const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
@@ -49,6 +57,10 @@ function ensureLoopBounds(start: number, end: number): [number, number] {
     e = clamp01(s + minGap);
   }
   return [s, e];
+}
+
+function makePlaybackStorageKey(seqId: string): string {
+  return `${PLAYBACK_STORAGE_KEY_PREFIX}${encodeURIComponent(seqId)}`;
 }
 
 function readCookie(name: string): string | null {
@@ -68,10 +80,9 @@ function writeCookie(name: string, value: string) {
   document.cookie = `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
 }
 
-function parsePersistedPlayback(rawJson: string): PersistedSliceLoopPlaybackSettings | null {
-  const parsed: unknown = JSON.parse(rawJson);
-  if (!parsed || typeof parsed !== 'object') return null;
-  const obj = parsed as Record<string, unknown>;
+function parsePersistedPlaybackValue(value: unknown): PersistedSliceLoopPlaybackSettings | null {
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
 
   const sRaw = obj.loopStart;
   const eRaw = obj.loopEnd;
@@ -92,12 +103,85 @@ function parsePersistedPlayback(rawJson: string): PersistedSliceLoopPlaybackSett
   return { loopStart, loopEnd, loopSpeed };
 }
 
-function readPersistedSliceLoopPlaybackSettings(): PersistedSliceLoopPlaybackSettings | null {
-  // Prefer localStorage (origin-scoped).
+function parsePersistedPlaybackJson(rawJson: string): PersistedSliceLoopPlaybackSettings | null {
   try {
-    const raw = localStorage.getItem(PLAYBACK_STORAGE_KEY);
+    return parsePersistedPlaybackValue(JSON.parse(rawJson));
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedSliceLoopPlaybackSettingsFromCookieV2(seqId: string): PersistedSliceLoopPlaybackSettings | null {
+  try {
+    const cookieVal = readCookie(PLAYBACK_COOKIE_NAME_V2);
+    if (!cookieVal) return null;
+
+    const decoded = decodeURIComponent(cookieVal);
+    const parsed: unknown = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const bySeq = (parsed as Record<string, unknown>).bySeq;
+    if (!bySeq || typeof bySeq !== 'object') return null;
+
+    const entry = (bySeq as Record<string, unknown>)[seqId];
+    return parsePersistedPlaybackValue(entry);
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedSliceLoopPlaybackSettingsToCookieV2(seqId: string, settings: PersistedSliceLoopPlaybackSettings) {
+  try {
+    const existingVal = readCookie(PLAYBACK_COOKIE_NAME_V2);
+    let cookieObj: PersistedSliceLoopPlaybackCookieV2 = { bySeq: {} };
+
+    if (existingVal) {
+      try {
+        const decoded = decodeURIComponent(existingVal);
+        const parsed: unknown = JSON.parse(decoded);
+        if (parsed && typeof parsed === 'object') {
+          const bySeq = (parsed as Record<string, unknown>).bySeq;
+          if (bySeq && typeof bySeq === 'object') {
+            cookieObj = { bySeq: bySeq as PersistedSliceLoopPlaybackCookieV2['bySeq'] };
+          }
+        }
+      } catch {
+        // Ignore malformed cookie.
+      }
+    }
+
+    cookieObj.bySeq[seqId] = { ...settings, updatedAt: Date.now() };
+
+    // Prune to keep cookie size reasonable.
+    const entries = Object.entries(cookieObj.bySeq)
+      .map(([k, v]) => {
+        const ts = typeof v?.updatedAt === 'number' && Number.isFinite(v.updatedAt) ? v.updatedAt : 0;
+        return [k, ts] as const;
+      })
+      .sort((a, b) => b[1] - a[1]);
+
+    const MAX_COOKIE_ENTRIES = 25;
+    if (entries.length > MAX_COOKIE_ENTRIES) {
+      const keep = new Set(entries.slice(0, MAX_COOKIE_ENTRIES).map(([k]) => k));
+      for (const key of Object.keys(cookieObj.bySeq)) {
+        if (!keep.has(key)) {
+          delete cookieObj.bySeq[key];
+        }
+      }
+    }
+
+    writeCookie(PLAYBACK_COOKIE_NAME_V2, encodeURIComponent(JSON.stringify(cookieObj)));
+  } catch {
+    // Ignore blocked cookies.
+  }
+}
+
+function readPersistedSliceLoopPlaybackSettingsForSeq(seqId: string): PersistedSliceLoopPlaybackSettings | null {
+  // Prefer localStorage (origin-scoped) per sequence.
+  try {
+    const raw = localStorage.getItem(makePlaybackStorageKey(seqId));
     if (raw) {
-      const parsed = parsePersistedPlayback(raw);
+      const parsed = parsePersistedPlaybackJson(raw);
       if (parsed) return parsed;
     }
   } catch {
@@ -105,30 +189,50 @@ function readPersistedSliceLoopPlaybackSettings(): PersistedSliceLoopPlaybackSet
   }
 
   // Fallback to cookie (shared across ports on the same host).
+  const fromCookie = readPersistedSliceLoopPlaybackSettingsFromCookieV2(seqId);
+  if (fromCookie) return fromCookie;
+
+  // Legacy global settings (seed per-seq once).
   try {
-    const cookieVal = readCookie(PLAYBACK_COOKIE_NAME);
-    if (!cookieVal) return null;
-    const decoded = decodeURIComponent(cookieVal);
-    return parsePersistedPlayback(decoded);
+    const raw = localStorage.getItem(LEGACY_PLAYBACK_STORAGE_KEY);
+    if (raw) {
+      const parsed = parsePersistedPlaybackJson(raw);
+      if (parsed) {
+        writePersistedSliceLoopPlaybackSettingsForSeq(seqId, parsed);
+        return parsed;
+      }
+    }
   } catch {
-    return null;
+    // ignore
   }
+
+  try {
+    const cookieVal = readCookie(LEGACY_PLAYBACK_COOKIE_NAME);
+    if (cookieVal) {
+      const decoded = decodeURIComponent(cookieVal);
+      const parsed = parsePersistedPlaybackJson(decoded);
+      if (parsed) {
+        writePersistedSliceLoopPlaybackSettingsForSeq(seqId, parsed);
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
 
-function writePersistedSliceLoopPlaybackSettings(settings: PersistedSliceLoopPlaybackSettings) {
+function writePersistedSliceLoopPlaybackSettingsForSeq(seqId: string, settings: PersistedSliceLoopPlaybackSettings) {
   const raw = JSON.stringify(settings);
 
   try {
-    localStorage.setItem(PLAYBACK_STORAGE_KEY, raw);
+    localStorage.setItem(makePlaybackStorageKey(seqId), raw);
   } catch {
     // Ignore quota/blocked storage.
   }
 
-  try {
-    writeCookie(PLAYBACK_COOKIE_NAME, encodeURIComponent(raw));
-  } catch {
-    // Ignore blocked cookies.
-  }
+  writePersistedSliceLoopPlaybackSettingsToCookieV2(seqId, settings);
 }
 
 export function ComparisonMatrix() {
@@ -322,13 +426,11 @@ export function ComparisonMatrix() {
     return 1;
   }, [overlayColumns, overlayDateIndex, columns]);
 
-  const [persistedPlayback] = useState(() => readPersistedSliceLoopPlaybackSettings());
-
   // Loop playback for slice navigation
-  const [loopStart, setLoopStart] = useState(() => persistedPlayback?.loopStart ?? 0);
-  const [loopEnd, setLoopEnd] = useState(() => persistedPlayback?.loopEnd ?? 1);
+  const [loopStart, setLoopStart] = useState(0);
+  const [loopEnd, setLoopEnd] = useState(1);
   const [isLooping, setIsLooping] = useState(false);
-  const [loopSpeed, setLoopSpeed] = useState<1 | 2 | 4>(() => persistedPlayback?.loopSpeed ?? 1);
+  const [loopSpeed, setLoopSpeed] = useState<1 | 2 | 4>(1);
   const loopDirectionRef = useRef<1 | -1>(1);
   const rafRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
@@ -336,13 +438,38 @@ export function ComparisonMatrix() {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
 
+  const playbackHydratedSeqIdRef = useRef<string | null>(null);
+
+  // Hydrate playback settings when the user switches sequence combos.
+  // Layout effect prevents a one-frame flash of the previous combo's handles.
+  useLayoutEffect(() => {
+    if (!selectedSeqId) return;
+
+    const persisted = readPersistedSliceLoopPlaybackSettingsForSeq(selectedSeqId);
+    if (persisted) {
+      setLoopStart(persisted.loopStart);
+      setLoopEnd(persisted.loopEnd);
+      setLoopSpeed(persisted.loopSpeed);
+    } else {
+      setLoopStart(0);
+      setLoopEnd(1);
+      setLoopSpeed(1);
+    }
+
+    playbackHydratedSeqIdRef.current = selectedSeqId;
+  }, [selectedSeqId]);
+
+  // Persist per-seq loop window.
   useEffect(() => {
-    writePersistedSliceLoopPlaybackSettings({
+    if (!selectedSeqId) return;
+    if (playbackHydratedSeqIdRef.current !== selectedSeqId) return;
+
+    writePersistedSliceLoopPlaybackSettingsForSeq(selectedSeqId, {
       loopStart,
       loopEnd,
       loopSpeed,
     });
-  }, [loopStart, loopEnd, loopSpeed]);
+  }, [selectedSeqId, loopStart, loopEnd, loopSpeed]);
 
   // Adjust loop bounds and keep progress inside
   const updateLoop = useCallback(
