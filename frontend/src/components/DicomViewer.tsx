@@ -53,8 +53,16 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
   const [showSpinner, setShowSpinner] = useState(false);
   const spinnerTimeoutRef = useRef<number | null>(null);
 
-  // Delay the spinner slightly to avoid flicker for fast loads.
+  // Reset loading state on URL change; delay the spinner slightly to avoid flicker for fast loads.
   useEffect(() => {
+    setStatus('loading');
+    setShowSpinner(false);
+
+    if (spinnerTimeoutRef.current) {
+      clearTimeout(spinnerTimeoutRef.current);
+      spinnerTimeoutRef.current = null;
+    }
+
     spinnerTimeoutRef.current = window.setTimeout(() => {
       setShowSpinner(true);
     }, 150);
@@ -62,9 +70,10 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
     return () => {
       if (spinnerTimeoutRef.current) {
         clearTimeout(spinnerTimeoutRef.current);
+        spinnerTimeoutRef.current = null;
       }
     };
-  }, []);
+  }, [imageUrl]);
 
   const handleLoad = useCallback(() => {
     setStatus('loaded');
@@ -329,7 +338,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         onDoubleClick={handleDoubleClick}
       >
         <ImageContent
-          key={imageUrl}
           imageUrl={imageUrl}
           imageFilter={imageFilter}
           imageTransform={imageTransform}
