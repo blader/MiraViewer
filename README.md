@@ -23,10 +23,10 @@ This will:
 1. Create a Python virtual environment (if needed)
 2. Install Python dependencies
 3. Install Node.js dependencies (if needed)
-4. Start the backend server on port 8000
-5. Start the frontend dev server on port 5173
+4. Start the backend server on port 43123
+5. Start the frontend dev server on port 43124
 
-Then open http://localhost:5173 in your browser.
+Then open http://localhost:43124 in your browser.
 
 ## Manual Setup
 

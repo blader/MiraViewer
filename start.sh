@@ -45,8 +45,8 @@ cd ..
 
 echo ""
 echo "✅ MiraViewer is running!"
-echo "   Frontend: http://localhost:5173"
-echo "   Backend:  http://localhost:8000"
+echo "   Frontend: http://localhost:43124"
+echo "   Backend:  http://localhost:43123"
 echo ""
 echo "Press Ctrl+C to stop both servers"
 
