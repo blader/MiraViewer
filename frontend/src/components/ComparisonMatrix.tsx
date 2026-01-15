@@ -28,6 +28,108 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+type PersistedSliceLoopPlaybackSettings = {
+  loopStart: number;
+  loopEnd: number;
+  loopSpeed: 1 | 2 | 4;
+};
+
+const PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
+const PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function ensureLoopBounds(start: number, end: number): [number, number] {
+  const minGap = 0.01;
+  let s = clamp01(start);
+  let e = clamp01(end);
+  if (e - s < minGap) {
+    e = clamp01(s + minGap);
+  }
+  return [s, e];
+}
+
+function readCookie(name: string): string | null {
+  const parts = document.cookie.split(';');
+  for (const part of parts) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === name) {
+      return rest.join('=') || '';
+    }
+  }
+  return null;
+}
+
+function writeCookie(name: string, value: string) {
+  // Persist for 1 year.
+  const maxAge = 60 * 60 * 24 * 365;
+  document.cookie = `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+}
+
+function parsePersistedPlayback(rawJson: string): PersistedSliceLoopPlaybackSettings | null {
+  const parsed: unknown = JSON.parse(rawJson);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const obj = parsed as Record<string, unknown>;
+
+  const sRaw = obj.loopStart;
+  const eRaw = obj.loopEnd;
+  if (
+    typeof sRaw !== 'number' ||
+    !Number.isFinite(sRaw) ||
+    typeof eRaw !== 'number' ||
+    !Number.isFinite(eRaw)
+  ) {
+    return null;
+  }
+
+  const [loopStart, loopEnd] = ensureLoopBounds(sRaw, eRaw);
+
+  const sp = obj.loopSpeed;
+  const loopSpeed: 1 | 2 | 4 = sp === 2 || sp === 4 ? sp : 1;
+
+  return { loopStart, loopEnd, loopSpeed };
+}
+
+function readPersistedSliceLoopPlaybackSettings(): PersistedSliceLoopPlaybackSettings | null {
+  // Prefer localStorage (origin-scoped).
+  try {
+    const raw = localStorage.getItem(PLAYBACK_STORAGE_KEY);
+    if (raw) {
+      const parsed = parsePersistedPlayback(raw);
+      if (parsed) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+
+  // Fallback to cookie (shared across ports on the same host).
+  try {
+    const cookieVal = readCookie(PLAYBACK_COOKIE_NAME);
+    if (!cookieVal) return null;
+    const decoded = decodeURIComponent(cookieVal);
+    return parsePersistedPlayback(decoded);
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedSliceLoopPlaybackSettings(settings: PersistedSliceLoopPlaybackSettings) {
+  const raw = JSON.stringify(settings);
+
+  try {
+    localStorage.setItem(PLAYBACK_STORAGE_KEY, raw);
+  } catch {
+    // Ignore quota/blocked storage.
+  }
+
+  try {
+    writeCookie(PLAYBACK_COOKIE_NAME, encodeURIComponent(raw));
+  } catch {
+    // Ignore blocked cookies.
+  }
+}
 
 export function ComparisonMatrix() {
   const { data, loading, error } = useComparisonData();
@@ -220,11 +322,13 @@ export function ComparisonMatrix() {
     return 1;
   }, [overlayColumns, overlayDateIndex, columns]);
 
+  const [persistedPlayback] = useState(() => readPersistedSliceLoopPlaybackSettings());
+
   // Loop playback for slice navigation
-  const [loopStart, setLoopStart] = useState(0);
-  const [loopEnd, setLoopEnd] = useState(1);
+  const [loopStart, setLoopStart] = useState(() => persistedPlayback?.loopStart ?? 0);
+  const [loopEnd, setLoopEnd] = useState(() => persistedPlayback?.loopEnd ?? 1);
   const [isLooping, setIsLooping] = useState(false);
-  const [loopSpeed, setLoopSpeed] = useState<1 | 2 | 4>(1);
+  const [loopSpeed, setLoopSpeed] = useState<1 | 2 | 4>(() => persistedPlayback?.loopSpeed ?? 1);
   const loopDirectionRef = useRef<1 | -1>(1);
   const rafRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
@@ -232,20 +336,13 @@ export function ComparisonMatrix() {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
 
-  const clamp01 = useCallback((v: number) => Math.min(1, Math.max(0, v)), []);
-
-  const ensureLoopBounds = useCallback(
-    (start: number, end: number) => {
-      const minGap = 0.01;
-      let s = clamp01(start);
-      let e = clamp01(end);
-      if (e - s < minGap) {
-        e = clamp01(s + minGap);
-      }
-      return [s, e] as const;
-    },
-    [clamp01]
-  );
+  useEffect(() => {
+    writePersistedSliceLoopPlaybackSettings({
+      loopStart,
+      loopEnd,
+      loopSpeed,
+    });
+  }, [loopStart, loopEnd, loopSpeed]);
 
   // Adjust loop bounds and keep progress inside
   const updateLoop = useCallback(
@@ -258,7 +355,7 @@ export function ComparisonMatrix() {
       progressRef.current = clamped;
       setProgressWithClearAi(clamped);
     },
-    [ensureLoopBounds, setProgressWithClearAi, clamp01]
+    [setProgressWithClearAi]
   );
 
   // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
@@ -330,7 +427,7 @@ export function ComparisonMatrix() {
       lastTsRef.current = null;
       loopStepAccumRef.current = 0;
     };
-  }, [isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, clamp01, setProgressWithClearAi]);
+  }, [isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, setProgressWithClearAi]);
 
   // Stop looping if bounds collapse
   useEffect(() => {
@@ -362,7 +459,7 @@ export function ComparisonMatrix() {
       window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('mouseup', handleUp);
     };
-  }, [draggingHandle, clamp01, loopEnd, loopStart, updateLoop]);
+  }, [draggingHandle, loopEnd, loopStart, updateLoop]);
 
   if (loading) {
     return (
