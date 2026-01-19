@@ -94,7 +94,8 @@ export interface AlignmentResult {
   date: string;
   seriesUid: string;
   bestSliceIndex: number;
-  nccScore: number; // 0-1, higher is better
+  /** Normalized mutual information (Studholme). Higher is better. */
+  nmiScore: number;
   computedSettings: PanelSettings;
   slicesChecked: number; // For debugging/stats
 }
@@ -106,5 +107,5 @@ export interface AlignmentProgress {
   dateIndex: number;
   totalDates: number;
   slicesChecked: number;
-  bestNccSoFar: number;
+  bestNmiSoFar: number;
 }

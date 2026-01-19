@@ -4,16 +4,63 @@ import {
   ImageType,
   FloatTypes,
   PixelTypes,
+  InterfaceTypes,
+  runPipeline,
   setPipelinesBaseUrl as setItkPipelinesBaseUrl,
   getPipelinesBaseUrl as getItkPipelinesBaseUrl,
 } from 'itk-wasm';
 import type { Mat2, StandardAffine2D, Vec2 } from './affine2d';
+import { computeMutualInformation } from './mutualInformation';
 import {
   affineAboutOriginToStandard,
   composeStandardAffine2D,
   invertStandardAffine2D,
   standardToAffineAboutOrigin,
 } from './affine2d';
+
+const DEBUG_ALIGNMENT_STORAGE_KEY = 'miraviewer:debug-alignment';
+
+function isDebugAlignmentEnabled(): boolean {
+  return typeof window !== 'undefined' && window.localStorage.getItem(DEBUG_ALIGNMENT_STORAGE_KEY) === '1';
+}
+
+function tailString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return value.slice(value.length - maxChars);
+}
+
+function tryParseElastixFinalMetricFromLogs(stdout: string, stderr: string): { finalMetric?: number; samples: number } {
+  // Elastix / ITK log formats can vary across versions and parameter maps.
+  // We keep this intentionally heuristic and best-effort.
+  const combined = `${stdout}\n${stderr}`;
+  const lines = combined.split(/\r?\n/);
+
+  const numberRe = /[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g;
+
+  const metricCandidates: number[] = [];
+
+  for (const line of lines) {
+    if (!/metric/i.test(line)) continue;
+
+    const matches = line.match(numberRe);
+    if (!matches || matches.length === 0) continue;
+
+    // Heuristic: in lines that mention "metric", the last float is often the metric value.
+    const last = Number(matches[matches.length - 1]);
+    if (Number.isFinite(last)) {
+      metricCandidates.push(last);
+    }
+  }
+
+  if (metricCandidates.length === 0) {
+    return { samples: 0 };
+  }
+
+  return {
+    finalMetric: metricCandidates[metricCandidates.length - 1],
+    samples: metricCandidates.length,
+  };
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -222,6 +269,28 @@ export type ElastixAffine2DRegistrationResult = {
   /** Full elastix transform parameter object representation (typically fixed->moving). */
   transformParameterObject: JsonCompatible;
 
+  /**
+   * Quality metrics computed on (fixedPixels, resampledMovingPixels).
+   *
+   * Notes:
+   * - NMI is commonly used as a registration quality metric and is more robust than simple
+   *   correlation when intensity mappings differ.
+   * - `elastixFinalMetric` is best-effort parsed from the pipeline logs.
+   */
+  quality: {
+    mi: number;
+    nmi: number;
+    bins: number;
+    elastixFinalMetric?: number;
+    elastixMetricSamples?: number;
+  };
+
+  /** Optional log tails for debugging (only populated when debug logging is enabled). */
+  elastixLogTail?: {
+    stdout: string;
+    stderr: string;
+  };
+
   /** WebWorker used for computation (can be reused across calls). */
   webWorker: Worker;
 };
@@ -296,17 +365,88 @@ export async function registerAffine2DWithElastix(
   // Elastix expects a *parameter object* as an array of parameter maps.
   const parameterObject: JsonCompatible = [affineParameterMap] as unknown as JsonCompatible;
 
-  const m = await importElastix();
+  // We run the pipeline directly (instead of calling the generated `elastix()` wrapper)
+  // so we can capture stdout/stderr and optionally parse Elastix' own metric trace.
+  const debug = isDebugAlignmentEnabled();
 
-  let result: Awaited<ReturnType<typeof m.elastix>>;
+  let result: {
+    webWorker: Worker;
+    result: Image;
+    transformParameterObject: JsonCompatible;
+    stdout: string;
+    stderr: string;
+  };
+
   try {
     result = await withTimeout(
-      m.elastix(parameterObject, {
-        fixed,
-        moving,
-        initialTransformParameterObject: opts?.initialTransformParameterObject,
-        webWorker,
-      }),
+      (async () => {
+        const desiredOutputs = [
+          { type: InterfaceTypes.Image },
+          { type: InterfaceTypes.TransformList },
+          { type: InterfaceTypes.JsonCompatible },
+        ];
+
+        const inputs = [{ type: InterfaceTypes.JsonCompatible, data: parameterObject }];
+        const args: string[] = [];
+
+        // Inputs
+        const parameterObjectName = '0';
+        args.push(parameterObjectName);
+
+        // Outputs
+        args.push('0'); // result
+        args.push('1'); // transform
+        args.push('2'); // transformParameterObject
+
+        // Options
+        args.push('--memory-io');
+
+        // fixed
+        {
+          const inputCountString = inputs.length.toString();
+          inputs.push({ type: InterfaceTypes.Image, data: fixed });
+          args.push('--fixed', inputCountString);
+        }
+
+        // moving
+        {
+          const inputCountString = inputs.length.toString();
+          inputs.push({ type: InterfaceTypes.Image, data: moving });
+          args.push('--moving', inputCountString);
+        }
+
+        if (opts?.initialTransformParameterObject) {
+          const inputCountString = inputs.length.toString();
+          inputs.push({ type: InterfaceTypes.JsonCompatible, data: opts.initialTransformParameterObject });
+          args.push('--initial-transform-parameter-object', inputCountString);
+        }
+
+        const pipelineBaseUrl = getAppPipelinesBaseUrl();
+
+        const { webWorker: usedWebWorker, returnValue, stdout, stderr, outputs } = await runPipeline(
+          'elastix',
+          args,
+          desiredOutputs,
+          inputs,
+          {
+            pipelineBaseUrl,
+            webWorker,
+          }
+        );
+
+        if (returnValue !== 0) {
+          const msg = stderr || stdout || `Elastix failed with returnValue=${returnValue}`;
+          throw new Error(msg);
+        }
+
+        return {
+          webWorker: (usedWebWorker ?? webWorker) as Worker,
+          result: outputs[0]?.data as Image,
+          transformParameterObject: outputs[2]?.data as JsonCompatible,
+          stdout,
+          stderr,
+        };
+      })(),
       240_000,
       'Elastix registration'
     );
@@ -349,7 +489,7 @@ export async function registerAffine2DWithElastix(
   // or moving->fixed. Instead, we compare candidates against elastix's returned resample.
   //
   // This prevents subtle convention mismatches (or chain ordering issues) from silently
-  // producing a high NCC but incorrect on-screen geometry.
+  // producing incorrect on-screen geometry despite the registration output looking plausible.
   const { warpGrayscaleAffine } = await import('./warpAffine');
 
   type Candidate = {
@@ -391,7 +531,6 @@ export async function registerAffine2DWithElastix(
   candidates.sort((a, b) => a.mad - b.mad);
   const best = candidates[0];
 
-  const debug = typeof window !== 'undefined' && window.localStorage.getItem('miraviewer:debug-alignment') === '1';
   if (debug) {
     console.info('[alignment] Elastix transform sanity check', {
       size,
@@ -411,11 +550,44 @@ export async function registerAffine2DWithElastix(
 
   const m2fAboutOrigin = best.aboutOrigin;
 
+  // Quality metrics (computed in fixed space against elastix' resampled moving).
+  const miResult = computeMutualInformation(fixedPixels, resampledMovingPixels, 64);
+  const metricFromLogs = tryParseElastixFinalMetricFromLogs(result.stdout, result.stderr);
+
+  const elastixLogTail = debug
+    ? {
+        stdout: tailString(result.stdout, 4000),
+        stderr: tailString(result.stderr, 4000),
+      }
+    : undefined;
+
+  if (debug && (result.stdout || result.stderr)) {
+    console.info('[alignment] Elastix pipeline logs (tail)', {
+      stdoutChars: result.stdout.length,
+      stderrChars: result.stderr.length,
+      elastixFinalMetric: metricFromLogs.finalMetric,
+      metricSamples: metricFromLogs.samples,
+      // MI/NMI are computed on (fixedPixels, resampledMovingPixels).
+      mi: Number(miResult.mi.toFixed(6)),
+      nmi: Number(miResult.nmi.toFixed(6)),
+      stdoutTail: elastixLogTail?.stdout,
+      stderrTail: elastixLogTail?.stderr,
+    });
+  }
+
   return {
     A: m2fAboutOrigin.A,
     translatePx: m2fAboutOrigin.t,
     resampledMovingPixels,
     transformParameterObject: result.transformParameterObject,
+    quality: {
+      mi: miResult.mi,
+      nmi: miResult.nmi,
+      bins: miResult.bins,
+      elastixFinalMetric: metricFromLogs.finalMetric,
+      elastixMetricSamples: metricFromLogs.samples,
+    },
+    elastixLogTail,
     webWorker: result.webWorker,
   };
 }

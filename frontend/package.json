@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "check": "npm run lint && npm run test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "package:zip": "node scripts/make-downloadable-zip.mjs"
   },
   "dependencies": {
     "@itk-wasm/elastix": "^1.0.2",

@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import cornerstone from 'cornerstone-core';
 import type { JsonCompatible } from 'itk-wasm';
 import type { AlignmentReference, AlignmentResult, AlignmentProgress, SeriesRef } from '../types/api';
-import { computeAlignedSettings, computeNCC, findBestMatchingSlice } from '../utils/alignment';
+import { computeAlignedSettings, findBestMatchingSlice } from '../utils/alignment';
 import { ALIGNMENT_IMAGE_SIZE, computeHistogramStats } from '../utils/imageCapture';
 import { clamp } from '../utils/math';
 import { getImageIdForInstance } from '../utils/localApi';
@@ -18,6 +18,21 @@ import {
   panelGeometryToAffineAboutCenter,
   type PanelGeometry,
 } from '../utils/panelTransform';
+
+const DEBUG_ALIGNMENT_STORAGE_KEY = 'miraviewer:debug-alignment';
+
+function isDebugAlignmentEnabled(): boolean {
+  return typeof window !== 'undefined' && window.localStorage.getItem(DEBUG_ALIGNMENT_STORAGE_KEY) === '1';
+}
+
+type SeedRegistrationResult = {
+  idx: number;
+  nmi: number;
+  transformA: { m00: number; m01: number; m10: number; m11: number };
+  transformT: { x: number; y: number };
+  transformParameterObject: JsonCompatible;
+  webWorker: Worker;
+};
 
 /**
  * Yield to the main thread to keep UI responsive during alignment.
@@ -257,7 +272,7 @@ export function useAutoAlign() {
           dateIndex: 0,
           totalDates: targetDates.length,
           slicesChecked: 0,
-          bestNccSoFar: 0,
+          bestNmiSoFar: 0,
         },
         results: [],
         error: null,
@@ -266,9 +281,7 @@ export function useAutoAlign() {
       // Single render element used for all captures at ALIGNMENT_IMAGE_SIZE.
       const renderElement = createCornerstoneRenderElement(ALIGNMENT_IMAGE_SIZE);
 
-      const debugAlignment =
-        typeof window !== 'undefined' &&
-        window.localStorage.getItem('miraviewer:debug-alignment') === '1';
+      const debugAlignment = isDebugAlignmentEnabled();
 
       console.info('[alignment] Align All started', {
         referenceDate: reference.date,
@@ -301,7 +314,6 @@ export function useAutoAlign() {
       });
       const referencePixels = referenceRender.pixels;
 
-      const referenceRawStats = computeHistogramStats(referencePixels);
       const referenceDisplayedPixels = applyBrightnessContrastToPixels(
         referencePixels,
         reference.settings.brightness,
@@ -341,7 +353,7 @@ export function useAutoAlign() {
               dateIndex: dateIdx,
               totalDates: targetDates.length,
               slicesChecked: 0,
-              bestNccSoFar: 0,
+              bestNmiSoFar: 0,
             },
           }));
 
@@ -386,14 +398,12 @@ export function useAutoAlign() {
           });
 
           // 1) Get a coarse affine transform from a small seed set.
-          let bestSeed: {
-            idx: number;
-            ncc: number;
-            transformA: { m00: number; m01: number; m10: number; m11: number };
-            transformT: { x: number; y: number };
-            transformParameterObject: JsonCompatible;
-            webWorker: Worker;
-          } | null = null;
+          //
+          // This seed transform is used for two things:
+          // - It gives us a decent initial alignment quickly.
+          // - It lets the subsequent slice-search score candidates in approximately the
+          //   right space (by pre-warping each candidate slice before NMI).
+          let bestSeed: SeedRegistrationResult | null = null;
 
           for (const idx of seedIndices) {
             console.info('[alignment] Seed registration starting', { date, seedIdx: idx });
@@ -408,16 +418,12 @@ export function useAutoAlign() {
 
             sharedWebWorker = reg.webWorker;
 
-            const ncc = computeNCC(
-              referencePixels,
-              reg.resampledMovingPixels,
-              { mean: referenceRawStats.mean, stddev: referenceRawStats.stddev }
-            );
+            const nmi = reg.quality.nmi;
 
             console.info('[alignment] Seed registration finished', {
               date,
               seedIdx: idx,
-              ncc: Number(ncc.toFixed(4)),
+              nmi: Number(nmi.toFixed(4)),
             });
 
             debugAlignmentLog(
@@ -425,7 +431,10 @@ export function useAutoAlign() {
               {
                 date,
                 seedIdx: idx,
-                ncc,
+                nmi,
+                mi: reg.quality.mi,
+                elastixFinalMetric: reg.quality.elastixFinalMetric,
+                elastixMetricSamples: reg.quality.elastixMetricSamples,
                 translatePx: { x: reg.translatePx.x, y: reg.translatePx.y },
                 A: reg.A,
                 renderTimedOut: seedRender.renderTimedOut,
@@ -438,10 +447,10 @@ export function useAutoAlign() {
               debugAlignment
             );
 
-            if (!bestSeed || ncc > bestSeed.ncc) {
+            if (!bestSeed || nmi > bestSeed.nmi) {
               bestSeed = {
                 idx,
-                ncc,
+                nmi,
                 transformA: reg.A,
                 transformT: reg.translatePx,
                 transformParameterObject: reg.transformParameterObject,
@@ -462,7 +471,7 @@ export function useAutoAlign() {
               date,
               startIdx,
               chosenSeedIdx: bestSeed.idx,
-              chosenSeedNcc: bestSeed.ncc,
+              chosenSeedNmi: bestSeed.nmi,
               translatePx: bestSeed.transformT,
               A: bestSeed.transformA,
             },
@@ -472,10 +481,14 @@ export function useAutoAlign() {
           console.info('[alignment] Seed chosen', {
             date,
             seedIdx: bestSeed.idx,
-            ncc: Number(bestSeed.ncc.toFixed(4)),
+            nmi: Number(bestSeed.nmi.toFixed(4)),
           });
 
-          // 2) Use the seed transform to drive a fast NCC-based slice search.
+          // 2) Use the seed transform to drive a fast NMI-based slice search.
+          //
+          // Instead of scoring raw slices against the reference, we pre-warp each candidate slice
+          // by the seed transform. This reduces the chance that differences in in-plane pose
+          // dominate the slice similarity score.
           const getSlicePixels = async (index: number): Promise<Float32Array> => {
             const rendered = await renderSliceToPixels(renderElement, seriesRef.series_uid, index, ALIGNMENT_IMAGE_SIZE);
             return warpGrayscaleAffine(rendered.pixels, ALIGNMENT_IMAGE_SIZE, {
@@ -494,19 +507,18 @@ export function useAutoAlign() {
 
           const searchResult = await findBestMatchingSlice(
             referencePixels,
-            { mean: referenceRawStats.mean, stddev: referenceRawStats.stddev },
             getSlicePixels,
             reference.sliceIndex,
             reference.sliceCount,
             seriesRef.instance_count,
-            (slicesChecked, bestNccSoFar) => {
+            (slicesChecked, bestNmiSoFar) => {
               setState((s) => ({
                 ...s,
                 progress: s.progress
                   ? {
                       ...s.progress,
                       slicesChecked,
-                      bestNccSoFar,
+                      bestNmiSoFar,
                     }
                   : null,
               }));
@@ -518,7 +530,7 @@ export function useAutoAlign() {
           console.info('[alignment] Slice search finished', {
             date,
             bestIndex: searchResult.bestIndex,
-            bestNcc: Number(searchResult.bestNCC.toFixed(4)),
+            bestNmi: Number(searchResult.bestNMI.toFixed(4)),
             slicesChecked: searchResult.slicesChecked,
           });
 
@@ -555,21 +567,20 @@ export function useAutoAlign() {
 
           sharedWebWorker = refined.webWorker;
 
-          const refinedNcc = computeNCC(
-            referencePixels,
-            refined.resampledMovingPixels,
-            { mean: referenceRawStats.mean, stddev: referenceRawStats.stddev }
-          );
+          const refinedNmi = refined.quality.nmi;
 
-          console.info('[alignment] Refinement finished', { date, ncc: Number(refinedNcc.toFixed(4)) });
+          console.info('[alignment] Refinement finished', { date, nmi: Number(refinedNmi.toFixed(4)) });
 
           debugAlignmentLog(
             'refine.registration',
             {
               date,
               bestSliceIndex: searchResult.bestIndex,
-              coarseBestNcc: searchResult.bestNCC,
-              refinedNcc,
+              coarseBestNmi: searchResult.bestNMI,
+              refinedNmi,
+              mi: refined.quality.mi,
+              elastixFinalMetric: refined.quality.elastixFinalMetric,
+              elastixMetricSamples: refined.quality.elastixMetricSamples,
               translatePx: refined.translatePx,
               A: refined.A,
             },
@@ -602,6 +613,12 @@ export function useAutoAlign() {
 
           const refStd = affineAboutOriginToStandard(refAffine);
           const deltaStd = affineAboutOriginToStandard(deltaAffine);
+
+          // Composition order matters:
+          // - `deltaStd` maps target -> reference (in the downsampled alignment pixel space)
+          // - `refStd` maps reference -> displayed reference
+          // To display the *target* in the same view as the reference we want:
+          //   displayed = refStd(deltaStd(x_target))
           const composedStd = composeStandardAffine2D(refStd, deltaStd);
 
           const composedAboutOrigin = standardToAffineAboutOrigin(composedStd.A, composedStd.b, origin);
@@ -623,7 +640,7 @@ export function useAutoAlign() {
             date,
             seriesUid: seriesRef.series_uid,
             bestSliceIndex: searchResult.bestIndex,
-            nccScore: refinedNcc,
+            nmiScore: refinedNmi,
             computedSettings,
             slicesChecked: searchResult.slicesChecked,
           };

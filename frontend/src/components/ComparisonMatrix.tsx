@@ -593,8 +593,8 @@ export function ComparisonMatrix() {
 
       // Log summary
       console.log(
-        `[Alignment] Aligned ${results.length} dates. Average NCC: ${(
-          results.reduce((sum, r) => sum + r.nccScore, 0) / results.length
+        `[Alignment] Aligned ${results.length} dates. Average NMI: ${(
+          results.reduce((sum, r) => sum + r.nmiScore, 0) / results.length
         ).toFixed(3)}`
       );
     } catch (err) {
@@ -1395,7 +1395,7 @@ export function ComparisonMatrix() {
                             </div>
                             {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
                               <div className="text-xs text-white/70">
-                                {alignmentProgress.slicesChecked} slices · NCC {(alignmentProgress.bestNccSoFar * 100).toFixed(0)}%
+                                {alignmentProgress.slicesChecked} slices · NMI {alignmentProgress.bestNmiSoFar.toFixed(3)}
                               </div>
                             ) : null}
                           </div>

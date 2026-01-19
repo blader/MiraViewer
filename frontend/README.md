@@ -9,6 +9,19 @@ npm install
 npm run dev
 ```
 
+## Downloadable ZIP (offline)
+
+Build a “download-and-run” ZIP:
+
+```bash
+npm run package:zip
+```
+
+Output:
+- `release/MiraViewer.zip`
+
+End-user instructions are included inside the ZIP as `README.txt`.
+
 ## Scripts
 
 - `npm run dev` — start the frontend dev server

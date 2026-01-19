@@ -26,6 +26,34 @@ npm run dev
 
 Then open http://localhost:43124 in your browser.
 
+## Downloadable ZIP (offline)
+
+This repo can produce a “download-and-run” ZIP for non-technical users.
+
+### Build the ZIP (developer)
+
+```bash
+cd frontend
+npm install
+npm run package:zip
+```
+
+Output:
+- `frontend/release/MiraViewer.zip`
+
+### Run from the ZIP (end user)
+
+1. Download `MiraViewer.zip` and unzip it.
+2. Start MiraViewer:
+   - macOS: double-click `start.command`
+   - Windows: double-click `start.bat`
+   - Linux: run `start.sh`
+3. Your browser should open automatically. Keep the Terminal/Command Prompt window open while using MiraViewer.
+
+Notes:
+- The app still runs entirely in your browser; the launcher only starts a tiny local HTTP server.
+- Data is stored locally in your browser (IndexedDB). Use the in-app Download button to export a backup ZIP.
+
 ## Importing DICOMs
 
 Click the **Upload** button in the header to import DICOM files:

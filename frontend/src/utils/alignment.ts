@@ -1,68 +1,18 @@
 import type { HistogramStats, PanelSettings } from '../types/api';
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from './constants';
 import { clamp } from './math';
+import { computeMutualInformation } from './mutualInformation';
 
 /**
- * Compute Normalized Cross-Correlation (NCC) between two grayscale images.
- * Both images must have the same dimensions.
- * Returns a value in range [-1, 1], where 1 is perfect correlation.
+ * Compute normalized mutual information (NMI) between two grayscale images.
  *
- * NCC is invariant to linear brightness/contrast changes, making it ideal
- * for matching MRI slices that may have different intensity distributions.
- *
- * Formula: NCC = Σ((a - μa)(b - μb)) / (n * σa * σb)
+ * Notes:
+ * - Higher is better.
+ * - NMI is commonly used as a registration quality metric because it can be more robust than
+ *   correlation-based metrics when intensity mappings differ.
  */
-export function computeNCC(
-  imageA: Float32Array,
-  imageB: Float32Array,
-  statsA?: { mean: number; stddev: number },
-  statsB?: { mean: number; stddev: number }
-): number {
-  const n = imageA.length;
-  if (n !== imageB.length || n === 0) {
-    return 0;
-  }
-
-  // Compute means if not provided
-  let meanA: number;
-  let meanB: number;
-  if (statsA) {
-    meanA = statsA.mean;
-  } else {
-    let sumA = 0;
-    for (let i = 0; i < n; i++) sumA += imageA[i];
-    meanA = sumA / n;
-  }
-  if (statsB) {
-    meanB = statsB.mean;
-  } else {
-    let sumB = 0;
-    for (let i = 0; i < n; i++) sumB += imageB[i];
-    meanB = sumB / n;
-  }
-
-  // Compute cross-correlation and stddevs in one pass
-  let crossSum = 0;
-  let sumSqA = 0;
-  let sumSqB = 0;
-  for (let i = 0; i < n; i++) {
-    const diffA = imageA[i] - meanA;
-    const diffB = imageB[i] - meanB;
-    crossSum += diffA * diffB;
-    sumSqA += diffA * diffA;
-    sumSqB += diffB * diffB;
-  }
-
-  const stddevA = statsA?.stddev ?? Math.sqrt(sumSqA / n);
-  const stddevB = statsB?.stddev ?? Math.sqrt(sumSqB / n);
-
-  // Avoid division by zero
-  if (stddevA < 1e-10 || stddevB < 1e-10) {
-    return 0;
-  }
-
-  const ncc = crossSum / (n * stddevA * stddevB);
-  return clamp(ncc, -1, 1);
+export function computeNMI(imageA: Float32Array, imageB: Float32Array, bins: number = 64): number {
+  return computeMutualInformation(imageA, imageB, bins).nmi;
 }
 
 /**
@@ -70,7 +20,7 @@ export function computeNCC(
  */
 export interface SliceSearchResult {
   bestIndex: number;
-  bestNCC: number;
+  bestNMI: number;
   slicesChecked: number;
 }
 
@@ -80,29 +30,29 @@ export interface SliceSearchResult {
  * Strategy:
  * - Start at the normalized slice depth (refIndex/refCount mapped into targetCount)
  * - Search outward in both directions
- * - Stop in each direction only after 3 consecutive NCC decreases (per-direction)
+ * - Stop in each direction only after 3 consecutive NMI decreases (per-direction)
  *
  * Rationale:
- * - NCC can be noisy across adjacent slices, so a single decrease is not sufficient to stop.
- * - We intentionally do NOT early-exit based on bestNCC, and we do NOT enforce a minimum
+ * - Adjacent slices can be noisy; a single decrease is not sufficient to stop.
+ * - We intentionally do NOT early-exit based on bestNMI, and we do NOT enforce a minimum
  *   search window. That keeps behavior deterministic and avoids premature termination when
- *   NCC happens to spike early.
+ *   NMI happens to spike early.
  */
 export async function findBestMatchingSlice(
   referencePixels: Float32Array,
-  referenceStats: { mean: number; stddev: number },
   getTargetSlicePixels: (index: number) => Promise<Float32Array>,
   refSliceIndex: number,
   refSliceCount: number,
   targetSliceCount: number,
-  onProgress?: (slicesChecked: number, bestNccSoFar: number) => void,
+  onProgress?: (slicesChecked: number, bestNmiSoFar: number) => void,
   startIndexOverride?: number
 ): Promise<SliceSearchResult> {
   if (targetSliceCount === 0) {
-    return { bestIndex: 0, bestNCC: 0, slicesChecked: 0 };
+    return { bestIndex: 0, bestNMI: 0, slicesChecked: 0 };
   }
 
   const STOP_DECREASE_STREAK = 3; // require 3 consecutive decreases
+  const NMI_BINS = 64;
 
   // Compute starting index from normalized position.
   //
@@ -117,15 +67,13 @@ export async function findBestMatchingSlice(
       ? clamp(Math.round(startIndexOverride), 0, targetSliceCount - 1)
       : fallbackStart;
 
-
   // Initialize with starting slice
   const startPixels = await getTargetSlicePixels(clampedStart);
   let bestIdx = clampedStart;
-  let bestNCC = computeNCC(referencePixels, startPixels, referenceStats);
+  let bestNMI = computeNMI(referencePixels, startPixels, NMI_BINS);
   let slicesChecked = 1;
 
-  onProgress?.(slicesChecked, bestNCC);
-
+  onProgress?.(slicesChecked, bestNMI);
 
   // Bidirectional search state
   let leftIdx = clampedStart - 1;
@@ -134,8 +82,8 @@ export async function findBestMatchingSlice(
   let leftDone = leftIdx < 0;
   let rightDone = rightIdx >= targetSliceCount;
 
-  let leftPrevNCC = bestNCC;
-  let rightPrevNCC = bestNCC;
+  let leftPrevNMI = bestNMI;
+  let rightPrevNMI = bestNMI;
 
   let leftDecreaseStreak = 0;
   let rightDecreaseStreak = 0;
@@ -148,21 +96,21 @@ export async function findBestMatchingSlice(
         leftDone = true;
       } else {
         const leftPixels = await getTargetSlicePixels(idx);
-        const leftNCC = computeNCC(referencePixels, leftPixels, referenceStats);
+        const leftNMI = computeNMI(referencePixels, leftPixels, NMI_BINS);
         slicesChecked++;
 
-        if (leftNCC > bestNCC) {
-          bestNCC = leftNCC;
+        if (leftNMI > bestNMI) {
+          bestNMI = leftNMI;
           bestIdx = idx;
         }
 
         // Track consecutive decreases in this direction.
-        if (leftNCC < leftPrevNCC) {
+        if (leftNMI < leftPrevNMI) {
           leftDecreaseStreak++;
         } else {
           leftDecreaseStreak = 0;
         }
-        leftPrevNCC = leftNCC;
+        leftPrevNMI = leftNMI;
 
         leftIdx = idx - 1;
         if (leftIdx < 0) {
@@ -174,8 +122,7 @@ export async function findBestMatchingSlice(
           }
         }
 
-        onProgress?.(slicesChecked, bestNCC);
-
+        onProgress?.(slicesChecked, bestNMI);
       }
     }
 
@@ -186,20 +133,20 @@ export async function findBestMatchingSlice(
         rightDone = true;
       } else {
         const rightPixels = await getTargetSlicePixels(idx);
-        const rightNCC = computeNCC(referencePixels, rightPixels, referenceStats);
+        const rightNMI = computeNMI(referencePixels, rightPixels, NMI_BINS);
         slicesChecked++;
 
-        if (rightNCC > bestNCC) {
-          bestNCC = rightNCC;
+        if (rightNMI > bestNMI) {
+          bestNMI = rightNMI;
           bestIdx = idx;
         }
 
-        if (rightNCC < rightPrevNCC) {
+        if (rightNMI < rightPrevNMI) {
           rightDecreaseStreak++;
         } else {
           rightDecreaseStreak = 0;
         }
-        rightPrevNCC = rightNCC;
+        rightPrevNMI = rightNMI;
 
         rightIdx = idx + 1;
         if (rightIdx >= targetSliceCount) {
@@ -210,13 +157,12 @@ export async function findBestMatchingSlice(
           }
         }
 
-        onProgress?.(slicesChecked, bestNCC);
-
+        onProgress?.(slicesChecked, bestNMI);
       }
     }
   }
 
-  return { bestIndex: bestIdx, bestNCC, slicesChecked };
+  return { bestIndex: bestIdx, bestNMI, slicesChecked };
 }
 
 /**

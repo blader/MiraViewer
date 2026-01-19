@@ -104,7 +104,7 @@ export function AlignmentControls({
           </span>
           {progress.slicesChecked > 0 && (
             <span className="text-[var(--text-tertiary)]">
-              {progress.slicesChecked} slices · NCC {(progress.bestNccSoFar * 100).toFixed(0)}%
+              {progress.slicesChecked} slices · NMI {progress.bestNmiSoFar.toFixed(3)}
             </span>
           )}
         </div>
