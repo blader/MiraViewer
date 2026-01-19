@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import type { PanelSettings, PanelSettingsFromApi } from '../types/api';
-import { fetchPanelSettings, savePanelSettings } from '../utils/api';
+import { getPanelSettings, savePanelSettings } from '../utils/localApi';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 
 function normalizePanelSettingsFromApi(s: PanelSettingsFromApi | undefined): PanelSettings {
@@ -149,7 +149,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     let cancelled = false;
     (async () => {
       try {
-        const server = await fetchPanelSettings(selectedSeqId);
+        const server = await getPanelSettings(selectedSeqId);
         if (cancelled) return;
         
         setPanelSettings(prev => {

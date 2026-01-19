@@ -1,13 +1,6 @@
-mri_scans/
-exported_images/
-dicom_metadata.db
 .DS_Store
-__pycache__/
-*.pyc
 node_modules/
 dist/
-.venv/
-venv/
 *.log
 
 # Local environment variables (API keys, etc.)
@@ -15,8 +8,18 @@ venv/
 .env.*
 frontend/.env
 frontend/.env.*
-backend/.env
-backend/.env.*
 
 # Allow example env files to be committed
 !frontend/.env.example
+
+# Dev server logs
+frontend/.logs/
+
+# Local MRI/DICOM sample images (not for source control)
+Critical MRI Source Images (LLM Agent - do not delete)/
+
+# Local test artifacts (downloaded DICOMs, zips, etc.)
+frontend/tmp/
+
+# Accidental root lockfile (repo does not have a root package.json)
+/package-lock.json

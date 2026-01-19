@@ -1,29 +1,39 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ComparisonData } from '../types/api';
-import { fetchComparisonData } from '../utils/api';
+import { getComparisonData } from '../utils/localApi';
 
 export function useComparisonData() {
   const [data, setData] = useState<ComparisonData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const reload = useCallback(async () => {
+    try {
+      setLoading(true);
+      const d = await getComparisonData();
+      setData(d);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load comparison data');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    let mounted = true;
+    let cancelled = false;
     (async () => {
       try {
         setLoading(true);
-        const d = await fetchComparisonData();
-        if (mounted) setData(d);
+        const d = await getComparisonData();
+        if (!cancelled) setData(d);
       } catch (e) {
-        if (mounted) setError(e instanceof Error ? e.message : 'Failed to load comparison data');
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load comparison data');
       } finally {
-        if (mounted) setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      mounted = false;
-    };
+    return () => { cancelled = true; };
   }, []);
 
-  return { data, loading, error };
+  return { data, loading, error, reload };
 }

@@ -7,7 +7,8 @@ import {
   useCallback,
   useImperativeHandle,
 } from 'react';
-import { getImageUrl } from '../utils/api';
+import { getImageIdForInstance } from '../utils/localApi';
+import cornerstone from 'cornerstone-core';
 import { useWheelNavigation } from '../hooks/useWheelNavigation';
 
 export type DicomViewerCaptureOptions = {
@@ -52,11 +53,8 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
   const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
   const [showSpinner, setShowSpinner] = useState(false);
   const spinnerTimeoutRef = useRef<number | null>(null);
-
-  // Reset loading state on URL change; delay the spinner slightly to avoid flicker for fast loads.
+  // Delay the spinner slightly to avoid flicker for fast loads.
   useEffect(() => {
-    setStatus('loading');
-    setShowSpinner(false);
 
     if (spinnerTimeoutRef.current) {
       clearTimeout(spinnerTimeoutRef.current);
@@ -141,14 +139,29 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   }: DicomViewerProps,
   ref
 ) {
+  void studyId;
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Mouse wheel navigation for slices
   useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
 
-  // Generate image URL
-  const imageUrl = imageUrlOverride ?? getImageUrl(studyId, seriesUid, instanceIndex);
+  // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
+  const [imageId, setImageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await getImageIdForInstance(seriesUid, instanceIndex);
+        if (!cancelled) setImageId(id);
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setImageId(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [seriesUid, instanceIndex]);
 
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
@@ -337,14 +350,207 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
       >
-        <ImageContent
-          imageUrl={imageUrl}
-          imageFilter={imageFilter}
-          imageTransform={imageTransform}
-          alt={`Slice ${instanceIndex + 1}`}
-          imgRef={imgRef}
-        />
+        {imageUrlOverride ? (
+          <ImageContent
+            key={imageUrlOverride}
+            imageUrl={imageUrlOverride}
+            imageFilter={imageFilter}
+            imageTransform={imageTransform}
+            alt={`Slice ${instanceIndex + 1}`}
+            imgRef={imgRef}
+          />
+        ) : imageId ? (
+          <CornerstoneImage
+            imageId={imageId}
+            imageFilter={imageFilter}
+            imageTransform={imageTransform}
+            alt={`Slice ${instanceIndex + 1}`}
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
+            Loading...
+          </div>
+        )}
       </div>
     </div>
   );
 });
+
+interface CornerstoneImageProps {
+  imageId: string;
+  imageFilter: string;
+  imageTransform: string;
+  alt: string;
+}
+
+function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
+  const [show, setShow] = useState(false);
+
+  // We intentionally avoid setState() directly in the effect body to keep our
+  // eslint rules happy (and to avoid cascading renders). The spinner only flips
+  // on after a short delay, which prevents flicker when slices load quickly.
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setShow(true);
+    }, delayMs);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [delayMs]);
+
+  if (!show) return null;
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
+
+function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
+  const elementRef = useRef<HTMLDivElement | null>(null);
+  const enabledRef = useRef(false);
+
+  // Track which imageId has been loaded to derive status.
+  // Note: we intentionally do NOT clear `loadedImageId` when navigating so the previous
+  // slice stays visible until the next slice is ready. This avoids "black flashes"
+  // while scrubbing quickly with the mouse wheel.
+  const [loadedImageId, setLoadedImageId] = useState<string | null>(null);
+  const [errorImageId, setErrorImageId] = useState<string | null>(null);
+
+
+  // Derive status from comparison
+  const status: 'loading' | 'loaded' | 'error' =
+    errorImageId === imageId ? 'error' :
+    loadedImageId === imageId ? 'loaded' :
+    'loading';
+
+  // Enable cornerstone once on mount
+  useEffect(() => {
+    const element = elementRef.current;
+    if (!element) return;
+
+    // Ensure the element has dimensions before enabling
+    const rect = element.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      // Wait for layout
+      const observer = new ResizeObserver(() => {
+        const newRect = element.getBoundingClientRect();
+        if (newRect.width > 0 && newRect.height > 0) {
+          observer.disconnect();
+          try {
+            cornerstone.enable(element);
+            enabledRef.current = true;
+          } catch {
+            // already enabled
+          }
+        }
+      });
+      observer.observe(element);
+      return () => observer.disconnect();
+    }
+
+    try {
+      cornerstone.enable(element);
+      enabledRef.current = true;
+    } catch {
+      // already enabled
+    }
+
+    return () => {
+      try {
+        cornerstone.disable(element);
+        enabledRef.current = false;
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  // Load image when imageId changes
+  useEffect(() => {
+    const element = elementRef.current;
+    if (!element) return;
+
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        // Wait for cornerstone to be enabled
+        let attempts = 0;
+        while (!enabledRef.current && attempts < 50) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          attempts++;
+        }
+
+        if (!enabledRef.current) {
+          // Try to enable now
+          try {
+            cornerstone.enable(element);
+            enabledRef.current = true;
+          } catch {
+            // already enabled
+            enabledRef.current = true;
+          }
+        }
+
+        const image = await cornerstone.loadImage(imageId);
+        if (cancelled) return;
+
+        const viewport = cornerstone.getDefaultViewportForImage(element, image);
+        cornerstone.displayImage(element, image, viewport);
+        setLoadedImageId(imageId);
+        setErrorImageId(null);
+      } catch (err) {
+        console.error('Failed to load DICOM image:', err);
+        if (!cancelled) {
+          setErrorImageId(imageId);
+        }
+      }
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [imageId]);
+
+  // Handle resize
+  useEffect(() => {
+    const element = elementRef.current;
+    if (!element) return;
+
+    const handleResize = () => {
+      if (enabledRef.current) {
+        try {
+          cornerstone.resize(element, true);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const observer = new ResizeObserver(handleResize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="w-full h-full relative" style={{ transform: imageTransform, filter: imageFilter }}>
+      <div 
+        ref={elementRef} 
+        className="w-full h-full" 
+        style={{ minWidth: '100px', minHeight: '100px' }}
+        aria-label={alt} 
+      />
+      {status === 'loading' && <DelayedSpinnerOverlay />}
+      {status === 'error' && (
+        <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)] bg-black">
+          Failed to load image
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,46 +1,22 @@
 # MiraViewer
 
-A web-based DICOM viewer for MRI brain scans, optimized for comparing the same sequence across multiple dates.
+A browser-based DICOM viewer for MRI brain scans, optimized for comparing the same sequence across multiple dates. Runs entirely in the browser with local IndexedDB storage—no server required.
 
-![MiraViewer](https://img.shields.io/badge/React-19-blue) ![Python](https://img.shields.io/badge/Python-3.11+-green) ![License](https://img.shields.io/badge/License-Private-red)
+![MiraViewer](https://img.shields.io/badge/React-19-blue) ![License](https://img.shields.io/badge/License-Private-red)
 
 ## Features
 
-- **Comparison Matrix**: View the selected sequence across multiple dates in a synchronized grid.
-- **Overlay Mode**: Flip between dates quickly for visual comparison (including hold-to-compare).
-- **Synchronized Slice Navigation**: Use the bottom slider (or scroll) to keep anatomical position aligned across dates.
-- **Per-date Panel Settings**: Persist slice offset, zoom, rotation, brightness/contrast, and pan per date.
-- **Interaction**: Scroll to change slices, click to center on a point, double-click to reset pan.
-- **Clinical Tooltips**: Hover sequence names for concise sequence descriptions.
+- **Local Storage**: All data stored in browser IndexedDB—no server needed
+- **DICOM Upload**: Upload folders or ZIP archives of DICOM files directly in the browser
+- **Export/Backup**: Download your data as a ZIP for backup or transfer
+- **Comparison Matrix**: View the selected sequence across multiple dates in a synchronized grid
+- **Overlay Mode**: Flip between dates quickly for visual comparison (including hold-to-compare)
+- **Synchronized Slice Navigation**: Use the bottom slider (or scroll) to keep anatomical position aligned across dates
+- **Per-date Panel Settings**: Persist slice offset, zoom, rotation, brightness/contrast, and pan per date
+- **Cornerstone.js Rendering**: Native DICOM rendering with pan, zoom, and window/level controls
+- **Clinical Tooltips**: Hover sequence names for concise sequence descriptions
 
 ## Quick Start
-
-```bash
-./start.sh
-```
-
-This will:
-1. Create a Python virtual environment (if needed)
-2. Install Python dependencies
-3. Install Node.js dependencies (if needed)
-4. Start the backend server on port 43123
-5. Start the frontend dev server on port 43124
-
-Then open http://localhost:43124 in your browser.
-
-## Manual Setup
-
-### Backend
-
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
-
-### Frontend
 
 ```bash
 cd frontend
@@ -48,73 +24,44 @@ npm install
 npm run dev
 ```
 
+Then open http://localhost:43124 in your browser.
+
 ## Importing DICOMs
 
-MiraViewer serves **pre-exported PNG images** and reads metadata from a local SQLite database (`dicom_metadata.db`).
+Click the **Upload** button in the header to import DICOM files:
+- Select a folder containing DICOM files
+- Or upload a ZIP archive
 
-To use your own DICOMs, run the exporter to scan your DICOM files, extract metadata, and render per-slice PNGs.
+Files are parsed in-browser and stored in IndexedDB.
 
-Make sure backend dependencies are installed first (e.g. run `./start.sh` once, or follow the Backend steps above).
+## Exporting/Backup
 
-```bash
-# From the repo root (recommended: use the project venv)
-backend/venv/bin/python backend/export_dicom.py
-```
+Click the **Download** button in the header to export your data as a ZIP file containing:
+- All DICOM files
+- Metadata JSON for each study
 
-This will:
-- Scan `mri_scans/` recursively
-- Write images to `exported_images/`
-- Write/update metadata in `dicom_metadata.db`
+This can be used for backup or to transfer data to another browser/device.
 
-### Import a folder (any structure)
+## Storage Warning
 
-You can point the exporter at any directory containing DICOMs (it will scan recursively):
+⚠️ Data is stored in browser IndexedDB. Clearing site data will erase all scans.
 
-```bash
-backend/venv/bin/python backend/export_dicom.py /path/to/dicom_folder
-```
-
-### Import one or more files
-
-```bash
-backend/venv/bin/python backend/export_dicom.py /path/to/image1.dcm /path/to/image2.dcm
-```
-
-### Tips
-
-- If your DICOMs have unusual/no extensions and aren’t being picked up, try:
-
-```bash
-backend/venv/bin/python backend/export_dicom.py --scan-all-files /path/to/dicom_folder
-```
-
-- If you want the `study_folder` label to come from the first directory under the scan root (useful when importing a directory containing multiple studies):
-
-```bash
-backend/venv/bin/python backend/export_dicom.py --group-by-top-level-folder /path/to/dicom_root
-```
-
-- To completely reset your local dataset, delete `exported_images/` and `dicom_metadata.db` and rerun the exporter.
+The app requests persistent storage to reduce the chance of data loss, but browser behavior varies. Use the export feature to back up important data.
 
 ## Project Structure
 
 ```
 MiraViewer/
-├── backend/
-│   ├── main.py           # FastAPI server (serves pre-exported images + metadata)
-│   ├── export_dicom.py   # Offline exporter/indexer (DICOM -> PNG + SQLite)
-│   └── requirements.txt  # Python dependencies
-├── frontend/
-│   ├── src/
-│   │   ├── components/   # React components
-│   │   ├── hooks/        # Custom React hooks
-│   │   ├── types/        # TypeScript type definitions
-│   │   └── utils/        # Utility functions
-│   └── ...
-├── mri_scans/            # Place DICOMs here (optional; exporter can also scan arbitrary paths)
-├── exported_images/      # Generated (ignored by git)
-├── dicom_metadata.db     # Generated (ignored by git)
-└── start.sh              # Startup script
+└── frontend/
+    ├── src/
+    │   ├── components/   # React components
+    │   ├── db/           # IndexedDB schema and helpers
+    │   ├── hooks/        # Custom React hooks
+    │   ├── services/     # DICOM ingestion, export
+    │   ├── types/        # TypeScript type definitions
+    │   └── utils/        # Utility functions, Cornerstone init
+    ├── tests/            # Vitest tests
+    └── ...
 ```
 
 ## Keyboard Shortcuts
@@ -128,18 +75,20 @@ Overlay mode:
 - **← / →** — previous / next date
 - **Hold Space** — quick compare with previously viewed date
 
-## API Endpoints
+## Development
 
-- `GET /api/comparison-data` - Sequences/dates + mapping for the comparison matrix
-- `GET /api/panel-settings/{combo_id}` - Load per-date panel settings for a sequence combo
-- `POST /api/panel-settings` - Save per-date panel settings
-- `GET /api/image/{study_id}/{series_uid}/{instance_index}` - Fetch a pre-exported image
-- `GET /api/stats` - Basic DB stats
-
-Legacy endpoints still exist in the backend (e.g. `/api/studies`) but are not currently used by the main UI.
+```bash
+cd frontend
+npm install
+npm run dev      # Start dev server
+npm run check    # Lint + tests
+npm run build    # Production build
+```
 
 ## Tech Stack
 
 - **Frontend**: React, TypeScript, Vite, Tailwind CSS
-- **Backend**: Python, FastAPI, pydicom, NumPy, Pillow
+- **DICOM Parsing**: dicom-parser
+- **Medical Imaging**: Cornerstone.js
+- **Local Storage**: IndexedDB via idb
 - **Icons**: Lucide React

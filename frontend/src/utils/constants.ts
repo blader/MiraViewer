@@ -28,3 +28,6 @@ export const OVERLAY = {
   ],
   DEFAULT_SPEED: 1000,
 } as const;
+
+// Offline mode: AI features disabled by default.
+export const AI_ENABLED = false;

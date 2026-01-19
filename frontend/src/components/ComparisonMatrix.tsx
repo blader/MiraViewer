@@ -1,10 +1,26 @@
 import { createRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
-import { Brain, Layers, CalendarDays, ChevronLeft, ChevronRight, LayoutGrid, Play, Pause, HelpCircle } from 'lucide-react';
+import {
+  Brain,
+  Layers,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  LayoutGrid,
+  Play,
+  Pause,
+  HelpCircle,
+  Upload,
+  Download,
+  Trash2,
+} from 'lucide-react';
 import { DicomViewer, type DicomViewerHandle } from './DicomViewer';
 import { ImageControls } from './ImageControls';
 import { HelpModal } from './HelpModal';
+import { UploadModal } from './UploadModal';
+import { ExportModal } from './ExportModal';
+import { ClearDataModal } from './ClearDataModal';
 import { TooltipTrigger } from './TooltipTrigger';
 import { useComparisonData } from '../hooks/useComparisonData';
 import { useComparisonFilters } from '../hooks/useComparisonFilters';
@@ -13,7 +29,7 @@ import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
 import { useAiAnnotation } from '../hooks/useAiAnnotation';
-import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY } from '../utils/constants';
+import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY, AI_ENABLED } from '../utils/constants';
 import { getSliceIndex, getProgressFromSlice } from '../utils/math';
 
 function getOverlayViewerSize(gridSize: { width: number; height: number }) {
@@ -51,7 +67,7 @@ function clamp01(value: number): number {
 
 function ensureLoopBounds(start: number, end: number): [number, number] {
   const minGap = 0.01;
-  let s = clamp01(start);
+  const s = clamp01(start);
   let e = clamp01(end);
   if (e - s < minGap) {
     e = clamp01(s + minGap);
@@ -236,7 +252,7 @@ function writePersistedSliceLoopPlaybackSettingsForSeq(seqId: string, settings: 
 }
 
 export function ComparisonMatrix() {
-  const { data, loading, error } = useComparisonData();
+  const { data, loading, error, reload } = useComparisonData();
   const {
     availablePlanes,
     selectedPlane,
@@ -254,6 +270,9 @@ export function ComparisonMatrix() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [clearDataModalOpen, setClearDataModalOpen] = useState(false);
 
   const {
     status: nanoBananaStatus,
@@ -299,6 +318,7 @@ export function ComparisonMatrix() {
       label?: string | null;
     }
   ) => {
+    if (!AI_ENABLED) return;
     const canReuseExisting =
       nanoBananaStatus === 'ready' &&
       !!nanoBananaImageUrl &&
@@ -599,22 +619,26 @@ export function ComparisonMatrix() {
     );
   }
 
-  if (error || !data || !selectedPlane || !selectedSeqId) {
+  const hasData = data && selectedPlane && selectedSeqId;
+
+  if (error) {
     return (
       <div className="h-screen flex items-center justify-center text-[var(--text-secondary)]">
-        {error || 'No data available'}
+        {error}
       </div>
     );
   }
 
-  const selectedSeq = data.sequences.find(s => s.id === selectedSeqId);
+  const selectedSeq = hasData ? data.sequences.find(s => s.id === selectedSeqId) : undefined;
 
-  const aiSeriesContext = {
-    plane: selectedSeq?.plane ?? selectedPlane,
-    weight: selectedSeq?.weight,
-    sequence: selectedSeq?.sequence,
-    label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
-  };
+  const aiSeriesContext = hasData
+    ? {
+        plane: selectedSeq?.plane ?? selectedPlane,
+        weight: selectedSeq?.weight,
+        sequence: selectedSeq?.sequence,
+        label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
+      }
+    : { plane: null, weight: null, sequence: null, label: null };
 
   const overlayControlCol = overlayColumns[overlayDateIndex];
   const overlayControlRef = overlayControlCol?.ref;
@@ -655,13 +679,32 @@ export function ComparisonMatrix() {
     <div className="h-screen flex flex-col">
       {/* Help Modal */}
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
-
+      
+      {/* Upload Modal */}
+      {uploadModalOpen && (
+        <UploadModal
+          onClose={() => setUploadModalOpen(false)}
+          onUploadComplete={() => {
+            reload();
+          }}
+        />
+      )}
+      {exportModalOpen && <ExportModal onClose={() => setExportModalOpen(false)} />}
+      {clearDataModalOpen && (
+        <ClearDataModal
+          onClose={() => setClearDataModalOpen(false)}
+          onReset={() => window.location.reload()}
+        />
+      )}
 
       {/* Header */}
       <div className="px-4 py-3 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Brain className="w-6 h-6 text-[var(--accent)]" />
           <h1 className="text-lg font-semibold">MiraViewer</h1>
+          <span className="text-[10px] text-[var(--text-tertiary)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded">
+            Local storage only — clear site data will erase scans
+          </span>
           {selectedSeq && (
             <div className="text-sm text-[var(--text-secondary)] border-l border-[var(--border-color)] pl-3 ml-1">
               {selectedPlane} · {formatSequenceLabel(selectedSeq)}
@@ -669,6 +712,31 @@ export function ComparisonMatrix() {
           )}
         </div>
         <div className="flex items-center gap-3">
+          {/* Upload button */}
+          <button
+            onClick={() => setUploadModalOpen(true)}
+            className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            title="Upload DICOM Archive"
+          >
+            <Upload className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setExportModalOpen(true)}
+            className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            title="Export backup (ZIP)"
+          >
+            <Download className="w-5 h-5" />
+          </button>
+
+          {/* Clear data */}
+          <button
+            onClick={() => setClearDataModalOpen(true)}
+            className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-red-400 hover:text-red-300"
+            title="Clear all local data"
+          >
+            <Trash2 className="w-5 h-5" />
+          </button>
+
           {/* View mode toggle */}
           <div className="flex items-center bg-[var(--bg-primary)] rounded-lg border border-[var(--border-color)]">
             <button
@@ -761,7 +829,25 @@ export function ComparisonMatrix() {
 
         {/* Main content area - Grid or Overlay */}
         <div ref={gridContainerRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
-          {viewMode === 'grid' ? (
+          {!hasData ? (
+            /* Empty state */
+            <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8">
+              <Brain className="w-16 h-16 text-[var(--accent)] opacity-50" />
+              <div>
+                <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No scans loaded</h2>
+                <p className="text-[var(--text-secondary)] max-w-md">
+                  Upload a folder of DICOM files or a ZIP archive to get started.
+                </p>
+              </div>
+              <button
+                onClick={() => setUploadModalOpen(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
+              >
+                <Upload className="w-5 h-5" />
+                Upload DICOM Files
+              </button>
+            </div>
+          ) : viewMode === 'grid' ? (
             /* Grid View */
             <div className="flex-1 flex items-center justify-center">
               <div 
@@ -812,19 +898,22 @@ export function ComparisonMatrix() {
                             }
                             updatePanelSetting(date, update);
                           }}
-                          onAcpAnalyze={() =>
-                            handleAiButtonClick(
-                              {
-                                date,
-                                studyId: ref.study_id,
-                                seriesUid: ref.series_uid,
-                                instanceIndex: idx,
-                              },
-                              viewerKey,
-                              aiSeriesContext
-                            )
+                          onAcpAnalyze={
+                            AI_ENABLED
+                              ? () =>
+                                  handleAiButtonClick(
+                                    {
+                                      date,
+                                      studyId: ref.study_id,
+                                      seriesUid: ref.series_uid,
+                                      instanceIndex: idx,
+                                    },
+                                    viewerKey,
+                                    aiSeriesContext
+                                  )
+                              : undefined
                           }
-                          acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
+                          acpAnalyzeDisabled={!AI_ENABLED || nanoBananaStatus === 'loading'}
                         />
                       </div>
                       <div className="flex-1 min-h-0 bg-black relative">
@@ -854,7 +943,7 @@ export function ComparisonMatrix() {
                           }
                         />
 
-                        {nanoBananaStatus === 'loading' && isNanoBananaTarget && (
+                        {AI_ENABLED && nanoBananaStatus === 'loading' && isNanoBananaTarget && (
                           <div className="absolute top-2 right-2 max-w-[70%]">
                             <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/60">
                               <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
@@ -865,7 +954,7 @@ export function ComparisonMatrix() {
                           </div>
                         )}
 
-                        {nanoBananaStatus === 'ready' && isNanoBananaTarget && (
+                        {AI_ENABLED && nanoBananaStatus === 'ready' && isNanoBananaTarget && (
                           <button
                             type="button"
                             onClick={clearNanoBanana}
@@ -958,20 +1047,24 @@ export function ComparisonMatrix() {
 
                       updatePanelSetting(overlayControlDate, update);
                     }}
-                    onAcpAnalyze={() => {
-                      if (!overlayDisplayedRef || !overlayDisplayedDate) return;
-                      handleAiButtonClick(
-                        {
-                          date: overlayDisplayedDate,
-                          studyId: overlayDisplayedRef.study_id,
-                          seriesUid: overlayDisplayedRef.series_uid,
-                          instanceIndex: overlayDisplayedSliceIndex,
-                        },
-                        'overlay',
-                        aiSeriesContext
-                      );
-                    }}
-                    acpAnalyzeDisabled={nanoBananaStatus === 'loading'}
+                    onAcpAnalyze={
+                      AI_ENABLED
+                        ? () => {
+                            if (!overlayDisplayedRef || !overlayDisplayedDate) return;
+                            handleAiButtonClick(
+                              {
+                                date: overlayDisplayedDate,
+                                studyId: overlayDisplayedRef.study_id,
+                                seriesUid: overlayDisplayedRef.series_uid,
+                                instanceIndex: overlayDisplayedSliceIndex,
+                              },
+                              'overlay',
+                              aiSeriesContext
+                            );
+                          }
+                        : undefined
+                    }
+                    acpAnalyzeDisabled={!AI_ENABLED || nanoBananaStatus === 'loading'}
                   />
                 </div>
               )}
@@ -989,7 +1082,9 @@ export function ComparisonMatrix() {
                     <DicomViewer
                       // eslint-disable-next-line react-hooks/refs -- Dynamic ref for viewer capture
                       ref={getViewerRef('overlay')}
-                      key={`${overlayDisplayedRef.study_id}-${overlayDisplayedRef.series_uid}`}
+                      // Important: do not key by series/date.
+                      // Remounting the viewer forces Cornerstone to re-enable the element,
+                      // which causes a visible black flash when toggling dates.
                       studyId={overlayDisplayedRef.study_id}
                       seriesUid={overlayDisplayedRef.series_uid}
                       instanceIndex={overlayDisplayedSliceIndex}
@@ -1019,7 +1114,7 @@ export function ComparisonMatrix() {
                       }
                     />
 
-                    {nanoBananaStatus === 'loading' && overlayIsNanoBananaTarget && (
+                    {AI_ENABLED && nanoBananaStatus === 'loading' && overlayIsNanoBananaTarget && (
                       <div className="absolute top-3 right-3 max-w-[70%]">
                         <div className="flex items-center gap-2 px-3 py-2 rounded bg-black/60">
                           <div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
@@ -1030,7 +1125,7 @@ export function ComparisonMatrix() {
                       </div>
                     )}
 
-                    {nanoBananaStatus === 'ready' && overlayIsNanoBananaTarget && (
+                    {AI_ENABLED && nanoBananaStatus === 'ready' && overlayIsNanoBananaTarget && (
                       <button
                         type="button"
                         onClick={clearNanoBanana}
@@ -1054,7 +1149,7 @@ export function ComparisonMatrix() {
           )}
 
           {/* AI prompt panel (shown on AI button click; does not affect layout) */}
-          {aiPromptOpen && nanoBananaStatus === 'ready' && nanoBananaPrompt && (
+          {AI_ENABLED && aiPromptOpen && nanoBananaStatus === 'ready' && nanoBananaPrompt && (
             <div className="absolute bottom-3 right-3 z-30 w-[420px] max-w-[calc(100%-24px)] rounded-xl border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-2xl">
               <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--border-color)]">
                 <div className="min-w-0">
@@ -1108,7 +1203,7 @@ export function ComparisonMatrix() {
           )}
 
           {/* AI error panel */}
-          {nanoBananaStatus === 'error' && nanoBananaError && (
+          {AI_ENABLED && nanoBananaStatus === 'error' && nanoBananaError && (
             <div className="absolute bottom-3 right-3 z-30 w-[420px] max-w-[calc(100%-24px)] rounded-xl border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-2xl">
               <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--border-color)]">
                 <div className="text-xs font-semibold text-red-400">AI annotation failed</div>
