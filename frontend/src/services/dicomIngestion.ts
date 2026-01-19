@@ -155,7 +155,7 @@ const TAGS = {
   WindowWidth: 'x00281051',
 };
 
-// Heuristics for description parsing (copied from backend logic)
+// Heuristics for parsing series descriptions into plane/weight/sequenceType.
 function parsePlane(desc: string): string | undefined {
   const d = desc.toUpperCase();
   if (d.includes(' AX ') || d.startsWith('AX ') || d.includes('_AX_') || d.includes('AXIAL')) return 'Axial';

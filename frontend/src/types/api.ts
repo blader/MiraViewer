@@ -33,8 +33,8 @@ export interface PanelSettings {
   progress: number; // normalized 0..1, last viewed global slice position for this date
 }
 
-// What the backend may return (values may be missing or null).
-export type PanelSettingsFromApi = Partial<{
+// Persisted settings may be partial (values may be missing or null).
+export type PanelSettingsPartial = Partial<{
   offset: number | null;
   zoom: number | null;
   rotation: number | null;

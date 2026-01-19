@@ -1,5 +1,33 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { SeriesRef } from '../types/api';
+
+type PersistedOverlayNav = {
+  viewMode?: 'grid' | 'overlay';
+  overlayDate?: string;
+  playSpeed?: number;
+};
+
+const OVERLAY_NAV_STORAGE_KEY = 'miraviewer:overlay-nav:v1';
+
+function readPersistedOverlayNav(): PersistedOverlayNav {
+  try {
+    const raw = localStorage.getItem(OVERLAY_NAV_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const obj = parsed as Record<string, unknown>;
+
+    const viewMode = obj.viewMode === 'overlay' ? 'overlay' : obj.viewMode === 'grid' ? 'grid' : undefined;
+    const overlayDate = typeof obj.overlayDate === 'string' ? obj.overlayDate : undefined;
+    const playSpeed = typeof obj.playSpeed === 'number' && Number.isFinite(obj.playSpeed) ? obj.playSpeed : undefined;
+
+    return { viewMode, overlayDate, playSpeed };
+  } catch {
+    return {};
+  }
+}
 
 function getUtcDateMs(date: string) {
   // Expecting YYYY-MM-DD. Use a UTC timestamp to avoid timezone shifts.
@@ -15,11 +43,27 @@ function getUtcDateMs(date: string) {
 export function useOverlayNavigation(
   overlayColumns: { date: string; ref?: SeriesRef }[]
 ) {
-  const [viewMode, setViewModeState] = useState<'grid' | 'overlay'>('grid');
+  const persistedRef = useRef<PersistedOverlayNav>(readPersistedOverlayNav());
+
+  const persist = useCallback((update: PersistedOverlayNav) => {
+    const next: PersistedOverlayNav = { ...persistedRef.current, ...update };
+    persistedRef.current = next;
+    try {
+      localStorage.setItem(OVERLAY_NAV_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore quota/blocked storage.
+    }
+  }, []);
+
+  const [viewMode, setViewModeState] = useState<'grid' | 'overlay'>(() => {
+    return readPersistedOverlayNav().viewMode === 'overlay' ? 'overlay' : 'grid';
+  });
   const [overlayDateIndex, setOverlayDateIndexState] = useState(0);
   const [previousOverlayDateIndex, setPreviousOverlayDateIndex] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState(1000); // ms between frames
+  const [playSpeed, setPlaySpeedState] = useState(() => {
+    return readPersistedOverlayNav().playSpeed ?? 1000;
+  }); // ms between frames
 
   // Track spacebar held state for compare feature
   const [spaceHeld, setSpaceHeld] = useState(false);
@@ -33,6 +77,19 @@ export function useOverlayNavigation(
       setIsPlaying(false);
     }
   }, []);
+
+  // Persist view mode and play speed so we can resume after a hard refresh.
+  useEffect(() => {
+    persist({ viewMode });
+  }, [persist, viewMode]);
+
+  const setPlaySpeed = useCallback((ms: number) => {
+    setPlaySpeedState(ms);
+  }, []);
+
+  useEffect(() => {
+    persist({ playSpeed });
+  }, [persist, playSpeed]);
 
   const maxOverlayIndex = Math.max(0, overlayColumns.length - 1);
 
@@ -53,6 +110,34 @@ export function useOverlayNavigation(
 
   // Read-only, clamped indices (avoid setState in effects when columns shrink).
   const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateIndex));
+
+  // Hydrate the overlay date from storage (once) after we know which dates are available.
+  // If we do restore, skip the first persist pass so we don't overwrite the stored value
+  // with the default index (0) for a single render.
+  const hydratedOverlayDateRef = useRef(false);
+  const skipNextPersistOverlayDateRef = useRef(false);
+  useEffect(() => {
+    if (hydratedOverlayDateRef.current) return;
+
+    const stored = persistedRef.current.overlayDate;
+    if (!stored) {
+      hydratedOverlayDateRef.current = true;
+      return;
+    }
+
+    if (overlayColumns.length === 0) {
+      // Wait until we have dates to match against.
+      return;
+    }
+
+    hydratedOverlayDateRef.current = true;
+
+    const idx = overlayColumns.findIndex((c) => c.date === stored);
+    if (idx >= 0 && idx !== safeOverlayDateIndex) {
+      skipNextPersistOverlayDateRef.current = true;
+      setOverlayDateIndexState(idx);
+    }
+  }, [overlayColumns, safeOverlayDateIndex]);
   const safePreviousOverlayDateIndex =
     previousOverlayDateIndex === null
       ? null
@@ -89,6 +174,18 @@ export function useOverlayNavigation(
     safePreviousOverlayDateIndex !== null ? safePreviousOverlayDateIndex : fallbackCompareIndex;
 
   const displayedOverlayIndex = spaceHeld ? compareTargetIndex : safeOverlayDateIndex;
+
+  // Persist the currently-selected date (not the displayed compare date).
+  useEffect(() => {
+    if (skipNextPersistOverlayDateRef.current) {
+      skipNextPersistOverlayDateRef.current = false;
+      return;
+    }
+
+    const date = overlayColumns[safeOverlayDateIndex]?.date;
+    if (!date) return;
+    persist({ overlayDate: date });
+  }, [persist, overlayColumns, safeOverlayDateIndex]);
 
   // Auto-play effect for overlay mode
   useEffect(() => {

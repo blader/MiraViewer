@@ -24,7 +24,7 @@ function getAvailablePlanes(data: ComparisonData): string[] {
   const planes: string[] = [];
   const seen = new Set<string>();
 
-  // Keep backend plane ordering, but move Other to the end.
+  // Keep the plane ordering provided by the dataset, but move Other to the end.
   for (const p of data.planes) {
     if (p === OTHER_PLANE || !p.trim()) continue;
     if (!seen.has(p)) {

@@ -9,8 +9,6 @@ npm install
 npm run dev
 ```
 
-Vite proxies all `/api/*` requests to the backend (see `vite.config.ts`).
-
 ## Scripts
 
 - `npm run dev` — start the frontend dev server
@@ -21,6 +19,10 @@ Vite proxies all `/api/*` requests to the backend (see `vite.config.ts`).
 ## Where to look in the code
 
 - `src/components/ComparisonMatrix.tsx` — main UI (grid + overlay views)
-- `src/components/DicomViewer.tsx` — image display + interactions (scroll, click-to-center)
+- `src/components/DicomViewer.tsx` — DICOM slice rendering + interactions
+- `src/components/UploadModal.tsx` — DICOM import (folder/ZIP)
+- `src/components/ExportModal.tsx` — export backups
 - `src/hooks/usePanelSettings.ts` — per-date panel settings persistence
-- `src/utils/api.ts` — API client for the backend
+- `src/services/dicomIngestion.ts` — parse/store DICOMs into IndexedDB
+- `src/services/exportBackup.ts` — build ZIP backups from IndexedDB
+- `src/utils/localApi.ts` — local data access layer (IndexedDB)

@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import type { PanelSettings, PanelSettingsFromApi } from '../types/api';
+import type { PanelSettings, PanelSettingsPartial } from '../types/api';
 import { getPanelSettings, savePanelSettings } from '../utils/localApi';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 
-function normalizePanelSettingsFromApi(s: PanelSettingsFromApi | undefined): PanelSettings {
+function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): PanelSettings {
   return {
     offset: typeof s?.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
     zoom: typeof s?.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
@@ -72,7 +72,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
       return next;
     });
 
-    // Persist to backend (fire-and-forget)
+    // Persist to local storage (fire-and-forget)
     savePanelSettings(seqId, date, settings).catch(() => {});
   }, []);
 
@@ -125,7 +125,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undoLastPanelSetting, redoLastPanelSetting]);
 
-  // Load panel settings from backend when sequence or dates change
+  // Load panel settings from local storage when sequence or dates change
   useEffect(() => {
     if (!selectedSeqId) return;
     const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
@@ -149,7 +149,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     let cancelled = false;
     (async () => {
       try {
-        const server = await getPanelSettings(selectedSeqId);
+        const stored = await getPanelSettings(selectedSeqId);
         if (cancelled) return;
         
         setPanelSettings(prev => {
@@ -164,12 +164,12 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
             }
           }
 
-          // Hydrate all server settings (not just enabled dates) so toggling dates later preserves saved values.
-          for (const [date, s] of Object.entries(server)) {
-            next.set(date, normalizePanelSettingsFromApi(s));
+          // Hydrate all stored settings (not just enabled dates) so toggling dates later preserves saved values.
+          for (const [date, s] of Object.entries(stored)) {
+            next.set(date, normalizePanelSettingsPartial(s));
           }
 
-          // Ensure enabled dates not present on server still get defaults.
+          // Ensure enabled dates not present in storage still get defaults.
           for (const date of currentDates) {
             if (!next.has(date)) {
               next.set(date, { ...DEFAULT_PANEL_SETTINGS });
@@ -185,7 +185,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
           const initial = sortedDates[0];
           if (initial) {
             setActivePanel(initial);
-            const s = server[initial] || {};
+            const s = stored[initial] || {};
             if (typeof s.progress === 'number') {
               setProgress(Math.max(0, Math.min(1, s.progress)));
             }
@@ -240,7 +240,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
         }
       }
 
-      // Persist to backend (fire-and-forget)
+      // Persist to local storage (fire-and-forget)
       savePanelSettings(selectedSeqId, date, updated).catch(() => {});
 
       const next = new Map(prev);

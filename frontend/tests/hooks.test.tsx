@@ -1,4 +1,4 @@
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useComparisonFilters } from '../src/hooks/useComparisonFilters';
 import { useOverlayNavigation } from '../src/hooks/useOverlayNavigation';
@@ -53,6 +53,55 @@ describe('useComparisonFilters', () => {
 });
 
 describe('useOverlayNavigation', () => {
+  it('hydrates view mode, selected date, and play speed from storage', async () => {
+    localStorage.setItem(
+      'miraviewer:overlay-nav:v1',
+      JSON.stringify({ viewMode: 'overlay', overlayDate: '2024-02-01', playSpeed: 250 })
+    );
+
+    const ref1: SeriesRef = { study_id: 's1', series_uid: 'a', instance_count: 1 };
+    const ref2: SeriesRef = { study_id: 's2', series_uid: 'b', instance_count: 1 };
+    const ref3: SeriesRef = { study_id: 's3', series_uid: 'c', instance_count: 1 };
+    const columns = [
+      { date: '2024-01-01', ref: ref1 },
+      { date: '2024-02-01', ref: ref2 },
+      { date: '2024-03-01', ref: ref3 },
+    ];
+
+    const { result } = renderHook(() => useOverlayNavigation(columns));
+
+    expect(result.current.viewMode).toBe('overlay');
+    expect(result.current.playSpeed).toBe(250);
+
+    await waitFor(() => {
+      expect(result.current.overlayDateIndex).toBe(1);
+    });
+  });
+
+  it('persists navigation changes to storage', async () => {
+    const ref1: SeriesRef = { study_id: 's1', series_uid: 'a', instance_count: 1 };
+    const ref2: SeriesRef = { study_id: 's2', series_uid: 'b', instance_count: 1 };
+    const columns = [
+      { date: '2024-01-01', ref: ref1 },
+      { date: '2024-02-01', ref: ref2 },
+    ];
+
+    const { result } = renderHook(() => useOverlayNavigation(columns));
+
+    act(() => result.current.setViewMode('overlay'));
+    act(() => result.current.setPlaySpeed(2000));
+    act(() => result.current.setOverlayDateIndex(1));
+
+    await waitFor(() => {
+      const raw = localStorage.getItem('miraviewer:overlay-nav:v1');
+      expect(raw).toBeTruthy();
+      const parsed = JSON.parse(raw || '{}') as { viewMode?: string; overlayDate?: string; playSpeed?: number };
+      expect(parsed.viewMode).toBe('overlay');
+      expect(parsed.overlayDate).toBe('2024-02-01');
+      expect(parsed.playSpeed).toBe(2000);
+    });
+  });
+
   it('handles keyboard navigation and space compare', () => {
     const ref1: SeriesRef = { study_id: 's1', series_uid: 'a', instance_count: 1 };
     const ref2: SeriesRef = { study_id: 's2', series_uid: 'b', instance_count: 1 };

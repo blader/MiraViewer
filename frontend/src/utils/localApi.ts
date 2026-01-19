@@ -1,6 +1,6 @@
 import { getDB } from '../db/db';
 import type { DicomSeries } from '../db/schema';
-import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsFromApi, PanelSettings } from '../types/api';
+import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
 
 // Helper to generate a stable ID for the combo
 function slugifyCombo(plane?: string, weight?: string, sequence?: string): string {
@@ -203,13 +203,13 @@ export async function getComparisonData(): Promise<ComparisonData> {
   };
 }
 
-export async function getPanelSettings(comboId: string): Promise<Record<string, PanelSettingsFromApi>> {
+export async function getPanelSettings(comboId: string): Promise<Record<string, PanelSettingsPartial>> {
   const db = await getDB();
   const row = await db.get('panel_settings', comboId);
   if (!row) return {};
   
-  // Convert full settings to Partial for API compat
-  const result: Record<string, PanelSettingsFromApi> = {};
+  // Convert stored settings to a partial shape (callers treat missing fields as defaults).
+  const result: Record<string, PanelSettingsPartial> = {};
   for (const [date, settings] of Object.entries(row.settings)) {
     result[date] = settings;
   }
@@ -239,14 +239,58 @@ export async function savePanelSettings(comboId: string, dateIso: string, settin
  * Resolve the Cornerstone imageId for a given series + instance index.
  * Returns an ID like `miradb:<sopInstanceUid>`.
  */
-export async function getImageIdForInstance(seriesUid: string, instanceIndex: number): Promise<string> {
+type SeriesInstanceOrderCacheEntry = {
+  // Sorted by instanceNumber (ascending).
+  uids: string[];
+};
+
+const SERIES_INSTANCE_ORDER_CACHE_MAX = 64;
+const seriesInstanceOrderCache = new Map<string, SeriesInstanceOrderCacheEntry>();
+
+function cacheSeriesInstanceOrder(seriesUid: string, uids: string[]) {
+  // Refresh LRU ordering.
+  if (seriesInstanceOrderCache.has(seriesUid)) {
+    seriesInstanceOrderCache.delete(seriesUid);
+  }
+  seriesInstanceOrderCache.set(seriesUid, { uids });
+
+  // Simple LRU eviction.
+  while (seriesInstanceOrderCache.size > SERIES_INSTANCE_ORDER_CACHE_MAX) {
+    const oldest = seriesInstanceOrderCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    seriesInstanceOrderCache.delete(oldest);
+  }
+}
+
+async function getSortedInstanceUidsForSeries(seriesUid: string): Promise<string[]> {
+  const cached = seriesInstanceOrderCache.get(seriesUid);
+  if (cached) {
+    // Touch LRU.
+    cacheSeriesInstanceOrder(seriesUid, cached.uids);
+    return cached.uids;
+  }
+
   const db = await getDB();
   const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
   if (!instances || instances.length === 0) {
     throw new Error('No instances for series');
   }
-  instances.sort((a, b) => a.instanceNumber - b.instanceNumber);
-  const inst = instances[instanceIndex];
-  if (!inst) throw new Error('Instance index out of range');
-  return `miradb:${inst.sopInstanceUid}`;
+
+  instances.sort((a, b) => {
+    const diff = a.instanceNumber - b.instanceNumber;
+    if (diff !== 0) return diff;
+    // Stable tie-breaker for weird/duplicate instance numbers.
+    return a.sopInstanceUid.localeCompare(b.sopInstanceUid);
+  });
+
+  const uids = instances.map((i) => i.sopInstanceUid);
+  cacheSeriesInstanceOrder(seriesUid, uids);
+  return uids;
+}
+
+export async function getImageIdForInstance(seriesUid: string, instanceIndex: number): Promise<string> {
+  const uids = await getSortedInstanceUidsForSeries(seriesUid);
+  const uid = uids[instanceIndex];
+  if (!uid) throw new Error('Instance index out of range');
+  return `miradb:${uid}`;
 }

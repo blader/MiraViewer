@@ -545,7 +545,7 @@ function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: Corners
         style={{ minWidth: '100px', minHeight: '100px' }}
         aria-label={alt} 
       />
-      {status === 'loading' && <DelayedSpinnerOverlay />}
+      {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
       {status === 'error' && (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)] bg-black">
           Failed to load image

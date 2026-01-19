@@ -28,9 +28,6 @@ export default defineConfig(() => {
       // Keep a stable dev URL and avoid Vite auto-incrementing to 43125/43126 if 43124 is already in use.
       port: 43124,
       strictPort: true,
-      proxy: {
-        '/api': 'http://localhost:43123',
-      },
     },
     test: {
       globals: true,

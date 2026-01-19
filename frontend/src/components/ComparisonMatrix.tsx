@@ -61,6 +61,31 @@ const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
 const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
 const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
 
+type PersistedComparisonUiState = {
+  sidebarOpen?: boolean;
+  rightSidebarOpen?: boolean;
+};
+
+const COMPARISON_UI_STORAGE_KEY = 'miraviewer:comparison-ui:v1';
+
+function readPersistedComparisonUiState(): PersistedComparisonUiState {
+  try {
+    const raw = localStorage.getItem(COMPARISON_UI_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const obj = parsed as Record<string, unknown>;
+    return {
+      sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : undefined,
+      rightSidebarOpen: typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -267,8 +292,35 @@ export function ComparisonMatrix() {
     toggleDate,
   } = useComparisonFilters(data);
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
+  const uiPersistedRef = useRef<PersistedComparisonUiState>(readPersistedComparisonUiState());
+
+  const persistUi = useCallback((update: PersistedComparisonUiState) => {
+    const next: PersistedComparisonUiState = { ...uiPersistedRef.current, ...update };
+    uiPersistedRef.current = next;
+    try {
+      localStorage.setItem(COMPARISON_UI_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore quota/blocked storage.
+    }
+  }, []);
+
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    const persisted = readPersistedComparisonUiState();
+    return typeof persisted.sidebarOpen === 'boolean' ? persisted.sidebarOpen : true;
+  });
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
+    const persisted = readPersistedComparisonUiState();
+    return typeof persisted.rightSidebarOpen === 'boolean' ? persisted.rightSidebarOpen : true;
+  });
+
+  // Persist the user's layout preferences so a hard refresh resumes where they left off.
+  useEffect(() => {
+    persistUi({ sidebarOpen });
+  }, [persistUi, sidebarOpen]);
+  useEffect(() => {
+    persistUi({ rightSidebarOpen });
+  }, [persistUi, rightSidebarOpen]);
+
   const [helpOpen, setHelpOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
@@ -1099,17 +1151,21 @@ export function ComparisonMatrix() {
                           )
                         );
                       }}
-                      brightness={overlayNanoBananaOverrideUrl ? 100 : overlayDisplayedSettings.brightness}
-                      contrast={overlayNanoBananaOverrideUrl ? 100 : overlayDisplayedSettings.contrast}
-                      zoom={overlayNanoBananaOverrideUrl ? 1 : overlayDisplayedSettings.zoom}
-                      rotation={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.rotation}
-                      panX={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.panX}
-                      panY={overlayNanoBananaOverrideUrl ? 0 : overlayDisplayedSettings.panY}
+                      // In overlay mode, we want "hold Space to compare" to feel instant.
+                      // If we swap per-date pan/zoom/brightness when Space is held, the image can appear
+                      // to "flash" (the previous date's transforms apply briefly). Keep transforms pinned
+                      // to the actively-controlled date so Space compare only swaps pixel data.
+                      brightness={overlayNanoBananaOverrideUrl ? 100 : overlayControlSettings.brightness}
+                      contrast={overlayNanoBananaOverrideUrl ? 100 : overlayControlSettings.contrast}
+                      zoom={overlayNanoBananaOverrideUrl ? 1 : overlayControlSettings.zoom}
+                      rotation={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.rotation}
+                      panX={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.panX}
+                      panY={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.panY}
                       onPanChange={
-                        overlayNanoBananaOverrideUrl
+                        overlayNanoBananaOverrideUrl || !overlayControlDate
                           ? undefined
                           : (newPanX, newPanY) => {
-                              updatePanelSetting(overlayDisplayedDate, { panX: newPanX, panY: newPanY });
+                              updatePanelSetting(overlayControlDate, { panX: newPanX, panY: newPanY });
                             }
                       }
                     />

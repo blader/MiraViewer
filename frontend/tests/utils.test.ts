@@ -3,7 +3,6 @@ import { clamp, clampInt, getSliceIndex, getProgressFromSlice, normalizeRotation
 import { formatDate, formatRotation } from '../src/utils/format';
 import { formatSequenceLabel, getSequenceTooltip } from '../src/utils/clinicalData';
 import { base64ToBlob, blobToBase64Data } from '../src/utils/base64';
-import { getImageUrl, fetchNanoBananaProAcpAnnotation, uploadDicomArchive } from '../src/utils/api';
 
 describe('math utils', () => {
   it('clamps values', () => {
@@ -59,17 +58,5 @@ describe('base64 utils', () => {
     const blob = base64ToBlob(base64, 'text/plain');
     const out = await blobToBase64Data(blob);
     expect(out).toBe(base64);
-  });
-});
-
-describe('api utils (offline)', () => {
-  it('getImageUrl returns a placeholder imageId', () => {
-    const url = getImageUrl('study', 'series', 1);
-    expect(url).toMatch(/^miradb:/);
-  });
-
-  it('AI and upload APIs throw in offline mode', async () => {
-    await expect(fetchNanoBananaProAcpAnnotation()).rejects.toThrow(/disabled/i);
-    await expect(uploadDicomArchive()).rejects.toThrow(/offline/i);
   });
 });
