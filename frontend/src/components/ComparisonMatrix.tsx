@@ -1085,6 +1085,10 @@ export function ComparisonMatrix() {
                           rotation={nanoBananaOverrideUrl ? 0 : settings.rotation}
                           panX={nanoBananaOverrideUrl ? 0 : settings.panX}
                           panY={nanoBananaOverrideUrl ? 0 : settings.panY}
+                          affine00={nanoBananaOverrideUrl ? 1 : settings.affine00}
+                          affine01={nanoBananaOverrideUrl ? 0 : settings.affine01}
+                          affine10={nanoBananaOverrideUrl ? 0 : settings.affine10}
+                          affine11={nanoBananaOverrideUrl ? 1 : settings.affine11}
                           onPanChange={
                             nanoBananaOverrideUrl
                               ? undefined
@@ -1317,6 +1321,10 @@ export function ComparisonMatrix() {
                           }
                           panX={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.panX}
                           panY={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.panY}
+                          affine00={overlaySelectedNanoBananaOverrideUrl ? 1 : overlaySelectedSettings.affine00}
+                          affine01={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.affine01}
+                          affine10={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.affine10}
+                          affine11={overlaySelectedNanoBananaOverrideUrl ? 1 : overlaySelectedSettings.affine11}
                           onPanChange={
                             overlaySelectedNanoBananaOverrideUrl || isOverlayComparing
                               ? undefined
@@ -1361,6 +1369,10 @@ export function ComparisonMatrix() {
                           }
                           panX={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.panX}
                           panY={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.panY}
+                          affine00={overlayCompareNanoBananaOverrideUrl ? 1 : overlayCompareSettings.affine00}
+                          affine01={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.affine01}
+                          affine10={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.affine10}
+                          affine11={overlayCompareNanoBananaOverrideUrl ? 1 : overlayCompareSettings.affine11}
                           // Compare mode is read-only for geometry edits.
                           onPanChange={undefined}
                         />

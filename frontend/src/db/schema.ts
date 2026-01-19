@@ -54,6 +54,10 @@ export interface PanelSetting {
     contrast: number;
     panX: number;
     panY: number;
+    affine00: number;
+    affine01: number;
+    affine10: number;
+    affine11: number;
     progress: number;
   }>;
 }

@@ -95,7 +95,8 @@ export async function findBestMatchingSlice(
   refSliceIndex: number,
   refSliceCount: number,
   targetSliceCount: number,
-  onProgress?: (slicesChecked: number, bestNccSoFar: number) => void
+  onProgress?: (slicesChecked: number, bestNccSoFar: number) => void,
+  startIndexOverride?: number
 ): Promise<SliceSearchResult> {
   if (targetSliceCount === 0) {
     return { bestIndex: 0, bestNCC: 0, slicesChecked: 0 };
@@ -103,9 +104,18 @@ export async function findBestMatchingSlice(
 
   const STOP_DECREASE_STREAK = 3; // require 3 consecutive decreases
 
-  // Compute starting index from normalized position
+  // Compute starting index from normalized position.
+  //
+  // Note: when series have different coverage / slice spacing, the normalized mapping can be
+  // noticeably off. Callers can override the start index with a better guess (e.g. from a
+  // coarse registration seed).
   const startIdx = Math.round((refSliceIndex / Math.max(1, refSliceCount - 1)) * (targetSliceCount - 1));
-  const clampedStart = clamp(startIdx, 0, targetSliceCount - 1);
+  const fallbackStart = clamp(startIdx, 0, targetSliceCount - 1);
+
+  const clampedStart =
+    typeof startIndexOverride === 'number' && Number.isFinite(startIndexOverride)
+      ? clamp(Math.round(startIndexOverride), 0, targetSliceCount - 1)
+      : fallbackStart;
 
 
   // Initialize with starting slice
@@ -291,7 +301,10 @@ export function computeAlignedSettings(
   targetSliceIndex: number,
   targetSliceCount: number,
   currentProgress: number,
-  geometry: Pick<PanelSettings, 'zoom' | 'rotation' | 'panX' | 'panY'>
+  geometry: Pick<
+    PanelSettings,
+    'zoom' | 'rotation' | 'panX' | 'panY' | 'affine00' | 'affine01' | 'affine10' | 'affine11'
+  >
 ): PanelSettings {
   const { brightness, contrast } = computeIntensityMatch(refStats, targetStats);
   const offset = computeSliceOffset(targetSliceIndex, targetSliceCount, currentProgress);
@@ -306,6 +319,10 @@ export function computeAlignedSettings(
     rotation: geometry.rotation,
     panX: geometry.panX,
     panY: geometry.panY,
+    affine00: geometry.affine00,
+    affine01: geometry.affine01,
+    affine10: geometry.affine10,
+    affine11: geometry.affine11,
     // Preserve progress
     progress: currentProgress,
   };

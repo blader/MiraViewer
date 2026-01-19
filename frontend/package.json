@@ -12,6 +12,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@itk-wasm/elastix": "^1.0.2",
     "@tailwindcss/vite": "^4.1.18",
     "cornerstone-core": "^2.6.1",
     "cornerstone-math": "^0.1.10",
@@ -47,6 +48,7 @@
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
     "vite-plugin-checker": "^0.12.0",
+    "vite-plugin-static-copy": "^3.1.5",
     "vitest": "^4.0.17"
   }
 }

@@ -2,13 +2,28 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import checker from 'vite-plugin-checker'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
 import type { PluginOption } from 'vite'
 
 // https://vite.dev/config/
 export default defineConfig(() => {
   const isVitest = process.env.VITEST === 'true';
   const plugins: PluginOption[] = [react(), tailwindcss()];
+
   if (!isVitest) {
+    // ITK-Wasm pipelines are lazy-loaded assets (JS + Wasm). We vendor them into
+    // the output directory so runtime fetches are same-origin and predictable.
+    plugins.push(
+      viteStaticCopy({
+        targets: [
+          {
+            src: 'node_modules/@itk-wasm/elastix/dist/pipelines/*.{js,wasm,wasm.zst}',
+            dest: 'pipelines/',
+          },
+        ],
+      })
+    );
+
     plugins.push(
       checker({
         typescript: true,
@@ -19,8 +34,14 @@ export default defineConfig(() => {
       })
     );
   }
+
   return {
     plugins,
+    // Avoid pre-bundling ITK-Wasm packages. These rely on lazy-loaded web workers
+    // and Emscripten modules that can break when optimized.
+    optimizeDeps: {
+      exclude: ['itk-wasm', '@itk-wasm/elastix', '@thewtex/zstddec'],
+    },
     // Expose only the specific env vars we need to the client.
     // Note: this still means the API key is available in the browser when using client-side AI.
     envPrefix: ['VITE_', 'GOOGLE_API_KEY', 'GEMINI_API_KEY'],

@@ -12,6 +12,10 @@ function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): Pan
     contrast: typeof s?.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
     panX: typeof s?.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
     panY: typeof s?.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
+    affine00: typeof s?.affine00 === 'number' ? s.affine00 : DEFAULT_PANEL_SETTINGS.affine00,
+    affine01: typeof s?.affine01 === 'number' ? s.affine01 : DEFAULT_PANEL_SETTINGS.affine01,
+    affine10: typeof s?.affine10 === 'number' ? s.affine10 : DEFAULT_PANEL_SETTINGS.affine10,
+    affine11: typeof s?.affine11 === 'number' ? s.affine11 : DEFAULT_PANEL_SETTINGS.affine11,
     progress: typeof s?.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
   };
 }

@@ -30,6 +30,18 @@ export interface PanelSettings {
   contrast: number; // 0-200, 100 = normal
   panX: number; // normalized pan (-1..1), as fraction of viewport width
   panY: number; // normalized pan (-1..1), as fraction of viewport height
+
+  /**
+   * Hidden affine residual (shear / anisotropic scale) applied for display.
+   *
+   * This is a row-major 2x2 matrix, applied around the viewport center.
+   * It is not currently user-adjustable via the UI.
+   */
+  affine00: number;
+  affine01: number;
+  affine10: number;
+  affine11: number;
+
   progress: number; // normalized 0..1, last viewed global slice position for this date
 }
 
@@ -42,6 +54,10 @@ export type PanelSettingsPartial = Partial<{
   contrast: number | null;
   panX: number | null;
   panY: number | null;
+  affine00: number | null;
+  affine01: number | null;
+  affine10: number | null;
+  affine11: number | null;
   progress: number | null;
 }>;
 

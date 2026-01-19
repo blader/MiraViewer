@@ -38,6 +38,11 @@ interface DicomViewerProps {
   rotation?: number; // degrees
   panX?: number; // normalized pan (-1 to 1, as fraction of viewport)
   panY?: number; // normalized pan (-1 to 1, as fraction of viewport)
+  // Hidden affine residual (shear / anisotropic scale), row-major 2x2.
+  affine00?: number;
+  affine01?: number;
+  affine10?: number;
+  affine11?: number;
   onPanChange?: (panX: number, panY: number) => void;
 }
 
@@ -135,6 +140,10 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     rotation = 0,
     panX = 0,
     panY = 0,
+    affine00 = 1,
+    affine01 = 0,
+    affine10 = 0,
+    affine11 = 1,
     onPanChange,
   }: DicomViewerProps,
   ref
@@ -190,8 +199,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   const panXPx = panX * viewportSize.width;
   const panYPx = panY * viewportSize.height;
   
-  // Combined transform - pan is applied to move the clicked point to center
-  const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg)`;
+  // Combined transform
+  //
+  // Order matters. We apply the hidden affine matrix first (rightmost), then user rotation/zoom,
+  // and finally pan translation in display space.
+  const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg) matrix(${affine00}, ${affine10}, ${affine01}, ${affine11}, 0, 0)`;
 
   const waitForImageLoad = useCallback(async (): Promise<HTMLImageElement> => {
     const img = imgRef.current;
@@ -261,8 +273,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       ctx.fillStyle = 'black';
       ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-      // Match the CSS transform applied in the DOM:
-      // transform: translate(pan) scale(zoom) rotate(rotation)
+      // Match the CSS transform applied in the DOM.
+      //
+      // Note: Canvas 2D uses post-multiplication for transforms, so the last call is applied first.
+      // The order below mirrors:
+      //   transform: translate(pan) scale(zoom) rotate(rotation) matrix(affine)
       const panXPx = panX * cssWidth;
       const panYPx = panY * cssHeight;
 
@@ -271,6 +286,14 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       ctx.translate(panXPx, panYPx);
       ctx.scale(zoom, zoom);
       ctx.rotate((rotation * Math.PI) / 180);
+
+      // JSDOM's mocked canvas context (used in tests) may not implement ctx.transform.
+      // We only need this when the affine residual is non-identity.
+      const isIdentityAffine = affine00 === 1 && affine01 === 0 && affine10 === 0 && affine11 === 1;
+      if (!isIdentityAffine && typeof ctx.transform === 'function') {
+        ctx.transform(affine00, affine10, affine01, affine11, 0, 0);
+      }
+
       ctx.translate(-cssWidth / 2, -cssHeight / 2);
 
       // Apply brightness/contrast like CSS filters.
@@ -307,7 +330,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         }, 'image/png');
       });
     },
-    [brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom]
+    [affine00, affine01, affine10, affine11, brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom]
   );
 
   useImperativeHandle(

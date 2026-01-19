@@ -8,6 +8,11 @@ export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
   contrast: 100,
   panX: 0,
   panY: 0,
+  // Identity affine residual (no shear / anisotropy).
+  affine00: 1,
+  affine01: 0,
+  affine10: 0,
+  affine11: 1,
   progress: 0,
 };
 
