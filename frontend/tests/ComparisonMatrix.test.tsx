@@ -54,6 +54,7 @@ vi.mock('../src/hooks/useOverlayNavigation', () => ({
     setViewMode: vi.fn(),
     overlayDateIndex: 0,
     setOverlayDateIndex: vi.fn(),
+    compareTargetIndex: 0,
     displayedOverlayIndex: 0,
     isPlaying: false,
     setIsPlaying: vi.fn(),

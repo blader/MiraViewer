@@ -44,3 +44,51 @@ export type PanelSettingsPartial = Partial<{
   panY: number | null;
   progress: number | null;
 }>;
+
+// Histogram statistics for intensity matching.
+export interface HistogramStats {
+  mean: number;
+  stddev: number;
+  min: number;
+  max: number;
+  p10: number; // 10th percentile
+  p50: number; // median
+  p90: number; // 90th percentile
+}
+
+// Alignment reference for an auto-alignment run.
+//
+// We intentionally store *only* metadata + the reference panel settings.
+// The alignment code renders the reference slice from DICOM directly, which avoids
+// relying on a screenshot/capture of the viewer (and keeps alignment deterministic).
+export interface AlignmentReference {
+  // Source identification
+  date: string; // ISO date of reference
+  seriesUid: string;
+  sliceIndex: number; // Instance index on reference date
+  sliceCount: number; // Total slices in reference series
+
+  // Settings that should be used as the *base* view transform for aligned targets.
+  // (Targets get a recovered delta transform composed on top of these settings.)
+  settings: PanelSettings;
+}
+
+// Result of aligning a single date to the reference.
+export interface AlignmentResult {
+  date: string;
+  seriesUid: string;
+  bestSliceIndex: number;
+  nccScore: number; // 0-1, higher is better
+  computedSettings: PanelSettings;
+  slicesChecked: number; // For debugging/stats
+}
+
+// Progress update during alignment.
+export interface AlignmentProgress {
+  phase: 'capturing' | 'matching' | 'computing' | 'applying';
+  currentDate: string | null;
+  dateIndex: number;
+  totalDates: number;
+  slicesChecked: number;
+  bestNccSoFar: number;
+}

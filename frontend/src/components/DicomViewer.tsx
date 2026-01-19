@@ -234,7 +234,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         throw new Error('Viewer has zero size');
       }
 
-      const img = await waitForImageLoad();
+      // Determine our render source:
+      // - If ImageContent is used, we capture from the <img>
+      // - If CornerstoneImage is used, we capture from its internal <canvas>
+      const img = imgRef.current;
+      const cornerstoneCanvas = container.querySelector('canvas') as HTMLCanvasElement | null;
 
       const maxSize = options?.maxSize ?? 512;
       const maxCssDim = Math.max(cssWidth, cssHeight);
@@ -272,16 +276,28 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       // Apply brightness/contrast like CSS filters.
       ctx.filter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
 
-      // Draw the image with object-contain semantics inside the viewport.
-      const iw = img.naturalWidth;
-      const ih = img.naturalHeight;
-      const scale = Math.min(cssWidth / iw, cssHeight / ih);
-      const dw = iw * scale;
-      const dh = ih * scale;
-      const dx = (cssWidth - dw) / 2;
-      const dy = (cssHeight - dh) / 2;
+      if (img) {
+        const loadedImg = await waitForImageLoad();
 
-      ctx.drawImage(img, dx, dy, dw, dh);
+        // Draw the image with object-contain semantics inside the viewport.
+        const iw = loadedImg.naturalWidth;
+        const ih = loadedImg.naturalHeight;
+        const scale = Math.min(cssWidth / iw, cssHeight / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const dx = (cssWidth - dw) / 2;
+        const dy = (cssHeight - dh) / 2;
+
+        ctx.drawImage(loadedImg, dx, dy, dw, dh);
+      } else if (cornerstoneCanvas) {
+        // Cornerstone renders directly into a canvas sized to the viewport.
+        // We draw it 1:1 into our capture canvas.
+        ctx.drawImage(cornerstoneCanvas, 0, 0, cssWidth, cssHeight);
+      } else {
+        ctx.restore();
+        throw new Error('No render source available for capture');
+      }
+
       ctx.restore();
 
       return new Promise<Blob>((resolve, reject) => {
@@ -362,6 +378,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         ) : imageId ? (
           <CornerstoneImage
             imageId={imageId}
+            contentKey={`${seriesUid}:${instanceIndex}`}
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}
@@ -378,6 +395,17 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
 interface CornerstoneImageProps {
   imageId: string;
+  /**
+   * Identity for the requested content (e.g. series+instance).
+   *
+   * This is intentionally separate from `imageId` because `imageId` is resolved asynchronously.
+   * When navigating (e.g. swapping overlay dates), props like brightness/contrast/transform can
+   * update immediately while the viewer is still showing the previous image.
+   *
+   * We use this key to keep the *previous* image rendered with the *previous* visual settings
+   * until the new image has actually been displayed.
+   */
+  contentKey: string;
   imageFilter: string;
   imageTransform: string;
   alt: string;
@@ -408,7 +436,7 @@ function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
   );
 }
 
-function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
+function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
@@ -419,12 +447,51 @@ function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: Corners
   const [loadedImageId, setLoadedImageId] = useState<string | null>(null);
   const [errorImageId, setErrorImageId] = useState<string | null>(null);
 
+  // Track which contentKey the currently-loaded image corresponds to.
+  // This lets us avoid applying the *new* settings/transform to the *old* image
+  // during async navigation (e.g. switching overlay dates).
+  const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
+
+  // Store the last-applied visual settings so we can keep the previous image stable
+  // until the newly-requested image is actually displayed.
+  const [frozenImageFilter, setFrozenImageFilter] = useState(imageFilter);
+  const [frozenImageTransform, setFrozenImageTransform] = useState(imageTransform);
+
+  // Keep a ref of the latest requested key so the imageId load effect can associate
+  // a loaded imageId with the correct contentKey without re-running on every key change.
+  const contentKeyRef = useRef(contentKey);
+  useEffect(() => {
+    contentKeyRef.current = contentKey;
+  }, [contentKey]);
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
     errorImageId === imageId ? 'error' :
     loadedImageId === imageId ? 'loaded' :
     'loading';
+
+  const isContentInSync = loadedImageId === imageId && loadedContentKey === contentKey;
+
+  // Update the frozen visual settings only when we're "in sync".
+  //
+  // We intentionally schedule the update to avoid calling setState synchronously
+  // inside an effect body (our lint rules disallow that).
+  useEffect(() => {
+    if (!isContentInSync) return;
+
+    const timeout = window.setTimeout(() => {
+      setFrozenImageFilter(imageFilter);
+      setFrozenImageTransform(imageTransform);
+    }, 0);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [imageFilter, imageTransform, isContentInSync]);
+
+  // While navigating, keep rendering the previous image with the previous settings.
+  const appliedImageFilter = isContentInSync ? imageFilter : frozenImageFilter;
+  const appliedImageTransform = isContentInSync ? imageTransform : frozenImageTransform;
 
   // Enable cornerstone once on mount
   useEffect(() => {
@@ -473,6 +540,8 @@ function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: Corners
     const element = elementRef.current;
     if (!element) return;
 
+    const keyForThisLoad = contentKeyRef.current;
+
     let cancelled = false;
 
     const load = async () => {
@@ -501,6 +570,7 @@ function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: Corners
         const viewport = cornerstone.getDefaultViewportForImage(element, image);
         cornerstone.displayImage(element, image, viewport);
         setLoadedImageId(imageId);
+        setLoadedContentKey(keyForThisLoad);
         setErrorImageId(null);
       } catch (err) {
         console.error('Failed to load DICOM image:', err);
@@ -538,12 +608,15 @@ function CornerstoneImage({ imageId, imageFilter, imageTransform, alt }: Corners
   }, []);
 
   return (
-    <div className="w-full h-full relative" style={{ transform: imageTransform, filter: imageFilter }}>
-      <div 
-        ref={elementRef} 
-        className="w-full h-full" 
+    <div
+      className="w-full h-full relative"
+      style={{ transform: appliedImageTransform, filter: appliedImageFilter }}
+    >
+      <div
+        ref={elementRef}
+        className="w-full h-full"
         style={{ minWidth: '100px', minHeight: '100px' }}
-        aria-label={alt} 
+        aria-label={alt}
       />
       {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
       {status === 'error' && (

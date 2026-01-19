@@ -20,6 +20,12 @@ type PanelSettingsHistoryEntry = {
   date: string;
   before: PanelSettings;
   after: PanelSettings;
+  /**
+   * Optional batch identifier.
+   * If present, undo/redo will apply all contiguous entries with the same batchId
+   * as a single user-visible operation.
+   */
+  batchId?: string;
 };
 
 const MAX_HISTORY = 200;
@@ -80,6 +86,28 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     const entry = undoStackRef.current.pop();
     if (!entry) return;
 
+    const batchId = entry.batchId;
+
+    // Batch undo: pop all contiguous entries with the same batchId.
+    if (batchId) {
+      const batch: PanelSettingsHistoryEntry[] = [entry];
+      while (
+        undoStackRef.current.length > 0 &&
+        undoStackRef.current[undoStackRef.current.length - 1]?.batchId === batchId
+      ) {
+        const next = undoStackRef.current.pop();
+        if (!next) break;
+        batch.push(next);
+      }
+
+      for (const e of batch) {
+        redoStackRef.current.push(e);
+        applyPanelSettings(e.date, e.before);
+      }
+
+      return;
+    }
+
     redoStackRef.current.push(entry);
     applyPanelSettings(entry.date, entry.before);
   }, [applyPanelSettings]);
@@ -87,6 +115,28 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   const redoLastPanelSetting = useCallback(() => {
     const entry = redoStackRef.current.pop();
     if (!entry) return;
+
+    const batchId = entry.batchId;
+
+    // Batch redo: pop all contiguous entries with the same batchId.
+    if (batchId) {
+      const batch: PanelSettingsHistoryEntry[] = [entry];
+      while (
+        redoStackRef.current.length > 0 &&
+        redoStackRef.current[redoStackRef.current.length - 1]?.batchId === batchId
+      ) {
+        const next = redoStackRef.current.pop();
+        if (!next) break;
+        batch.push(next);
+      }
+
+      for (const e of batch) {
+        undoStackRef.current.push(e);
+        applyPanelSettings(e.date, e.after);
+      }
+
+      return;
+    }
 
     undoStackRef.current.push(entry);
     applyPanelSettings(entry.date, entry.after);
@@ -249,6 +299,53 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     });
   }, [selectedSeqId]);
 
+  // Batch update multiple panels at once (for alignment results).
+  // The undo stack groups all entries with the same batchId so Cmd/Ctrl+Z reverts the whole batch.
+  const batchUpdateSettings = useCallback((updates: Map<string, PanelSettings>) => {
+    if (!selectedSeqId || updates.size === 0) return;
+
+    const batchId = `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+
+    const historyEntries: PanelSettingsHistoryEntry[] = [];
+
+    setPanelSettings((prev) => {
+      const next = new Map(prev);
+
+      for (const [date, newSettings] of updates) {
+        const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
+        const updated = { ...current, ...newSettings };
+
+        historyEntries.push({
+          date,
+          before: { ...current },
+          after: { ...updated },
+          batchId,
+        });
+
+        next.set(date, updated);
+
+        // Persist (fire-and-forget)
+        savePanelSettings(selectedSeqId, date, updated).catch(() => {});
+      }
+
+      return next;
+    });
+
+    if (historyEntries.length > 0) {
+      for (const entry of historyEntries) {
+        undoStackRef.current.push(entry);
+      }
+
+      // New action invalidates redo stack.
+      redoStackRef.current.length = 0;
+
+      // Cap memory.
+      while (undoStackRef.current.length > MAX_HISTORY) {
+        undoStackRef.current.shift();
+      }
+    }
+  }, [selectedSeqId]);
+
   // Debounced persistence of progress for the active panel
   useEffect(() => {
     if (!selectedSeqId || !effectiveActivePanel) return;
@@ -288,6 +385,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     setActivePanel,
     progress,
     setProgress,
-    updatePanelSetting
+    updatePanelSetting,
+    batchUpdateSettings,
   };
 }

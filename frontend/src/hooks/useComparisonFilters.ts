@@ -186,9 +186,15 @@ export function useComparisonFilters(data: ComparisonData | null) {
   }, []);
 
   const selectAllDates = useCallback(() => {
-    if (!data) return;
-    setFilters((prev) => ({ ...prev, enabledDates: [...sortedDates] }));
-  }, [data, sortedDates]);
+    if (!data || !selectedSeqId) return;
+
+    // Only select dates that actually have data for the currently-selected sequence.
+    // (The UI renders other dates as disabled.)
+    const seqMap = data.series_map[selectedSeqId] || {};
+    const selectableDates = sortedDates.filter((d) => !!seqMap[d]);
+
+    setFilters((prev) => ({ ...prev, enabledDates: selectableDates }));
+  }, [data, selectedSeqId, sortedDates]);
 
   const selectNoDates = useCallback(() => {
     setFilters((prev) => ({ ...prev, enabledDates: [] }));

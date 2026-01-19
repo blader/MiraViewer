@@ -46,10 +46,21 @@ function toMetadata(instance: DicomInstance) {
 
 async function toArrayBuffer(value: unknown): Promise<ArrayBuffer> {
   if (value instanceof ArrayBuffer) return value;
-  if (ArrayBuffer.isView(value)) return value.buffer;
+
+  if (ArrayBuffer.isView(value)) {
+    // `value.buffer` is typed as ArrayBufferLike (can include SharedArrayBuffer).
+    // JSZip expects an ArrayBuffer, so we copy into a fresh ArrayBuffer.
+    const view = value as ArrayBufferView;
+    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return copy.buffer;
+  }
+
   if (value && typeof (value as Blob).arrayBuffer === 'function') {
     return (value as Blob).arrayBuffer();
   }
+
   // Fallback: wrap into a Blob
   return new Blob([value as BlobPart]).arrayBuffer();
 }

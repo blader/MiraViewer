@@ -259,6 +259,9 @@ export function useOverlayNavigation(
     setViewMode,
     overlayDateIndex: safeOverlayDateIndex,
     setOverlayDateIndex,
+    // Exposed so callers can pre-render/prefetch the compare target and avoid a visible jump
+    // when the user holds Space.
+    compareTargetIndex,
     displayedOverlayIndex,
     isPlaying,
     setIsPlaying,

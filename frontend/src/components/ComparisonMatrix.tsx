@@ -1,5 +1,5 @@
-import { createRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { SequenceCombo, SeriesRef } from '../types/api';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { AlignmentReference, PanelSettings, SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
 import {
   Brain,
@@ -14,6 +14,9 @@ import {
   Upload,
   Download,
   Trash2,
+  Loader2,
+  Link2,
+  X,
 } from 'lucide-react';
 import { DicomViewer, type DicomViewerHandle } from './DicomViewer';
 import { ImageControls } from './ImageControls';
@@ -27,6 +30,7 @@ import { useComparisonFilters } from '../hooks/useComparisonFilters';
 import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
+import { useAutoAlign } from '../hooks/useAutoAlign';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
 import { useAiAnnotation } from '../hooks/useAiAnnotation';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY, AI_ENABLED } from '../utils/constants';
@@ -342,17 +346,12 @@ export function ComparisonMatrix() {
     isTarget: isNanoTarget,
   } = useAiAnnotation();
 
-  // Map of viewer refs so we can snapshot exactly what's visible in a specific cell.
-  // We access this in render to assign refs; React warns if we read .current in render,
-  // but here we are managing a Map of refs for children, not reading them for display logic.
-  // This pattern is acceptable for dynamic refs.
-  const viewerRefsRef = useRef(new Map<string, React.RefObject<DicomViewerHandle | null>>());
-  const getViewerRef = useCallback((key: string) => {
-    const existing = viewerRefsRef.current.get(key);
-    if (existing) return existing;
-    const created = createRef<DicomViewerHandle>();
-    viewerRefsRef.current.set(key, created);
-    return created;
+  // Viewer handles (keyed by panel) so AI flows can optionally access the live viewer.
+  // We use callback refs so we never need to read ref values during render.
+  const viewerHandlesRef = useRef(new Map<string, DicomViewerHandle | null>());
+
+  const registerViewerHandle = useCallback((key: string, handle: DicomViewerHandle | null) => {
+    viewerHandlesRef.current.set(key, handle);
   }, []);
 
   const handleAiButtonClick = (
@@ -386,7 +385,7 @@ export function ComparisonMatrix() {
       return;
     }
 
-    const viewerHandle = viewerRefsRef.current.get(viewerKey)?.current || null;
+    const viewerHandle = viewerHandlesRef.current.get(viewerKey) || null;
     runNanoBananaAcpAnalysis(target, viewerHandle, seriesContext);
   };
 
@@ -398,7 +397,16 @@ export function ComparisonMatrix() {
   }, [clearNanoBanana]);
 
   // Custom hooks
-  const { panelSettings, progress, setProgress, updatePanelSetting } = usePanelSettings(selectedSeqId, enabledDatesKey);
+  const { panelSettings, progress, setProgress, updatePanelSetting, batchUpdateSettings } = usePanelSettings(selectedSeqId, enabledDatesKey);
+
+  // Alignment hooks
+  const {
+    isAligning,
+    progress: alignmentProgress,
+    alignAllDates,
+    abort: abortAlignment,
+  } = useAutoAlign();
+
 
   const sequencesForPlane = useMemo(() => {
     if (!data || !selectedPlane) return [] as SequenceCombo[];
@@ -440,6 +448,7 @@ export function ComparisonMatrix() {
     const selectedDates = [...enabledDates].sort((a, b) => b.localeCompare(a));
     return selectedDates.map(date => ({ date, ref: map[date] }));
   }, [data, selectedSeqId, enabledDates]);
+
   
   // For overlay mode: columns sorted oldest to newest (earliest left, latest right)
   const overlayColumns = useMemo(() => {
@@ -462,12 +471,136 @@ export function ComparisonMatrix() {
     setViewMode,
     overlayDateIndex,
     setOverlayDateIndex,
+    compareTargetIndex,
     displayedOverlayIndex,
     isPlaying,
     setIsPlaying,
     playSpeed,
     setPlaySpeed,
   } = useOverlayNavigation(overlayColumns);
+
+  const overlayDisplayedCol = overlayColumns[displayedOverlayIndex];
+  const overlayDisplayedRef = overlayDisplayedCol?.ref;
+  const overlayDisplayedDate = overlayDisplayedCol?.date;
+  const overlayDisplayedSettings = overlayDisplayedDate
+    ? panelSettings.get(overlayDisplayedDate) || DEFAULT_PANEL_SETTINGS
+    : DEFAULT_PANEL_SETTINGS;
+  const overlayDisplayedSliceIndex = overlayDisplayedRef
+    ? getSliceIndex(overlayDisplayedRef.instance_count, progress, overlayDisplayedSettings.offset)
+    : 0;
+
+  // Selected overlay date (the one highlighted in the strip).
+  const overlaySelectedCol = overlayColumns[overlayDateIndex];
+  const overlaySelectedRef = overlaySelectedCol?.ref;
+  const overlaySelectedDate = overlaySelectedCol?.date;
+  const overlaySelectedSettings = overlaySelectedDate
+    ? panelSettings.get(overlaySelectedDate) || DEFAULT_PANEL_SETTINGS
+    : DEFAULT_PANEL_SETTINGS;
+  const overlaySelectedSliceIndex = overlaySelectedRef
+    ? getSliceIndex(overlaySelectedRef.instance_count, progress, overlaySelectedSettings.offset)
+    : 0;
+
+  // Space-hold compare target.
+  const overlayCompareCol = overlayColumns[compareTargetIndex];
+  const overlayCompareRef = overlayCompareCol?.ref;
+  const overlayCompareDate = overlayCompareCol?.date;
+  const overlayCompareSettings = overlayCompareDate
+    ? panelSettings.get(overlayCompareDate) || DEFAULT_PANEL_SETTINGS
+    : DEFAULT_PANEL_SETTINGS;
+  const overlayCompareSliceIndex = overlayCompareRef
+    ? getSliceIndex(overlayCompareRef.instance_count, progress, overlayCompareSettings.offset)
+    : 0;
+
+  const isOverlayComparing = displayedOverlayIndex !== overlayDateIndex;
+  const hasOverlayCompareTarget = overlayColumns.length > 1 && compareTargetIndex !== overlayDateIndex;
+
+  const overlayIsNanoBananaTarget =
+    !!nanoBananaTarget &&
+    !!overlayDisplayedRef &&
+    !!overlayDisplayedDate &&
+    nanoBananaTarget.date === overlayDisplayedDate &&
+    nanoBananaTarget.seriesUid === overlayDisplayedRef.series_uid &&
+    nanoBananaTarget.instanceIndex === overlayDisplayedSliceIndex;
+
+  const overlaySelectedIsNanoBananaTarget =
+    !!overlaySelectedRef &&
+    !!overlaySelectedDate &&
+    isNanoTarget(overlaySelectedDate, overlaySelectedRef.series_uid, overlaySelectedSliceIndex);
+
+  const overlayCompareIsNanoBananaTarget =
+    !!overlayCompareRef &&
+    !!overlayCompareDate &&
+    isNanoTarget(overlayCompareDate, overlayCompareRef.series_uid, overlayCompareSliceIndex);
+
+  const overlaySelectedNanoBananaOverrideUrl =
+    nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlaySelectedIsNanoBananaTarget
+      ? nanoBananaImageUrl
+      : undefined;
+
+  const overlayCompareNanoBananaOverrideUrl =
+    nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlayCompareIsNanoBananaTarget
+      ? nanoBananaImageUrl
+      : undefined;
+
+
+  const overlayViewerSize = getOverlayViewerSize(gridSize);
+
+  const captureCurrentOverlayAsAlignmentReference = useCallback(async (): Promise<AlignmentReference | null> => {
+    if (!overlayDisplayedRef || !overlayDisplayedDate) return null;
+
+    // Use the underlying DICOM series/slice as the reference (identity/untransformed image).
+    // The alignment pipeline will render pixels from DICOM directly; we only need the metadata
+    // and the reference date's current panel settings.
+    return {
+      date: overlayDisplayedDate,
+      seriesUid: overlayDisplayedRef.series_uid,
+      sliceIndex: overlayDisplayedSliceIndex,
+      sliceCount: overlayDisplayedRef.instance_count,
+      settings: overlayDisplayedSettings,
+    };
+  }, [overlayDisplayedDate, overlayDisplayedRef, overlayDisplayedSliceIndex, overlayDisplayedSettings]);
+
+  // Handler for "Align All" button
+  const handleAlignAll = useCallback(async () => {
+    if (isAligning) {
+      abortAlignment();
+      return;
+    }
+
+    if (!data || !selectedSeqId) return;
+
+    const reference = await captureCurrentOverlayAsAlignmentReference();
+    if (!reference) return;
+
+    const seriesMap = data.series_map[selectedSeqId] || {};
+
+    // Get all dates except the reference date.
+    const targetDates = overlayColumns
+      .filter((col) => col.ref && col.date !== reference.date)
+      .map((col) => col.date);
+
+    if (targetDates.length === 0) return;
+
+    try {
+      const results = await alignAllDates(reference, targetDates, seriesMap, progress);
+
+      // Apply results via batch update
+      const updates = new Map<string, PanelSettings>();
+      for (const result of results) {
+        updates.set(result.date, result.computedSettings);
+      }
+      batchUpdateSettings(updates);
+
+      // Log summary
+      console.log(
+        `[Alignment] Aligned ${results.length} dates. Average NCC: ${(
+          results.reduce((sum, r) => sum + r.nccScore, 0) / results.length
+        ).toFixed(3)}`
+      );
+    } catch (err) {
+      console.error('[Alignment] Failed:', err);
+    }
+  }, [abortAlignment, captureCurrentOverlayAsAlignmentReference, data, selectedSeqId, overlayColumns, progress, alignAllDates, batchUpdateSettings, isAligning]);
 
   const setProgressWithClearAi = useCallback(
     (nextProgress: number) => {
@@ -519,6 +652,7 @@ export function ComparisonMatrix() {
 
     const persisted = readPersistedSliceLoopPlaybackSettingsForSeq(selectedSeqId);
     if (persisted) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate per-seq loop UI state on seq change (avoids a one-frame flash).
       setLoopStart(persisted.loopStart);
       setLoopEnd(persisted.loopEnd);
       setLoopSpeed(persisted.loopSpeed);
@@ -631,6 +765,7 @@ export function ComparisonMatrix() {
   // Stop looping if bounds collapse
   useEffect(() => {
     if (loopEnd - loopStart < 0.005 && isLooping) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- guardrail: stop playback when bounds collapse.
       setIsLooping(false);
     }
   }, [loopStart, loopEnd, isLooping, setIsLooping]);
@@ -691,41 +826,6 @@ export function ComparisonMatrix() {
         label: selectedSeq ? formatSequenceLabel(selectedSeq) : selectedPlane,
       }
     : { plane: null, weight: null, sequence: null, label: null };
-
-  const overlayControlCol = overlayColumns[overlayDateIndex];
-  const overlayControlRef = overlayControlCol?.ref;
-  const overlayControlDate = overlayControlCol?.date;
-  const overlayControlSettings = overlayControlDate
-    ? panelSettings.get(overlayControlDate) || DEFAULT_PANEL_SETTINGS
-    : DEFAULT_PANEL_SETTINGS;
-  const overlayControlSliceIndex = overlayControlRef
-    ? getSliceIndex(overlayControlRef.instance_count, progress, overlayControlSettings.offset)
-    : 0;
-
-  const overlayDisplayedCol = overlayColumns[displayedOverlayIndex];
-  const overlayDisplayedRef = overlayDisplayedCol?.ref;
-  const overlayDisplayedDate = overlayDisplayedCol?.date;
-  const overlayDisplayedSettings = overlayDisplayedDate
-    ? panelSettings.get(overlayDisplayedDate) || DEFAULT_PANEL_SETTINGS
-    : DEFAULT_PANEL_SETTINGS;
-  const overlayDisplayedSliceIndex = overlayDisplayedRef
-    ? getSliceIndex(overlayDisplayedRef.instance_count, progress, overlayDisplayedSettings.offset)
-    : 0;
-
-  const overlayIsNanoBananaTarget =
-    !!nanoBananaTarget &&
-    !!overlayDisplayedRef &&
-    !!overlayDisplayedDate &&
-    nanoBananaTarget.date === overlayDisplayedDate &&
-    nanoBananaTarget.seriesUid === overlayDisplayedRef.series_uid &&
-    nanoBananaTarget.instanceIndex === overlayDisplayedSliceIndex;
-
-  const overlayNanoBananaOverrideUrl =
-    nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlayIsNanoBananaTarget
-      ? nanoBananaImageUrl
-      : undefined;
-
-  const overlayViewerSize = getOverlayViewerSize(gridSize);
 
   return (
     <div className="h-screen flex flex-col">
@@ -909,7 +1009,6 @@ export function ComparisonMatrix() {
                   gridAutoRows: `${gridCellSize + 32}px`, // +32 for header
                 }}
               >
-                {/* eslint-disable react-hooks/refs -- Dynamic refs for viewer capture */}
                 {columns.map(({ date, ref }) => {
                   const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;
                   
@@ -970,7 +1069,7 @@ export function ComparisonMatrix() {
                       </div>
                       <div className="flex-1 min-h-0 bg-black relative">
                         <DicomViewer
-                          ref={getViewerRef(viewerKey)}
+                          ref={(handle) => registerViewerHandle(viewerKey, handle)}
                           studyId={ref.study_id}
                           seriesUid={ref.series_uid}
                           instanceIndex={idx}
@@ -1025,7 +1124,6 @@ export function ComparisonMatrix() {
                     </div>
                   );
                 })}
-                {/* eslint-enable react-hooks/refs */}
                 {columns.length === 0 && (
                   <div className="h-full flex items-center justify-center text-[var(--text-secondary)]">Select dates to view</div>
                 )}
@@ -1081,28 +1179,36 @@ export function ComparisonMatrix() {
                 ))}
               </div>
               
-              {/* Image adjustment controls for current date */}
-              {overlayControlRef && overlayControlDate && (
-                <div className="flex items-center flex-shrink-0 bg-[var(--bg-primary)] rounded-lg px-2 py-1">
+              {/* Image adjustment controls for displayed date (follows Space-hold compare). */}
+              {overlayDisplayedRef && overlayDisplayedDate && (
+                <div
+                  className={`flex items-center flex-shrink-0 bg-[var(--bg-primary)] rounded-lg px-2 py-1 ${
+                    displayedOverlayIndex !== overlayDateIndex ? 'opacity-70 pointer-events-none' : ''
+                  }`}
+                  title={
+                    displayedOverlayIndex !== overlayDateIndex
+                      ? 'Comparing (hold Space) — controls are read-only'
+                      : undefined
+                  }
+                >
                   <ImageControls
-                    settings={overlayControlSettings}
-                    instanceIndex={overlayControlSliceIndex}
-                    instanceCount={overlayControlRef.instance_count}
+                    settings={overlayDisplayedSettings}
+                    instanceIndex={overlayDisplayedSliceIndex}
+                    instanceCount={overlayDisplayedRef.instance_count}
                     onUpdate={(update) => {
                       const isOverlayTarget =
                         nanoBananaStatus !== 'idle' &&
-                        isNanoTarget(overlayControlDate, overlayControlRef.series_uid, overlayControlSliceIndex);
+                        isNanoTarget(overlayDisplayedDate, overlayDisplayedRef.series_uid, overlayDisplayedSliceIndex);
 
                       if (isOverlayTarget) {
                         clearNanoBanana();
                       }
 
-                      updatePanelSetting(overlayControlDate, update);
+                      updatePanelSetting(overlayDisplayedDate, update);
                     }}
                     onAcpAnalyze={
                       AI_ENABLED
                         ? () => {
-                            if (!overlayDisplayedRef || !overlayDisplayedDate) return;
                             handleAiButtonClick(
                               {
                                 date: overlayDisplayedDate,
@@ -1120,6 +1226,39 @@ export function ComparisonMatrix() {
                   />
                 </div>
               )}
+
+              {/* Align All button (uses current overlay image as reference). */}
+              <div className="flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={handleAlignAll}
+                  disabled={!overlayDisplayedRef}
+                  className={`min-w-[120px] justify-center px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 whitespace-nowrap ${
+                    isAligning
+                      ? 'bg-amber-600 text-white hover:bg-amber-700'
+                      : !overlayDisplayedRef
+                      ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
+                      : 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
+                  }`}
+                  title={
+                    isAligning
+                      ? 'Cancel alignment'
+                      : 'Align all other dates to match the currently visible overlay image'
+                  }
+                >
+                  {isAligning ? (
+                    <>
+                      <X className="w-4 h-4" />
+                      Cancel
+                    </>
+                  ) : (
+                    <>
+                      <Link2 className="w-4 h-4" />
+                      Align All
+                    </>
+                  )}
+                </button>
+              </div>
               </div>
               
               {/* Single large viewer */}
@@ -1131,44 +1270,126 @@ export function ComparisonMatrix() {
                     className="relative rounded-lg overflow-hidden border border-[var(--border-color)]"
                     style={{ width: overlayViewerSize, height: overlayViewerSize }}
                   >
-                    <DicomViewer
-                      // eslint-disable-next-line react-hooks/refs -- Dynamic ref for viewer capture
-                      ref={getViewerRef('overlay')}
-                      // Important: do not key by series/date.
-                      // Remounting the viewer forces Cornerstone to re-enable the element,
-                      // which causes a visible black flash when toggling dates.
-                      studyId={overlayDisplayedRef.study_id}
-                      seriesUid={overlayDisplayedRef.series_uid}
-                      instanceIndex={overlayDisplayedSliceIndex}
-                      instanceCount={overlayDisplayedRef.instance_count}
-                      imageUrlOverride={overlayNanoBananaOverrideUrl}
-                      onInstanceChange={(i) => {
-                        setProgressWithClearAi(
-                          getProgressFromSlice(
-                            i,
-                            overlayDisplayedRef.instance_count,
-                            overlayDisplayedSettings.offset
-                          )
-                        );
-                      }}
-                      // In overlay mode, we want "hold Space to compare" to feel instant.
-                      // If we swap per-date pan/zoom/brightness when Space is held, the image can appear
-                      // to "flash" (the previous date's transforms apply briefly). Keep transforms pinned
-                      // to the actively-controlled date so Space compare only swaps pixel data.
-                      brightness={overlayNanoBananaOverrideUrl ? 100 : overlayControlSettings.brightness}
-                      contrast={overlayNanoBananaOverrideUrl ? 100 : overlayControlSettings.contrast}
-                      zoom={overlayNanoBananaOverrideUrl ? 1 : overlayControlSettings.zoom}
-                      rotation={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.rotation}
-                      panX={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.panX}
-                      panY={overlayNanoBananaOverrideUrl ? 0 : overlayControlSettings.panY}
-                      onPanChange={
-                        overlayNanoBananaOverrideUrl || !overlayControlDate
-                          ? undefined
-                          : (newPanX, newPanY) => {
-                              updatePanelSetting(overlayControlDate, { panX: newPanX, panY: newPanY });
-                            }
-                      }
-                    />
+                    {/*
+                      Space compare should feel instant.
+
+                      Previously we updated a single viewer's series/settings on Space keydown.
+                      That can cause a brief visual "jerk" (old image + new transform/settings)
+                      while the new slice resolves/loads.
+
+                      To avoid that, we keep BOTH the selected date and the compare target mounted
+                      and simply toggle which one is visible.
+                    */}
+                    <div
+                      className={`absolute inset-0 ${
+                        isOverlayComparing ? 'opacity-0 pointer-events-none' : 'opacity-100'
+                      }`}
+                    >
+                      {overlaySelectedRef && overlaySelectedDate ? (
+                        <DicomViewer
+                          ref={(handle) => registerViewerHandle('overlay', handle)}
+                          // Important: do not key by series/date.
+                          // Remounting the viewer forces Cornerstone to re-enable the element,
+                          // which causes a visible black flash when toggling dates.
+                          studyId={overlaySelectedRef.study_id}
+                          seriesUid={overlaySelectedRef.series_uid}
+                          instanceIndex={overlaySelectedSliceIndex}
+                          instanceCount={overlaySelectedRef.instance_count}
+                          imageUrlOverride={overlaySelectedNanoBananaOverrideUrl}
+                          onInstanceChange={(i) => {
+                            setProgressWithClearAi(
+                              getProgressFromSlice(
+                                i,
+                                overlaySelectedRef.instance_count,
+                                overlaySelectedSettings.offset
+                              )
+                            );
+                          }}
+                          brightness={
+                            overlaySelectedNanoBananaOverrideUrl ? 100 : overlaySelectedSettings.brightness
+                          }
+                          contrast={
+                            overlaySelectedNanoBananaOverrideUrl ? 100 : overlaySelectedSettings.contrast
+                          }
+                          zoom={overlaySelectedNanoBananaOverrideUrl ? 1 : overlaySelectedSettings.zoom}
+                          rotation={
+                            overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.rotation
+                          }
+                          panX={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.panX}
+                          panY={overlaySelectedNanoBananaOverrideUrl ? 0 : overlaySelectedSettings.panY}
+                          onPanChange={
+                            overlaySelectedNanoBananaOverrideUrl || isOverlayComparing
+                              ? undefined
+                              : (newPanX, newPanY) => {
+                                  updatePanelSetting(overlaySelectedDate, { panX: newPanX, panY: newPanY });
+                                }
+                          }
+                        />
+                      ) : null}
+                    </div>
+
+                    {hasOverlayCompareTarget && overlayCompareRef && overlayCompareDate ? (
+                      <div
+                        className={`absolute inset-0 ${
+                          isOverlayComparing ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                        }`}
+                      >
+                        <DicomViewer
+                          studyId={overlayCompareRef.study_id}
+                          seriesUid={overlayCompareRef.series_uid}
+                          instanceIndex={overlayCompareSliceIndex}
+                          instanceCount={overlayCompareRef.instance_count}
+                          imageUrlOverride={overlayCompareNanoBananaOverrideUrl}
+                          onInstanceChange={(i) => {
+                            setProgressWithClearAi(
+                              getProgressFromSlice(
+                                i,
+                                overlayCompareRef.instance_count,
+                                overlayCompareSettings.offset
+                              )
+                            );
+                          }}
+                          brightness={
+                            overlayCompareNanoBananaOverrideUrl ? 100 : overlayCompareSettings.brightness
+                          }
+                          contrast={
+                            overlayCompareNanoBananaOverrideUrl ? 100 : overlayCompareSettings.contrast
+                          }
+                          zoom={overlayCompareNanoBananaOverrideUrl ? 1 : overlayCompareSettings.zoom}
+                          rotation={
+                            overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.rotation
+                          }
+                          panX={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.panX}
+                          panY={overlayCompareNanoBananaOverrideUrl ? 0 : overlayCompareSettings.panY}
+                          // Compare mode is read-only for geometry edits.
+                          onPanChange={undefined}
+                        />
+                      </div>
+                    ) : null}
+
+                    {isAligning && alignmentProgress && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-black/70 border border-white/10 shadow-xl">
+                          <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-white">
+                              {alignmentProgress.phase === 'capturing'
+                                ? 'Preparing reference…'
+                                : alignmentProgress.currentDate
+                                ? `Aligning ${formatDate(alignmentProgress.currentDate)} (${alignmentProgress.dateIndex + 1}/${
+                                    alignmentProgress.totalDates
+                                  })`
+                                : 'Aligning…'}
+                            </div>
+                            {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
+                              <div className="text-xs text-white/70">
+                                {alignmentProgress.slicesChecked} slices · NCC {(alignmentProgress.bestNccSoFar * 100).toFixed(0)}%
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {AI_ENABLED && nanoBananaStatus === 'loading' && overlayIsNanoBananaTarget && (
                       <div className="absolute top-3 right-3 max-w-[70%]">

@@ -112,6 +112,9 @@ export async function getStudy(studyUid: string) {
 }
 
 export async function getSeries(studyUid: string, seriesUid: string) {
+  // This API matches the server-style signature, but we only need seriesUid locally.
+  void studyUid;
+
   const db = await getDB();
   const series = await db.get('series', seriesUid);
   if (!series) throw new Error('Series not found');
@@ -211,7 +214,9 @@ export async function getPanelSettings(comboId: string): Promise<Record<string, 
   // Convert stored settings to a partial shape (callers treat missing fields as defaults).
   const result: Record<string, PanelSettingsPartial> = {};
   for (const [date, settings] of Object.entries(row.settings)) {
-    result[date] = settings;
+    // idb's inferred types for Object.entries can degrade to `unknown` under strict settings.
+    // The stored value is a subset of PanelSettings (numbers), which is safe to treat as partial.
+    result[date] = settings as PanelSettingsPartial;
   }
   return result;
 }

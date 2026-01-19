@@ -31,7 +31,7 @@ export function HelpModal({ onClose }: HelpModalProps) {
             <ul className="space-y-1 text-[var(--text-secondary)]">
               <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">1-9</kbd> — Jump to date by number</li>
               <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">←</kbd> <kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">→</kbd> — Previous / next date</li>
-              <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Hold Space</kbd> — Quick compare with previous date</li>
+              <li><kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Hold Space</kbd> — Quick compare (previous date if available; otherwise nearest)</li>
             </ul>
           </div>
           <div>
@@ -46,11 +46,22 @@ export function HelpModal({ onClose }: HelpModalProps) {
             </ul>
           </div>
           <div>
+            <h3 className="font-semibold text-[var(--text-primary)] mb-2">Auto-Alignment (Overlay Mode)</h3>
+            <ul className="space-y-1 text-[var(--text-secondary)]">
+              <li><span className="text-[var(--text-primary)]">Align All</span> — Use the currently visible overlay image as the reference and align all other dates</li>
+              <li>• Finds best matching slice for each date</li>
+              <li>• Adjusts brightness/contrast to match intensity</li>
+              <li>• Copies zoom, rotation, and pan from the reference view</li>
+              <li className="text-xs italic">Progress appears over the center viewer while aligning</li>
+            </ul>
+          </div>
+          <div>
             <h3 className="font-semibold text-[var(--text-primary)] mb-2">Tips</h3>
             <ul className="space-y-1 text-[var(--text-secondary)]">
               <li>• Hover over sequence names for clinical descriptions</li>
               <li>• Slice slider syncs anatomical position across dates</li>
               <li>• All settings persist automatically</li>
+              <li>• Use <kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] rounded text-xs">Cmd/Ctrl+Z</kbd> to undo alignment</li>
             </ul>
           </div>
         </div>
