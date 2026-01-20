@@ -1,7 +1,7 @@
-import type { HistogramStats, PanelSettings } from '../types/api';
+import type { ExclusionMask, HistogramStats, PanelSettings } from '../types/api';
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from './constants';
 import { clamp } from './math';
-import { computeMutualInformation } from './mutualInformation';
+import { computeMutualInformation, type MutualInformationOptions } from './mutualInformation';
 
 /**
  * Compute normalized mutual information (NMI) between two grayscale images.
@@ -20,8 +20,40 @@ export function computeNMI(imageA: Float32Array, imageB: Float32Array, bins: num
  */
 export interface SliceSearchResult {
   bestIndex: number;
-  bestNMI: number;
+  /** Mutual information (natural log). Higher is better. */
+  bestMI: number;
   slicesChecked: number;
+  /** Optional perf counters for profiling/debugging. */
+  timingMs?: {
+    /** Time spent computing MI/NMI scores (excludes rendering / warping). */
+    scoreMs: number;
+  };
+}
+
+type SliceScoreDirection = 'start' | 'left' | 'right';
+
+type FindBestMatchingSliceOptions = {
+  /** Override the starting index with a better initial guess (e.g. from a coarse seed). */
+  startIndexOverride?: number;
+  /** Histogram bins for MI/NMI scoring. Lower values are faster but less sensitive. */
+  miBins?: number;
+  /** How many consecutive decreases are required before stopping a direction. */
+  stopDecreaseStreak?: number;
+  /** Optional hook for logging or debugging slice-level scores. */
+  onSliceScored?: (index: number, metrics: { mi: number; nmi: number }, direction: SliceScoreDirection) => void;
+  /**
+   * Optional exclusion rectangle in normalized [0,1] image coordinates.
+   * Pixels inside this rect are excluded from MI scoring (useful for ignoring tumors).
+   */
+  exclusionRect?: ExclusionMask;
+  /** Image width in pixels (required if exclusionRect is provided). */
+  imageWidth?: number;
+  /** Image height in pixels (required if exclusionRect is provided). */
+  imageHeight?: number;
+};
+
+function nowMs(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
 }
 
 /**
@@ -30,13 +62,13 @@ export interface SliceSearchResult {
  * Strategy:
  * - Start at the normalized slice depth (refIndex/refCount mapped into targetCount)
  * - Search outward in both directions
- * - Stop in each direction only after 3 consecutive NMI decreases (per-direction)
+ * - Stop in each direction only after N consecutive MI decreases (per-direction)
  *
  * Rationale:
  * - Adjacent slices can be noisy; a single decrease is not sufficient to stop.
- * - We intentionally do NOT early-exit based on bestNMI, and we do NOT enforce a minimum
+ * - We intentionally do NOT early-exit based on bestMI, and we do NOT enforce a minimum
  *   search window. That keeps behavior deterministic and avoids premature termination when
- *   NMI happens to spike early.
+ *   MI happens to spike early.
  */
 export async function findBestMatchingSlice(
   referencePixels: Float32Array,
@@ -44,15 +76,37 @@ export async function findBestMatchingSlice(
   refSliceIndex: number,
   refSliceCount: number,
   targetSliceCount: number,
-  onProgress?: (slicesChecked: number, bestNmiSoFar: number) => void,
-  startIndexOverride?: number
+  onProgress?: (slicesChecked: number, bestMiSoFar: number) => void,
+  options?: FindBestMatchingSliceOptions
 ): Promise<SliceSearchResult> {
   if (targetSliceCount === 0) {
-    return { bestIndex: 0, bestNMI: 0, slicesChecked: 0 };
+    return { bestIndex: 0, bestMI: 0, slicesChecked: 0, timingMs: { scoreMs: 0 } };
   }
 
-  const STOP_DECREASE_STREAK = 3; // require 3 consecutive decreases
-  const NMI_BINS = 64;
+  const STOP_DECREASE_STREAK = options?.stopDecreaseStreak ?? 2;
+  const MI_BINS = options?.miBins ?? 64;
+  const exclusionRect = options?.exclusionRect;
+  const imageWidth = options?.imageWidth;
+  const imageHeight = options?.imageHeight;
+
+  let scoreMs = 0;
+  const computeMetrics = (targetPixels: Float32Array): { mi: number; nmi: number } => {
+    const t0 = nowMs();
+
+    // We compute MI + NMI together from the histogram.
+    // If an exclusion rect is provided, skip those pixels.
+    const miOptions: MutualInformationOptions = {
+      bins: MI_BINS,
+      exclusionRect,
+      imageWidth,
+      imageHeight,
+    };
+    const miResult = computeMutualInformation(referencePixels, targetPixels, miOptions);
+
+    scoreMs += nowMs() - t0;
+
+    return { mi: miResult.mi, nmi: miResult.nmi };
+  };
 
   // Compute starting index from normalized position.
   //
@@ -62,6 +116,8 @@ export async function findBestMatchingSlice(
   const startIdx = Math.round((refSliceIndex / Math.max(1, refSliceCount - 1)) * (targetSliceCount - 1));
   const fallbackStart = clamp(startIdx, 0, targetSliceCount - 1);
 
+  const startIndexOverride = options?.startIndexOverride;
+
   const clampedStart =
     typeof startIndexOverride === 'number' && Number.isFinite(startIndexOverride)
       ? clamp(Math.round(startIndexOverride), 0, targetSliceCount - 1)
@@ -70,10 +126,12 @@ export async function findBestMatchingSlice(
   // Initialize with starting slice
   const startPixels = await getTargetSlicePixels(clampedStart);
   let bestIdx = clampedStart;
-  let bestNMI = computeNMI(referencePixels, startPixels, NMI_BINS);
+  const startMetrics = computeMetrics(startPixels);
+  let bestMI = startMetrics.mi;
   let slicesChecked = 1;
 
-  onProgress?.(slicesChecked, bestNMI);
+  options?.onSliceScored?.(clampedStart, startMetrics, 'start');
+  onProgress?.(slicesChecked, bestMI);
 
   // Bidirectional search state
   let leftIdx = clampedStart - 1;
@@ -82,8 +140,8 @@ export async function findBestMatchingSlice(
   let leftDone = leftIdx < 0;
   let rightDone = rightIdx >= targetSliceCount;
 
-  let leftPrevNMI = bestNMI;
-  let rightPrevNMI = bestNMI;
+  let leftPrevMI = bestMI;
+  let rightPrevMI = bestMI;
 
   let leftDecreaseStreak = 0;
   let rightDecreaseStreak = 0;
@@ -96,21 +154,24 @@ export async function findBestMatchingSlice(
         leftDone = true;
       } else {
         const leftPixels = await getTargetSlicePixels(idx);
-        const leftNMI = computeNMI(referencePixels, leftPixels, NMI_BINS);
+        const leftMetrics = computeMetrics(leftPixels);
+        const leftMI = leftMetrics.mi;
         slicesChecked++;
 
-        if (leftNMI > bestNMI) {
-          bestNMI = leftNMI;
+        options?.onSliceScored?.(idx, leftMetrics, 'left');
+
+        if (leftMI > bestMI) {
+          bestMI = leftMI;
           bestIdx = idx;
         }
 
         // Track consecutive decreases in this direction.
-        if (leftNMI < leftPrevNMI) {
+        if (leftMI < leftPrevMI) {
           leftDecreaseStreak++;
         } else {
           leftDecreaseStreak = 0;
         }
-        leftPrevNMI = leftNMI;
+        leftPrevMI = leftMI;
 
         leftIdx = idx - 1;
         if (leftIdx < 0) {
@@ -122,7 +183,7 @@ export async function findBestMatchingSlice(
           }
         }
 
-        onProgress?.(slicesChecked, bestNMI);
+        onProgress?.(slicesChecked, bestMI);
       }
     }
 
@@ -133,20 +194,23 @@ export async function findBestMatchingSlice(
         rightDone = true;
       } else {
         const rightPixels = await getTargetSlicePixels(idx);
-        const rightNMI = computeNMI(referencePixels, rightPixels, NMI_BINS);
+        const rightMetrics = computeMetrics(rightPixels);
+        const rightMI = rightMetrics.mi;
         slicesChecked++;
 
-        if (rightNMI > bestNMI) {
-          bestNMI = rightNMI;
+        options?.onSliceScored?.(idx, rightMetrics, 'right');
+
+        if (rightMI > bestMI) {
+          bestMI = rightMI;
           bestIdx = idx;
         }
 
-        if (rightNMI < rightPrevNMI) {
+        if (rightMI < rightPrevMI) {
           rightDecreaseStreak++;
         } else {
           rightDecreaseStreak = 0;
         }
-        rightPrevNMI = rightNMI;
+        rightPrevMI = rightMI;
 
         rightIdx = idx + 1;
         if (rightIdx >= targetSliceCount) {
@@ -157,12 +221,12 @@ export async function findBestMatchingSlice(
           }
         }
 
-        onProgress?.(slicesChecked, bestNMI);
+        onProgress?.(slicesChecked, bestMI);
       }
     }
   }
 
-  return { bestIndex: bestIdx, bestNMI, slicesChecked };
+  return { bestIndex: bestIdx, bestMI, slicesChecked, timingMs: { scoreMs } };
 }
 
 /**

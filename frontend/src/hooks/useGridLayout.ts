@@ -37,7 +37,8 @@ export function useGridLayout(itemCount: number) {
     if (width === 0 || height === 0) return { cols: Math.min(n, 4), cellSize: 300, gridSize };
     
     const gap = 8; // gap-2 = 8px
-    const headerHeight = 32; // approximate header height per cell
+    // Grid cell controls are overlaid on hover, so they don't take up layout height.
+    const headerHeight = 0;
 
     // Reserve margins so grid isn't hugging edges
     const marginH = 24; // px on left+right total reserve is 2*marginH

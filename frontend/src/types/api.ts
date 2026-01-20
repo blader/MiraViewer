@@ -72,6 +72,21 @@ export interface HistogramStats {
   p90: number; // 90th percentile
 }
 
+/**
+ * Rectangular exclusion mask in normalized [0,1] image coordinates.
+ * Used to exclude regions (e.g., tumors) from similarity computations during alignment.
+ */
+export interface ExclusionMask {
+  /** Left edge, normalized [0,1]. */
+  x: number;
+  /** Top edge, normalized [0,1]. */
+  y: number;
+  /** Width, normalized [0,1]. */
+  width: number;
+  /** Height, normalized [0,1]. */
+  height: number;
+}
+
 // Alignment reference for an auto-alignment run.
 //
 // We intentionally store *only* metadata + the reference panel settings.
@@ -87,6 +102,12 @@ export interface AlignmentReference {
   // Settings that should be used as the *base* view transform for aligned targets.
   // (Targets get a recovered delta transform composed on top of these settings.)
   settings: PanelSettings;
+
+  /**
+   * Optional rectangular region to exclude from similarity metrics (e.g., tumor area).
+   * Pixels inside this rect are ignored when computing MI/NMI for slice search and registration.
+   */
+  exclusionMask?: ExclusionMask;
 }
 
 // Result of aligning a single date to the reference.
@@ -107,5 +128,6 @@ export interface AlignmentProgress {
   dateIndex: number;
   totalDates: number;
   slicesChecked: number;
-  bestNmiSoFar: number;
+  /** Mutual information (natural log) from the coarse slice search. Higher is better. */
+  bestMiSoFar: number;
 }

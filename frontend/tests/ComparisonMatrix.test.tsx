@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { ComparisonMatrix } from '../src/components/ComparisonMatrix';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
@@ -95,12 +95,16 @@ vi.mock('../src/components/DicomViewer', () => ({
 }));
 
 describe('ComparisonMatrix', () => {
-  it('renders header warning and export/upload actions', () => {
+  it('renders header menu actions', () => {
     render(<ComparisonMatrix />);
 
-    expect(screen.getByText(/local storage only/i)).toBeInTheDocument();
-    expect(screen.getByTitle(/upload/i)).toBeInTheDocument();
-    expect(screen.getByTitle(/export backup/i)).toBeInTheDocument();
+    const menuButton = screen.getByTitle(/menu/i);
+    expect(menuButton).toBeInTheDocument();
+
+    fireEvent.click(menuButton);
+
+    expect(screen.getByText(/import \(dicom zip\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/export backup \(zip\)/i)).toBeInTheDocument();
     expect(screen.getByTestId('dicom-viewer')).toBeInTheDocument();
   });
 });

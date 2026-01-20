@@ -13,6 +13,8 @@ interface ImageControlsProps {
   onAcpAnalyze?: () => void;
   acpAnalyzeLoading?: boolean;
   acpAnalyzeDisabled?: boolean;
+  /** If false, omit the slice selector control (useful when rendering it on a separate row). */
+  showSliceControl?: boolean;
 }
 
 const Divider = ({ wide = false }: { wide?: boolean }) => (
@@ -27,20 +29,25 @@ export function ImageControls({
   onAcpAnalyze,
   acpAnalyzeLoading = false,
   acpAnalyzeDisabled = false,
+  showSliceControl = true,
 }: ImageControlsProps) {
   return (
     <div className="flex items-center">
-      <StepControl
-        title="Slice offset"
-        value={`${instanceIndex + 1}/${instanceCount}`}
-        valueWidth="w-16"
-        tabular
-        accent
-        onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
-        onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
-      />
+      {showSliceControl && (
+        <>
+          <StepControl
+            title="Slice offset"
+            value={`${instanceIndex + 1}/${instanceCount}`}
+            valueWidth="w-16"
+            tabular
+            accent
+            onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
+            onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
+          />
 
-      <Divider wide />
+          <Divider wide />
+        </>
+      )}
 
       <StepControl
         title="Zoom"

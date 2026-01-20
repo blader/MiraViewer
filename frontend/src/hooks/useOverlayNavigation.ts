@@ -170,8 +170,15 @@ export function useOverlayNavigation(
     return rightDiff < leftDiff ? right : left;
   })();
 
+  // Prefer navigation history, but only if it points to a *different* index.
+  //
+  // When the set of overlay columns changes (dates enabled/disabled), indices can collapse and
+  // the clamped previous index may end up equal to the current index. In that case we should
+  // fall back to the closest adjacent date so Space-compare still works.
   const compareTargetIndex =
-    safePreviousOverlayDateIndex !== null ? safePreviousOverlayDateIndex : fallbackCompareIndex;
+    safePreviousOverlayDateIndex !== null && safePreviousOverlayDateIndex !== safeOverlayDateIndex
+      ? safePreviousOverlayDateIndex
+      : fallbackCompareIndex;
 
   const displayedOverlayIndex = spaceHeld ? compareTargetIndex : safeOverlayDateIndex;
 
