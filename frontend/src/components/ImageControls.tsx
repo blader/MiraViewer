@@ -1,4 +1,4 @@
-import { Sparkles } from 'lucide-react';
+import { ArrowDownUp, Sparkles } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
 import { StepControl } from './StepControl';
 import { CONTROL_LIMITS } from '../utils/constants';
@@ -31,6 +31,26 @@ export function ImageControls({
   acpAnalyzeDisabled = false,
   showSliceControl = true,
 }: ImageControlsProps) {
+  const canReverse = instanceCount > 1;
+  const isReversed = !!settings.reverseSliceOrder;
+
+  const toggleReverseSliceOrder = () => {
+    if (!canReverse) return;
+
+    const max = instanceCount - 1;
+    const currentIndex = instanceIndex;
+
+    // Keep the physical slice stable while flipping the logical order.
+    const currentPhysicalIndex = isReversed ? max - currentIndex : currentIndex;
+    const nextReversed = !isReversed;
+    const nextIndex = nextReversed ? max - currentPhysicalIndex : currentPhysicalIndex;
+
+    // displayedIndex = base + offset, so we can preserve base by adjusting offset by delta.
+    const nextOffset = settings.offset + (nextIndex - currentIndex);
+
+    onUpdate({ reverseSliceOrder: nextReversed, offset: nextOffset });
+  };
+
   return (
     <div className="flex items-center">
       {showSliceControl && (
@@ -111,6 +131,31 @@ export function ImageControls({
           })
         }
       />
+
+      <Divider />
+
+      <button
+        type="button"
+        onClick={toggleReverseSliceOrder}
+        disabled={!canReverse}
+        className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
+          !canReverse
+            ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
+            : isReversed
+            ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
+            : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+        }`}
+        title={
+          !canReverse
+            ? 'Not enough slices to reverse'
+            : isReversed
+            ? 'Slice order reversed (click to restore)'
+            : 'Reverse slice order'
+        }
+      >
+        <ArrowDownUp className="w-3 h-3" />
+        Rev
+      </button>
 
       {onAcpAnalyze && (
         <>

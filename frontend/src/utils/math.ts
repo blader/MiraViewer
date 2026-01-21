@@ -13,6 +13,21 @@ export function clampInt(value: number, min: number, max: number): number {
 }
 
 /**
+ * Map a logical slice index (0..N-1) to the physical DICOM instance index.
+ *
+ * When `reverseSliceOrder` is enabled, logical index 0 maps to the last instance.
+ */
+export function getEffectiveInstanceIndex(
+  instanceIndex: number,
+  instanceCount: number,
+  reverseSliceOrder: boolean
+): number {
+  const max = Math.max(0, instanceCount - 1);
+  const clamped = clampInt(instanceIndex, 0, max);
+  return reverseSliceOrder ? max - clamped : clamped;
+}
+
+/**
  * Calculate the slice index from a normalized progress value plus an offset.
  */
 export function getSliceIndex(instanceCount: number, progress: number, offset: number): number {

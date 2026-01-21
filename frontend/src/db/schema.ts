@@ -48,6 +48,7 @@ export interface PanelSetting {
   comboId: string;
   settings: Record<string, {
     offset: number;
+    reverseSliceOrder: boolean;
     zoom: number;
     rotation: number;
     brightness: number;

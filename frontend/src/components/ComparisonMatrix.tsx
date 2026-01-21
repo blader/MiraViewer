@@ -14,8 +14,6 @@ import {
   Download,
   Trash2,
   Loader2,
-  Link2,
-  X,
   MoreVertical,
   HelpCircle,
 } from 'lucide-react';
@@ -26,7 +24,7 @@ import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
 import { ExportModal } from './ExportModal';
 import { ClearDataModal } from './ClearDataModal';
-import { ExclusionMaskSelector } from './ExclusionMaskSelector';
+import { DragRectActionOverlay } from './DragRectActionOverlay';
 import { TooltipTrigger } from './TooltipTrigger';
 import { useComparisonData } from '../hooks/useComparisonData';
 import { useComparisonFilters } from '../hooks/useComparisonFilters';
@@ -37,7 +35,7 @@ import { useAutoAlign } from '../hooks/useAutoAlign';
 import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
 import { useAiAnnotation } from '../hooks/useAiAnnotation';
 import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY, AI_ENABLED } from '../utils/constants';
-import { getSliceIndex, getProgressFromSlice } from '../utils/math';
+import { getEffectiveInstanceIndex, getSliceIndex, getProgressFromSlice } from '../utils/math';
 
 function getOverlayViewerSize(gridSize: { width: number; height: number }) {
   // Fill available space while leaving room for the top strip.
@@ -121,7 +119,11 @@ function hasEditableAncestor(target: EventTarget | null): boolean {
   return false;
 }
 
-function hasScrollableAncestor(target: EventTarget | null, deltaY: number): boolean {
+function hasScrollableAncestor(
+  target: EventTarget | null,
+  deltaY: number,
+  stopAt?: HTMLElement | null
+): boolean {
   if (!(target instanceof HTMLElement)) return false;
 
   const dir = Math.sign(deltaY);
@@ -140,6 +142,8 @@ function hasScrollableAncestor(target: EventTarget | null, deltaY: number): bool
       if (dir > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
       if (dir < 0 && el.scrollTop > 0) return true;
     }
+
+    if (stopAt && el === stopAt) break;
 
     el = el.parentElement;
   }
@@ -410,8 +414,6 @@ export function ComparisonMatrix() {
     };
   }, [headerMenuOpen]);
 
-  // Grid view alignment reference (click a cell to choose the reference date).
-  const [gridAlignmentReferenceDate, setGridAlignmentReferenceDate] = useState<string | null>(null);
 
   const {
     status: nanoBananaStatus,
@@ -491,6 +493,10 @@ export function ComparisonMatrix() {
     abort: abortAlignment,
   } = useAutoAlign();
 
+  // Hover state for showing per-cell controls (avoid relying on CSS group-hover).
+  const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
+  const [isOverlayViewerHovered, setIsOverlayViewerHovered] = useState(false);
+
   // Apply alignment results incrementally so grid cells update as each date finishes.
   const appliedAlignmentDatesRef = useRef(new Set<string>());
   const wasAligningRef = useRef(false);
@@ -506,16 +512,34 @@ export function ComparisonMatrix() {
 
     const pending = new Map<string, PanelSettings>();
     for (const r of alignmentResults) {
-      if (!appliedAlignmentDatesRef.current.has(r.date)) {
-        pending.set(r.date, r.computedSettings);
-        appliedAlignmentDatesRef.current.add(r.date);
+      if (appliedAlignmentDatesRef.current.has(r.date)) continue;
+
+      const existing = panelSettings.get(r.date) || DEFAULT_PANEL_SETTINGS;
+      const reverseSliceOrder = !!existing.reverseSliceOrder;
+
+      // If slice order is reversed for this date, adjust the computed offset so the
+      // *physical* bestSliceIndex still displays (logical = max - physical).
+      let next = r.computedSettings;
+      if (reverseSliceOrder && data && selectedSeqId) {
+        const seriesRef = data.series_map[selectedSeqId]?.[r.date];
+        const instanceCount = seriesRef?.instance_count;
+        if (typeof instanceCount === 'number' && instanceCount > 0) {
+          const max = instanceCount - 1;
+          const desiredLogicalIndex = max - r.bestSliceIndex;
+          const delta = desiredLogicalIndex - r.bestSliceIndex;
+          next = { ...next, offset: next.offset + delta };
+        }
       }
+
+      // Always preserve the user's per-date slice order preference.
+      pending.set(r.date, { ...next, reverseSliceOrder });
+      appliedAlignmentDatesRef.current.add(r.date);
     }
 
     if (pending.size > 0) {
       batchUpdateSettings(pending);
     }
-  }, [alignmentResults, batchUpdateSettings]);
+  }, [alignmentResults, batchUpdateSettings, data, panelSettings, selectedSeqId]);
 
 
 
@@ -572,11 +596,22 @@ export function ComparisonMatrix() {
 
   // Hooks for layout and navigation
   const {
-    containerRef: gridContainerRef,
+    containerRef: gridLayoutContainerRef,
     cols: gridCols,
     cellSize: gridCellSize,
     gridSize,
   } = useGridLayout(columns.length);
+
+  // `useGridLayout` returns a callback ref, but we also need the actual DOM node
+  // for wheel + hover logic.
+  const centerPaneRef = useRef<HTMLDivElement | null>(null);
+  const setCenterPaneRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      centerPaneRef.current = node;
+      gridLayoutContainerRef(node);
+    },
+    [gridLayoutContainerRef]
+  );
   const {
     viewMode,
     setViewMode,
@@ -590,19 +625,6 @@ export function ComparisonMatrix() {
     setPlaySpeed,
   } = useOverlayNavigation(overlayColumns);
 
-  // Keep the grid alignment reference pinned to an existing date with data.
-  // If the current reference disappears (e.g. toggling enabled dates), fall back to the first available.
-  useEffect(() => {
-    const first = columns.find((c) => c.ref)?.date ?? null;
-
-    const isValid =
-      gridAlignmentReferenceDate !== null && columns.some((c) => c.date === gridAlignmentReferenceDate && !!c.ref);
-
-    if (!isValid) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- keep reference selection consistent with available dates.
-      setGridAlignmentReferenceDate(first);
-    }
-  }, [columns, gridAlignmentReferenceDate]);
 
   const overlayDisplayedCol = overlayColumns[displayedOverlayIndex];
   const overlayDisplayedRef = overlayDisplayedCol?.ref;
@@ -612,6 +634,13 @@ export function ComparisonMatrix() {
     : DEFAULT_PANEL_SETTINGS;
   const overlayDisplayedSliceIndex = overlayDisplayedRef
     ? getSliceIndex(overlayDisplayedRef.instance_count, progress, overlayDisplayedSettings.offset)
+    : 0;
+  const overlayDisplayedEffectiveSliceIndex = overlayDisplayedRef
+    ? getEffectiveInstanceIndex(
+        overlayDisplayedSliceIndex,
+        overlayDisplayedRef.instance_count,
+        overlayDisplayedSettings.reverseSliceOrder
+      )
     : 0;
 
   // Selected overlay date (the one highlighted in the strip).
@@ -624,6 +653,13 @@ export function ComparisonMatrix() {
   const overlaySelectedSliceIndex = overlaySelectedRef
     ? getSliceIndex(overlaySelectedRef.instance_count, progress, overlaySelectedSettings.offset)
     : 0;
+  const overlaySelectedEffectiveSliceIndex = overlaySelectedRef
+    ? getEffectiveInstanceIndex(
+        overlaySelectedSliceIndex,
+        overlaySelectedRef.instance_count,
+        overlaySelectedSettings.reverseSliceOrder
+      )
+    : 0;
 
   // Space-hold compare target.
   const overlayCompareCol = overlayColumns[compareTargetIndex];
@@ -635,6 +671,13 @@ export function ComparisonMatrix() {
   const overlayCompareSliceIndex = overlayCompareRef
     ? getSliceIndex(overlayCompareRef.instance_count, progress, overlayCompareSettings.offset)
     : 0;
+  const overlayCompareEffectiveSliceIndex = overlayCompareRef
+    ? getEffectiveInstanceIndex(
+        overlayCompareSliceIndex,
+        overlayCompareRef.instance_count,
+        overlayCompareSettings.reverseSliceOrder
+      )
+    : 0;
 
   const isOverlayComparing = displayedOverlayIndex !== overlayDateIndex;
   const hasOverlayCompareTarget = overlayColumns.length > 1 && compareTargetIndex !== overlayDateIndex;
@@ -645,17 +688,17 @@ export function ComparisonMatrix() {
     !!overlayDisplayedDate &&
     nanoBananaTarget.date === overlayDisplayedDate &&
     nanoBananaTarget.seriesUid === overlayDisplayedRef.series_uid &&
-    nanoBananaTarget.instanceIndex === overlayDisplayedSliceIndex;
+    nanoBananaTarget.instanceIndex === overlayDisplayedEffectiveSliceIndex;
 
   const overlaySelectedIsNanoBananaTarget =
     !!overlaySelectedRef &&
     !!overlaySelectedDate &&
-    isNanoTarget(overlaySelectedDate, overlaySelectedRef.series_uid, overlaySelectedSliceIndex);
+    isNanoTarget(overlaySelectedDate, overlaySelectedRef.series_uid, overlaySelectedEffectiveSliceIndex);
 
   const overlayCompareIsNanoBananaTarget =
     !!overlayCompareRef &&
     !!overlayCompareDate &&
-    isNanoTarget(overlayCompareDate, overlayCompareRef.series_uid, overlayCompareSliceIndex);
+    isNanoTarget(overlayCompareDate, overlayCompareRef.series_uid, overlayCompareEffectiveSliceIndex);
 
   const overlaySelectedNanoBananaOverrideUrl =
     nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlaySelectedIsNanoBananaTarget
@@ -667,91 +710,30 @@ export function ComparisonMatrix() {
       ? nanoBananaImageUrl
       : undefined;
 
+  const overlayDisplayedNanoBananaOverrideUrl =
+    nanoBananaStatus === 'ready' && nanoBananaImageUrl && overlayIsNanoBananaTarget
+      ? nanoBananaImageUrl
+      : undefined;
 
   const overlayViewerSize = getOverlayViewerSize(gridSize);
 
-  const captureCurrentOverlayAsAlignmentReference = useCallback(async (): Promise<AlignmentReference | null> => {
-    if (!overlayDisplayedRef || !overlayDisplayedDate) return null;
+  const startAlignAll = useCallback(
+    async (reference: AlignmentReference, exclusionMask: ExclusionMask) => {
+      if (isAligning) {
+        abortAlignment();
+        return;
+      }
 
-    // Use the underlying DICOM series/slice as the reference (identity/untransformed image).
-    // The alignment pipeline will render pixels from DICOM directly; we only need the metadata
-    // and the reference date's current panel settings.
-    return {
-      date: overlayDisplayedDate,
-      seriesUid: overlayDisplayedRef.series_uid,
-      sliceIndex: overlayDisplayedSliceIndex,
-      sliceCount: overlayDisplayedRef.instance_count,
-      settings: overlayDisplayedSettings,
-    };
-  }, [overlayDisplayedDate, overlayDisplayedRef, overlayDisplayedSliceIndex, overlayDisplayedSettings]);
-
-  const captureAlignmentReference = useCallback(async (): Promise<AlignmentReference | null> => {
-    if (viewMode === 'overlay') {
-      return await captureCurrentOverlayAsAlignmentReference();
-    }
-
-    // Grid view: use user-selected reference date when available.
-    const fallbackDate = columns.find((c) => c.ref)?.date ?? null;
-    const refDate = gridAlignmentReferenceDate ?? fallbackDate;
-    if (!refDate) return null;
-
-    const seriesRef = columns.find((c) => c.date === refDate)?.ref;
-    if (!seriesRef) return null;
-
-    const settings = panelSettings.get(refDate) || DEFAULT_PANEL_SETTINGS;
-    const sliceIndex = getSliceIndex(seriesRef.instance_count, progress, settings.offset);
-
-    return {
-      date: refDate,
-      seriesUid: seriesRef.series_uid,
-      sliceIndex,
-      sliceCount: seriesRef.instance_count,
-      settings,
-    };
-  }, [captureCurrentOverlayAsAlignmentReference, columns, gridAlignmentReferenceDate, panelSettings, progress, viewMode]);
-
-  // State for the exclusion mask selector modal.
-  const [maskSelectorOpen, setMaskSelectorOpen] = useState(false);
-  const [maskSelectorReference, setMaskSelectorReference] = useState<AlignmentReference | null>(null);
-
-  // Handler for "Align All" button - shows the mask selector modal first.
-  const handleAlignAllClick = useCallback(async () => {
-    if (isAligning) {
-      abortAlignment();
-      return;
-    }
-
-    if (!data || !selectedSeqId) return;
-
-    const reference = await captureAlignmentReference();
-    if (!reference) return;
-
-    // Show the mask selector modal so user can optionally draw an exclusion region.
-    setMaskSelectorReference(reference);
-    setMaskSelectorOpen(true);
-  }, [abortAlignment, captureAlignmentReference, data, isAligning, selectedSeqId]);
-
-  // Called when user confirms or skips the mask selector.
-  const handleMaskSelectorConfirm = useCallback(
-    async (mask: ExclusionMask | null) => {
-      setMaskSelectorOpen(false);
-
-      const reference = maskSelectorReference;
-      if (!reference || !data || !selectedSeqId) return;
-
-      // Attach the exclusion mask to the reference if provided.
-      const finalReference: AlignmentReference = mask
-        ? { ...reference, exclusionMask: mask }
-        : reference;
+      if (!data || !selectedSeqId) return;
 
       const seriesMap = data.series_map[selectedSeqId] || {};
 
       // Get all dates except the reference date.
-      const targetDates = overlayColumns.filter((col) => col.ref && col.date !== finalReference.date).map((col) => col.date);
-
+      const targetDates = overlayColumns.filter((col) => col.ref && col.date !== reference.date).map((col) => col.date);
       if (targetDates.length === 0) return;
 
       try {
+        const finalReference: AlignmentReference = { ...reference, exclusionMask };
         const results = await alignAllDates(finalReference, targetDates, seriesMap, progress);
 
         // Results are applied incrementally via an effect so the UI updates per-date.
@@ -764,13 +746,8 @@ export function ComparisonMatrix() {
         console.error('[Alignment] Failed:', err);
       }
     },
-    [alignAllDates, data, maskSelectorReference, overlayColumns, progress, selectedSeqId]
+    [abortAlignment, alignAllDates, data, isAligning, overlayColumns, progress, selectedSeqId]
   );
-
-  const handleMaskSelectorCancel = useCallback(() => {
-    setMaskSelectorOpen(false);
-    setMaskSelectorReference(null);
-  }, []);
 
   const setProgressWithClearAi = useCallback(
     (nextProgress: number) => {
@@ -834,7 +811,7 @@ export function ComparisonMatrix() {
       if (e.ctrlKey) return;
 
       // Only slice-scroll when the wheel event originated inside the center pane.
-      const centerPane = gridContainerRef.current;
+      const centerPane = centerPaneRef.current;
       if (!centerPane) return;
       if (!(e.target instanceof Node) || !centerPane.contains(e.target)) return;
 
@@ -843,8 +820,11 @@ export function ComparisonMatrix() {
       // Don't slice when the user is interacting with text inputs or editable content.
       if (hasEditableAncestor(e.target)) return;
 
-      // Don't slice when the wheel should scroll an overflow container (sidebars, modals, etc).
-      if (hasScrollableAncestor(e.target, e.deltaY)) return;
+      // Don't slice when the wheel should scroll an overflow container (modals, panels, etc).
+      //
+      // Important: We intentionally stop the search at the center pane so the document/body
+      // scrolling doesn't disable slice-wheel navigation.
+      if (hasScrollableAncestor(e.target, e.deltaY, centerPane)) return;
 
       const ctx = wheelNavContextRef.current;
       if (!ctx) return;
@@ -867,7 +847,7 @@ export function ComparisonMatrix() {
 
     window.addEventListener('wheel', handleWheel, { passive: false });
     return () => window.removeEventListener('wheel', handleWheel);
-  }, [gridContainerRef]);
+  }, []);
 
   const playbackInstanceCount = useMemo(() => {
     const fromOverlay = overlayColumns[overlayDateIndex]?.ref?.instance_count;
@@ -1078,25 +1058,6 @@ export function ComparisonMatrix() {
       }
     : { plane: null, weight: null, sequence: null, label: null };
 
-  const alignAllReferenceDate =
-    viewMode === 'overlay'
-      ? overlayDisplayedDate ?? null
-      : gridAlignmentReferenceDate ?? columns.find((c) => c.ref)?.date ?? null;
-
-  const alignAllHasReference =
-    viewMode === 'overlay'
-      ? !!overlayDisplayedRef && !!overlayDisplayedDate
-      : alignAllReferenceDate !== null && columns.some((c) => c.date === alignAllReferenceDate && !!c.ref);
-
-  const alignAllDisabled = !isAligning && (!alignAllHasReference || overlayColumns.length < 2);
-
-  const alignAllTitle = isAligning
-    ? 'Cancel alignment'
-    : !alignAllHasReference
-    ? 'Select a reference date'
-    : overlayColumns.length < 2
-    ? 'Select at least 2 dates with data'
-    : `Align all other dates to ${alignAllReferenceDate ? formatDate(alignAllReferenceDate) : 'reference'}`;
 
   return (
     <div className="h-screen flex flex-col">
@@ -1120,15 +1081,6 @@ export function ComparisonMatrix() {
         />
       )}
 
-      {/* Exclusion mask selector modal for Align All */}
-      {maskSelectorOpen && maskSelectorReference && (
-        <ExclusionMaskSelector
-          seriesUid={maskSelectorReference.seriesUid}
-          instanceIndex={maskSelectorReference.sliceIndex}
-          onConfirm={handleMaskSelectorConfirm}
-          onCancel={handleMaskSelectorCancel}
-        />
-      )}
 
       {/* Header */}
       <div className="px-4 py-3 bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
@@ -1198,7 +1150,7 @@ export function ComparisonMatrix() {
 
                 <div className="w-px h-6 bg-[var(--border-color)] shrink-0" />
 
-                <div className="flex items-center gap-1 flex-1 overflow-x-auto min-w-0 translate-y-0.5">
+                <div className="flex items-center gap-1 flex-1 overflow-x-auto min-w-0 translate-y-1 pb-1">
                   {overlayColumns.map((col, idx) => (
                     <button
                       key={col.date}
@@ -1226,34 +1178,19 @@ export function ComparisonMatrix() {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            {/* Align All */}
             <button
               type="button"
-              onClick={handleAlignAllClick}
-              disabled={alignAllDisabled}
-              className={`min-w-[120px] justify-center px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 whitespace-nowrap ${
-                isAligning
-                  ? 'bg-amber-600 text-white hover:bg-amber-700'
-                  : alignAllDisabled
-                  ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
-                  : 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
-              }`}
-              title={alignAllTitle}
+              onClick={() => {
+                setHeaderMenuOpen(false);
+                setHelpOpen(true);
+              }}
+              className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              title="Help & shortcuts"
             >
-              {isAligning ? (
-                <>
-                  <X className="w-4 h-4" />
-                  Cancel
-                </>
-              ) : (
-                <>
-                  <Link2 className="w-4 h-4" />
-                  Align All
-                </>
-              )}
+              <HelpCircle className="w-5 h-5" />
             </button>
 
-            {/* Header menu (Import/Export/Delete/Help) */}
+            {/* Header menu (Import/Export/Delete) */}
             <div className="relative" ref={headerMenuRef}>
               <button
                 type="button"
@@ -1298,18 +1235,6 @@ export function ComparisonMatrix() {
                   >
                     <Trash2 className="w-4 h-4" />
                     Delete all local data
-                  </button>
-                  <div className="h-px bg-[var(--border-color)]" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHeaderMenuOpen(false);
-                      setHelpOpen(true);
-                    }}
-                    className="w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
-                  >
-                    <HelpCircle className="w-4 h-4" />
-                    Help & shortcuts
                   </button>
                 </div>
               )}
@@ -1378,7 +1303,7 @@ export function ComparisonMatrix() {
         </button>
 
         {/* Main content area - Grid or Overlay */}
-        <div ref={gridContainerRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
+        <div ref={setCenterPaneRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
           {!hasData ? (
             /* Empty state */
             <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8">
@@ -1421,16 +1346,31 @@ export function ComparisonMatrix() {
                         </div>
                       ) : null}
                     </div>
+                    <button
+                      type="button"
+                      onClick={abortAlignment}
+                      className="shrink-0 px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs"
+                      title="Cancel alignment"
+                    >
+                      Cancel
+                    </button>
                   </div>
                 </div>
               )}
 
-              <div 
+              <div
                 className="grid gap-2"
-                style={{ 
+                style={{
                   gridTemplateColumns: `repeat(${gridCols}, ${gridCellSize}px)`,
                   gridAutoRows: `${gridCellSize}px`, // square cells; controls are overlaid on hover
                 }}
+                onMouseMove={(e) => {
+                  const target = e.target as HTMLElement | null;
+                  const cell = target?.closest?.('[data-grid-cell-date]') as HTMLElement | null;
+                  const next = cell?.getAttribute('data-grid-cell-date') ?? null;
+                  setHoveredGridCellDate((prev) => (prev === next ? prev : next));
+                }}
+                onMouseLeave={() => setHoveredGridCellDate(null)}
               >
                 {columns.map(({ date, ref }) => {
                   const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;
@@ -1445,25 +1385,30 @@ export function ComparisonMatrix() {
                   }
                   
                   const idx = getSliceIndex(ref.instance_count, progress, settings.offset);
+                  const effectiveIdx = getEffectiveInstanceIndex(idx, ref.instance_count, settings.reverseSliceOrder);
                   const viewerKey = `grid:${date}`;
-                  const isAlignmentReference = gridAlignmentReferenceDate === date;
 
-                  const isNanoBananaTarget = isNanoTarget(date, ref.series_uid, idx);
+                  const isNanoBananaTarget = isNanoTarget(date, ref.series_uid, effectiveIdx);
 
                   const nanoBananaOverrideUrl =
                     nanoBananaStatus === 'ready' && nanoBananaImageUrl && isNanoBananaTarget
                       ? nanoBananaImageUrl
                       : undefined;
 
+                  const isHovered = hoveredGridCellDate === date;
+
                   return (
                     <div
                       key={date}
-                      className={`relative flex flex-col rounded-lg overflow-hidden border group ${
-                        isAlignmentReference ? 'border-[var(--accent)]' : 'border-[var(--border-color)]'
-                      }`}
+                      data-grid-cell-date={date}
+                      className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
                     >
                       {/* Cell controls (shown on hover) */}
-                      <div className="absolute top-0 left-0 right-0 z-10 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
+                      <div
+                        className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
+                          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                        }`}
+                      >
                         <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-end">
                           <ImageControls
                             settings={settings}
@@ -1483,7 +1428,7 @@ export function ComparisonMatrix() {
                                         date,
                                         studyId: ref.study_id,
                                         seriesUid: ref.series_uid,
-                                        instanceIndex: idx,
+                                        instanceIndex: effectiveIdx,
                                       },
                                       viewerKey,
                                       aiSeriesContext
@@ -1497,7 +1442,9 @@ export function ComparisonMatrix() {
                       </div>
                       {/* Slice selector (shown on hover, bottom-right corner) */}
                       <div
-                        className="absolute bottom-2 right-2 z-10 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity"
+                        className={`absolute bottom-2 right-2 z-10 transition-opacity ${
+                          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                        }`}
                         onMouseDown={(e) => e.stopPropagation()}
                       >
                         <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
@@ -1522,70 +1469,96 @@ export function ComparisonMatrix() {
                           />
                         </div>
                       </div>
-                      <div
-                        className="flex-1 min-h-0 bg-black relative"
-                        onMouseDown={(e) => {
-                          if (e.button === 0) {
-                            setGridAlignmentReferenceDate(date);
-                          }
-                        }}
-                      >
-                        <DicomViewer
-                          ref={(handle) => registerViewerHandle(viewerKey, handle)}
-                          studyId={ref.study_id}
-                          seriesUid={ref.series_uid}
-                          instanceIndex={idx}
-                          instanceCount={ref.instance_count}
-                          imageUrlOverride={nanoBananaOverrideUrl}
-                          onInstanceChange={(i) => {
-                            // When scrolling on a panel, update the global progress.
-                            setProgressWithClearAi(getProgressFromSlice(i, ref.instance_count, settings.offset));
-                          }}
-                          brightness={nanoBananaOverrideUrl ? 100 : settings.brightness}
-                          contrast={nanoBananaOverrideUrl ? 100 : settings.contrast}
-                          zoom={nanoBananaOverrideUrl ? 1 : settings.zoom}
-                          rotation={nanoBananaOverrideUrl ? 0 : settings.rotation}
-                          panX={nanoBananaOverrideUrl ? 0 : settings.panX}
-                          panY={nanoBananaOverrideUrl ? 0 : settings.panY}
-                          affine00={nanoBananaOverrideUrl ? 1 : settings.affine00}
-                          affine01={nanoBananaOverrideUrl ? 0 : settings.affine01}
-                          affine10={nanoBananaOverrideUrl ? 0 : settings.affine10}
-                          affine11={nanoBananaOverrideUrl ? 1 : settings.affine11}
-                          onPanChange={
+                      <div className="flex-1 min-h-0 bg-black relative">
+                        <DragRectActionOverlay
+                          className="absolute inset-0 cursor-crosshair"
+                          geometry={
                             nanoBananaOverrideUrl
-                              ? undefined
-                              : (newPanX, newPanY) => {
-                                  updatePanelSetting(date, { panX: newPanX, panY: newPanY });
+                              ? { panX: 0, panY: 0, zoom: 1, rotation: 0, affine00: 1, affine01: 0, affine10: 0, affine11: 1 }
+                              : {
+                                  panX: settings.panX,
+                                  panY: settings.panY,
+                                  zoom: settings.zoom,
+                                  rotation: settings.rotation,
+                                  affine00: settings.affine00,
+                                  affine01: settings.affine01,
+                                  affine10: settings.affine10,
+                                  affine11: settings.affine11,
                                 }
                           }
-                        />
+                          disabled={overlayColumns.length < 2 || isAligning}
+                          onConfirm={(mask) => {
+                            void startAlignAll(
+                              {
+                                date,
+                                seriesUid: ref.series_uid,
+                                sliceIndex: effectiveIdx,
+                                sliceCount: ref.instance_count,
+                                settings,
+                              },
+                              mask
+                            );
+                          }}
+                          actionTitle={`Align all other dates to ${formatDate(date)}`}
+                        >
+                          <DicomViewer
+                            ref={(handle) => registerViewerHandle(viewerKey, handle)}
+                            studyId={ref.study_id}
+                            seriesUid={ref.series_uid}
+                            instanceIndex={idx}
+                            instanceCount={ref.instance_count}
+                            reverseSliceOrder={settings.reverseSliceOrder}
+                            imageUrlOverride={nanoBananaOverrideUrl}
+                            onInstanceChange={(i) => {
+                              // When scrolling on a panel, update the global progress.
+                              setProgressWithClearAi(getProgressFromSlice(i, ref.instance_count, settings.offset));
+                            }}
+                            brightness={nanoBananaOverrideUrl ? 100 : settings.brightness}
+                            contrast={nanoBananaOverrideUrl ? 100 : settings.contrast}
+                            zoom={nanoBananaOverrideUrl ? 1 : settings.zoom}
+                            rotation={nanoBananaOverrideUrl ? 0 : settings.rotation}
+                            panX={nanoBananaOverrideUrl ? 0 : settings.panX}
+                            panY={nanoBananaOverrideUrl ? 0 : settings.panY}
+                            affine00={nanoBananaOverrideUrl ? 1 : settings.affine00}
+                            affine01={nanoBananaOverrideUrl ? 0 : settings.affine01}
+                            affine10={nanoBananaOverrideUrl ? 0 : settings.affine10}
+                            affine11={nanoBananaOverrideUrl ? 1 : settings.affine11}
+                            onPanChange={
+                              nanoBananaOverrideUrl
+                                ? undefined
+                                : (newPanX, newPanY) => {
+                                    updatePanelSetting(date, { panX: newPanX, panY: newPanY });
+                                  }
+                            }
+                          />
 
-                        {AI_ENABLED && nanoBananaStatus === 'loading' && isNanoBananaTarget && (
-                          <div className="absolute top-2 right-2 max-w-[70%]">
-                            <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/60">
-                              <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
-                              <div className="text-[10px] text-white/90 truncate">
-                                {nanoBananaProgressText || 'Working…'}
+                          {AI_ENABLED && nanoBananaStatus === 'loading' && isNanoBananaTarget && (
+                            <div className="absolute top-2 right-2 max-w-[70%]">
+                              <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/60">
+                                <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+                                <div className="text-[10px] text-white/90 truncate">
+                                  {nanoBananaProgressText || 'Working…'}
+                                </div>
                               </div>
                             </div>
+                          )}
+
+                          {AI_ENABLED && nanoBananaStatus === 'ready' && isNanoBananaTarget && (
+                            <button
+                              type="button"
+                              onClick={clearNanoBanana}
+                              className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-[10px] hover:bg-black/80"
+                              title="Clear AI annotation"
+                            >
+                              Clear AI
+                            </button>
+                          )}
+
+                          {/* Date overlay (matches overlay view style) */}
+                          <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
+                            {formatDate(date)}
                           </div>
-                        )}
-
-                        {AI_ENABLED && nanoBananaStatus === 'ready' && isNanoBananaTarget && (
-                          <button
-                            type="button"
-                            onClick={clearNanoBanana}
-                            className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-[10px] hover:bg-black/80"
-                            title="Clear AI annotation"
-                          >
-                            Clear AI
-                          </button>
-                        )}
-
-                        {/* Date overlay (matches overlay view style) */}
-                        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
-                          {formatDate(date)}
-                        </div>
+                        </DragRectActionOverlay>
                       </div>
                     </div>
                   );
@@ -1602,15 +1575,19 @@ export function ComparisonMatrix() {
                 <div className="text-[var(--text-secondary)]">Select dates to view</div>
               ) : overlayDisplayedRef && overlayDisplayedDate ? (
                 <div
-                  className="relative rounded-lg overflow-hidden border border-[var(--border-color)] group"
+                  className="relative rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
                   style={{ width: overlayViewerSize, height: overlayViewerSize }}
+                  onMouseEnter={() => setIsOverlayViewerHovered(true)}
+                  onMouseLeave={() => setIsOverlayViewerHovered(false)}
                 >
                   {/* Cell controls (shown on hover, matches grid cell style) */}
                   <div
                     className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
                       isOverlayComparing
                         ? 'opacity-70 pointer-events-none'
-                        : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
+                        : isOverlayViewerHovered
+                        ? 'opacity-100 pointer-events-auto'
+                        : 'opacity-0 pointer-events-none'
                     }`}
                   >
                     <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-end">
@@ -1637,7 +1614,7 @@ export function ComparisonMatrix() {
                                     date: overlayDisplayedDate,
                                     studyId: overlayDisplayedRef.study_id,
                                     seriesUid: overlayDisplayedRef.series_uid,
-                                    instanceIndex: overlayDisplayedSliceIndex,
+                                    instanceIndex: overlayDisplayedEffectiveSliceIndex,
                                   },
                                   'overlay',
                                   aiSeriesContext
@@ -1656,7 +1633,9 @@ export function ComparisonMatrix() {
                     className={`absolute bottom-2 right-2 z-10 transition-opacity ${
                       isOverlayComparing
                         ? 'opacity-70 pointer-events-none'
-                        : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
+                        : isOverlayViewerHovered
+                        ? 'opacity-100 pointer-events-auto'
+                        : 'opacity-0 pointer-events-none'
                     }`}
                   >
                     <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
@@ -1682,7 +1661,38 @@ export function ComparisonMatrix() {
                     </div>
                   </div>
 
-                  {/*
+                  <DragRectActionOverlay
+                    className="absolute inset-0 cursor-crosshair"
+                    geometry={
+                      overlayDisplayedNanoBananaOverrideUrl
+                        ? { panX: 0, panY: 0, zoom: 1, rotation: 0, affine00: 1, affine01: 0, affine10: 0, affine11: 1 }
+                        : {
+                            panX: overlayDisplayedSettings.panX,
+                            panY: overlayDisplayedSettings.panY,
+                            zoom: overlayDisplayedSettings.zoom,
+                            rotation: overlayDisplayedSettings.rotation,
+                            affine00: overlayDisplayedSettings.affine00,
+                            affine01: overlayDisplayedSettings.affine01,
+                            affine10: overlayDisplayedSettings.affine10,
+                            affine11: overlayDisplayedSettings.affine11,
+                          }
+                    }
+                    disabled={overlayColumns.length < 2 || isAligning || isOverlayComparing}
+                    onConfirm={(mask) => {
+                      void startAlignAll(
+                        {
+                          date: overlayDisplayedDate,
+                          seriesUid: overlayDisplayedRef.series_uid,
+                          sliceIndex: overlayDisplayedEffectiveSliceIndex,
+                          sliceCount: overlayDisplayedRef.instance_count,
+                          settings: overlayDisplayedSettings,
+                        },
+                        mask
+                      );
+                    }}
+                    actionTitle={`Align all other dates to ${formatDate(overlayDisplayedDate)}`}
+                  >
+                    {/*
                     Space compare should feel instant.
 
                     Previously we updated a single viewer's series/settings on Space keydown.
@@ -1707,6 +1717,7 @@ export function ComparisonMatrix() {
                         seriesUid={overlaySelectedRef.series_uid}
                         instanceIndex={overlaySelectedSliceIndex}
                         instanceCount={overlaySelectedRef.instance_count}
+                        reverseSliceOrder={overlaySelectedSettings.reverseSliceOrder}
                         imageUrlOverride={overlaySelectedNanoBananaOverrideUrl}
                         onInstanceChange={(i) => {
                           setProgressWithClearAi(
@@ -1755,6 +1766,7 @@ export function ComparisonMatrix() {
                         seriesUid={overlayCompareRef.series_uid}
                         instanceIndex={overlayCompareSliceIndex}
                         instanceCount={overlayCompareRef.instance_count}
+                        reverseSliceOrder={overlayCompareSettings.reverseSliceOrder}
                         imageUrlOverride={overlayCompareNanoBananaOverrideUrl}
                         onInstanceChange={(i) => {
                           setProgressWithClearAi(
@@ -1807,6 +1819,14 @@ export function ComparisonMatrix() {
                             </div>
                           ) : null}
                         </div>
+                        <button
+                          type="button"
+                          onClick={abortAlignment}
+                          className="shrink-0 px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs"
+                          title="Cancel alignment"
+                        >
+                          Cancel
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1837,7 +1857,8 @@ export function ComparisonMatrix() {
                   <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
                     {formatDate(overlayDisplayedDate)}
                   </div>
-                </div>
+                </DragRectActionOverlay>
+              </div>
               ) : (
                 <div className="text-[var(--text-secondary)]">No data</div>
               )}
@@ -2020,7 +2041,6 @@ export function ComparisonMatrix() {
             {isLooping ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
           </button>
           <div className="flex items-center gap-1 text-[10px] text-[var(--text-secondary)]">
-            Speed
             {[1, 2, 4].map(s => (
               <button
                 key={s}

@@ -6,6 +6,8 @@ import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): PanelSettings {
   return {
     offset: typeof s?.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
+    reverseSliceOrder:
+      typeof s?.reverseSliceOrder === 'boolean' ? s.reverseSliceOrder : DEFAULT_PANEL_SETTINGS.reverseSliceOrder,
     zoom: typeof s?.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
     rotation: typeof s?.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
     brightness: typeof s?.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,

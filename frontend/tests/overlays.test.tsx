@@ -38,8 +38,9 @@ describe('HelpModal', () => {
     const onClose = vi.fn();
     render(<HelpModal onClose={onClose} />);
 
-    // Click backdrop
-    const backdrop = screen.getByText(/keyboard shortcuts/i).closest('div')?.parentElement?.parentElement;
+    // Click backdrop (the root fixed overlay)
+    const backdrop = screen.getByRole('heading', { name: /help/i }).closest('div')?.parentElement
+      ?.parentElement;
     if (backdrop) {
       fireEvent.click(backdrop);
     }
@@ -49,7 +50,8 @@ describe('HelpModal', () => {
   it('does not close when modal content is clicked', () => {
     const onClose = vi.fn();
     render(<HelpModal onClose={onClose} />);
-    fireEvent.click(screen.getByText(/keyboard shortcuts/i));
+    // Click on the modal heading itself (inside content)
+    fireEvent.click(screen.getByRole('heading', { name: /help/i }));
     expect(onClose).not.toHaveBeenCalled();
   });
 });

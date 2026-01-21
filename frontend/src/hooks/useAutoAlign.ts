@@ -29,7 +29,7 @@ const DEBUG_ALIGNMENT_STORAGE_KEY = 'miraviewer:debug-alignment';
 // - Reducing the search image size and/or histogram bins can significantly reduce runtime.
 const SLICE_SEARCH_IMAGE_SIZE = 128;
 const SLICE_SEARCH_MI_BINS = 32;
-const SLICE_SEARCH_STOP_DECREASE_STREAK = 6;
+const SLICE_SEARCH_STOP_DECREASE_STREAK = 4;
 
 // Registration perf tuning.
 //

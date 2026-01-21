@@ -2,6 +2,7 @@ import type { PanelSettings } from '../types/api';
 
 export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
   offset: 0,
+  reverseSliceOrder: false,
   zoom: 1,
   rotation: 0,
   brightness: 100,

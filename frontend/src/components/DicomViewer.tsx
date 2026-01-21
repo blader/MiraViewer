@@ -10,6 +10,7 @@ import {
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
 import { useWheelNavigation } from '../hooks/useWheelNavigation';
+import { getEffectiveInstanceIndex } from '../utils/math';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -27,9 +28,12 @@ export type DicomViewerHandle = {
 interface DicomViewerProps {
   studyId: string;
   seriesUid: string;
+  /** Logical slice index in the viewer's order (0..instanceCount-1). */
   instanceIndex: number;
   instanceCount: number;
   onInstanceChange: (index: number) => void;
+  /** If true, reverse through-plane order (logical 0 maps to last DICOM instance). */
+  reverseSliceOrder?: boolean;
   /** If provided, this image URL will be displayed instead of the DICOM slice URL. */
   imageUrlOverride?: string;
   brightness?: number; // 0-200, 100 = normal
@@ -133,6 +137,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     instanceIndex,
     instanceCount,
     onInstanceChange,
+    reverseSliceOrder = false,
     imageUrlOverride,
     brightness = 100,
     contrast = 100,
@@ -155,6 +160,8 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // Mouse wheel navigation for slices
   useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
 
+  const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
+
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
   const [imageId, setImageId] = useState<string | null>(null);
 
@@ -162,15 +169,17 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     let cancelled = false;
     (async () => {
       try {
-        const id = await getImageIdForInstance(seriesUid, instanceIndex);
+        const id = await getImageIdForInstance(seriesUid, effectiveInstanceIndex);
         if (!cancelled) setImageId(id);
       } catch (e) {
         console.error(e);
         if (!cancelled) setImageId(null);
       }
     })();
-    return () => { cancelled = true; };
-  }, [seriesUid, instanceIndex]);
+    return () => {
+      cancelled = true;
+    };
+  }, [seriesUid, effectiveInstanceIndex]);
 
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
@@ -401,7 +410,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         ) : imageId ? (
           <CornerstoneImage
             imageId={imageId}
-            contentKey={`${seriesUid}:${instanceIndex}`}
+            contentKey={`${seriesUid}:${effectiveInstanceIndex}`}
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}

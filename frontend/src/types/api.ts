@@ -24,6 +24,8 @@ export interface ComparisonData {
 // Persisted per-date viewer settings for a specific sequence combo.
 export interface PanelSettings {
   offset: number;
+  /** If true, treat slice index 0 as the last DICOM instance (reverse through-plane order). */
+  reverseSliceOrder: boolean;
   zoom: number; // 1 = 100%
   rotation: number; // degrees, typically [-180, 180]
   brightness: number; // 0-200, 100 = normal
@@ -48,6 +50,7 @@ export interface PanelSettings {
 // Persisted settings may be partial (values may be missing or null).
 export type PanelSettingsPartial = Partial<{
   offset: number | null;
+  reverseSliceOrder: boolean | null;
   zoom: number | null;
   rotation: number | null;
   brightness: number | null;

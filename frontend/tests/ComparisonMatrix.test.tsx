@@ -45,6 +45,7 @@ vi.mock('../src/hooks/usePanelSettings', () => ({
     progress: 0,
     setProgress: vi.fn(),
     updatePanelSetting: vi.fn(),
+    batchUpdateSettings: vi.fn(),
   }),
 }));
 
@@ -65,7 +66,7 @@ vi.mock('../src/hooks/useOverlayNavigation', () => ({
 
 vi.mock('../src/hooks/useGridLayout', () => ({
   useGridLayout: () => ({
-    containerRef: { current: null },
+    containerRef: vi.fn(),
     cols: 1,
     cellSize: 200,
     gridSize: { width: 600, height: 600 },
