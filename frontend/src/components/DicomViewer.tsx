@@ -60,59 +60,19 @@ interface ImageContentProps {
 
 function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: ImageContentProps) {
   const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
-  const [showSpinner, setShowSpinner] = useState(false);
-  const spinnerTimeoutRef = useRef<number | null>(null);
-  // Delay the spinner slightly to avoid flicker for fast loads.
-  useEffect(() => {
-
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-      spinnerTimeoutRef.current = null;
-    }
-
-    spinnerTimeoutRef.current = window.setTimeout(() => {
-      setShowSpinner(true);
-    }, 150);
-
-    return () => {
-      if (spinnerTimeoutRef.current) {
-        clearTimeout(spinnerTimeoutRef.current);
-        spinnerTimeoutRef.current = null;
-      }
-    };
-  }, [imageUrl]);
 
   const handleLoad = useCallback(() => {
     setStatus('loaded');
-    setShowSpinner(false);
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-      spinnerTimeoutRef.current = null;
-    }
   }, []);
 
   const handleError = useCallback(() => {
     setStatus('error');
-    setShowSpinner(false);
-    if (spinnerTimeoutRef.current) {
-      clearTimeout(spinnerTimeoutRef.current);
-      spinnerTimeoutRef.current = null;
-    }
   }, []);
 
   return (
     <>
-      {showSpinner && status === 'loading' && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
-        </div>
-      )}
-
-      {status === 'error' && (
-        <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
-          Failed to load image
-        </div>
-      )}
+      {status === 'loading' && <DelayedSpinnerOverlay delayMs={150} />}
+      {status === 'error' && <ErrorOverlay message="Failed to load image" />}
 
       <div className="w-full h-full flex items-center justify-center" style={{ transform: imageTransform }}>
         <img
@@ -153,7 +113,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   }: DicomViewerProps,
   ref
 ) {
-  void studyId;
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
@@ -410,7 +369,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         ) : imageId ? (
           <CornerstoneImage
             imageId={imageId}
-            contentKey={`${seriesUid}:${effectiveInstanceIndex}`}
+            contentKey={`${studyId}:${seriesUid}:${effectiveInstanceIndex}`}
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}
@@ -468,9 +427,26 @@ function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
   );
 }
 
+function ErrorOverlay({ message }: { message: string }) {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)] bg-black">
+      {message}
+    </div>
+  );
+}
+
 function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
+
+  const enabledDeferredRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null);
+  if (enabledDeferredRef.current == null) {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    enabledDeferredRef.current = { promise, resolve };
+  }
 
   // Track which imageId has been loaded to derive status.
   // Note: we intentionally do NOT clear `loadedImageId` when navigating so the previous
@@ -525,37 +501,22 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
   const appliedImageFilter = isContentInSync ? imageFilter : frozenImageFilter;
   const appliedImageTransform = isContentInSync ? imageTransform : frozenImageTransform;
 
-  // Enable cornerstone once on mount
+  // Enable cornerstone once on mount.
+  //
+  // This must be fast and non-blocking: we avoid polling loops (which can stall in tests
+  // and in slow layouts) and instead gate image loading on a one-time "enabled" promise.
   useEffect(() => {
     const element = elementRef.current;
     if (!element) return;
 
-    // Ensure the element has dimensions before enabling
-    const rect = element.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      // Wait for layout
-      const observer = new ResizeObserver(() => {
-        const newRect = element.getBoundingClientRect();
-        if (newRect.width > 0 && newRect.height > 0) {
-          observer.disconnect();
-          try {
-            cornerstone.enable(element);
-            enabledRef.current = true;
-          } catch {
-            // already enabled
-          }
-        }
-      });
-      observer.observe(element);
-      return () => observer.disconnect();
-    }
-
     try {
       cornerstone.enable(element);
-      enabledRef.current = true;
     } catch {
       // already enabled
     }
+
+    enabledRef.current = true;
+    enabledDeferredRef.current?.resolve();
 
     return () => {
       try {
@@ -578,23 +539,8 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
 
     const load = async () => {
       try {
-        // Wait for cornerstone to be enabled
-        let attempts = 0;
-        while (!enabledRef.current && attempts < 50) {
-          await new Promise(resolve => setTimeout(resolve, 20));
-          attempts++;
-        }
-
-        if (!enabledRef.current) {
-          // Try to enable now
-          try {
-            cornerstone.enable(element);
-            enabledRef.current = true;
-          } catch {
-            // already enabled
-            enabledRef.current = true;
-          }
-        }
+        await enabledDeferredRef.current!.promise;
+        if (cancelled) return;
 
         const image = await cornerstone.loadImage(imageId);
         if (cancelled) return;
@@ -651,11 +597,7 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
         aria-label={alt}
       />
       {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
-      {status === 'error' && (
-        <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)] bg-black">
-          Failed to load image
-        </div>
-      )}
+      {status === 'error' && <ErrorOverlay message="Failed to load image" />}
     </div>
   );
 }

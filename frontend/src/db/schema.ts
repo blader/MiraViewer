@@ -44,7 +44,7 @@ export interface DicomInstance {
   fileBlob: Blob;
 }
 
-export interface PanelSetting {
+export interface PanelSettingsRow {
   comboId: string;
   settings: Record<string, {
     offset: number;
@@ -80,6 +80,6 @@ export interface MiraDB {
   };
   panel_settings: {
     key: string; // comboId
-    value: PanelSetting;
+    value: PanelSettingsRow;
   };
 }

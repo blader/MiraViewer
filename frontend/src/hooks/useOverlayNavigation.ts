@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { SeriesRef } from '../types/api';
+import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
 
 type PersistedOverlayNav = {
   viewMode?: 'grid' | 'overlay';
@@ -10,23 +11,16 @@ type PersistedOverlayNav = {
 const OVERLAY_NAV_STORAGE_KEY = 'miraviewer:overlay-nav:v1';
 
 function readPersistedOverlayNav(): PersistedOverlayNav {
-  try {
-    const raw = localStorage.getItem(OVERLAY_NAV_STORAGE_KEY);
-    if (!raw) return {};
+  const parsed = readLocalStorageJson(OVERLAY_NAV_STORAGE_KEY);
+  if (!parsed || typeof parsed !== 'object') return {};
 
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
+  const obj = parsed as Record<string, unknown>;
 
-    const obj = parsed as Record<string, unknown>;
+  const viewMode = obj.viewMode === 'overlay' ? 'overlay' : obj.viewMode === 'grid' ? 'grid' : undefined;
+  const overlayDate = typeof obj.overlayDate === 'string' ? obj.overlayDate : undefined;
+  const playSpeed = typeof obj.playSpeed === 'number' && Number.isFinite(obj.playSpeed) ? obj.playSpeed : undefined;
 
-    const viewMode = obj.viewMode === 'overlay' ? 'overlay' : obj.viewMode === 'grid' ? 'grid' : undefined;
-    const overlayDate = typeof obj.overlayDate === 'string' ? obj.overlayDate : undefined;
-    const playSpeed = typeof obj.playSpeed === 'number' && Number.isFinite(obj.playSpeed) ? obj.playSpeed : undefined;
-
-    return { viewMode, overlayDate, playSpeed };
-  } catch {
-    return {};
-  }
+  return { viewMode, overlayDate, playSpeed };
 }
 
 function getUtcDateMs(date: string) {
@@ -48,11 +42,7 @@ export function useOverlayNavigation(
   const persist = useCallback((update: PersistedOverlayNav) => {
     const next: PersistedOverlayNav = { ...persistedRef.current, ...update };
     persistedRef.current = next;
-    try {
-      localStorage.setItem(OVERLAY_NAV_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore quota/blocked storage.
-    }
+    writeLocalStorageJson(OVERLAY_NAV_STORAGE_KEY, next);
   }, []);
 
   const [viewMode, setViewModeState] = useState<'grid' | 'overlay'>(() => {

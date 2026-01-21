@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ComparisonData } from '../types/api';
+import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
 
 const FILTERS_STORAGE_KEY = 'mira-filters-v2';
 
@@ -83,20 +84,16 @@ function findMatchingSequence(data: ComparisonData, newPlane: string, currentSeq
 }
 
 function loadStoredFilters(): FiltersState {
-  try {
-    const restored = JSON.parse(localStorage.getItem(FILTERS_STORAGE_KEY) || 'null') as unknown;
-    if (restored && typeof restored === 'object') {
-      const r = restored as { plane?: unknown; seqId?: unknown; enabledDates?: unknown };
-      return {
-        plane: typeof r.plane === 'string' ? r.plane : null,
-        seqId: typeof r.seqId === 'string' ? r.seqId : null,
-        enabledDates: Array.isArray(r.enabledDates)
-          ? r.enabledDates.filter((d): d is string => typeof d === 'string')
-          : null,
-      };
-    }
-  } catch {
-    // Ignore corrupted localStorage state.
+  const restored = readLocalStorageJson(FILTERS_STORAGE_KEY);
+  if (restored && typeof restored === 'object') {
+    const r = restored as { plane?: unknown; seqId?: unknown; enabledDates?: unknown };
+    return {
+      plane: typeof r.plane === 'string' ? r.plane : null,
+      seqId: typeof r.seqId === 'string' ? r.seqId : null,
+      enabledDates: Array.isArray(r.enabledDates)
+        ? r.enabledDates.filter((d): d is string => typeof d === 'string')
+        : null,
+    };
   }
 
   return { plane: null, seqId: null, enabledDates: null };
@@ -162,11 +159,7 @@ export function useComparisonFilters(data: ComparisonData | null) {
       seqId: selectedSeqId,
       enabledDates: enabledDatesKey.split(',').filter(Boolean),
     };
-    try {
-      localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // Ignore quota / privacy mode errors.
-    }
+    writeLocalStorageJson(FILTERS_STORAGE_KEY, payload);
   }, [data, selectedPlane, selectedSeqId, enabledDatesKey]);
 
   const selectPlane = useCallback(

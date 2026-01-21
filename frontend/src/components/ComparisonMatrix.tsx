@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { AlignmentReference, ExclusionMask, PanelSettings, SequenceCombo, SeriesRef } from '../types/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { AlignmentReference, ExclusionMask, SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
+import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
 import {
   Brain,
   Layers,
-  CalendarDays,
-  ChevronLeft,
-  ChevronRight,
   LayoutGrid,
   Play,
   Pause,
@@ -25,16 +23,20 @@ import { UploadModal } from './UploadModal';
 import { ExportModal } from './ExportModal';
 import { ClearDataModal } from './ClearDataModal';
 import { DragRectActionOverlay } from './DragRectActionOverlay';
-import { TooltipTrigger } from './TooltipTrigger';
+import { SliceLoopNavigator } from './comparison/SliceLoopNavigator';
+import { ComparisonFiltersSidebar } from './comparison/ComparisonFiltersSidebar';
+import { ComparisonDatesSidebar } from './comparison/ComparisonDatesSidebar';
 import { useComparisonData } from '../hooks/useComparisonData';
 import { useComparisonFilters } from '../hooks/useComparisonFilters';
 import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useOverlayNavigation } from '../hooks/useOverlayNavigation';
 import { useGridLayout } from '../hooks/useGridLayout';
 import { useAutoAlign } from '../hooks/useAutoAlign';
-import { getSequenceTooltip, formatSequenceLabel } from '../utils/clinicalData';
+import { useApplyAlignmentResults } from '../hooks/useApplyAlignmentResults';
+import { useGlobalSliceWheelNavigation } from '../hooks/useGlobalSliceWheelNavigation';
+import { formatSequenceLabel } from '../utils/clinicalData';
 import { useAiAnnotation } from '../hooks/useAiAnnotation';
-import { DEFAULT_PANEL_SETTINGS, CONTROL_LIMITS, OVERLAY, AI_ENABLED } from '../utils/constants';
+import { DEFAULT_PANEL_SETTINGS, OVERLAY, AI_ENABLED } from '../utils/constants';
 import { getEffectiveInstanceIndex, getSliceIndex, getProgressFromSlice } from '../utils/math';
 
 function getOverlayViewerSize(gridSize: { width: number; height: number }) {
@@ -49,23 +51,6 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
-type PersistedSliceLoopPlaybackSettings = {
-  loopStart: number;
-  loopEnd: number;
-  loopSpeed: 1 | 2 | 4;
-};
-
-type PersistedSliceLoopPlaybackCookieV2 = {
-  bySeq: Record<string, (PersistedSliceLoopPlaybackSettings & { updatedAt?: number }) | undefined>;
-};
-
-const PLAYBACK_STORAGE_KEY_PREFIX = 'miraviewer:slice-loop-playback:v2:';
-const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
-
-// Legacy global settings (used to seed per-seq settings if present).
-const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
-
 type PersistedComparisonUiState = {
   sidebarOpen?: boolean;
   rightSidebarOpen?: boolean;
@@ -74,267 +59,14 @@ type PersistedComparisonUiState = {
 const COMPARISON_UI_STORAGE_KEY = 'miraviewer:comparison-ui:v1';
 
 function readPersistedComparisonUiState(): PersistedComparisonUiState {
-  try {
-    const raw = localStorage.getItem(COMPARISON_UI_STORAGE_KEY);
-    if (!raw) return {};
+  const parsed = readLocalStorageJson(COMPARISON_UI_STORAGE_KEY);
+  if (!parsed || typeof parsed !== 'object') return {};
 
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
-
-    const obj = parsed as Record<string, unknown>;
-    return {
-      sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : undefined,
-      rightSidebarOpen: typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-function hasEditableAncestor(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-
-  let el: HTMLElement | null = target;
-  while (el) {
-    if (el.isContentEditable) return true;
-
-    const tag = el.tagName;
-    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
-
-    if (tag === 'INPUT') {
-      const type = (el as HTMLInputElement).type;
-      // Allow wheel slicing over the global slice slider (range input).
-      if (type !== 'range') {
-        return true;
-      }
-    }
-
-    el = el.parentElement;
-  }
-
-  return false;
-}
-
-function hasScrollableAncestor(
-  target: EventTarget | null,
-  deltaY: number,
-  stopAt?: HTMLElement | null
-): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-
-  const dir = Math.sign(deltaY);
-  if (dir === 0) return false;
-
-  let el: HTMLElement | null = target;
-
-  while (el) {
-    const style = window.getComputedStyle(el);
-    const overflowY = style.overflowY;
-    const scrollableY =
-      (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') && el.scrollHeight > el.clientHeight + 1;
-
-    if (scrollableY) {
-      // Only treat it as scrollable if this wheel event would actually scroll it.
-      if (dir > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
-      if (dir < 0 && el.scrollTop > 0) return true;
-    }
-
-    if (stopAt && el === stopAt) break;
-
-    el = el.parentElement;
-  }
-
-  return false;
-}
-
-function ensureLoopBounds(start: number, end: number): [number, number] {
-  const minGap = 0.01;
-  const s = clamp01(start);
-  let e = clamp01(end);
-  if (e - s < minGap) {
-    e = clamp01(s + minGap);
-  }
-  return [s, e];
-}
-
-function makePlaybackStorageKey(seqId: string): string {
-  return `${PLAYBACK_STORAGE_KEY_PREFIX}${encodeURIComponent(seqId)}`;
-}
-
-function readCookie(name: string): string | null {
-  const parts = document.cookie.split(';');
-  for (const part of parts) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k === name) {
-      return rest.join('=') || '';
-    }
-  }
-  return null;
-}
-
-function writeCookie(name: string, value: string) {
-  // Persist for 1 year.
-  const maxAge = 60 * 60 * 24 * 365;
-  document.cookie = `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
-}
-
-function parsePersistedPlaybackValue(value: unknown): PersistedSliceLoopPlaybackSettings | null {
-  if (!value || typeof value !== 'object') return null;
-  const obj = value as Record<string, unknown>;
-
-  const sRaw = obj.loopStart;
-  const eRaw = obj.loopEnd;
-  if (
-    typeof sRaw !== 'number' ||
-    !Number.isFinite(sRaw) ||
-    typeof eRaw !== 'number' ||
-    !Number.isFinite(eRaw)
-  ) {
-    return null;
-  }
-
-  const [loopStart, loopEnd] = ensureLoopBounds(sRaw, eRaw);
-
-  const sp = obj.loopSpeed;
-  const loopSpeed: 1 | 2 | 4 = sp === 2 || sp === 4 ? sp : 1;
-
-  return { loopStart, loopEnd, loopSpeed };
-}
-
-function parsePersistedPlaybackJson(rawJson: string): PersistedSliceLoopPlaybackSettings | null {
-  try {
-    return parsePersistedPlaybackValue(JSON.parse(rawJson));
-  } catch {
-    return null;
-  }
-}
-
-function readPersistedSliceLoopPlaybackSettingsFromCookieV2(seqId: string): PersistedSliceLoopPlaybackSettings | null {
-  try {
-    const cookieVal = readCookie(PLAYBACK_COOKIE_NAME_V2);
-    if (!cookieVal) return null;
-
-    const decoded = decodeURIComponent(cookieVal);
-    const parsed: unknown = JSON.parse(decoded);
-    if (!parsed || typeof parsed !== 'object') return null;
-
-    const bySeq = (parsed as Record<string, unknown>).bySeq;
-    if (!bySeq || typeof bySeq !== 'object') return null;
-
-    const entry = (bySeq as Record<string, unknown>)[seqId];
-    return parsePersistedPlaybackValue(entry);
-  } catch {
-    return null;
-  }
-}
-
-function writePersistedSliceLoopPlaybackSettingsToCookieV2(seqId: string, settings: PersistedSliceLoopPlaybackSettings) {
-  try {
-    const existingVal = readCookie(PLAYBACK_COOKIE_NAME_V2);
-    let cookieObj: PersistedSliceLoopPlaybackCookieV2 = { bySeq: {} };
-
-    if (existingVal) {
-      try {
-        const decoded = decodeURIComponent(existingVal);
-        const parsed: unknown = JSON.parse(decoded);
-        if (parsed && typeof parsed === 'object') {
-          const bySeq = (parsed as Record<string, unknown>).bySeq;
-          if (bySeq && typeof bySeq === 'object') {
-            cookieObj = { bySeq: bySeq as PersistedSliceLoopPlaybackCookieV2['bySeq'] };
-          }
-        }
-      } catch {
-        // Ignore malformed cookie.
-      }
-    }
-
-    cookieObj.bySeq[seqId] = { ...settings, updatedAt: Date.now() };
-
-    // Prune to keep cookie size reasonable.
-    const entries = Object.entries(cookieObj.bySeq)
-      .map(([k, v]) => {
-        const ts = typeof v?.updatedAt === 'number' && Number.isFinite(v.updatedAt) ? v.updatedAt : 0;
-        return [k, ts] as const;
-      })
-      .sort((a, b) => b[1] - a[1]);
-
-    const MAX_COOKIE_ENTRIES = 25;
-    if (entries.length > MAX_COOKIE_ENTRIES) {
-      const keep = new Set(entries.slice(0, MAX_COOKIE_ENTRIES).map(([k]) => k));
-      for (const key of Object.keys(cookieObj.bySeq)) {
-        if (!keep.has(key)) {
-          delete cookieObj.bySeq[key];
-        }
-      }
-    }
-
-    writeCookie(PLAYBACK_COOKIE_NAME_V2, encodeURIComponent(JSON.stringify(cookieObj)));
-  } catch {
-    // Ignore blocked cookies.
-  }
-}
-
-function readPersistedSliceLoopPlaybackSettingsForSeq(seqId: string): PersistedSliceLoopPlaybackSettings | null {
-  // Prefer localStorage (origin-scoped) per sequence.
-  try {
-    const raw = localStorage.getItem(makePlaybackStorageKey(seqId));
-    if (raw) {
-      const parsed = parsePersistedPlaybackJson(raw);
-      if (parsed) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-
-  // Fallback to cookie (shared across ports on the same host).
-  const fromCookie = readPersistedSliceLoopPlaybackSettingsFromCookieV2(seqId);
-  if (fromCookie) return fromCookie;
-
-  // Legacy global settings (seed per-seq once).
-  try {
-    const raw = localStorage.getItem(LEGACY_PLAYBACK_STORAGE_KEY);
-    if (raw) {
-      const parsed = parsePersistedPlaybackJson(raw);
-      if (parsed) {
-        writePersistedSliceLoopPlaybackSettingsForSeq(seqId, parsed);
-        return parsed;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  try {
-    const cookieVal = readCookie(LEGACY_PLAYBACK_COOKIE_NAME);
-    if (cookieVal) {
-      const decoded = decodeURIComponent(cookieVal);
-      const parsed = parsePersistedPlaybackJson(decoded);
-      if (parsed) {
-        writePersistedSliceLoopPlaybackSettingsForSeq(seqId, parsed);
-        return parsed;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  return null;
-}
-
-function writePersistedSliceLoopPlaybackSettingsForSeq(seqId: string, settings: PersistedSliceLoopPlaybackSettings) {
-  const raw = JSON.stringify(settings);
-
-  try {
-    localStorage.setItem(makePlaybackStorageKey(seqId), raw);
-  } catch {
-    // Ignore quota/blocked storage.
-  }
-
-  writePersistedSliceLoopPlaybackSettingsToCookieV2(seqId, settings);
+  const obj = parsed as Record<string, unknown>;
+  return {
+    sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : undefined,
+    rightSidebarOpen: typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : undefined,
+  };
 }
 
 export function ComparisonMatrix() {
@@ -358,11 +90,7 @@ export function ComparisonMatrix() {
   const persistUi = useCallback((update: PersistedComparisonUiState) => {
     const next: PersistedComparisonUiState = { ...uiPersistedRef.current, ...update };
     uiPersistedRef.current = next;
-    try {
-      localStorage.setItem(COMPARISON_UI_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore quota/blocked storage.
-    }
+    writeLocalStorageJson(COMPARISON_UI_STORAGE_KEY, next);
   }, []);
 
   const [sidebarOpen, setSidebarOpen] = useState(() => {
@@ -497,49 +225,14 @@ export function ComparisonMatrix() {
   const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
   const [isOverlayViewerHovered, setIsOverlayViewerHovered] = useState(false);
 
-  // Apply alignment results incrementally so grid cells update as each date finishes.
-  const appliedAlignmentDatesRef = useRef(new Set<string>());
-  const wasAligningRef = useRef(false);
-  useEffect(() => {
-    if (isAligning && !wasAligningRef.current) {
-      appliedAlignmentDatesRef.current.clear();
-    }
-    wasAligningRef.current = isAligning;
-  }, [isAligning]);
-
-  useEffect(() => {
-    if (alignmentResults.length === 0) return;
-
-    const pending = new Map<string, PanelSettings>();
-    for (const r of alignmentResults) {
-      if (appliedAlignmentDatesRef.current.has(r.date)) continue;
-
-      const existing = panelSettings.get(r.date) || DEFAULT_PANEL_SETTINGS;
-      const reverseSliceOrder = !!existing.reverseSliceOrder;
-
-      // If slice order is reversed for this date, adjust the computed offset so the
-      // *physical* bestSliceIndex still displays (logical = max - physical).
-      let next = r.computedSettings;
-      if (reverseSliceOrder && data && selectedSeqId) {
-        const seriesRef = data.series_map[selectedSeqId]?.[r.date];
-        const instanceCount = seriesRef?.instance_count;
-        if (typeof instanceCount === 'number' && instanceCount > 0) {
-          const max = instanceCount - 1;
-          const desiredLogicalIndex = max - r.bestSliceIndex;
-          const delta = desiredLogicalIndex - r.bestSliceIndex;
-          next = { ...next, offset: next.offset + delta };
-        }
-      }
-
-      // Always preserve the user's per-date slice order preference.
-      pending.set(r.date, { ...next, reverseSliceOrder });
-      appliedAlignmentDatesRef.current.add(r.date);
-    }
-
-    if (pending.size > 0) {
-      batchUpdateSettings(pending);
-    }
-  }, [alignmentResults, batchUpdateSettings, data, panelSettings, selectedSeqId]);
+  useApplyAlignmentResults({
+    isAligning,
+    alignmentResults,
+    panelSettings,
+    data,
+    selectedSeqId,
+    batchUpdateSettings,
+  });
 
 
 
@@ -802,52 +495,12 @@ export function ComparisonMatrix() {
     setProgressWithClearAiRef.current = setProgressWithClearAi;
   }, [setProgressWithClearAi]);
 
-  useEffect(() => {
-    const handleWheel = (e: WheelEvent) => {
-      // If a nested component (e.g. a DicomViewer) handled it already, don't double-apply.
-      if (e.defaultPrevented) return;
-
-      // Trackpad pinch-zoom sends ctrlKey wheel events; don't hijack those.
-      if (e.ctrlKey) return;
-
-      // Only slice-scroll when the wheel event originated inside the center pane.
-      const centerPane = centerPaneRef.current;
-      if (!centerPane) return;
-      if (!(e.target instanceof Node) || !centerPane.contains(e.target)) return;
-
-      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
-
-      // Don't slice when the user is interacting with text inputs or editable content.
-      if (hasEditableAncestor(e.target)) return;
-
-      // Don't slice when the wheel should scroll an overflow container (modals, panels, etc).
-      //
-      // Important: We intentionally stop the search at the center pane so the document/body
-      // scrolling doesn't disable slice-wheel navigation.
-      if (hasScrollableAncestor(e.target, e.deltaY, centerPane)) return;
-
-      const ctx = wheelNavContextRef.current;
-      if (!ctx) return;
-
-      const delta = Math.sign(e.deltaY);
-      if (delta === 0) return;
-
-      const currentProgress = progressRef.current;
-      const currentIndex = getSliceIndex(ctx.instanceCount, currentProgress, ctx.offset);
-      const nextIndex = Math.max(0, Math.min(ctx.instanceCount - 1, currentIndex + delta));
-      if (nextIndex === currentIndex) return;
-
-      const nextProgress = getProgressFromSlice(nextIndex, ctx.instanceCount, ctx.offset);
-      if (nextProgress === currentProgress) return;
-
-      e.preventDefault();
-      progressRef.current = nextProgress;
-      setProgressWithClearAiRef.current(nextProgress);
-    };
-
-    window.addEventListener('wheel', handleWheel, { passive: false });
-    return () => window.removeEventListener('wheel', handleWheel);
-  }, []);
+  useGlobalSliceWheelNavigation({
+    centerPaneRef,
+    contextRef: wheelNavContextRef,
+    progressRef,
+    setProgressRef: setProgressWithClearAiRef,
+  });
 
   const playbackInstanceCount = useMemo(() => {
     const fromOverlay = overlayColumns[overlayDateIndex]?.ref?.instance_count;
@@ -861,170 +514,6 @@ export function ComparisonMatrix() {
 
     return 1;
   }, [overlayColumns, overlayDateIndex, columns]);
-
-  // Loop playback for slice navigation
-  const [loopStart, setLoopStart] = useState(0);
-  const [loopEnd, setLoopEnd] = useState(1);
-  const [isLooping, setIsLooping] = useState(false);
-  const [loopSpeed, setLoopSpeed] = useState<1 | 2 | 4>(1);
-  const loopDirectionRef = useRef<1 | -1>(1);
-  const rafRef = useRef<number | null>(null);
-  const lastTsRef = useRef<number | null>(null);
-  const loopStepAccumRef = useRef(0);
-  const trackRef = useRef<HTMLDivElement | null>(null);
-  const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
-
-  const playbackHydratedSeqIdRef = useRef<string | null>(null);
-
-  // Hydrate playback settings when the user switches sequence combos.
-  // Layout effect prevents a one-frame flash of the previous combo's handles.
-  useLayoutEffect(() => {
-    if (!selectedSeqId) return;
-
-    const persisted = readPersistedSliceLoopPlaybackSettingsForSeq(selectedSeqId);
-    if (persisted) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate per-seq loop UI state on seq change (avoids a one-frame flash).
-      setLoopStart(persisted.loopStart);
-      setLoopEnd(persisted.loopEnd);
-      setLoopSpeed(persisted.loopSpeed);
-    } else {
-      setLoopStart(0);
-      setLoopEnd(1);
-      setLoopSpeed(1);
-    }
-
-    playbackHydratedSeqIdRef.current = selectedSeqId;
-  }, [selectedSeqId]);
-
-  // Persist per-seq loop window.
-  useEffect(() => {
-    if (!selectedSeqId) return;
-    if (playbackHydratedSeqIdRef.current !== selectedSeqId) return;
-
-    writePersistedSliceLoopPlaybackSettingsForSeq(selectedSeqId, {
-      loopStart,
-      loopEnd,
-      loopSpeed,
-    });
-  }, [selectedSeqId, loopStart, loopEnd, loopSpeed]);
-
-  // Adjust loop bounds and keep progress inside
-  const updateLoop = useCallback(
-    (nextStart: number, nextEnd: number) => {
-      const [s, e] = ensureLoopBounds(nextStart, nextEnd);
-      setLoopStart(s);
-      setLoopEnd(e);
-
-      const clamped = clamp01(Math.max(s, Math.min(progressRef.current, e)));
-      progressRef.current = clamped;
-      setProgressWithClearAi(clamped);
-    },
-    [setProgressWithClearAi]
-  );
-
-  // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
-  useEffect(() => {
-    if (!isLooping) {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-      lastTsRef.current = null;
-      loopStepAccumRef.current = 0;
-      return;
-    }
-
-    lastTsRef.current = null;
-    loopStepAccumRef.current = 0;
-
-    const baseSlicesPerSecond = 8; // 1x = 8 slices/sec; 2x/4x scale from there.
-
-    const step = (ts: number) => {
-      if (lastTsRef.current === null) {
-        lastTsRef.current = ts;
-        rafRef.current = requestAnimationFrame(step);
-        return;
-      }
-
-      // Cap dt so tab-switch / hitch doesn't jump too far.
-      const dt = Math.min(0.1, (ts - lastTsRef.current) / 1000);
-      lastTsRef.current = ts;
-
-      const denom = Math.max(1, playbackInstanceCount - 1);
-      const stepProgress = 1 / denom;
-
-      loopStepAccumRef.current += dt * baseSlicesPerSecond * loopSpeed;
-      let didAdvance = false;
-
-      while (loopStepAccumRef.current >= 1) {
-        loopStepAccumRef.current -= 1;
-
-        let next = progressRef.current + stepProgress * loopDirectionRef.current;
-
-        // Reflect at bounds (ping-pong).
-        while (next > loopEnd || next < loopStart) {
-          if (next > loopEnd) {
-            next = loopEnd - (next - loopEnd);
-            loopDirectionRef.current = -1;
-          } else if (next < loopStart) {
-            next = loopStart + (loopStart - next);
-            loopDirectionRef.current = 1;
-          }
-        }
-
-        next = clamp01(next);
-        if (next !== progressRef.current) {
-          progressRef.current = next;
-          didAdvance = true;
-        }
-      }
-
-      if (didAdvance) {
-        setProgressWithClearAi(progressRef.current);
-      }
-
-      rafRef.current = requestAnimationFrame(step);
-    };
-
-    rafRef.current = requestAnimationFrame(step);
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-      lastTsRef.current = null;
-      loopStepAccumRef.current = 0;
-    };
-  }, [isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, setProgressWithClearAi]);
-
-  // Stop looping if bounds collapse
-  useEffect(() => {
-    if (loopEnd - loopStart < 0.005 && isLooping) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- guardrail: stop playback when bounds collapse.
-      setIsLooping(false);
-    }
-  }, [loopStart, loopEnd, isLooping, setIsLooping]);
-
-  // Drag handlers for loop handles
-  useEffect(() => {
-    if (!draggingHandle) return;
-
-    const handleMove = (e: MouseEvent) => {
-      const rect = trackRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const pct = clamp01((e.clientX - rect.left) / rect.width);
-      if (draggingHandle === 'start') {
-        updateLoop(pct, loopEnd);
-      } else {
-        updateLoop(loopStart, pct);
-      }
-    };
-
-    const handleUp = () => setDraggingHandle(null);
-
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-    };
-  }, [draggingHandle, loopEnd, loopStart, updateLoop]);
 
   if (loading) {
     return (
@@ -1245,62 +734,17 @@ export function ComparisonMatrix() {
 
       {/* Main area with sidebar */}
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Collapsible sidebar */}
-        <div
-          className={`flex-shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${sidebarOpen ? 'w-64' : 'w-0'}`}
-        >
-          <div className="w-64 h-full overflow-y-auto p-4 space-y-6">
-            {/* Plane selector */}
-            <div>
-              <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center gap-2">
-                <Layers className="w-4 h-4" />Plane
-              </div>
-              <div className="grid grid-cols-2 gap-1">
-                {availablePlanes.map(p => (
-                  <button
-                    key={p}
-                    onClick={() => selectPlane(p)}
-                    className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate ${selectedPlane === p ? 'bg-[var(--accent)] text-white' : 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'}`}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Sequence selector */}
-            <div>
-              <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3">Sequence</div>
-              <div className="grid grid-cols-2 gap-1">
-                {sequencesForPlane.map(seq => {
-                  const hasData = sequencesWithDataForDates.has(seq.id);
-                  const isSelected = selectedSeqId === seq.id;
-                  const tooltipText = getSequenceTooltip(seq.weight, seq.sequence) + (hasData ? '' : '\n\n⚠️ No data for selected dates');
-                  return (
-                    <TooltipTrigger
-                      key={seq.id}
-                      content={tooltipText}
-                      onClick={() => selectSequence(seq.id)}
-                      className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${isSelected ? (hasData ? 'bg-[var(--accent)] text-white' : 'bg-[var(--accent)] text-white opacity-50') : hasData ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] opacity-50'}`}
-                    >
-                      {formatSequenceLabel(seq)}
-                    </TooltipTrigger>
-                  );
-                })}
-              </div>
-            </div>
-
-          </div>
-        </div>
-
-        {/* Left sidebar toggle (compact) */}
-        <button
-          onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="absolute left-2 top-1/2 -translate-y-1/2 z-20 p-1 rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
-          title={sidebarOpen ? 'Hide filters' : 'Show filters'}
-        >
-          {sidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-        </button>
+        <ComparisonFiltersSidebar
+          open={sidebarOpen}
+          onToggleOpen={() => setSidebarOpen((v) => !v)}
+          availablePlanes={availablePlanes}
+          selectedPlane={selectedPlane}
+          onSelectPlane={selectPlane}
+          sequencesForPlane={sequencesForPlane}
+          sequencesWithDataForDates={sequencesWithDataForDates}
+          selectedSeqId={selectedSeqId}
+          onSelectSequence={selectSequence}
+        />
 
         {/* Main content area - Grid or Overlay */}
         <div ref={setCenterPaneRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
@@ -1961,156 +1405,26 @@ export function ComparisonMatrix() {
           )}
         </div>
 
-        {/* Right sidebar toggle (compact) */}
-        <button
-          onClick={() => setRightSidebarOpen(!rightSidebarOpen)}
-          className="absolute right-2 top-1/2 -translate-y-1/2 z-20 p-1 rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
-          title={rightSidebarOpen ? 'Hide dates' : 'Show dates'}
-        >
-          {rightSidebarOpen ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-        </button>
-
-        {/* Right sidebar - Dates */}
-        <div
-          className={`flex-shrink-0 bg-[var(--bg-secondary)] border-l border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${rightSidebarOpen ? 'w-56' : 'w-0'}`}
-        >
-          <div className="w-56 h-full overflow-y-auto p-4">
-            <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <CalendarDays className="w-4 h-4" />Dates
-              </div>
-              <div className="flex gap-1">
-                <button
-                  onClick={selectAllDates}
-                  className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
-                  title="Select all dates"
-                >
-                  All
-                </button>
-                <button
-                  onClick={selectNoDates}
-                  className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
-                  title="Deselect all dates"
-                >
-                  None
-                </button>
-              </div>
-            </div>
-            <div className="space-y-1">
-              {sortedDates.map(d => {
-                const enabled = enabledDates.has(d);
-                const hasData = datesWithDataForSequence.has(d);
-                return (
-                  <button
-                    key={d}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => toggleDate(d)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 focus:outline-none ${enabled ? (hasData ? 'bg-[var(--accent)] text-white' : 'bg-[var(--accent)] text-white opacity-50') : hasData ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]' : 'text-[var(--text-tertiary)] opacity-50'}`}
-                    title={hasData ? undefined : 'No data for selected sequence'}
-                  >
-                    <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${enabled ? 'bg-white text-[var(--accent)] border-white' : 'border-[var(--border-color)]'}`}>
-                      {enabled && '✓'}
-                    </span>
-                    {formatDate(d)}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
+        <ComparisonDatesSidebar
+          open={rightSidebarOpen}
+          onToggleOpen={() => setRightSidebarOpen((v) => !v)}
+          sortedDates={sortedDates}
+          enabledDates={enabledDates}
+          datesWithDataForSequence={datesWithDataForSequence}
+          onSelectAllDates={selectAllDates}
+          onSelectNoDates={selectNoDates}
+          onToggleDate={toggleDate}
+        />
       </div>
 
       {/* Slice navigator with loop + speed controls */}
-      <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)] flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className={`p-2 rounded-md border border-[var(--border-color)] ${isLooping ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-            onClick={() => {
-              // Ensure loop window has size before starting
-              const minGap = 0.02;
-              if (loopEnd - loopStart < minGap) {
-                const newEnd = clamp01(loopStart + minGap);
-                updateLoop(loopStart, newEnd);
-              }
-              loopDirectionRef.current = 1;
-              setIsLooping(!isLooping);
-            }}
-            title={isLooping ? 'Pause loop' : 'Play loop'}
-          >
-            {isLooping ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-          </button>
-          <div className="flex items-center gap-1 text-[10px] text-[var(--text-secondary)]">
-            {[1, 2, 4].map(s => (
-              <button
-                key={s}
-                type="button"
-                className={`px-2 py-1 rounded border text-[10px] ${loopSpeed === s ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-color)]'}`}
-                onClick={() => setLoopSpeed(s as 1 | 2 | 4)}
-              >
-                {s}x
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="text-xs text-[var(--text-secondary)] whitespace-nowrap">Slice</div>
-
-        <div className="relative flex-1 h-8" ref={trackRef}>
-          {/* Highlighted loop window */}
-          <div
-            className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--bg-tertiary)] w-full"
-            aria-hidden
-          />
-          <div
-            className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--accent)] opacity-40"
-            style={{
-              left: `${loopStart * 100}%`,
-              width: `${Math.max(0, loopEnd - loopStart) * 100}%`,
-            }}
-            aria-hidden
-          />
-
-          {/* Main progress slider */}
-          <input
-            type="range"
-            min={0}
-            max={CONTROL_LIMITS.SLICE_NAV.MAX_RANGE}
-            step={1}
-            value={Math.round(progress * CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
-            onChange={(e) =>
-              setProgressWithClearAi(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)
-            }
-            className="absolute inset-0 w-full h-8 opacity-0 cursor-pointer"
-            aria-label="Slice position"
-          />
-
-          {/* Visible thumb for current position */}
-          <div
-            className="absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-[var(--text-primary)] rounded pointer-events-none"
-            style={{ left: `calc(${progress * 100}% - 4px)` }}
-            aria-hidden
-          />
-
-          {/* Loop handles */}
-          {(['start', 'end'] as const).map(handle => {
-            const pos = handle === 'start' ? loopStart : loopEnd;
-            return (
-              <button
-                key={handle}
-                type="button"
-                className="absolute top-1/2 -translate-y-1/2 w-3 h-5 bg-white border border-[var(--accent)] rounded cursor-ew-resize"
-                style={{ left: `calc(${pos * 100}% - 6px)` }}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setDraggingHandle(handle);
-                }}
-                title={handle === 'start' ? 'Loop start' : 'Loop end'}
-              />
-            );
-          })}
-        </div>
-      </div>
+      <SliceLoopNavigator
+        selectedSeqId={selectedSeqId}
+        playbackInstanceCount={playbackInstanceCount}
+        progress={progress}
+        progressRef={progressRef}
+        setProgress={setProgressWithClearAi}
+      />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { getDB } from '../db/db';
 import type { DicomSeries } from '../db/schema';
 import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
+import { parseSeriesDescription } from './dicomSeriesParsing';
 
 // Helper to generate a stable ID for the combo
 function slugifyCombo(plane?: string, weight?: string, sequence?: string): string {
@@ -17,47 +18,58 @@ export async function getStudies() {
   const db = await getDB();
   const studies = await db.getAll('studies');
   const allSeries = await db.getAll('series');
-  const allInstances = await db.getAll('instances');
-  
-  // Aggregate counts
-  // This is a bit naive (fetch all), but fine for local app scale
+
+  // Aggregate counts without loading instance Blob payloads.
   const seriesByStudy: Record<string, DicomSeries[]> = {};
-  allSeries.forEach(s => {
+  allSeries.forEach((s) => {
     if (!seriesByStudy[s.studyInstanceUid]) seriesByStudy[s.studyInstanceUid] = [];
     seriesByStudy[s.studyInstanceUid].push(s);
   });
 
   const instanceCountsBySeries: Record<string, number> = {};
-  allInstances.forEach(i => {
-    instanceCountsBySeries[i.seriesInstanceUid] = (instanceCountsBySeries[i.seriesInstanceUid] || 0) + 1;
-  });
+  await Promise.all(
+    allSeries.map(async (s) => {
+      instanceCountsBySeries[s.seriesInstanceUid] = await db.countFromIndex(
+        'instances',
+        'by-series',
+        s.seriesInstanceUid
+      );
+    })
+  );
 
-  return studies.map(study => {
-    const series = seriesByStudy[study.studyInstanceUid] || [];
-    const seriesList = series.map(s => ({
-      series_uid: s.seriesInstanceUid,
-      series_description: s.seriesDescription,
-      series_number: s.seriesNumber,
-      modality: s.modality,
-      plane: s.plane,
-      weight: s.weight,
-      sequence_type: s.sequenceType,
-      instance_count: instanceCountsBySeries[s.seriesInstanceUid] || 0,
-    })).filter(s => s.instance_count > 0);
+  return studies
+    .map((study) => {
+      const series = seriesByStudy[study.studyInstanceUid] || [];
+      const seriesList = series
+        .map((s) => {
+          const parsed = parseSeriesDescription(s.seriesDescription);
+          return {
+            series_uid: s.seriesInstanceUid,
+            series_description: s.seriesDescription,
+            series_number: s.seriesNumber,
+            modality: s.modality,
+            plane: s.plane || parsed.plane,
+            weight: s.weight || parsed.weight,
+            sequence_type: s.sequenceType || parsed.sequenceType,
+            instance_count: instanceCountsBySeries[s.seriesInstanceUid] || 0,
+          };
+        })
+        .filter((s) => s.instance_count > 0);
 
-    const totalInstances = seriesList.reduce((acc, s) => acc + s.instance_count, 0);
+      const totalInstances = seriesList.reduce((acc, s) => acc + s.instance_count, 0);
 
-    return {
-      study_id: study.studyInstanceUid, // Use UID as ID
-      study_instance_uid: study.studyInstanceUid,
-      folder_name: study.studyDescription, // approximate mapping
-      study_date: study.studyDate,
-      scan_type: study.studyDescription || study.modality,
-      series: seriesList.sort((a, b) => a.series_number - b.series_number),
-      series_count: seriesList.length,
-      total_instances: totalInstances,
-    };
-  }).sort((a, b) => b.study_date.localeCompare(a.study_date));
+      return {
+        study_id: study.studyInstanceUid, // Use UID as ID
+        study_instance_uid: study.studyInstanceUid,
+        folder_name: study.studyDescription, // approximate mapping
+        study_date: study.studyDate,
+        scan_type: study.studyDescription || study.modality,
+        series: seriesList.sort((a, b) => a.series_number - b.series_number),
+        series_count: seriesList.length,
+        total_instances: totalInstances,
+      };
+    })
+    .sort((a, b) => b.study_date.localeCompare(a.study_date));
 }
 
 export async function getStudy(studyUid: string) {
@@ -112,12 +124,12 @@ export async function getStudy(studyUid: string) {
 }
 
 export async function getSeries(studyUid: string, seriesUid: string) {
-  // This API matches the server-style signature, but we only need seriesUid locally.
-  void studyUid;
-
   const db = await getDB();
   const series = await db.get('series', seriesUid);
   if (!series) throw new Error('Series not found');
+  if (series.studyInstanceUid !== studyUid) {
+    throw new Error('Series not found');
+  }
 
   const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
   instances.sort((a, b) => a.instanceNumber - b.instanceNumber);
@@ -144,15 +156,18 @@ export async function getComparisonData(): Promise<ComparisonData> {
   const db = await getDB();
   const allSeries = await db.getAll('series');
   const allStudies = await db.getAll('studies');
-  const allInstances = await db.getAll('instances'); // Need counts
 
   // Create lookup for study date
   const studyDateMap: Record<string, string> = {};
-  allStudies.forEach(s => studyDateMap[s.studyInstanceUid] = s.studyDate);
+  allStudies.forEach((s) => (studyDateMap[s.studyInstanceUid] = s.studyDate));
 
-  // Instance counts
+  // Instance counts without loading instance Blob payloads.
   const instanceCounts: Record<string, number> = {};
-  allInstances.forEach(i => instanceCounts[i.seriesInstanceUid] = (instanceCounts[i.seriesInstanceUid] || 0) + 1);
+  await Promise.all(
+    allSeries.map(async (s) => {
+      instanceCounts[s.seriesInstanceUid] = await db.countFromIndex('instances', 'by-series', s.seriesInstanceUid);
+    })
+  );
 
   const planes = new Set<string>();
   const dates = new Set<string>();
@@ -160,29 +175,35 @@ export async function getComparisonData(): Promise<ComparisonData> {
   const seriesMap: Record<string, Record<string, SeriesRef>> = {};
 
   for (const s of allSeries) {
-    if (!instanceCounts[s.seriesInstanceUid]) continue;
-    
-    if (s.plane) planes.add(s.plane);
-    
+    const instanceCount = instanceCounts[s.seriesInstanceUid] || 0;
+    if (instanceCount === 0) continue;
+
+    const parsed = parseSeriesDescription(s.seriesDescription);
+    const plane = s.plane || parsed.plane || null;
+    const weight = s.weight || parsed.weight || null;
+    const sequenceType = s.sequenceType || parsed.sequenceType || null;
+
+    if (plane) planes.add(plane);
+
     const date = studyDateMap[s.studyInstanceUid];
     if (!date) continue;
-    
+
     // Format date to ISO-like if it's YYYYMMDD
     let dateIso = date;
     if (date.length === 8) {
-      dateIso = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}T00:00:00`;
+      dateIso = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T00:00:00`;
     }
     dates.add(dateIso);
 
-    const comboId = slugifyCombo(s.plane, s.weight, s.sequenceType);
-    
+    const comboId = slugifyCombo(plane ?? undefined, weight ?? undefined, sequenceType ?? undefined);
+
     if (!sequences[comboId]) {
       sequences[comboId] = {
         id: comboId,
-        plane: s.plane || null,
-        weight: s.weight || null,
-        sequence: s.sequenceType || null,
-        label: labelCombo(s.plane, s.weight, s.sequenceType),
+        plane,
+        weight,
+        sequence: sequenceType,
+        label: labelCombo(plane ?? undefined, weight ?? undefined, sequenceType ?? undefined),
         date_count: 0,
       };
       seriesMap[comboId] = {};
@@ -192,7 +213,7 @@ export async function getComparisonData(): Promise<ComparisonData> {
       seriesMap[comboId][dateIso] = {
         study_id: s.studyInstanceUid,
         series_uid: s.seriesInstanceUid,
-        instance_count: instanceCounts[s.seriesInstanceUid],
+        instance_count: instanceCount,
       };
       sequences[comboId].date_count++;
     }
@@ -276,21 +297,41 @@ async function getSortedInstanceUidsForSeries(seriesUid: string): Promise<string
   }
 
   const db = await getDB();
-  const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
-  if (!instances || instances.length === 0) {
-    throw new Error('No instances for series');
+
+  // Fast path: use the compound ordering index to fetch SOPInstanceUIDs in slice order
+  // without loading full instance records (which include Blob payloads).
+  try {
+    const range = IDBKeyRange.bound(
+      [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
+      [seriesUid, Number.MAX_SAFE_INTEGER, '\uffff']
+    );
+    const keys = await db.getAllKeysFromIndex('instances', 'by-series-instanceNumber-uid', range);
+    const uids = keys.map((k) => String(k));
+
+    if (uids.length === 0) {
+      throw new Error('No instances for series');
+    }
+
+    cacheSeriesInstanceOrder(seriesUid, uids);
+    return uids;
+  } catch {
+    // Fallback (older DB / missing index): load values and sort.
+    const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
+    if (!instances || instances.length === 0) {
+      throw new Error('No instances for series');
+    }
+
+    instances.sort((a, b) => {
+      const diff = a.instanceNumber - b.instanceNumber;
+      if (diff !== 0) return diff;
+      // Stable tie-breaker for weird/duplicate instance numbers.
+      return a.sopInstanceUid.localeCompare(b.sopInstanceUid);
+    });
+
+    const uids = instances.map((i) => i.sopInstanceUid);
+    cacheSeriesInstanceOrder(seriesUid, uids);
+    return uids;
   }
-
-  instances.sort((a, b) => {
-    const diff = a.instanceNumber - b.instanceNumber;
-    if (diff !== 0) return diff;
-    // Stable tie-breaker for weird/duplicate instance numbers.
-    return a.sopInstanceUid.localeCompare(b.sopInstanceUid);
-  });
-
-  const uids = instances.map((i) => i.sopInstanceUid);
-  cacheSeriesInstanceOrder(seriesUid, uids);
-  return uids;
 }
 
 export async function getImageIdForInstance(seriesUid: string, instanceIndex: number): Promise<string> {

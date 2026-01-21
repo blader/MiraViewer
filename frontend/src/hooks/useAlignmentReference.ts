@@ -1,46 +1,35 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { AlignmentReference, PanelSettings } from '../types/api';
+import { readLocalStorageJson, removeLocalStorageItem, writeLocalStorageJson } from '../utils/persistence';
 
 const REFERENCE_STORAGE_KEY_PREFIX = 'miraviewer:alignment-ref:';
 
 /**
- * Serialize AlignmentReference for storage.
- */
-function serializeReference(ref: AlignmentReference): string {
-  return JSON.stringify(ref);
-}
-
-/**
  * Deserialize AlignmentReference from storage.
  */
-function deserializeReference(json: string): AlignmentReference | null {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    if (!parsed || typeof parsed !== 'object') return null;
+function deserializeReference(parsed: unknown): AlignmentReference | null {
+  if (!parsed || typeof parsed !== 'object') return null;
 
-    const obj = parsed as Record<string, unknown>;
+  const obj = parsed as Record<string, unknown>;
 
-    const date = obj.date;
-    const seriesUid = obj.seriesUid;
-    const sliceIndex = obj.sliceIndex;
-    const sliceCount = obj.sliceCount;
-    const settings = obj.settings;
+  const date = obj.date;
+  const seriesUid = obj.seriesUid;
+  const sliceIndex = obj.sliceIndex;
+  const sliceCount = obj.sliceCount;
+  const settings = obj.settings;
 
-    if (typeof date !== 'string' || typeof seriesUid !== 'string') return null;
-    if (typeof sliceIndex !== 'number' || !Number.isFinite(sliceIndex)) return null;
-    if (typeof sliceCount !== 'number' || !Number.isFinite(sliceCount)) return null;
-    if (!settings || typeof settings !== 'object') return null;
+  if (typeof date !== 'string' || typeof seriesUid !== 'string') return null;
+  if (typeof sliceIndex !== 'number' || !Number.isFinite(sliceIndex)) return null;
+  if (typeof sliceCount !== 'number' || !Number.isFinite(sliceCount)) return null;
+  if (!settings || typeof settings !== 'object') return null;
 
-    return {
-      date,
-      seriesUid,
-      sliceIndex,
-      sliceCount,
-      settings: settings as PanelSettings,
-    };
-  } catch {
-    return null;
-  }
+  return {
+    date,
+    seriesUid,
+    sliceIndex,
+    sliceCount,
+    settings: settings as PanelSettings,
+  };
 }
 
 /**
@@ -66,15 +55,11 @@ export function useAlignmentReference(selectedSeqId: string | null) {
     }
     prevSeqIdRef.current = selectedSeqId;
 
-    try {
-      const stored = localStorage.getItem(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId);
-      if (stored) {
-        const ref = deserializeReference(stored);
-        setReference(ref);
-      } else {
-        setReference(null);
-      }
-    } catch {
+    const stored = readLocalStorageJson(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId);
+    if (stored) {
+      const ref = deserializeReference(stored);
+      setReference(ref);
+    } else {
       setReference(null);
     }
   }, [selectedSeqId]);
@@ -83,14 +68,10 @@ export function useAlignmentReference(selectedSeqId: string | null) {
   useEffect(() => {
     if (!selectedSeqId) return;
 
-    try {
-      if (reference) {
-        localStorage.setItem(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId, serializeReference(reference));
-      } else {
-        localStorage.removeItem(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId);
-      }
-    } catch {
-      // Ignore quota errors
+    if (reference) {
+      writeLocalStorageJson(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId, reference);
+    } else {
+      removeLocalStorageItem(REFERENCE_STORAGE_KEY_PREFIX + selectedSeqId);
     }
   }, [reference, selectedSeqId]);
 

@@ -3,7 +3,7 @@ import type { IDBPDatabase } from 'idb';
 import type { MiraDB } from './schema';
 
 const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase<MiraDB>> | null = null;
 
@@ -38,24 +38,44 @@ export async function deleteAllStoredMriData(): Promise<void> {
 export function getDB() {
   if (!dbPromise) {
     dbPromise = openDB<MiraDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      upgrade(db, _oldVersion, _newVersion, transaction) {
         // Studies
         if (!db.objectStoreNames.contains('studies')) {
           db.createObjectStore('studies', { keyPath: 'studyInstanceUid' });
         }
 
         // Series
-        if (!db.objectStoreNames.contains('series')) {
-          const seriesStore = db.createObjectStore('series', { keyPath: 'seriesInstanceUid' });
-          seriesStore.createIndex('by-study', 'studyInstanceUid');
+        {
+          const seriesStore = db.objectStoreNames.contains('series')
+            ? transaction.objectStore('series')
+            : db.createObjectStore('series', { keyPath: 'seriesInstanceUid' });
+
+          if (!seriesStore.indexNames.contains('by-study')) {
+            seriesStore.createIndex('by-study', 'studyInstanceUid');
+          }
         }
 
         // Instances
-        if (!db.objectStoreNames.contains('instances')) {
-          const instanceStore = db.createObjectStore('instances', { keyPath: 'sopInstanceUid' });
-          instanceStore.createIndex('by-series', 'seriesInstanceUid');
+        {
+          const instanceStore = db.objectStoreNames.contains('instances')
+            ? transaction.objectStore('instances')
+            : db.createObjectStore('instances', { keyPath: 'sopInstanceUid' });
+
+          if (!instanceStore.indexNames.contains('by-series')) {
+            instanceStore.createIndex('by-series', 'seriesInstanceUid');
+          }
+
+          // Sorted-by-instanceNumber ordering without loading Blob values.
+          // Includes sopInstanceUid as a tie-breaker for stable ordering.
+          if (!instanceStore.indexNames.contains('by-series-instanceNumber-uid')) {
+            instanceStore.createIndex('by-series-instanceNumber-uid', [
+              'seriesInstanceUid',
+              'instanceNumber',
+              'sopInstanceUid',
+            ]);
+          }
         }
-        
+
         // Panel Settings
         if (!db.objectStoreNames.contains('panel_settings')) {
           db.createObjectStore('panel_settings', { keyPath: 'comboId' });
