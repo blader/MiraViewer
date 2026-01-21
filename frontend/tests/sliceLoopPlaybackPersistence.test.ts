@@ -46,15 +46,19 @@ describe('sliceLoopPlaybackPersistence', () => {
     expect(loaded).toEqual({ loopStart: 0.1, loopEnd: 0.9, loopSpeed: 4 });
   });
 
-  it('migrates legacy global v1 localStorage into per-seq storage', () => {
+  it('does not read legacy global v1 localStorage', () => {
     const seqId = 'seq-migrate';
 
-    localStorage.setItem('miraviewer:slice-loop-playback:v1', JSON.stringify({ loopStart: 0.3, loopEnd: 0.7, loopSpeed: 2 }));
+    localStorage.setItem(
+      'miraviewer:slice-loop-playback:v1',
+      JSON.stringify({ loopStart: 0.3, loopEnd: 0.7, loopSpeed: 2 })
+    );
 
     const loaded = readPersistedSliceLoopPlaybackSettingsForSeq(seqId);
-    expect(loaded).toEqual({ loopStart: 0.3, loopEnd: 0.7, loopSpeed: 2 });
+    expect(loaded).toBeNull();
 
+    // Legacy settings should not be migrated/seeded into per-seq storage.
     const perSeqKey = `miraviewer:slice-loop-playback:v2:${encodeURIComponent(seqId)}`;
-    expect(localStorage.getItem(perSeqKey)).toBeTruthy();
+    expect(localStorage.getItem(perSeqKey)).toBeNull();
   });
 });

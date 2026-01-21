@@ -1,4 +1,22 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// AI types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** AI annotation processing status. */
+export type NanoStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+/** Context about the MRI series for AI analysis. */
+export type AiSeriesContext = {
+  plane?: string | null;
+  weight?: string | null;
+  sequence?: string | null;
+  label?: string | null;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Comparison view types
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface SequenceCombo {
   id: string;
   plane: string | null;
@@ -47,22 +65,13 @@ export interface PanelSettings {
   progress: number; // normalized 0..1, last viewed global slice position for this date
 }
 
-// Persisted settings may be partial (values may be missing or null).
-export type PanelSettingsPartial = Partial<{
-  offset: number | null;
-  reverseSliceOrder: boolean | null;
-  zoom: number | null;
-  rotation: number | null;
-  brightness: number | null;
-  contrast: number | null;
-  panX: number | null;
-  panY: number | null;
-  affine00: number | null;
-  affine01: number | null;
-  affine10: number | null;
-  affine11: number | null;
-  progress: number | null;
-}>;
+/**
+ * Persisted settings may be partial (values may be missing or null).
+ * Each property is optional and can be null to indicate "use default".
+ */
+export type PanelSettingsPartial = {
+  [K in keyof PanelSettings]?: PanelSettings[K] | null;
+};
 
 // Histogram statistics for intensity matching.
 export interface HistogramStats {

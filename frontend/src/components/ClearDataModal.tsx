@@ -1,19 +1,19 @@
 import { useState } from 'react';
 import { AlertCircle, CheckCircle, Loader2, Trash2, X } from 'lucide-react';
 import { deleteAllStoredMriData } from '../db/db';
+import {
+  FILTERS_STORAGE_KEY,
+  PLAYBACK_STORAGE_KEY_PREFIX,
+  PLAYBACK_COOKIE_NAME_V2,
+  LEGACY_PLAYBACK_STORAGE_KEY,
+  LEGACY_PLAYBACK_COOKIE_NAME,
+} from '../utils/storageKeys';
 
 interface ClearDataModalProps {
   onClose: () => void;
   /** Called after data is cleared (typically to reload the app). */
   onReset: () => void;
 }
-
-const FILTERS_STORAGE_KEY = 'mira-filters-v2';
-const PLAYBACK_STORAGE_KEY_PREFIX = 'miraviewer:slice-loop-playback:v2:';
-const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-
-const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
-const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
 
 function deleteCookie(name: string) {
   // Clear at the root path.

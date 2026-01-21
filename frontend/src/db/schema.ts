@@ -76,7 +76,14 @@ export interface MiraDB {
   instances: {
     key: string; // sopInstanceUid
     value: DicomInstance;
-    indexes: { 'by-series': string };
+    indexes: {
+      'by-series': string;
+      /**
+       * Compound index for sorted slice retrieval without loading Blob values.
+       * Key: [seriesInstanceUid, instanceNumber, sopInstanceUid]
+       */
+      'by-series-instanceNumber-uid': [string, number, string];
+    };
   };
   panel_settings: {
     key: string; // comboId

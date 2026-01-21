@@ -1,6 +1,6 @@
 import type { ExclusionMask, HistogramStats, PanelSettings } from '../types/api';
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from './constants';
-import { clamp } from './math';
+import { clamp, nowMs } from './math';
 import { computeMutualInformation, type MutualInformationOptions } from './mutualInformation';
 
 /**
@@ -51,10 +51,6 @@ type FindBestMatchingSliceOptions = {
   /** Image height in pixels (required if exclusionRect is provided). */
   imageHeight?: number;
 };
-
-function nowMs(): number {
-  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-}
 
 /**
  * Bidirectional search to find the best matching slice.

@@ -1,12 +1,9 @@
 import cornerstone from 'cornerstone-core';
 import { ALIGNMENT_IMAGE_SIZE } from './imageCapture';
 import { getImageIdForInstance } from './localApi';
+import { nowMs } from './math';
 
 type CornerstoneImageRenderedEvent = CustomEvent<{ image?: { imageId?: string } }>;
-
-function nowMs(): number {
-  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-}
 
 /**
  * Cornerstone may render asynchronously (via requestAnimationFrame).

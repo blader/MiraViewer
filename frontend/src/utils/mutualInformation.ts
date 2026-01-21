@@ -18,6 +18,8 @@ export type MutualInformationResult = {
 /**
  * Options for masked mutual information computation.
  */
+import { clamp01 } from './math';
+
 export type MutualInformationOptions = {
   /** Number of histogram bins (default: 64). */
   bins?: number;
@@ -31,12 +33,6 @@ export type MutualInformationOptions = {
   /** Image height in pixels (required if exclusionRect is provided). */
   imageHeight?: number;
 };
-
-function clamp01(x: number): number {
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  return x;
-}
 
 function entropyFromCounts(counts: Uint32Array, total: number): number {
   if (total <= 0) return 0;

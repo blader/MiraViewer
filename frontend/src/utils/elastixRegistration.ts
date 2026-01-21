@@ -16,12 +16,7 @@ import {
   chooseBestElastixTransformCandidateAboutOrigin,
   parseTransformParameterObjectToStandardAffines,
 } from './elastixTransform';
-
-const DEBUG_ALIGNMENT_STORAGE_KEY = 'miraviewer:debug-alignment';
-
-function isDebugAlignmentEnabled(): boolean {
-  return typeof window !== 'undefined' && window.localStorage.getItem(DEBUG_ALIGNMENT_STORAGE_KEY) === '1';
-}
+import { isDebugAlignmentEnabled } from './debugAlignment';
 
 function tailString(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;

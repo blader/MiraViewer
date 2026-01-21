@@ -1,11 +1,7 @@
 import { base64ToBlob } from './base64';
+import type { AiSeriesContext } from '../types/api';
 
-export type AiSeriesContext = {
-  plane?: string | null;
-  weight?: string | null;
-  sequence?: string | null;
-  label?: string | null;
-};
+export type { AiSeriesContext };
 
 type GenerateContentPart =
   | { text: string }

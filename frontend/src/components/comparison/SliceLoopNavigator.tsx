@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
 import { CONTROL_LIMITS } from '../../utils/constants';
+import { clamp01 } from '../../utils/math';
 import {
   readPersistedSliceLoopPlaybackSettingsForSeq,
   writePersistedSliceLoopPlaybackSettingsForSeq,
 } from '../../utils/sliceLoopPlaybackPersistence';
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
 
 function ensureLoopBounds(start: number, end: number): [number, number] {
   const minGap = 0.01;

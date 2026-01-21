@@ -1,4 +1,6 @@
 import { readCookieJson, readLocalStorageJson, writeCookieJson, writeLocalStorageJson } from './persistence';
+import { clamp01 } from './math';
+import { PLAYBACK_STORAGE_KEY_PREFIX, PLAYBACK_COOKIE_NAME_V2 } from './storageKeys';
 
 export type PersistedSliceLoopPlaybackSettings = {
   loopStart: number;
@@ -9,17 +11,6 @@ export type PersistedSliceLoopPlaybackSettings = {
 type PersistedSliceLoopPlaybackCookieV2 = {
   bySeq: Record<string, (PersistedSliceLoopPlaybackSettings & { updatedAt?: number }) | undefined>;
 };
-
-const PLAYBACK_STORAGE_KEY_PREFIX = 'miraviewer:slice-loop-playback:v2:';
-const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
-
-// Legacy global settings (used to seed per-seq settings if present).
-const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
 
 function ensureLoopBounds(start: number, end: number): [number, number] {
   const minGap = 0.01;
@@ -112,21 +103,6 @@ export function readPersistedSliceLoopPlaybackSettingsForSeq(seqId: string): Per
   // Fallback to cookie (shared across ports on the same host).
   const fromCookie = readPersistedSliceLoopPlaybackSettingsFromCookieV2(seqId);
   if (fromCookie) return fromCookie;
-
-  // Legacy global settings (seed per-seq once).
-  const legacyLocal = readLocalStorageJson(LEGACY_PLAYBACK_STORAGE_KEY);
-  const legacyLocalParsed = parsePersistedPlaybackValue(legacyLocal);
-  if (legacyLocalParsed) {
-    writePersistedSliceLoopPlaybackSettingsForSeq(seqId, legacyLocalParsed);
-    return legacyLocalParsed;
-  }
-
-  const legacyCookie = readCookieJson(LEGACY_PLAYBACK_COOKIE_NAME);
-  const legacyCookieParsed = parsePersistedPlaybackValue(legacyCookie);
-  if (legacyCookieParsed) {
-    writePersistedSliceLoopPlaybackSettingsForSeq(seqId, legacyCookieParsed);
-    return legacyCookieParsed;
-  }
 
   return null;
 }

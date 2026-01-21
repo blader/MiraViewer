@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link2, X } from 'lucide-react';
 import type { ExclusionMask, PanelSettings } from '../types/api';
+import { clamp } from '../utils/math';
 
 type Point = { x: number; y: number };
 
 type RectPx = { x: number; y: number; width: number; height: number };
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
 
 function invert2x2(a00: number, a01: number, a10: number, a11: number): { i00: number; i01: number; i10: number; i11: number } | null {
   const det = a00 * a11 - a01 * a10;

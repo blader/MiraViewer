@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ComparisonData } from '../types/api';
 import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
-
-const FILTERS_STORAGE_KEY = 'mira-filters-v2';
+import { FILTERS_STORAGE_KEY } from '../utils/storageKeys';
 
 type FiltersState = {
   plane: string | null;

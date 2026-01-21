@@ -8,6 +8,21 @@ export type GlobalSliceWheelNavContext = {
   offset: number;
 };
 
+/**
+ * Global wheel slice navigation for the center pane.
+ *
+ * This is a catch-all: it listens on `window` and only reacts to wheel events whose targets
+ * are inside `centerPaneRef`.
+ *
+ * It is designed to coexist with per-viewer `useWheelNavigation`:
+ * - If a DicomViewer handled the wheel event, it calls `preventDefault()`.
+ * - This global handler checks `e.defaultPrevented` and bails out to avoid double-applying.
+ *
+ * It also avoids hijacking normal scrolling by bailing out when:
+ * - the event came from editable elements, or
+ * - the wheel would scroll a nested overflow container (sidebars/modals), or
+ * - the event looks like a pinch-zoom gesture (`ctrlKey`).
+ */
 export function useGlobalSliceWheelNavigation(opts: {
   centerPaneRef: RefObject<HTMLElement | null>;
   contextRef: MutableRefObject<GlobalSliceWheelNavContext | null>;

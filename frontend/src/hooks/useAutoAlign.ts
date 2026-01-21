@@ -9,7 +9,7 @@ import {
   createPixelCaptureScratch,
   renderSliceToPixels,
 } from '../utils/cornerstoneSliceCapture';
-import { clamp } from '../utils/math';
+import { clamp, nowMs } from '../utils/math';
 import { registerAffine2DWithElastix } from '../utils/elastixRegistration';
 import { warpGrayscaleAffine } from '../utils/warpAffine';
 import {
@@ -22,8 +22,7 @@ import {
   panelGeometryToAffineAboutCenter,
   type PanelGeometry,
 } from '../utils/panelTransform';
-
-const DEBUG_ALIGNMENT_STORAGE_KEY = 'miraviewer:debug-alignment';
+import { isDebugAlignmentEnabled, debugAlignmentLog } from '../utils/debugAlignment';
 
 // Perf tuning for the MI-based slice search.
 //
@@ -45,10 +44,6 @@ const SLICE_SEARCH_STOP_DECREASE_STREAK: number = 4;
 const SEED_REGISTRATION_RESOLUTIONS = 1;
 const REFINEMENT_REGISTRATION_RESOLUTIONS = 1;
 
-function isDebugAlignmentEnabled(): boolean {
-  return typeof window !== 'undefined' && window.localStorage.getItem(DEBUG_ALIGNMENT_STORAGE_KEY) === '1';
-}
-
 type SeedRegistrationResult = {
   idx: number;
   nmi: number;
@@ -62,15 +57,6 @@ type SeedRegistrationResult = {
  */
 function yieldToMain(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function nowMs(): number {
-  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-}
-
-function debugAlignmentLog(step: string, details: Record<string, unknown>, enabled: boolean) {
-  if (!enabled) return;
-  console.log(`[alignment] ${step}`, details);
 }
 
 function applyBrightnessContrastToPixels(pixels: Float32Array, brightness: number, contrast: number): Float32Array {

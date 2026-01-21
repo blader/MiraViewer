@@ -54,3 +54,20 @@ export function getProgressFromSlice(
 export function normalizeRotation(degrees: number): number {
   return (((degrees + 180) % 360) + 360) % 360 - 180;
 }
+
+/**
+ * Clamp a value to [0, 1].
+ */
+export function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/**
+ * High-resolution timestamp in milliseconds.
+ * Falls back to Date.now() in environments without performance.now().
+ */
+export function nowMs(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}

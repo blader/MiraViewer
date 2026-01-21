@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { SeriesRef } from '../types/api';
 import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
+import { OVERLAY_NAV_STORAGE_KEY } from '../utils/storageKeys';
 
 type PersistedOverlayNav = {
   viewMode?: 'grid' | 'overlay';
   overlayDate?: string;
   playSpeed?: number;
 };
-
-const OVERLAY_NAV_STORAGE_KEY = 'miraviewer:overlay-nav:v1';
 
 function readPersistedOverlayNav(): PersistedOverlayNav {
   const parsed = readLocalStorageJson(OVERLAY_NAV_STORAGE_KEY);
