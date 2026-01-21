@@ -69,12 +69,20 @@ export function GridView({
 }: GridViewProps) {
   const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
 
-  const onMouseMoveGrid = useCallback((e: MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement | null;
-    const cell = target?.closest?.('[data-grid-cell-date]') as HTMLElement | null;
+  const updateHoveredCellFromEvent = useCallback((e: MouseEvent<HTMLDivElement>) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+
+    const cell = target.closest('[data-grid-cell-date]');
     const next = cell?.getAttribute('data-grid-cell-date') ?? null;
     setHoveredGridCellDate((prev) => (prev === next ? prev : next));
   }, []);
+
+  // We listen to both:
+  // - onMouseOver: fires immediately when entering a cell (no movement required)
+  // - onMouseMove: keeps hover stable when elements are added/removed under the cursor
+  const onMouseMoveGrid = updateHoveredCellFromEvent;
+  const onMouseOverGrid = updateHoveredCellFromEvent;
 
   const onMouseLeaveGrid = useCallback(() => setHoveredGridCellDate(null), []);
 
@@ -116,6 +124,7 @@ export function GridView({
           gridTemplateColumns: `repeat(${gridCols}, ${gridCellSize}px)`,
           gridAutoRows: `${gridCellSize}px`,
         }}
+        onMouseOver={onMouseOverGrid}
         onMouseMove={onMouseMoveGrid}
         onMouseLeave={onMouseLeaveGrid}
       >
