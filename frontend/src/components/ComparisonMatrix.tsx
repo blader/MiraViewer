@@ -744,21 +744,33 @@ export function ComparisonMatrix() {
         <div ref={setCenterPaneRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
           {!hasData ? (
             /* Empty state */
-            <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8">
-              <Brain className="w-16 h-16 text-[var(--accent)] opacity-50" />
-              <div>
-                <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No scans loaded</h2>
-                <p className="text-[var(--text-secondary)] max-w-md">
-                  Upload a folder of DICOM files or a ZIP archive to get started.
-                </p>
+            <div className="flex-1 flex flex-col items-center justify-center gap-8 text-center p-8 max-w-2xl mx-auto">
+              <div className="p-6 rounded-full bg-[var(--bg-secondary)] border border-[var(--border-color)]">
+                <Brain className="w-20 h-20 text-[var(--accent)]" />
               </div>
-              <button
-                onClick={() => setUploadModalOpen(true)}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] transition-colors"
-              >
-                <Upload className="w-5 h-5" />
-                Upload DICOM Files
-              </button>
+              
+              <div className="space-y-4">
+                <h2 className="text-3xl font-bold text-[var(--text-primary)] tracking-tight">
+                  Welcome to MiraViewer
+                </h2>
+                <p className="text-lg text-[var(--text-secondary)] leading-relaxed">
+                  Upload your MRI scans to visualize and compare them over time.
+                </p>
+                <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-tertiary)] bg-[var(--bg-secondary)] py-2 px-4 rounded-full border border-[var(--border-color)] w-fit mx-auto">
+                  <span className="text-emerald-500">🔒</span>
+                  <span>Your data is stored locally in your browser and never leaves your device.</span>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 w-full max-w-sm">
+                <button
+                  onClick={() => setUploadModalOpen(true)}
+                  className="flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl bg-[var(--accent)] text-white font-medium hover:bg-[var(--accent-hover)] transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5"
+                >
+                  <Upload className="w-5 h-5" />
+                  Load DICOM Files
+                </button>
+              </div>
             </div>
           ) : viewMode === 'grid' ? (
             <GridView
