@@ -76,7 +76,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     const picker = (window as unknown as { showDirectoryPicker?: () => Promise<DirectoryHandle> }).showDirectoryPicker;
 
     if (!picker) {
-      setErrorMessage('Folder import is not supported in this browser. Please select files or upload a ZIP.');
+      setErrorMessage('Folder import is not supported in this browser. Please select DICOM files or a ZIP.');
       return;
     }
 
@@ -221,7 +221,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       }, 2000);
     } catch (err) {
       setStatus('error');
-      setErrorMessage(err instanceof Error ? err.message : 'Upload failed');
+      setErrorMessage(err instanceof Error ? err.message : 'Import failed');
     }
   };
 
@@ -236,7 +236,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]">
           <h3 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
             <Upload className="w-4 h-4" />
-            Upload DICOM Archive
+            Import DICOM files
           </h3>
           <button
             onClick={onClose}
@@ -252,7 +252,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
               <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
                 <CheckCircle className="w-6 h-6" />
               </div>
-              <h4 className="text-[var(--text-primary)] font-medium mb-1">Upload Successful</h4>
+              <h4 className="text-[var(--text-primary)] font-medium mb-1">Import complete</h4>
               <p className="text-sm text-[var(--text-secondary)]">
                 {importSummary
                   ? importSummary.ingested > 0
@@ -367,10 +367,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
                   {status === 'uploading' ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Uploading...
+                      Importing…
                     </>
                   ) : (
-                    'Upload'
+                    'Import'
                   )}
                 </button>
               </div>

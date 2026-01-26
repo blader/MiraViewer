@@ -31,8 +31,8 @@ describe('UploadModal', () => {
     const file = new File([new Uint8Array([1])], 'scan.dcm', { type: 'application/dicom' });
     fireEvent.change(input, { target: { files: [file] } });
 
-    const uploadButton = screen.getByRole('button', { name: /^upload$/i });
-    fireEvent.click(uploadButton);
+    const importButton = screen.getByRole('button', { name: /^import$/i });
+    fireEvent.click(importButton);
 
     await waitFor(() => expect(processFiles).toHaveBeenCalled());
     expect(onUploadComplete).toHaveBeenCalled();
@@ -52,8 +52,8 @@ describe('UploadModal', () => {
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files: [zipFile] } });
 
-    const uploadButton = screen.getByRole('button', { name: /^upload$/i });
-    fireEvent.click(uploadButton);
+    const importButton = screen.getByRole('button', { name: /^import$/i });
+    fireEvent.click(importButton);
 
     await waitFor(() => expect(processDicomFile).toHaveBeenCalled());
     await waitFor(() => expect(onUploadComplete).toHaveBeenCalled());

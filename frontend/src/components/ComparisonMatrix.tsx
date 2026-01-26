@@ -754,7 +754,7 @@ export function ComparisonMatrix() {
                   Welcome to MiraViewer
                 </h2>
                 <p className="text-lg text-[var(--text-secondary)] leading-relaxed">
-                  Upload your MRI scans to visualize and compare them over time.
+                  Import your MRI scans to visualize and compare them over time.
                 </p>
                 <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-tertiary)] bg-[var(--bg-secondary)] py-2 px-4 rounded-full border border-[var(--border-color)] w-fit mx-auto">
                   <span className="text-emerald-500">🔒</span>

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { clamp, clampInt, getSliceIndex, getProgressFromSlice, normalizeRotation } from '../src/utils/math';
 import { formatDate, formatRotation } from '../src/utils/format';
-import { formatSequenceLabel, getSequenceTooltip } from '../src/utils/clinicalData';
+import { formatSequenceLabel } from '../src/utils/clinicalData';
 import { base64ToBlob, blobToBase64Data } from '../src/utils/base64';
 
 describe('math utils', () => {
@@ -44,11 +44,6 @@ describe('format utils', () => {
 describe('clinicalData utils', () => {
   it('formats sequence label', () => {
     expect(formatSequenceLabel({ id: 'a', plane: 'Axial', weight: 'T1', sequence: 'SE', label: '', date_count: 0 })).toBe('T1 SE');
-  });
-
-  it('returns tooltip text', () => {
-    const text = getSequenceTooltip('T1', 'SE');
-    expect(text).toMatch(/T1/i);
   });
 });
 

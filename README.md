@@ -7,14 +7,13 @@ A browser-based DICOM viewer for MRI brain scans, optimized for comparing the sa
 ## Features
 
 - **Local Storage**: All data stored in browser IndexedDB—no server needed
-- **DICOM Upload**: Upload folders or ZIP archives of DICOM files directly in the browser
+- **DICOM Import**: Import folders or ZIP archives of DICOM files directly in the browser
 - **Export/Backup**: Download your data as a ZIP for backup or transfer
 - **Comparison Matrix**: View the selected sequence across multiple dates in a synchronized grid
 - **Overlay Mode**: Flip between dates quickly for visual comparison (including hold-to-compare)
 - **Synchronized Slice Navigation**: Use the bottom slider (or scroll) to keep anatomical position aligned across dates
 - **Per-date Panel Settings**: Persist slice offset, zoom, rotation, brightness/contrast, and pan per date
 - **Cornerstone.js Rendering**: Native DICOM rendering with pan, zoom, and window/level controls
-- **Clinical Tooltips**: Hover sequence names for concise sequence descriptions
 
 ## Quick Start
 
@@ -56,9 +55,9 @@ Notes:
 
 ## Importing DICOMs
 
-Click the **Upload** button in the header to import DICOM files:
+Click the **Import** button in the header to import DICOM files:
 - Select a folder containing DICOM files
-- Or upload a ZIP archive
+- Or select a ZIP archive
 
 Files are parsed in-browser and stored in IndexedDB.
 

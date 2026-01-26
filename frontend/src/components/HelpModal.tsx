@@ -140,7 +140,6 @@ export function HelpModal({ onClose }: HelpModalProps) {
           <section>
             <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">Tips</h3>
             <ul className="space-y-1.5 list-disc list-inside">
-              <li>Hover over sequence names for clinical descriptions.</li>
               <li>The global slice slider syncs anatomical position across all dates.</li>
               <li>All settings persist automatically in your browser.</li>
             </ul>

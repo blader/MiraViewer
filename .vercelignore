@@ -1,0 +1,9 @@
+node_modules
+frontend/node_modules
+.git
+Critical MRI Source Images (LLM Agent - do not delete)
+frontend/.logs
+frontend/tmp
+frontend/release
+*.log
+.DS_Store

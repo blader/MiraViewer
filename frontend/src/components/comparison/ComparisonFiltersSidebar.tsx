@@ -1,7 +1,6 @@
 import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
 import type { SequenceCombo } from '../../types/api';
-import { getSequenceTooltip, formatSequenceLabel } from '../../utils/clinicalData';
-import { TooltipTrigger } from '../TooltipTrigger';
+import { formatSequenceLabel } from '../../utils/clinicalData';
 
 type ComparisonFiltersSidebarProps = {
   open: boolean;
@@ -65,14 +64,11 @@ export function ComparisonFiltersSidebar({
               {sequencesForPlane.map((seq) => {
                 const hasData = sequencesWithDataForDates.has(seq.id);
                 const isSelected = selectedSeqId === seq.id;
-                const tooltipText =
-                  getSequenceTooltip(seq.weight, seq.sequence) +
-                  (hasData ? '' : '\n\n⚠️ No data for selected dates');
 
                 return (
-                  <TooltipTrigger
+                  <button
                     key={seq.id}
-                    content={tooltipText}
+                    type="button"
                     onClick={() => onSelectSequence(seq.id)}
                     className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${
                       isSelected
@@ -80,12 +76,12 @@ export function ComparisonFiltersSidebar({
                           ? 'bg-[var(--accent)] text-white'
                           : 'bg-[var(--accent)] text-white opacity-50'
                         : hasData
-                        ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                        : 'text-[var(--text-tertiary)] opacity-50'
+                          ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                          : 'text-[var(--text-tertiary)] opacity-50'
                     }`}
                   >
                     {formatSequenceLabel(seq)}
-                  </TooltipTrigger>
+                  </button>
                 );
               })}
             </div>
