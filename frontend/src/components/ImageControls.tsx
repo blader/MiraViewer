@@ -1,4 +1,4 @@
-import { ArrowDownUp, Sparkles } from 'lucide-react';
+import { ArrowDownUp } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
 import { StepControl } from './StepControl';
 import { CONTROL_LIMITS } from '../utils/constants';
@@ -10,9 +10,6 @@ interface ImageControlsProps {
   instanceIndex: number;
   instanceCount: number;
   onUpdate: (update: Partial<PanelSettings>) => void;
-  onAcpAnalyze?: () => void;
-  acpAnalyzeLoading?: boolean;
-  acpAnalyzeDisabled?: boolean;
   /** If false, omit the slice selector control (useful when rendering it on a separate row). */
   showSliceControl?: boolean;
 }
@@ -26,9 +23,6 @@ export function ImageControls({
   instanceIndex,
   instanceCount,
   onUpdate,
-  onAcpAnalyze,
-  acpAnalyzeLoading = false,
-  acpAnalyzeDisabled = false,
   showSliceControl = true,
 }: ImageControlsProps) {
   const canReverse = instanceCount > 1;
@@ -156,26 +150,6 @@ export function ImageControls({
         <ArrowDownUp className="w-3 h-3" />
         Rev
       </button>
-
-      {onAcpAnalyze && (
-        <>
-          <Divider />
-          <button
-            type="button"
-            onClick={onAcpAnalyze}
-            disabled={acpAnalyzeDisabled || acpAnalyzeLoading}
-            className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
-              acpAnalyzeDisabled || acpAnalyzeLoading
-                ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
-                : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-            }`}
-            title="AI: analyze/segment/annotate this slice (not persisted)"
-          >
-            <Sparkles className="w-3 h-3" />
-            AI
-          </button>
-        </>
-      )}
     </div>
   );
 }

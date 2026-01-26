@@ -4,19 +4,17 @@ import { Loader2 } from 'lucide-react';
 import type {
   AlignmentProgress,
   AlignmentReference,
-  AiSeriesContext,
   ExclusionMask,
-  NanoStatus,
   PanelSettings,
   SeriesRef,
 } from '../../types/api';
 import { formatDate } from '../../utils/format';
-import { DEFAULT_PANEL_SETTINGS, AI_ENABLED } from '../../utils/constants';
+import { DEFAULT_PANEL_SETTINGS } from '../../utils/constants';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls } from '../ImageControls';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
-import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
+import { DicomViewer } from '../DicomViewer';
 
 export type GridViewProps = {
   columns: { date: string; ref?: SeriesRef }[];
@@ -31,18 +29,6 @@ export type GridViewProps = {
   alignmentProgress: AlignmentProgress | null;
   abortAlignment: () => void;
   startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
-  registerViewerHandle: (key: string, handle: DicomViewerHandle | null) => void;
-  aiSeriesContext: AiSeriesContext;
-  nanoBananaStatus: NanoStatus;
-  nanoBananaProgressText?: string | null;
-  nanoBananaImageUrl?: string | null;
-  clearNanoBanana: () => void;
-  handleAiButtonClick: (
-    target: { date: string; studyId: string; seriesUid: string; instanceIndex: number },
-    viewerKey: string,
-    seriesContext: GridViewProps['aiSeriesContext']
-  ) => void;
-  isNanoTarget: (date: string, seriesUid: string, instanceIndex: number) => boolean;
 };
 
 export function GridView({
@@ -58,14 +44,6 @@ export function GridView({
   alignmentProgress,
   abortAlignment,
   startAlignAll,
-  registerViewerHandle,
-  aiSeriesContext,
-  nanoBananaStatus,
-  nanoBananaProgressText,
-  nanoBananaImageUrl,
-  clearNanoBanana,
-  handleAiButtonClick,
-  isNanoTarget,
 }: GridViewProps) {
   const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
 
@@ -144,11 +122,6 @@ export function GridView({
 
           const idx = getSliceIndex(ref.instance_count, progress, settings.offset);
           const effectiveIdx = getEffectiveInstanceIndex(idx, ref.instance_count, settings.reverseSliceOrder);
-          const viewerKey = `grid:${date}`;
-
-          const isNano = isNanoTarget(date, ref.series_uid, effectiveIdx);
-          const nanoBananaOverrideUrl =
-            nanoBananaStatus === 'ready' && nanoBananaImageUrl && isNano ? nanoBananaImageUrl : undefined;
 
           const isHovered = hoveredGridCellDate === date;
 
@@ -170,27 +143,8 @@ export function GridView({
                     instanceIndex={idx}
                     instanceCount={ref.instance_count}
                     onUpdate={(update) => {
-                      if (nanoBananaStatus !== 'idle' && isNano) {
-                        clearNanoBanana();
-                      }
                       updatePanelSetting(date, update);
                     }}
-                    onAcpAnalyze={
-                      AI_ENABLED
-                        ? () =>
-                            handleAiButtonClick(
-                              {
-                                date,
-                                studyId: ref.study_id,
-                                seriesUid: ref.series_uid,
-                                instanceIndex: effectiveIdx,
-                              },
-                              viewerKey,
-                              aiSeriesContext
-                            )
-                        : undefined
-                    }
-                    acpAnalyzeDisabled={!AI_ENABLED || nanoBananaStatus === 'loading'}
                     showSliceControl={false}
                   />
                 </div>
@@ -211,15 +165,9 @@ export function GridView({
                     tabular
                     accent
                     onDecrement={() => {
-                      if (nanoBananaStatus !== 'idle' && isNano) {
-                        clearNanoBanana();
-                      }
                       updatePanelSetting(date, { offset: settings.offset - 1 });
                     }}
                     onIncrement={() => {
-                      if (nanoBananaStatus !== 'idle' && isNano) {
-                        clearNanoBanana();
-                      }
                       updatePanelSetting(date, { offset: settings.offset + 1 });
                     }}
                   />
@@ -229,20 +177,16 @@ export function GridView({
               <div className="flex-1 min-h-0 bg-black relative">
                 <DragRectActionOverlay
                   className="absolute inset-0 cursor-crosshair"
-                  geometry={
-                    nanoBananaOverrideUrl
-                      ? { panX: 0, panY: 0, zoom: 1, rotation: 0, affine00: 1, affine01: 0, affine10: 0, affine11: 1 }
-                      : {
-                          panX: settings.panX,
-                          panY: settings.panY,
-                          zoom: settings.zoom,
-                          rotation: settings.rotation,
-                          affine00: settings.affine00,
-                          affine01: settings.affine01,
-                          affine10: settings.affine10,
-                          affine11: settings.affine11,
-                        }
-                  }
+                  geometry={{
+                    panX: settings.panX,
+                    panY: settings.panY,
+                    zoom: settings.zoom,
+                    rotation: settings.rotation,
+                    affine00: settings.affine00,
+                    affine01: settings.affine01,
+                    affine10: settings.affine10,
+                    affine11: settings.affine11,
+                  }}
                   disabled={overlayColumns.length < 2 || isAligning}
                   onConfirm={(mask) => {
                     void startAlignAll(
@@ -259,56 +203,28 @@ export function GridView({
                   actionTitle={`Align all other dates to ${formatDate(date)}`}
                 >
                   <DicomViewer
-                    ref={(handle) => registerViewerHandle(viewerKey, handle)}
                     studyId={ref.study_id}
                     seriesUid={ref.series_uid}
                     instanceIndex={idx}
                     instanceCount={ref.instance_count}
                     reverseSliceOrder={settings.reverseSliceOrder}
-                    imageUrlOverride={nanoBananaOverrideUrl}
                     onInstanceChange={(i) => {
                       setProgress(getProgressFromSlice(i, ref.instance_count, settings.offset));
                     }}
-                    brightness={nanoBananaOverrideUrl ? 100 : settings.brightness}
-                    contrast={nanoBananaOverrideUrl ? 100 : settings.contrast}
-                    zoom={nanoBananaOverrideUrl ? 1 : settings.zoom}
-                    rotation={nanoBananaOverrideUrl ? 0 : settings.rotation}
-                    panX={nanoBananaOverrideUrl ? 0 : settings.panX}
-                    panY={nanoBananaOverrideUrl ? 0 : settings.panY}
-                    affine00={nanoBananaOverrideUrl ? 1 : settings.affine00}
-                    affine01={nanoBananaOverrideUrl ? 0 : settings.affine01}
-                    affine10={nanoBananaOverrideUrl ? 0 : settings.affine10}
-                    affine11={nanoBananaOverrideUrl ? 1 : settings.affine11}
-                    onPanChange={
-                      nanoBananaOverrideUrl
-                        ? undefined
-                        : (newPanX, newPanY) => {
-                            updatePanelSetting(date, { panX: newPanX, panY: newPanY });
-                          }
-                    }
+                    brightness={settings.brightness}
+                    contrast={settings.contrast}
+                    zoom={settings.zoom}
+                    rotation={settings.rotation}
+                    panX={settings.panX}
+                    panY={settings.panY}
+                    affine00={settings.affine00}
+                    affine01={settings.affine01}
+                    affine10={settings.affine10}
+                    affine11={settings.affine11}
+                    onPanChange={(newPanX, newPanY) => {
+                      updatePanelSetting(date, { panX: newPanX, panY: newPanY });
+                    }}
                   />
-
-                  {AI_ENABLED && nanoBananaStatus === 'loading' && isNano && (
-                    <div className="absolute top-2 right-2 max-w-[70%]">
-                      <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/60">
-                        <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
-                        <div className="text-[10px] text-white/90 truncate">
-                          {nanoBananaProgressText || 'Working…'}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {AI_ENABLED && nanoBananaStatus === 'ready' && isNano && (
-                    <button
-                      type="button"
-                      onClick={clearNanoBanana}
-                      className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-[10px] hover:bg-black/80"
-                      title="Clear AI annotation"
-                    >
-                      Clear AI
-                    </button>
-                  )}
 
                   {/* Date overlay (matches overlay view style) */}
                   <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">

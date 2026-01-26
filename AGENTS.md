@@ -104,7 +104,6 @@ The viewer component:
 - `frontend/src/components/DicomViewer.tsx`
   - Resolves `miradb:<uid>` via `getImageIdForInstance`.
   - Uses Cornerstone to display, but intentionally keeps the previous slice visible while the next slice loads to avoid “black flashes”.
-  - Exposes an imperative handle to capture the currently visible viewport (`captureVisiblePng`) for downstream features (AI).
 
 ### Main UI (comparison matrix)
 The whole app is currently a single-page experience:
@@ -131,16 +130,6 @@ Auto-alignment is a client-side pipeline used to align all dates to a chosen ref
 
 Debugging alignment:
 - Set `localStorage.setItem('miraviewer:debug-alignment', '1')` to enable very verbose per-stage logs (see `frontend/src/utils/debugAlignment.ts`).
-
-### AI annotation (currently feature-flagged off)
-- Feature flag: `AI_ENABLED` in `frontend/src/utils/constants.ts` (defaults to `false`).
-- Flow:
-  - UI triggers `useAiAnnotation` (`frontend/src/hooks/useAiAnnotation.ts`).
-  - Captures the viewer viewport via `DicomViewerHandle.captureVisiblePng()`.
-  - Calls `runAcpAnnotateClient` (`frontend/src/utils/aiClient.ts`) which:
-    - Calls Google’s Generative Language API from the browser.
-    - Uses env vars like `VITE_GOOGLE_API_KEY` / `GOOGLE_API_KEY` (see `frontend/.env.example`).
-    - Can override model names with `VITE_GEMINI_ANALYSIS_MODEL` and `VITE_NANO_BANANA_PRO_MODEL`.
 
 ## Offline runnable build (ZIP) structure
 - `npm run package:zip` builds the Vite app and stages a runnable folder using templates in `frontend/distribution/`.

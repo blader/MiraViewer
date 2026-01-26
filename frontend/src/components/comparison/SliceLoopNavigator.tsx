@@ -25,7 +25,7 @@ export type SliceLoopNavigatorProps = {
   progress: number;
   /** Shared progress ref used by global wheel navigation + playback loops. */
   progressRef: React.MutableRefObject<number>;
-  /** Setter for progress (callers can wrap to clear AI, etc.). */
+  /** Setter for progress. */
   setProgress: (nextProgress: number) => void;
 };
 

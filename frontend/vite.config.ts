@@ -42,9 +42,8 @@ export default defineConfig(() => {
     optimizeDeps: {
       exclude: ['itk-wasm', '@itk-wasm/elastix', '@thewtex/zstddec'],
     },
-    // Expose only the specific env vars we need to the client.
-    // Note: this still means the API key is available in the browser when using client-side AI.
-    envPrefix: ['VITE_', 'GOOGLE_API_KEY', 'GEMINI_API_KEY'],
+    // Expose only Vite-prefixed env vars to the client.
+    envPrefix: ['VITE_'],
     server: {
       // Keep a stable dev URL and avoid Vite auto-incrementing to 43125/43126 if 43124 is already in use.
       port: 43124,

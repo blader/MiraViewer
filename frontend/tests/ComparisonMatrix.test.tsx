@@ -73,24 +73,6 @@ vi.mock('../src/hooks/useGridLayout', () => ({
   }),
 }));
 
-vi.mock('../src/hooks/useAiAnnotation', () => ({
-  useAiAnnotation: () => ({
-    status: 'idle',
-    progressText: null,
-    imageUrl: null,
-    prompt: null,
-    error: null,
-    timings: [],
-    target: null,
-    isPromptOpen: false,
-    setIsPromptOpen: vi.fn(),
-    togglePrompt: vi.fn(),
-    runAnalysis: vi.fn(),
-    clear: vi.fn(),
-    isTarget: vi.fn().mockReturnValue(false),
-  }),
-}));
-
 vi.mock('../src/components/DicomViewer', () => ({
   DicomViewer: () => <div data-testid="dicom-viewer" />,
 }));

@@ -1,19 +1,4 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AI types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** AI annotation processing status. */
-export type NanoStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-/** Context about the MRI series for AI analysis. */
-export type AiSeriesContext = {
-  plane?: string | null;
-  weight?: string | null;
-  sequence?: string | null;
-  label?: string | null;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Comparison view types
 // ─────────────────────────────────────────────────────────────────────────────
 
