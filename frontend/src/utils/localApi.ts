@@ -3,6 +3,12 @@ import type { DicomSeries } from '../db/schema';
 import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
 import { parseSeriesDescription } from './dicomSeriesParsing';
 
+function buildSeriesClassificationText(series: { seriesDescription: string; protocolName?: string; sequenceName?: string }): string {
+  // Many datasets put the most informative string in ProtocolName or SequenceName.
+  // Joining these aggressively reduces "Unknown" buckets without forcing defaults.
+  return [series.seriesDescription, series.protocolName, series.sequenceName].filter(Boolean).join(' | ');
+}
+
 // Helper to generate a stable ID for the combo
 function slugifyCombo(plane?: string, weight?: string, sequence?: string): string {
   const parts = [plane, weight, sequence].filter(Boolean);
@@ -42,7 +48,7 @@ export async function getStudies() {
       const series = seriesByStudy[study.studyInstanceUid] || [];
       const seriesList = series
         .map((s) => {
-          const parsed = parseSeriesDescription(s.seriesDescription);
+          const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
           return {
             series_uid: s.seriesInstanceUid,
             series_description: s.seriesDescription,
@@ -178,7 +184,7 @@ export async function getComparisonData(): Promise<ComparisonData> {
     const instanceCount = instanceCounts[s.seriesInstanceUid] || 0;
     if (instanceCount === 0) continue;
 
-    const parsed = parseSeriesDescription(s.seriesDescription);
+    const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
     const plane = s.plane || parsed.plane || null;
     const weight = s.weight || parsed.weight || null;
     const sequenceType = s.sequenceType || parsed.sequenceType || null;
@@ -209,13 +215,32 @@ export async function getComparisonData(): Promise<ComparisonData> {
       seriesMap[comboId] = {};
     }
 
-    if (!seriesMap[comboId][dateIso]) {
+    const prev = seriesMap[comboId][dateIso];
+
+    if (!prev) {
       seriesMap[comboId][dateIso] = {
         study_id: s.studyInstanceUid,
         series_uid: s.seriesInstanceUid,
         instance_count: instanceCount,
       };
       sequences[comboId].date_count++;
+      continue;
+    }
+
+    // If multiple series map to the same (plane, weight, sequenceType) combo for a given date,
+    // prefer the one with the most instances.
+    //
+    // Why:
+    // - In real-world DICOM exports it's common to have "extra" image series (e.g. screenshots,
+    //   localizers, reformats) that would otherwise get picked arbitrarily based on ingestion order.
+    // - Auto-alignment relies on having a full through-plane stack; choosing a tiny series can make
+    //   alignment look "broken" even though the real series exists.
+    if (instanceCount > prev.instance_count) {
+      seriesMap[comboId][dateIso] = {
+        study_id: s.studyInstanceUid,
+        series_uid: s.seriesInstanceUid,
+        instance_count: instanceCount,
+      };
     }
   }
 

@@ -14,7 +14,11 @@ export interface DicomSeries {
   seriesDescription: string;
   seriesNumber: number;
   modality: string;
-  
+
+  // Additional naming fields (often more informative than SeriesDescription alone)
+  protocolName?: string;
+  sequenceName?: string;
+
   // Derived/Parsed fields
   plane?: string; // Axial, Coronal, Sagittal
   weight?: string; // T1, T2

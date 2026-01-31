@@ -54,6 +54,67 @@ describe('localApi', () => {
     expect(Object.keys(data.series_map).length).toBe(1);
   });
 
+  it('prefers the highest-instance series when multiple series map to the same date+combo', async () => {
+    const db = await getDB();
+    await db.put('studies', {
+      studyInstanceUid: 'study-1',
+      studyDate: '20240101',
+      studyDescription: 'Test Study',
+      patientName: 'Test',
+      patientId: 'P1',
+      modality: 'MR',
+    });
+
+    // Two series that both parse to the "unknown" combo (no plane/weight/sequenceType).
+    // Note: avoid substrings like "SE" which would be picked up by our simple heuristics.
+    await db.put('series', {
+      seriesInstanceUid: 'series-1',
+      studyInstanceUid: 'study-1',
+      seriesDescription: 'Mystery Scan A',
+      seriesNumber: 1,
+      modality: 'MR',
+    });
+    await db.put('series', {
+      seriesInstanceUid: 'series-2',
+      studyInstanceUid: 'study-1',
+      seriesDescription: 'Mystery Scan B',
+      seriesNumber: 2,
+      modality: 'MR',
+    });
+
+    // series-1 has 1 instance; series-2 has 5 instances.
+    await db.put('instances', {
+      sopInstanceUid: 's1-inst-1',
+      seriesInstanceUid: 'series-1',
+      studyInstanceUid: 'study-1',
+      instanceNumber: 1,
+      rows: 256,
+      columns: 256,
+      fileBlob: new Blob([new Uint8Array([1])]),
+    });
+
+    for (let i = 1; i <= 5; i++) {
+      await db.put('instances', {
+        sopInstanceUid: `s2-inst-${i}`,
+        seriesInstanceUid: 'series-2',
+        studyInstanceUid: 'study-1',
+        instanceNumber: i,
+        rows: 256,
+        columns: 256,
+        fileBlob: new Blob([new Uint8Array([1])]),
+      });
+    }
+
+    const data = await getComparisonData();
+
+    const dateIso = '2024-01-01T00:00:00';
+    const chosen = data.series_map['unknown']?.[dateIso];
+
+    expect(chosen).toBeTruthy();
+    expect(chosen?.series_uid).toBe('series-2');
+    expect(chosen?.instance_count).toBe(5);
+  });
+
   it('persists and loads panel settings', async () => {
     await savePanelSettings('combo-1', '2024-01-01T00:00:00', {
       offset: 1,

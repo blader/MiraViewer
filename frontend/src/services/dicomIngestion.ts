@@ -6,7 +6,11 @@ import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
 export type DicomIngestResult =
   | { status: 'ingested'; fileName: string; sopInstanceUid: string }
   | { status: 'duplicate'; fileName: string; sopInstanceUid: string }
-  | { status: 'skipped'; fileName: string; reason: 'non-dicom-file' | 'non-displayable' | 'missing-uids' }
+  | {
+      status: 'skipped';
+      fileName: string;
+      reason: 'non-dicom-file' | 'non-displayable' | 'missing-uids' | 'secondary-capture';
+    }
   | { status: 'error'; fileName: string; reason: 'parse-error' | 'db-error'; message: string };
 
 export type ProcessFilesResult = {
@@ -128,6 +132,47 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function parseMultiNumberString(value: string): number[] {
+  // Multi-valued DICOM tags are typically separated by backslashes.
+  // Some exporters may use spaces/commas; accept those as well.
+  return value
+    .split(/[\\,\s]+/)
+    .filter(Boolean)
+    .map((s) => Number.parseFloat(s))
+    .filter((n) => Number.isFinite(n));
+}
+
+function inferPlaneFromImageOrientationPatient(iop: string): string | undefined {
+  // ImageOrientationPatient (0020,0037) is 6 values: row cosines (3) + column cosines (3).
+  // The slice normal is row x col. Dominant axis of the normal indicates plane.
+  const nums = parseMultiNumberString(iop);
+  if (nums.length < 6) return undefined;
+
+  const r0 = nums[0] ?? 0;
+  const r1 = nums[1] ?? 0;
+  const r2 = nums[2] ?? 0;
+  const c0 = nums[3] ?? 0;
+  const c1 = nums[4] ?? 0;
+  const c2 = nums[5] ?? 0;
+
+  // Cross product r x c
+  const nx = r1 * c2 - r2 * c1;
+  const ny = r2 * c0 - r0 * c2;
+  const nz = r0 * c1 - r1 * c0;
+
+  const ax = Math.abs(nx);
+  const ay = Math.abs(ny);
+  const az = Math.abs(nz);
+
+  // In DICOM patient coordinates:
+  // - Normal ~ X (L/R) => sagittal slices
+  // - Normal ~ Y (A/P) => coronal slices
+  // - Normal ~ Z (H/F) => axial slices
+  if (ax >= ay && ax >= az) return 'Sagittal';
+  if (ay >= ax && ay >= az) return 'Coronal';
+  return 'Axial';
+}
+
 // DICOM Tags
 const TAGS = {
   PatientName: 'x00100010',
@@ -140,8 +185,12 @@ const TAGS = {
 
   SeriesInstanceUID: 'x0020000e',
   SeriesDescription: 'x0008103e',
+  ProtocolName: 'x00181030',
+  SequenceName: 'x00180024',
   SeriesNumber: 'x00200011',
 
+  // SOP Class UID identifies the *type* of object (MR Image Storage vs Secondary Capture, etc.).
+  SOPClassUID: 'x00080016',
   SOPInstanceUID: 'x00080018',
   InstanceNumber: 'x00200013',
 
@@ -218,6 +267,15 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     return { status: 'skipped', fileName, reason: 'non-displayable' };
   }
 
+  // Secondary Capture (SOPClassUID=1.2.840.10008.5.1.4.1.1.7*) is commonly included in
+  // exports as "Screenshots". These are typically 8-bit RGB images and not part of the
+  // actual scan stack. Importing them pollutes "Unknown" sequences and can make
+  // auto-alignment look broken (because it's trying to align screenshots to MR volumes).
+  const sopClassUid = getText(dataSet, TAGS.SOPClassUID);
+  if (sopClassUid.startsWith('1.2.840.10008.5.1.4.1.1.7')) {
+    return { status: 'skipped', fileName, reason: 'secondary-capture' };
+  }
+
   // Extract UIDs
   const studyUid = getText(dataSet, TAGS.StudyInstanceUID);
   const seriesUid = getText(dataSet, TAGS.SeriesInstanceUID);
@@ -241,7 +299,15 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
   // Extract Series Info
   const seriesDesc = getText(dataSet, TAGS.SeriesDescription);
-  const parsedSeries = parseSeriesDescription(seriesDesc);
+  const protocolName = getText(dataSet, TAGS.ProtocolName);
+  const sequenceName = getText(dataSet, TAGS.SequenceName);
+
+  const seriesClassificationText = [seriesDesc, protocolName, sequenceName].filter(Boolean).join(' | ');
+  const parsedSeries = parseSeriesDescription(seriesClassificationText);
+
+  // Fallback: derive plane from orientation if text parsing didn't find it.
+  const iop = getText(dataSet, TAGS.ImageOrientationPatient);
+  const planeFromOrientation = iop ? inferPlaneFromImageOrientationPatient(iop) : undefined;
 
   const series: DicomSeries = {
     seriesInstanceUid: seriesUid,
@@ -249,7 +315,11 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     seriesDescription: seriesDesc || 'No Description',
     seriesNumber: getNumber(dataSet, TAGS.SeriesNumber),
     modality: getText(dataSet, TAGS.Modality),
-    plane: parsedSeries.plane,
+
+    protocolName: protocolName || undefined,
+    sequenceName: sequenceName || undefined,
+
+    plane: parsedSeries.plane ?? planeFromOrientation,
     weight: parsedSeries.weight,
     sequenceType: parsedSeries.sequenceType,
   };
