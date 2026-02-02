@@ -1215,7 +1215,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       onnxSessionRef.current = session;
       onnxSessionModeRef.current = 'webgpu-preferred';
       return { session, mode: 'webgpu-preferred' };
-    } catch (_eWebGpu) {
+    } catch {
       // Fallback to WASM-only.
       const session = await createOrtSessionFromModelBlob({ model: blob, preferWebGpu: false, logLevel: 'warning' });
       onnxSessionRef.current = session;

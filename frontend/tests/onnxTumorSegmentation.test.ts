@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import type * as Ort from 'onnxruntime-web';
+
+type TensorLike = { type: string; dims: number[]; data: unknown };
 
 // Mock ORT loader to avoid pulling real onnxruntime-web + wasm during unit tests.
 vi.mock('../src/utils/segmentation/onnx/ortLoader', () => {
@@ -43,7 +46,7 @@ describe('runTumorSegmentationOnnx', () => {
     const session = {
       inputNames: ['input'],
       outputNames: ['logits'],
-      run: vi.fn(async (feeds: Record<string, any>) => {
+      run: vi.fn(async (feeds: Record<string, TensorLike>) => {
         expect(Object.keys(feeds)).toEqual(['input']);
         expect(feeds.input.type).toBe('float32');
         expect(feeds.input.dims).toEqual([1, 1, 1, 1, 2]); // [N,C,Z,Y,X]
@@ -55,8 +58,8 @@ describe('runTumorSegmentationOnnx', () => {
             data: logits,
           },
         };
-      }),
-    } as any;
+      }) as unknown as Ort.InferenceSession['run'],
+    } as unknown as Ort.InferenceSession;
 
     const out = await runTumorSegmentationOnnx({ session, volume, dims });
     expect(Array.from(out.labels)).toEqual([1, 4]);

@@ -17,7 +17,9 @@ export async function loadOrtAll(): Promise<typeof Ort> {
       mod = await import('onnxruntime-web');
     } else {
       // In production builds, load from our vendored runtime assets.
-      mod = await import(/* @vite-ignore */ '/onnxruntime/ort.all.bundle.min.mjs');
+      // IMPORTANT: keep the specifier non-literal so Vite/Vitest don't try to resolve it during import analysis.
+      const bundleUrl = '/onnxruntime/' + 'ort.all.bundle.min.mjs';
+      mod = await import(/* @vite-ignore */ bundleUrl);
     }
 
     // The ESM bundles export both named exports and a default export.
