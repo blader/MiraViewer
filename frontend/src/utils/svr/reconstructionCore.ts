@@ -1,6 +1,7 @@
 import type { VolumeDims } from './trilinear';
 import { sampleTrilinear, splatTrilinearScaled } from './trilinear';
 import type { Vec3 } from './vec3';
+import { assertNotAborted, clamp01, withinTrilinearSupport } from './svrUtils';
 
 export type SvrPsfMode = 'none' | 'box' | 'gaussian';
 export type SvrRobustLoss = 'none' | 'huber' | 'tukey';
@@ -50,22 +51,6 @@ export type SvrCoreHooks = {
   yieldToMain?: () => Promise<void>;
   onProgress?: (p: { current: number; total: number; message: string }) => void;
 };
-
-function assertNotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new Error('SVR cancelled');
-  }
-}
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
-
-function withinTrilinearSupport(dims: VolumeDims, x: number, y: number, z: number): boolean {
-  // sampleTrilinear/splatTrilinear require x0>=0 and x1<nx (same for y/z),
-  // which is equivalent to 0 <= x < nx-1 (same for y/z).
-  return x >= 0 && y >= 0 && z >= 0 && x < dims.nx - 1 && y < dims.ny - 1 && z < dims.nz - 1;
-}
 
 type SlicePsf = { offsetsMm: Float32Array; weights: Float32Array; count: number; effectiveThicknessMm: number };
 
