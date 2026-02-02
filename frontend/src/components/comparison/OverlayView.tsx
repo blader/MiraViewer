@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Loader2, Pencil, Sparkles } from 'lucide-react';
 import type {
   AlignmentProgress,
   AlignmentReference,
@@ -8,13 +8,17 @@ import type {
   SeriesRef,
 } from '../../types/api';
 import { formatDate } from '../../utils/format';
-import { getProgressFromSlice } from '../../utils/math';
+import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls } from '../ImageControls';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
-import { DicomViewer } from '../DicomViewer';
+import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
+import { GroundTruthPolygonOverlay } from '../GroundTruthPolygonOverlay';
+import { TumorSegmentationOverlay } from '../TumorSegmentationOverlay';
 
 export type OverlayViewProps = {
+  comboId: string;
+
   overlayColumns: { date: string; ref?: SeriesRef }[];
   overlayViewerSize: number;
 
@@ -47,6 +51,7 @@ export type OverlayViewProps = {
 };
 
 export function OverlayView({
+  comboId,
   overlayColumns,
   overlayViewerSize,
   overlayDisplayedRef,
@@ -72,6 +77,32 @@ export function OverlayView({
   setProgress,
 }: OverlayViewProps) {
   const [isOverlayViewerHovered, setIsOverlayViewerHovered] = useState(false);
+  const [tumorToolOpen, setTumorToolOpen] = useState(false);
+  const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
+  const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
+
+  // Compare mode is read-only: ensure the tumor tool isn't active.
+  // We schedule the close to avoid calling setState synchronously inside the effect body.
+  useEffect(() => {
+    if (!isOverlayComparing) return;
+
+    const t = window.setTimeout(() => {
+      setTumorToolOpen(false);
+      setGtPolygonToolOpen(false);
+    }, 0);
+
+    return () => window.clearTimeout(t);
+  }, [isOverlayComparing]);
+
+  // Note: the tool only operates on the *selected* date when not comparing.
+  const tumorEffectiveSliceIndex =
+    overlaySelectedRef && overlaySelectedDate
+      ? getEffectiveInstanceIndex(
+          overlaySelectedSliceIndex,
+          overlaySelectedRef.instance_count,
+          overlaySelectedSettings.reverseSliceOrder
+        )
+      : 0;
 
   return (
     <div className="flex-1 flex items-center justify-center p-4">
@@ -94,7 +125,49 @@ export function OverlayView({
                 : 'opacity-0 pointer-events-none'
             }`}
           >
-            <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-end">
+            <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTumorToolOpen((v) => {
+                      const next = !v;
+                      if (next) setGtPolygonToolOpen(false);
+                      return next;
+                    });
+                  }}
+                  className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
+                    tumorToolOpen
+                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                      : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title="Tumor segmentation tool"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Tumor
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGtPolygonToolOpen((v) => {
+                      const next = !v;
+                      if (next) setTumorToolOpen(false);
+                      return next;
+                    });
+                  }}
+                  className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
+                    gtPolygonToolOpen
+                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                      : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title="Ground truth polygon tool (debug)"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  GT
+                </button>
+              </div>
+
               <ImageControls
                 settings={overlayDisplayedSettings}
                 instanceIndex={overlayDisplayedSliceIndex}
@@ -146,7 +219,7 @@ export function OverlayView({
               affine10: overlayDisplayedSettings.affine10,
               affine11: overlayDisplayedSettings.affine11,
             }}
-            disabled={overlayColumns.length < 2 || isAligning || isOverlayComparing}
+            disabled={overlayColumns.length < 2 || isAligning || isOverlayComparing || tumorToolOpen || gtPolygonToolOpen}
             onConfirm={(mask) => {
               void startAlignAll(
                 {
@@ -175,7 +248,9 @@ export function OverlayView({
               className={`absolute inset-0 ${isOverlayComparing ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
             >
               {overlaySelectedRef && overlaySelectedDate ? (
-                <DicomViewer
+                <>
+                  <DicomViewer
+                    ref={tumorViewerRef}
                   // Important: do not key by series/date.
                   // Remounting the viewer forces Cornerstone to re-enable the element,
                   // which causes a visible black flash when toggling dates.
@@ -207,6 +282,30 @@ export function OverlayView({
                         }
                   }
                 />
+
+                  <TumorSegmentationOverlay
+                    enabled={tumorToolOpen && !isOverlayComparing}
+                    onRequestClose={() => setTumorToolOpen(false)}
+                    viewerRef={tumorViewerRef}
+                    comboId={comboId}
+                    dateIso={overlaySelectedDate}
+                    studyId={overlaySelectedRef.study_id}
+                    seriesUid={overlaySelectedRef.series_uid}
+                    effectiveInstanceIndex={tumorEffectiveSliceIndex}
+                    viewerTransform={overlaySelectedSettings}
+                  />
+
+                  <GroundTruthPolygonOverlay
+                    enabled={gtPolygonToolOpen && !isOverlayComparing}
+                    onRequestClose={() => setGtPolygonToolOpen(false)}
+                    comboId={comboId}
+                    dateIso={overlaySelectedDate}
+                    studyId={overlaySelectedRef.study_id}
+                    seriesUid={overlaySelectedRef.series_uid}
+                    effectiveInstanceIndex={tumorEffectiveSliceIndex}
+                    viewerTransform={overlaySelectedSettings}
+                  />
+                </>
               ) : null}
             </div>
 
@@ -255,7 +354,7 @@ export function OverlayView({
                     </div>
                     {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
                       <div className="text-xs text-white/70">
-                        {alignmentProgress.slicesChecked} slices · MI {alignmentProgress.bestMiSoFar.toFixed(3)}
+                        {alignmentProgress.slicesChecked} slices · Score {alignmentProgress.bestMiSoFar.toFixed(3)}
                       </div>
                     ) : null}
                   </div>

@@ -58,4 +58,18 @@ describe('computeMutualInformation', () => {
     expect(Math.abs(ab.mi - ba.mi)).toBeLessThan(1e-6);
     expect(Math.abs(ab.nmi - ba.nmi)).toBeLessThan(1e-6);
   });
+
+  test('inclusionMask restricts pixels used and can increase MI when it selects the matching region', () => {
+    const a = new Float32Array([0, 1, 0, 1, 0, 1, 0, 1]);
+    // Second half is inverted relative to A.
+    const b = new Float32Array([0, 1, 0, 1, 1, 0, 1, 0]);
+
+    const unmasked = computeMutualInformation(a, b, { bins: 8 });
+
+    const mask = new Uint8Array([1, 1, 1, 1, 0, 0, 0, 0]);
+    const masked = computeMutualInformation(a, b, { bins: 8, inclusionMask: mask });
+
+    expect(masked.pixelsUsed).toBe(4);
+    expect(masked.mi).toBeGreaterThan(unmasked.mi);
+  });
 });

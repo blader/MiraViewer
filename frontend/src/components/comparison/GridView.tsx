@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { Loader2 } from 'lucide-react';
+import { GridCell } from './GridCell';
 import type {
   AlignmentProgress,
   AlignmentReference,
@@ -10,13 +11,10 @@ import type {
 } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { DEFAULT_PANEL_SETTINGS } from '../../utils/constants';
-import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls } from '../ImageControls';
-import { StepControl } from '../StepControl';
-import { DragRectActionOverlay } from '../DragRectActionOverlay';
-import { DicomViewer } from '../DicomViewer';
 
 export type GridViewProps = {
+  comboId: string;
+
   columns: { date: string; ref?: SeriesRef }[];
   gridCols: number;
   gridCellSize: number;
@@ -32,6 +30,7 @@ export type GridViewProps = {
 };
 
 export function GridView({
+  comboId,
   columns,
   gridCols,
   gridCellSize,
@@ -80,7 +79,7 @@ export function GridView({
               </div>
               {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
                 <div className="text-xs text-white/70">
-                  {alignmentProgress.slicesChecked} slices · MI {alignmentProgress.bestMiSoFar.toFixed(3)}
+                  {alignmentProgress.slicesChecked} slices · Score {alignmentProgress.bestMiSoFar.toFixed(3)}
                 </div>
               ) : null}
             </div>
@@ -108,131 +107,23 @@ export function GridView({
       >
         {columns.map(({ date, ref }) => {
           const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;
-
-          if (!ref) {
-            return (
-              <div key={date} className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] bg-[var(--bg-primary)]">
-                <div className="px-3 py-2 text-xs text-[var(--text-secondary)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
-                  {formatDate(date)}
-                </div>
-                <div className="flex-1 flex items-center justify-center text-[var(--text-secondary)]">No series</div>
-              </div>
-            );
-          }
-
-          const idx = getSliceIndex(ref.instance_count, progress, settings.offset);
-          const effectiveIdx = getEffectiveInstanceIndex(idx, ref.instance_count, settings.reverseSliceOrder);
-
           const isHovered = hoveredGridCellDate === date;
 
           return (
-            <div
+            <GridCell
               key={date}
-              data-grid-cell-date={date}
-              className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
-            >
-              {/* Cell controls (shown on hover) */}
-              <div
-                className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
-                  isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-end">
-                  <ImageControls
-                    settings={settings}
-                    instanceIndex={idx}
-                    instanceCount={ref.instance_count}
-                    onUpdate={(update) => {
-                      updatePanelSetting(date, update);
-                    }}
-                    showSliceControl={false}
-                  />
-                </div>
-              </div>
-
-              {/* Slice selector (shown on hover, bottom-right corner) */}
-              <div
-                className={`absolute bottom-2 right-2 z-10 transition-opacity ${
-                  isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-                }`}
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
-                  <StepControl
-                    title="Slice offset"
-                    value={`${idx + 1}/${ref.instance_count}`}
-                    valueWidth="w-16"
-                    tabular
-                    accent
-                    onDecrement={() => {
-                      updatePanelSetting(date, { offset: settings.offset - 1 });
-                    }}
-                    onIncrement={() => {
-                      updatePanelSetting(date, { offset: settings.offset + 1 });
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div className="flex-1 min-h-0 bg-black relative">
-                <DragRectActionOverlay
-                  className="absolute inset-0 cursor-crosshair"
-                  geometry={{
-                    panX: settings.panX,
-                    panY: settings.panY,
-                    zoom: settings.zoom,
-                    rotation: settings.rotation,
-                    affine00: settings.affine00,
-                    affine01: settings.affine01,
-                    affine10: settings.affine10,
-                    affine11: settings.affine11,
-                  }}
-                  disabled={overlayColumns.length < 2 || isAligning}
-                  onConfirm={(mask) => {
-                    void startAlignAll(
-                      {
-                        date,
-                        seriesUid: ref.series_uid,
-                        sliceIndex: effectiveIdx,
-                        sliceCount: ref.instance_count,
-                        settings,
-                      },
-                      mask
-                    );
-                  }}
-                  actionTitle={`Align all other dates to ${formatDate(date)}`}
-                >
-                  <DicomViewer
-                    studyId={ref.study_id}
-                    seriesUid={ref.series_uid}
-                    instanceIndex={idx}
-                    instanceCount={ref.instance_count}
-                    reverseSliceOrder={settings.reverseSliceOrder}
-                    onInstanceChange={(i) => {
-                      setProgress(getProgressFromSlice(i, ref.instance_count, settings.offset));
-                    }}
-                    brightness={settings.brightness}
-                    contrast={settings.contrast}
-                    zoom={settings.zoom}
-                    rotation={settings.rotation}
-                    panX={settings.panX}
-                    panY={settings.panY}
-                    affine00={settings.affine00}
-                    affine01={settings.affine01}
-                    affine10={settings.affine10}
-                    affine11={settings.affine11}
-                    onPanChange={(newPanX, newPanY) => {
-                      updatePanelSetting(date, { panX: newPanX, panY: newPanY });
-                    }}
-                  />
-
-                  {/* Date overlay (matches overlay view style) */}
-                  <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
-                    {formatDate(date)}
-                  </div>
-                </DragRectActionOverlay>
-              </div>
-            </div>
+              comboId={comboId}
+              date={date}
+              refData={ref}
+              settings={settings}
+              progress={progress}
+              setProgress={setProgress}
+              updatePanelSetting={updatePanelSetting}
+              isHovered={isHovered}
+              overlayColumns={overlayColumns}
+              isAligning={isAligning}
+              startAlignAll={startAlignAll}
+            />
           );
         })}
         {columns.length === 0 && <div className="h-full flex items-center justify-center text-[var(--text-secondary)]">Select dates to view</div>}

@@ -1,5 +1,14 @@
 import { getDB } from '../db/db';
-import type { DicomSeries } from '../db/schema';
+import type {
+  DicomSeries,
+  TumorSegmentationRow,
+  TumorGroundTruthRow,
+  TumorThreshold,
+  TumorPolygon,
+  NormalizedPoint,
+  ViewerTransform,
+  ViewportSize,
+} from '../db/schema';
 import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
 import { parseSeriesDescription } from './dicomSeriesParsing';
 
@@ -313,7 +322,7 @@ function cacheSeriesInstanceOrder(seriesUid: string, uids: string[]) {
   }
 }
 
-async function getSortedInstanceUidsForSeries(seriesUid: string): Promise<string[]> {
+export async function getSortedSopInstanceUidsForSeries(seriesUid: string): Promise<string[]> {
   const cached = seriesInstanceOrderCache.get(seriesUid);
   if (cached) {
     // Touch LRU.
@@ -359,9 +368,137 @@ async function getSortedInstanceUidsForSeries(seriesUid: string): Promise<string
   }
 }
 
-export async function getImageIdForInstance(seriesUid: string, instanceIndex: number): Promise<string> {
-  const uids = await getSortedInstanceUidsForSeries(seriesUid);
+export async function getSopInstanceUidForInstanceIndex(seriesUid: string, instanceIndex: number): Promise<string> {
+  const uids = await getSortedSopInstanceUidsForSeries(seriesUid);
   const uid = uids[instanceIndex];
   if (!uid) throw new Error('Instance index out of range');
+  return uid;
+}
+
+export async function getImageIdForInstance(seriesUid: string, instanceIndex: number): Promise<string> {
+  const uid = await getSopInstanceUidForInstanceIndex(seriesUid, instanceIndex);
   return `miradb:${uid}`;
+}
+
+function tumorSegmentationId(seriesUid: string, sopInstanceUid: string): string {
+  // Keep this stable and URL-safe. Series UID can contain dots.
+  return `${seriesUid}::${sopInstanceUid}`;
+}
+
+export async function getTumorSegmentationForInstance(
+  seriesUid: string,
+  sopInstanceUid: string
+): Promise<TumorSegmentationRow | null> {
+  const db = await getDB();
+  const id = tumorSegmentationId(seriesUid, sopInstanceUid);
+  const row = await db.get('tumor_segmentations', id);
+  return row ?? null;
+}
+
+export async function getTumorSegmentationsForSeries(seriesUid: string): Promise<TumorSegmentationRow[]> {
+  const db = await getDB();
+  return db.getAllFromIndex('tumor_segmentations', 'by-series', seriesUid);
+}
+
+export type SaveTumorSegmentationInput = {
+  comboId: string;
+  dateIso: string;
+  studyId: string;
+  seriesUid: string;
+  sopInstanceUid: string;
+  polygon: TumorPolygon;
+  threshold: TumorThreshold;
+  seed?: NormalizedPoint;
+  meta?: TumorSegmentationRow['meta'];
+  algorithmVersion?: string;
+};
+
+export async function saveTumorSegmentation(input: SaveTumorSegmentationInput): Promise<void> {
+  const db = await getDB();
+  const now = Date.now();
+
+  const id = tumorSegmentationId(input.seriesUid, input.sopInstanceUid);
+  const existing = await db.get('tumor_segmentations', id);
+
+  const row: TumorSegmentationRow = {
+    id,
+    comboId: input.comboId,
+    dateIso: input.dateIso,
+    studyId: input.studyId,
+    seriesUid: input.seriesUid,
+    sopInstanceUid: input.sopInstanceUid,
+    algorithmVersion: input.algorithmVersion ?? 'v1-display-domain-threshold',
+    polygon: input.polygon,
+    threshold: input.threshold,
+    seed: input.seed,
+    createdAtMs: existing?.createdAtMs ?? now,
+    updatedAtMs: now,
+    meta: input.meta,
+  };
+
+  await db.put('tumor_segmentations', row);
+}
+
+export async function deleteTumorSegmentation(seriesUid: string, sopInstanceUid: string): Promise<void> {
+  const db = await getDB();
+  await db.delete('tumor_segmentations', tumorSegmentationId(seriesUid, sopInstanceUid));
+}
+
+function tumorGroundTruthId(seriesUid: string, sopInstanceUid: string): string {
+  return `${seriesUid}::${sopInstanceUid}`;
+}
+
+export async function getTumorGroundTruthForInstance(
+  seriesUid: string,
+  sopInstanceUid: string
+): Promise<TumorGroundTruthRow | null> {
+  const db = await getDB();
+  const id = tumorGroundTruthId(seriesUid, sopInstanceUid);
+  const row = await db.get('tumor_ground_truth', id);
+  return row ?? null;
+}
+
+export async function getAllTumorGroundTruth(): Promise<TumorGroundTruthRow[]> {
+  const db = await getDB();
+  return db.getAll('tumor_ground_truth');
+}
+
+export type SaveTumorGroundTruthInput = {
+  comboId: string;
+  dateIso: string;
+  studyId: string;
+  seriesUid: string;
+  sopInstanceUid: string;
+  polygon: TumorPolygon;
+  viewTransform?: ViewerTransform;
+  viewportSize?: ViewportSize;
+};
+
+export async function saveTumorGroundTruth(input: SaveTumorGroundTruthInput): Promise<void> {
+  const db = await getDB();
+  const now = Date.now();
+
+  const id = tumorGroundTruthId(input.seriesUid, input.sopInstanceUid);
+  const existing = await db.get('tumor_ground_truth', id);
+
+  const row: TumorGroundTruthRow = {
+    id,
+    comboId: input.comboId,
+    dateIso: input.dateIso,
+    studyId: input.studyId,
+    seriesUid: input.seriesUid,
+    sopInstanceUid: input.sopInstanceUid,
+    polygon: input.polygon,
+    viewTransform: input.viewTransform,
+    viewportSize: input.viewportSize,
+    createdAtMs: existing?.createdAtMs ?? now,
+    updatedAtMs: now,
+  };
+
+  await db.put('tumor_ground_truth', row);
+}
+
+export async function deleteTumorGroundTruth(seriesUid: string, sopInstanceUid: string): Promise<void> {
+  const db = await getDB();
+  await db.delete('tumor_ground_truth', tumorGroundTruthId(seriesUid, sopInstanceUid));
 }

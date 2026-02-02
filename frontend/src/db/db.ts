@@ -3,7 +3,7 @@ import type { IDBPDatabase } from 'idb';
 import type { MiraDB } from './schema';
 
 const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 
 let dbPromise: Promise<IDBPDatabase<MiraDB>> | null = null;
 
@@ -79,6 +79,40 @@ export function getDB() {
         // Panel Settings
         if (!db.objectStoreNames.contains('panel_settings')) {
           db.createObjectStore('panel_settings', { keyPath: 'comboId' });
+        }
+
+        // Tumor segmentations
+        {
+          const segStore = db.objectStoreNames.contains('tumor_segmentations')
+            ? transaction.objectStore('tumor_segmentations')
+            : db.createObjectStore('tumor_segmentations', { keyPath: 'id' });
+
+          if (!segStore.indexNames.contains('by-series')) {
+            segStore.createIndex('by-series', 'seriesUid');
+          }
+          if (!segStore.indexNames.contains('by-sop')) {
+            segStore.createIndex('by-sop', 'sopInstanceUid');
+          }
+          if (!segStore.indexNames.contains('by-combo-date')) {
+            segStore.createIndex('by-combo-date', ['comboId', 'dateIso']);
+          }
+        }
+
+        // Tumor ground truth (manual polygon)
+        {
+          const gtStore = db.objectStoreNames.contains('tumor_ground_truth')
+            ? transaction.objectStore('tumor_ground_truth')
+            : db.createObjectStore('tumor_ground_truth', { keyPath: 'id' });
+
+          if (!gtStore.indexNames.contains('by-series')) {
+            gtStore.createIndex('by-series', 'seriesUid');
+          }
+          if (!gtStore.indexNames.contains('by-sop')) {
+            gtStore.createIndex('by-sop', 'sopInstanceUid');
+          }
+          if (!gtStore.indexNames.contains('by-combo-date')) {
+            gtStore.createIndex('by-combo-date', ['comboId', 'dateIso']);
+          }
         }
       },
     });

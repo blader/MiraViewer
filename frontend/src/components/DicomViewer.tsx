@@ -11,6 +11,8 @@ import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
 import { useWheelNavigation } from '../hooks/useWheelNavigation';
 import { getEffectiveInstanceIndex } from '../utils/math';
+import { isDebugAlignmentEnabled } from '../utils/debugAlignment';
+import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -24,6 +26,21 @@ export type DicomViewerHandle = {
    */
   captureVisiblePng: (options?: DicomViewerCaptureOptions) => Promise<Blob>;
 };
+
+function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
+  // Content key format: `${studyId}:${seriesUid}:${effectiveInstanceIndex}`
+  //
+  // We parse from the right so this keeps working even if study IDs ever contain ':' (unlikely).
+  const parts = contentKey.split(':');
+  if (parts.length < 3) return null;
+
+  const indexStr = parts[parts.length - 1];
+  const seriesUid = parts[parts.length - 2];
+  const instanceIndex = Number(indexStr);
+  if (!Number.isFinite(instanceIndex) || instanceIndex < 0) return null;
+
+  return { seriesUid, instanceIndex };
+}
 
 interface DicomViewerProps {
   studyId: string;
@@ -123,6 +140,52 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
   const [imageId, setImageId] = useState<string | null>(null);
+
+  // Track what slice is actually displayed in the viewer.
+  // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
+  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
+
+  const debugSliceScores = isDebugAlignmentEnabled();
+
+  // Only show the (very noisy) per-slice debug scores overlay while the user is holding 'Z'.
+  // This keeps the UI clean while still making it easy to inspect values on demand.
+  const [isZHeld, setIsZHeld] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const isZKey = (e: KeyboardEvent) => (e.key || '').toLowerCase() === 'z';
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore cmd/ctrl/alt modified combos (e.g. Cmd+Z) so we don't flash the overlay
+      // during common shortcuts.
+      if (!isZKey(e)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      setIsZHeld(true);
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!isZKey(e)) return;
+      setIsZHeld(false);
+    };
+
+    const onBlur = () => {
+      setIsZHeld(false);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  const displayedForScores = displayedContentKey ? parseDicomViewerContentKey(displayedContentKey) : null;
+  const scoreSeriesUid = displayedForScores?.seriesUid ?? seriesUid;
+  const scoreInstanceIndex = displayedForScores?.instanceIndex ?? effectiveInstanceIndex;
+  const sliceScore = debugSliceScores ? getAlignmentSliceScore(scoreSeriesUid, scoreInstanceIndex) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -373,12 +436,30 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}
+            onDisplayedContentKey={setDisplayedContentKey}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
             Loading...
           </div>
         )}
+
+        {debugSliceScores && isZHeld ? (
+          <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
+            <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-[10px] font-mono tabular-nums leading-snug">
+              <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
+              <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
+              <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
+              <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
+              <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
+              <div>MIND: {sliceScore && sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
+              <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
+              <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
+              <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
+              <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -400,6 +481,9 @@ interface CornerstoneImageProps {
   imageFilter: string;
   imageTransform: string;
   alt: string;
+
+  /** Called after Cornerstone actually displays the requested image. */
+  onDisplayedContentKey?: (contentKey: string) => void;
 }
 
 function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
@@ -435,7 +519,14 @@ function ErrorOverlay({ message }: { message: string }) {
   );
 }
 
-function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
+function CornerstoneImage({
+  imageId,
+  contentKey,
+  imageFilter,
+  imageTransform,
+  alt,
+  onDisplayedContentKey,
+}: CornerstoneImageProps) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
@@ -471,6 +562,11 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
   useEffect(() => {
     contentKeyRef.current = contentKey;
   }, [contentKey]);
+
+  const onDisplayedContentKeyRef = useRef(onDisplayedContentKey);
+  useEffect(() => {
+    onDisplayedContentKeyRef.current = onDisplayedContentKey;
+  }, [onDisplayedContentKey]);
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
@@ -550,6 +646,7 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
         setLoadedImageId(imageId);
         setLoadedContentKey(keyForThisLoad);
         setErrorImageId(null);
+        onDisplayedContentKeyRef.current?.(keyForThisLoad);
       } catch (err) {
         console.error('Failed to load DICOM image:', err);
         if (!cancelled) {

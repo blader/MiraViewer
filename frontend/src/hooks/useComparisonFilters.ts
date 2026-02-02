@@ -16,10 +16,17 @@ function normalizePlane(plane: string | null): string {
   return plane && plane.trim() ? plane : OTHER_PLANE;
 }
 
+function isKnownSequence(seq: { weight: string | null; sequence: string | null }): boolean {
+  return Boolean((seq.weight && seq.weight.trim()) || (seq.sequence && seq.sequence.trim()));
+}
+
 function getAvailablePlanes(data: ComparisonData): string[] {
-  const hasOther =
-    data.planes.some((p) => p === OTHER_PLANE || !p.trim()) ||
-    data.sequences.some((s) => !s.plane || !s.plane.trim());
+  // Filter out "Unknown" sequences (no weight + no sequence) from plane + sequence selectors.
+  const knownPlanes = new Set<string>();
+  for (const seq of data.sequences) {
+    if (!isKnownSequence(seq)) continue;
+    knownPlanes.add(normalizePlane(seq.plane));
+  }
 
   const planes: string[] = [];
   const seen = new Set<string>();
@@ -27,6 +34,7 @@ function getAvailablePlanes(data: ComparisonData): string[] {
   // Keep the plane ordering provided by the dataset, but move Other to the end.
   for (const p of data.planes) {
     if (p === OTHER_PLANE || !p.trim()) continue;
+    if (!knownPlanes.has(p)) continue;
     if (!seen.has(p)) {
       seen.add(p);
       planes.push(p);
@@ -35,6 +43,7 @@ function getAvailablePlanes(data: ComparisonData): string[] {
 
   // Defensive: include any planes that appear on sequences but not in data.planes.
   for (const seq of data.sequences) {
+    if (!isKnownSequence(seq)) continue;
     const p = normalizePlane(seq.plane);
     if (p === OTHER_PLANE) continue;
     if (!seen.has(p)) {
@@ -43,7 +52,7 @@ function getAvailablePlanes(data: ComparisonData): string[] {
     }
   }
 
-  if (hasOther) planes.push(OTHER_PLANE);
+  if (knownPlanes.has(OTHER_PLANE)) planes.push(OTHER_PLANE);
 
   return planes;
 }
@@ -55,7 +64,7 @@ function pickDefaultPlane(planes: string[]): string | null {
 }
 
 function pickDefaultSequence(data: ComparisonData, plane: string): string | null {
-  const seq = data.sequences.find((s) => normalizePlane(s.plane) === plane) || data.sequences[0];
+  const seq = data.sequences.find((s) => isKnownSequence(s) && normalizePlane(s.plane) === plane) || null;
   return seq ? seq.id : null;
 }
 
@@ -64,18 +73,21 @@ function findMatchingSequence(data: ComparisonData, newPlane: string, currentSeq
   if (!currentSeqId) return pickDefaultSequence(data, newPlane);
 
   const currentSeq = data.sequences.find((s) => s.id === currentSeqId);
-  if (!currentSeq) return pickDefaultSequence(data, newPlane);
+  if (!currentSeq || !isKnownSequence(currentSeq)) return pickDefaultSequence(data, newPlane);
 
   // Try to find a sequence in the new plane with same weight and sequence type
   const exactMatch = data.sequences.find(
     (s) =>
-      normalizePlane(s.plane) === newPlane && s.weight === currentSeq.weight && s.sequence === currentSeq.sequence
+      isKnownSequence(s) &&
+      normalizePlane(s.plane) === newPlane &&
+      s.weight === currentSeq.weight &&
+      s.sequence === currentSeq.sequence
   );
   if (exactMatch) return exactMatch.id;
 
   // Try matching just the weight
   const weightMatch = data.sequences.find(
-    (s) => normalizePlane(s.plane) === newPlane && s.weight === currentSeq.weight
+    (s) => isKnownSequence(s) && normalizePlane(s.plane) === newPlane && s.weight === currentSeq.weight
   );
   if (weightMatch) return weightMatch.id;
 
@@ -120,7 +132,9 @@ export function useComparisonFilters(data: ComparisonData | null) {
   const selectedSeqId = useMemo(() => {
     if (!data || !selectedPlane) return null;
     const seqIdsForPlane = new Set(
-      data.sequences.filter((s) => normalizePlane(s.plane) === selectedPlane).map((s) => s.id)
+      data.sequences
+        .filter((s) => isKnownSequence(s) && normalizePlane(s.plane) === selectedPlane)
+        .map((s) => s.id)
     );
     return filters.seqId && seqIdsForPlane.has(filters.seqId)
       ? filters.seqId
