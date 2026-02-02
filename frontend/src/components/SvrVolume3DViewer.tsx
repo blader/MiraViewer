@@ -1,7 +1,9 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
+import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
+import { computeSeedRange01, regionGrow3D, type Vec3i } from '../utils/segmentation/regionGrow3D';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 
 function clamp(x: number, min: number, max: number): number {
@@ -461,7 +463,7 @@ export type SvrVolume3DViewerHandle = {
 };
 
 export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3DViewerProps>(function SvrVolume3DViewer(
-  { volume, labels },
+  { volume, labels: labelsOverride },
   ref
 ) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -480,6 +482,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
   const [initError, setInitError] = useState<string | null>(null);
 
+  // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
+  const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
+  const labels = labelsOverride ?? generatedLabels;
+
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [threshold, setThreshold] = useState(0.05);
@@ -491,6 +497,24 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   // Optional segmentation overlay (label volume).
   const [labelsEnabled, setLabelsEnabled] = useState(true);
   const [labelMix, setLabelMix] = useState(0.65);
+
+  // Baseline interactive segmentation (Phase 2): seeded 3D region-growing.
+  const [seedVoxel, setSeedVoxel] = useState<Vec3i | null>(null);
+  const [growTargetLabel, setGrowTargetLabel] = useState<BratsBaseLabelId>(BRATS_LABEL_ID.ENHANCING);
+  const [growTolerance, setGrowTolerance] = useState(0.12);
+  const [growStatus, setGrowStatus] = useState<{ running: boolean; message?: string; error?: string }>(() => ({
+    running: false,
+  }));
+  const growAbortRef = useRef<AbortController | null>(null);
+
+  // When the underlying volume changes, drop any internally-generated labels and seed.
+  useEffect(() => {
+    setGeneratedLabels(null);
+    setSeedVoxel(null);
+    setGrowStatus({ running: false });
+    growAbortRef.current?.abort();
+    growAbortRef.current = null;
+  }, [volume]);
 
   const hasLabels = useMemo(() => {
     if (!volume) return false;
@@ -698,6 +722,115 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setInspectIndex(Math.floor(inspectorInfo.maxIndex / 2));
   }, [inspectPlane, inspectorInfo.maxIndex, volume]);
 
+  const onSliceInspectorPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!volume) return;
+
+      const rect = e.currentTarget.getBoundingClientRect();
+      const nx = Math.max(1, rect.width);
+      const ny = Math.max(1, rect.height);
+
+      const u = (e.clientX - rect.left) / nx;
+      const v = (e.clientY - rect.top) / ny;
+
+      const srcCols = inspectorInfo.srcCols;
+      const srcRows = inspectorInfo.srcRows;
+      const sliceIdx = Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex));
+
+      const sx = Math.round(clamp(u, 0, 1) * Math.max(0, srcCols - 1));
+      const sy = Math.round(clamp(v, 0, 1) * Math.max(0, srcRows - 1));
+
+      let seed: Vec3i;
+      if (inspectPlane === 'axial') {
+        seed = { x: sx, y: sy, z: sliceIdx };
+      } else if (inspectPlane === 'coronal') {
+        seed = { x: sx, y: sliceIdx, z: sy };
+      } else {
+        // sagittal
+        seed = { x: sliceIdx, y: sx, z: sy };
+      }
+
+      setSeedVoxel(seed);
+
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]
+  );
+
+  const cancelSeedGrow = useCallback(() => {
+    growAbortRef.current?.abort();
+    growAbortRef.current = null;
+    setGrowStatus({ running: false, message: 'Cancelled' });
+  }, []);
+
+  const runSeedGrow = useCallback(() => {
+    if (!volume) return;
+
+    if (!seedVoxel) {
+      setGrowStatus({ running: false, error: 'Click the slice inspector to place a seed first.' });
+      return;
+    }
+
+    growAbortRef.current?.abort();
+
+    const controller = new AbortController();
+    growAbortRef.current = controller;
+
+    setGrowStatus({ running: true, message: 'Growing…' });
+
+    const [nx, ny] = volume.dims;
+    const strideZ = nx * ny;
+    const seedIdx = seedVoxel.z * strideZ + seedVoxel.y * nx + seedVoxel.x;
+    const seedValue = volume.data[seedIdx] ?? 0;
+
+    const { min, max } = computeSeedRange01({ seedValue, tolerance: growTolerance });
+    const maxVoxels = Math.min(volume.data.length, 2_000_000);
+
+    void regionGrow3D({
+      volume: volume.data,
+      dims: volume.dims,
+      seed: seedVoxel,
+      min,
+      max,
+      opts: {
+        signal: controller.signal,
+        maxVoxels,
+        connectivity: 6,
+        yieldEvery: 160_000,
+        onProgress: (p) => {
+          setGrowStatus((s) => (s.running ? { ...s, message: `Growing… ${p.queued.toLocaleString()} voxels` } : s));
+        },
+      },
+    })
+      .then((res) => {
+        if (controller.signal.aborted) return;
+
+        const next = labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
+        for (let i = 0; i < res.mask.length; i++) {
+          if (res.mask[i]) next[i] = growTargetLabel;
+        }
+
+        setGeneratedLabels({ data: next, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
+        setLabelsEnabled(true);
+
+        setGrowStatus({
+          running: false,
+          message: `Seed ${seedValue.toFixed(3)} → ${res.count.toLocaleString()} voxels${res.hitMaxVoxels ? ' (hit limit)' : ''}`,
+        });
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        setGrowStatus({ running: false, error: msg });
+      })
+      .finally(() => {
+        if (growAbortRef.current === controller) {
+          growAbortRef.current = null;
+        }
+      });
+  }, [growTargetLabel, growTolerance, labels, seedVoxel, volume]);
+
   // Draw the inspector slice to a 2D canvas.
   useEffect(() => {
     const canvas = sliceCanvasRef.current;
@@ -825,7 +958,38 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     }
 
     ctx.putImageData(img, 0, 0);
-  }, [hasLabels, inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, labelMix, labels, labelsEnabled, volume]);
+
+    // Draw a small crosshair for the current seed (if it lies on the current inspector slice).
+    if (seedVoxel) {
+      const isOnSlice =
+        inspectPlane === 'axial'
+          ? seedVoxel.z === idx
+          : inspectPlane === 'coronal'
+            ? seedVoxel.y === idx
+            : seedVoxel.x === idx;
+
+      if (isOnSlice) {
+        const seedCol =
+          inspectPlane === 'axial' ? seedVoxel.x : inspectPlane === 'coronal' ? seedVoxel.x : seedVoxel.y;
+        const seedRow =
+          inspectPlane === 'axial' ? seedVoxel.y : inspectPlane === 'coronal' ? seedVoxel.z : seedVoxel.z;
+
+        const cx = srcCols > 1 ? (seedCol / (srcCols - 1)) * (dsCols - 1) : 0;
+        const cy = srcRows > 1 ? (seedRow / (srcRows - 1)) * (dsRows - 1) : 0;
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 80, 80, 0.95)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx - 6, cy);
+        ctx.lineTo(cx + 6, cy);
+        ctx.moveTo(cx, cy - 6);
+        ctx.lineTo(cx, cy + 6);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }, [hasLabels, inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, labelMix, labels, labelsEnabled, seedVoxel, volume]);
 
   useEffect(() => {
     setInitError(null);
@@ -1530,7 +1694,7 @@ void main() {
                 type="checkbox"
                 checked={labelsEnabled}
                 onChange={(e) => setLabelsEnabled(e.target.checked)}
-                disabled={!hasLabels}
+                disabled={!volume}
               />
               <span>Show labels</span>
             </label>
@@ -1549,6 +1713,97 @@ void main() {
               />
               <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
             </label>
+
+            <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
+              <span className="truncate">
+                Seed:{' '}
+                {seedVoxel ? (
+                  <span className="tabular-nums">
+                    {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
+                  </span>
+                ) : (
+                  <span>Click the slice inspector to set</span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSeedVoxel(null)}
+                disabled={!seedVoxel || growStatus.running}
+                className="ml-auto px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Target
+                <select
+                  value={growTargetLabel}
+                  onChange={(e) => setGrowTargetLabel(Number(e.target.value) as BratsBaseLabelId)}
+                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                  disabled={!volume || growStatus.running}
+                >
+                  <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
+                  <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
+                  <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
+                </select>
+              </label>
+
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Tolerance
+                <input
+                  type="range"
+                  min={0}
+                  max={0.5}
+                  step={0.005}
+                  value={growTolerance}
+                  onChange={(e) => setGrowTolerance(Number(e.target.value))}
+                  className="mt-1 w-full"
+                  disabled={!volume || growStatus.running}
+                />
+                <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={runSeedGrow}
+                disabled={!volume || !seedVoxel || growStatus.running}
+                className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+              >
+                Grow from seed
+              </button>
+
+              {growStatus.running ? (
+                <button
+                  type="button"
+                  onClick={cancelSeedGrow}
+                  className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                >
+                  Cancel
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setGeneratedLabels(null);
+                  setGrowStatus({ running: false, message: 'Cleared segmentation' });
+                }}
+                disabled={!generatedLabels || growStatus.running}
+                className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+              >
+                Clear seg
+              </button>
+            </div>
+
+            {growStatus.error ? (
+              <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{growStatus.error}</div>
+            ) : growStatus.message ? (
+              <div className="text-[10px] text-[var(--text-tertiary)]">{growStatus.message}</div>
+            ) : null}
 
             {!hasLabels || !labels ? (
               <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
@@ -1628,7 +1883,12 @@ void main() {
             </div>
 
             <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
-              <canvas ref={sliceCanvasRef} className="w-full h-auto" style={{ imageRendering: 'pixelated' }} />
+              <canvas
+                ref={sliceCanvasRef}
+                className="w-full h-auto"
+                style={{ imageRendering: 'pixelated', cursor: volume ? 'crosshair' : 'default' }}
+                onPointerDown={onSliceInspectorPointerDown}
+              />
             </div>
 
             {volume ? (
