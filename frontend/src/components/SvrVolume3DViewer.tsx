@@ -557,6 +557,13 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   }));
   const growAbortRef = useRef<AbortController | null>(null);
 
+  // Phase 4b: manual refinement brush.
+  const [segTool, setSegTool] = useState<'seed' | 'brush'>('seed');
+  const [brushLabel, setBrushLabel] = useState<number>(BRATS_LABEL_ID.ENHANCING);
+  const [brushRadiusVox, setBrushRadiusVox] = useState(2);
+  const [labelsEditTick, setLabelsEditTick] = useState(0);
+  const brushDragRef = useRef<{ pointerId: number; last: Vec3i | null; data: Uint8Array } | null>(null);
+
   // When the underlying volume changes, drop any internally-generated labels and seed.
   useEffect(() => {
     setGeneratedLabels(null);
@@ -564,6 +571,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setGrowStatus({ running: false });
     growAbortRef.current?.abort();
     growAbortRef.current = null;
+
+    brushDragRef.current = null;
+    setLabelsEditTick(0);
 
     // Cancel any in-flight ONNX segmentation (best-effort).
     onnxSegRunIdRef.current++;
@@ -833,16 +843,16 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setInspectIndex(Math.floor(inspectorInfo.maxIndex / 2));
   }, [inspectPlane, inspectorInfo.maxIndex, volume]);
 
-  const onSliceInspectorPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!volume) return;
+  const inspectorPointerToVoxel = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>): Vec3i | null => {
+      if (!volume) return null;
 
       const rect = e.currentTarget.getBoundingClientRect();
-      const nx = Math.max(1, rect.width);
-      const ny = Math.max(1, rect.height);
+      const w = Math.max(1, rect.width);
+      const h = Math.max(1, rect.height);
 
-      const u = (e.clientX - rect.left) / nx;
-      const v = (e.clientY - rect.top) / ny;
+      const u = (e.clientX - rect.left) / w;
+      const v = (e.clientY - rect.top) / h;
 
       const srcCols = inspectorInfo.srcCols;
       const srcRows = inspectorInfo.srcRows;
@@ -851,23 +861,223 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       const sx = Math.round(clamp(u, 0, 1) * Math.max(0, srcCols - 1));
       const sy = Math.round(clamp(v, 0, 1) * Math.max(0, srcRows - 1));
 
-      let seed: Vec3i;
       if (inspectPlane === 'axial') {
-        seed = { x: sx, y: sy, z: sliceIdx };
-      } else if (inspectPlane === 'coronal') {
-        seed = { x: sx, y: sliceIdx, z: sy };
-      } else {
-        // sagittal
-        seed = { x: sliceIdx, y: sx, z: sy };
+        return { x: sx, y: sy, z: sliceIdx };
       }
 
-      setSeedVoxel(seed);
+      if (inspectPlane === 'coronal') {
+        return { x: sx, y: sliceIdx, z: sy };
+      }
+
+      // sagittal
+      return { x: sliceIdx, y: sx, z: sy };
+    },
+    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]
+  );
+
+  const paintBrushAtVoxel = useCallback(
+    (labelData: Uint8Array, voxel: Vec3i) => {
+      if (!volume) return;
+
+      const [nx, ny, nz] = volume.dims;
+      const strideY = nx;
+      const strideZ = nx * ny;
+
+      const r = Math.max(0, Math.round(brushRadiusVox));
+      const r2 = r * r;
+      const labelId = (brushLabel & 0xff) >>> 0;
+
+      const set = (x: number, y: number, z: number) => {
+        if (x < 0 || x >= nx) return;
+        if (y < 0 || y >= ny) return;
+        if (z < 0 || z >= nz) return;
+        labelData[z * strideZ + y * strideY + x] = labelId;
+      };
+
+      if (inspectPlane === 'axial') {
+        const z = voxel.z;
+        for (let dy = -r; dy <= r; dy++) {
+          const y = voxel.y + dy;
+          const dy2 = dy * dy;
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy2 > r2) continue;
+            set(voxel.x + dx, y, z);
+          }
+        }
+        return;
+      }
+
+      if (inspectPlane === 'coronal') {
+        const y = voxel.y;
+        for (let dz = -r; dz <= r; dz++) {
+          const z = voxel.z + dz;
+          const dz2 = dz * dz;
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dz2 > r2) continue;
+            set(voxel.x + dx, y, z);
+          }
+        }
+        return;
+      }
+
+      // sagittal
+      const x = voxel.x;
+      for (let dz = -r; dz <= r; dz++) {
+        const z = voxel.z + dz;
+        const dz2 = dz * dz;
+        for (let dy = -r; dy <= r; dy++) {
+          if (dy * dy + dz2 > r2) continue;
+          set(x, voxel.y + dy, z);
+        }
+      }
+    },
+    [brushLabel, brushRadiusVox, inspectPlane, volume]
+  );
+
+  const paintBrushStroke = useCallback(
+    (labelData: Uint8Array, from: Vec3i | null, to: Vec3i) => {
+      if (!from) {
+        paintBrushAtVoxel(labelData, to);
+        return;
+      }
+
+      // Interpolate in the 2D slice plane so fast drags don't leave gaps.
+      let a0 = 0;
+      let b0 = 0;
+      let a1 = 0;
+      let b1 = 0;
+      let fixed = 0;
+
+      if (inspectPlane === 'axial') {
+        a0 = from.x;
+        b0 = from.y;
+        a1 = to.x;
+        b1 = to.y;
+        fixed = to.z;
+      } else if (inspectPlane === 'coronal') {
+        a0 = from.x;
+        b0 = from.z;
+        a1 = to.x;
+        b1 = to.z;
+        fixed = to.y;
+      } else {
+        // sagittal
+        a0 = from.y;
+        b0 = from.z;
+        a1 = to.y;
+        b1 = to.z;
+        fixed = to.x;
+      }
+
+      const da = a1 - a0;
+      const db = b1 - b0;
+      const steps = Math.max(Math.abs(da), Math.abs(db));
+
+      if (steps <= 1) {
+        paintBrushAtVoxel(labelData, to);
+        return;
+      }
+
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const aa = Math.round(a0 + da * t);
+        const bb = Math.round(b0 + db * t);
+
+        const v: Vec3i =
+          inspectPlane === 'axial'
+            ? { x: aa, y: bb, z: fixed }
+            : inspectPlane === 'coronal'
+              ? { x: aa, y: fixed, z: bb }
+              : { x: fixed, y: aa, z: bb };
+
+        paintBrushAtVoxel(labelData, v);
+      }
+    },
+    [inspectPlane, paintBrushAtVoxel]
+  );
+
+  const onSliceInspectorPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!volume) return;
+
+      const voxel = inspectorPointerToVoxel(e);
+      if (!voxel) return;
+
+      if (segTool === 'brush') {
+        if (growStatus.running) return;
+
+        // Ensure we have a mutable label volume to edit.
+        let editable: SvrLabelVolume;
+        if (generatedLabels) {
+          editable = generatedLabels;
+        } else if (labelsOverride) {
+          editable = { data: new Uint8Array(labelsOverride.data), dims: labelsOverride.dims, meta: labelsOverride.meta };
+          setGeneratedLabels(editable);
+        } else {
+          editable = { data: new Uint8Array(volume.data.length), dims: volume.dims, meta: BRATS_BASE_LABEL_META };
+          setGeneratedLabels(editable);
+        }
+
+        setLabelsEnabled(true);
+
+        brushDragRef.current = { pointerId: e.pointerId, last: voxel, data: editable.data };
+        e.currentTarget.setPointerCapture(e.pointerId);
+
+        paintBrushStroke(editable.data, null, voxel);
+        setLabelsEditTick((t) => t + 1);
+
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // Seed tool: click to set the seed voxel.
+      setSeedVoxel(voxel);
 
       e.preventDefault();
       e.stopPropagation();
     },
-    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]
+    [generatedLabels, growStatus.running, inspectorPointerToVoxel, labelsOverride, paintBrushStroke, segTool, volume]
   );
+
+  const onSliceInspectorPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const st = brushDragRef.current;
+      if (!st || st.pointerId !== e.pointerId) return;
+      if (!volume) return;
+      if (segTool !== 'brush') return;
+
+      const voxel = inspectorPointerToVoxel(e);
+      if (!voxel) return;
+
+      paintBrushStroke(st.data, st.last, voxel);
+      st.last = voxel;
+      setLabelsEditTick((t) => t + 1);
+
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [inspectorPointerToVoxel, paintBrushStroke, segTool, volume]
+  );
+
+  const onSliceInspectorPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const st = brushDragRef.current;
+    if (!st || st.pointerId !== e.pointerId) return;
+
+    brushDragRef.current = null;
+
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // Ignore.
+    }
+
+    // Commit labels object to trigger the 3D label texture upload once at the end of the stroke.
+    setGeneratedLabels((prev) => (prev ? { ...prev } : prev));
+
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
 
   const cancelSeedGrow = useCallback(() => {
     growAbortRef.current?.abort();
@@ -1258,7 +1468,20 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         ctx.restore();
       }
     }
-  }, [hasLabels, inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, labelMix, labels, labelsEnabled, seedVoxel, volume]);
+  }, [
+    hasLabels,
+    inspectIndex,
+    inspectPlane,
+    inspectorInfo.maxIndex,
+    inspectorInfo.srcCols,
+    inspectorInfo.srcRows,
+    labelMix,
+    labels,
+    labelsEditTick,
+    labelsEnabled,
+    seedVoxel,
+    volume,
+  ]);
 
   useEffect(() => {
     setInitError(null);
@@ -1983,6 +2206,54 @@ void main() {
               <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
             </label>
 
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Tool
+                <select
+                  value={segTool}
+                  onChange={(e) => setSegTool(e.target.value as 'seed' | 'brush')}
+                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                  disabled={!volume || growStatus.running}
+                >
+                  <option value="seed">Seed</option>
+                  <option value="brush">Brush</option>
+                </select>
+              </label>
+
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Brush radius
+                <input
+                  type="range"
+                  min={0}
+                  max={12}
+                  step={1}
+                  value={brushRadiusVox}
+                  onChange={(e) => setBrushRadiusVox(Number(e.target.value))}
+                  className="mt-1 w-full"
+                  disabled={!volume || segTool !== 'brush' || growStatus.running}
+                />
+                <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(brushRadiusVox)} vox</div>
+              </label>
+            </div>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Brush label
+              <select
+                value={brushLabel}
+                onChange={(e) => setBrushLabel(Number(e.target.value))}
+                className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                disabled={!volume || segTool !== 'brush' || growStatus.running}
+              >
+                <option value={0}>Erase (0)</option>
+                <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
+                <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
+                <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
+              </select>
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)]">
+                {segTool === 'brush' ? 'Drag in the slice inspector to paint labels.' : 'Click the slice inspector to set a seed.'}
+              </div>
+            </label>
+
             <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
               <span className="truncate">
                 Seed:{' '}
@@ -1990,6 +2261,8 @@ void main() {
                   <span className="tabular-nums">
                     {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
                   </span>
+                ) : segTool === 'brush' ? (
+                  <span>Switch tool to Seed, then click slice inspector</span>
                 ) : (
                   <span>Click the slice inspector to set</span>
                 )}
@@ -2268,8 +2541,14 @@ void main() {
               <canvas
                 ref={sliceCanvasRef}
                 className="w-full h-auto"
-                style={{ imageRendering: 'pixelated', cursor: volume ? 'crosshair' : 'default' }}
+                style={{
+                  imageRendering: 'pixelated',
+                  cursor: volume ? (segTool === 'brush' ? 'cell' : 'crosshair') : 'default',
+                }}
                 onPointerDown={onSliceInspectorPointerDown}
+                onPointerMove={onSliceInspectorPointerMove}
+                onPointerUp={onSliceInspectorPointerUp}
+                onPointerCancel={onSliceInspectorPointerUp}
               />
             </div>
 
