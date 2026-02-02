@@ -543,7 +543,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const refreshOnnxCacheStatus = useCallback(() => {
     void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
       .then((savedAtMs) => {
-        setOnnxStatus((s) => ({ ...s, cached: savedAtMs !== null, savedAtMs }));
+        setOnnxStatus((s) => ({ ...s, cached: savedAtMs !== null, savedAtMs, error: undefined }));
       })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1024,6 +1024,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
       if (segTool === 'brush') {
         if (growStatus.running) return;
+        if (onnxSegRunning) return;
 
         // Ensure we have a mutable label volume to edit.
         let editable: SvrLabelVolume;
@@ -1056,7 +1057,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       e.preventDefault();
       e.stopPropagation();
     },
-    [generatedLabels, growStatus.running, inspectorPointerToVoxel, labelsOverride, paintBrushStroke, segTool, volume]
+    [generatedLabels, growStatus.running, inspectorPointerToVoxel, labelsOverride, onnxSegRunning, paintBrushStroke, segTool, volume]
   );
 
   const onSliceInspectorPointerMove = useCallback(
@@ -1065,6 +1066,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       if (!st || st.pointerId !== e.pointerId) return;
       if (!volume) return;
       if (segTool !== 'brush') return;
+      if (onnxSegRunning) return;
 
       const voxel = inspectorPointerToVoxel(e);
       if (!voxel) return;
@@ -1076,7 +1078,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       e.preventDefault();
       e.stopPropagation();
     },
-    [inspectorPointerToVoxel, paintBrushStroke, segTool, volume]
+    [inspectorPointerToVoxel, onnxSegRunning, paintBrushStroke, segTool, volume]
   );
 
   const onSliceInspectorPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -2230,7 +2232,7 @@ void main() {
                   value={segTool}
                   onChange={(e) => setSegTool(e.target.value as 'seed' | 'brush')}
                   className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume || growStatus.running}
+                  disabled={!volume || growStatus.running || onnxSegRunning}
                 >
                   <option value="seed">Seed</option>
                   <option value="brush">Brush</option>
@@ -2259,7 +2261,7 @@ void main() {
                 value={brushLabel}
                 onChange={(e) => setBrushLabel(Number(e.target.value))}
                 className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                disabled={!volume || segTool !== 'brush' || growStatus.running}
+                disabled={!volume || segTool !== 'brush' || growStatus.running || onnxSegRunning}
               >
                 <option value={0}>Erase (0)</option>
                 <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
@@ -2287,7 +2289,7 @@ void main() {
               <button
                 type="button"
                 onClick={() => setSeedVoxel(null)}
-                disabled={!seedVoxel || growStatus.running}
+                disabled={!seedVoxel || growStatus.running || onnxSegRunning}
                 className="ml-auto px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
               >
                 Clear
@@ -2329,7 +2331,7 @@ void main() {
               <button
                 type="button"
                 onClick={runSeedGrow}
-                disabled={!volume || !seedVoxel || growStatus.running}
+                disabled={!volume || !seedVoxel || growStatus.running || onnxSegRunning}
                 className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
               >
                 Grow from seed
@@ -2351,7 +2353,7 @@ void main() {
                   setGeneratedLabels(null);
                   setGrowStatus({ running: false, message: 'Cleared segmentation' });
                 }}
-                disabled={!generatedLabels || growStatus.running}
+                disabled={!generatedLabels || growStatus.running || onnxSegRunning}
                 className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
               >
                 Clear seg
