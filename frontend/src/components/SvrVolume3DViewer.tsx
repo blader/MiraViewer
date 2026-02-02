@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import type { SvrVolume } from '../types/svr';
+import type { SvrLabelVolume, SvrVolume } from '../types/svr';
+import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 
 function clamp(x: number, min: number, max: number): number {
@@ -449,6 +450,7 @@ function createProgram(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string)
 
 export type SvrVolume3DViewerProps = {
   volume: SvrVolume | null;
+  labels?: SvrLabelVolume | null;
 };
 
 export type SvrVolume3DViewerHandle = {
@@ -459,12 +461,22 @@ export type SvrVolume3DViewerHandle = {
 };
 
 export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3DViewerProps>(function SvrVolume3DViewer(
-  { volume },
+  { volume, labels },
   ref
 ) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pendingCapture3dRef = useRef<{ resolve: (b: Blob | null) => void } | null>(null);
+
+  const glLabelStateRef = useRef<
+    | {
+        gl: WebGL2RenderingContext;
+        texLabels: WebGLTexture;
+        texPalette: WebGLTexture;
+        dims: { nx: number; ny: number; nz: number };
+      }
+    | null
+  >(null);
 
   const [initError, setInitError] = useState<string | null>(null);
 
@@ -476,15 +488,30 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [opacity, setOpacity] = useState(4.0);
   const [zoom, setZoom] = useState(1.0);
 
+  // Optional segmentation overlay (label volume).
+  const [labelsEnabled, setLabelsEnabled] = useState(true);
+  const [labelMix, setLabelMix] = useState(0.65);
+
+  const hasLabels = useMemo(() => {
+    if (!volume) return false;
+    if (!labels) return false;
+
+    const [nx, ny, nz] = volume.dims;
+    const [lx, ly, lz] = labels.dims;
+    if (nx !== lx || ny !== ly || nz !== lz) return false;
+
+    return labels.data.length === nx * ny * nz;
+  }, [labels, volume]);
+
   // Slice inspector (orthogonal slices).
   const sliceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [inspectPlane, setInspectPlane] = useState<'axial' | 'coronal' | 'sagittal'>('axial');
   const [inspectIndex, setInspectIndex] = useState(0);
 
-  const paramsRef = useRef({ threshold, steps, gamma, opacity, zoom });
+  const paramsRef = useRef({ threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels });
   useEffect(() => {
-    paramsRef.current = { threshold, steps, gamma, opacity, zoom };
-  }, [gamma, opacity, steps, threshold, zoom]);
+    paramsRef.current = { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels };
+  }, [gamma, hasLabels, labelMix, labelsEnabled, opacity, steps, threshold, zoom]);
 
   const rotationRef = useRef<Quat>([0, 0, 0, 1]);
 
@@ -739,19 +766,66 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     const img = ctx.createImageData(dsCols, dsRows);
     const out = img.data;
 
+    const overlayAlpha = hasLabels && labelsEnabled ? clamp(labelMix, 0, 1) : 0;
+    const palette = hasLabels && labelsEnabled && labels ? buildRgbaPalette256(labels.meta) : null;
+
     for (let i = 0; i < down.length; i++) {
       const v = down[i] ?? 0;
-      const b = Math.round(clamp(v, 0, 1) * 255);
+      const b0 = Math.round(clamp(v, 0, 1) * 255);
+
+      let r = b0;
+      let g = b0;
+      let b = b0;
+
+      if (palette && overlayAlpha > 0 && labels) {
+        const px = i % dsCols;
+        const py = Math.floor(i / dsCols);
+
+        const srcX = dsCols > 1 ? Math.round((px / (dsCols - 1)) * (srcCols - 1)) : 0;
+        const srcY = dsRows > 1 ? Math.round((py / (dsRows - 1)) * (srcRows - 1)) : 0;
+
+        let vx = 0;
+        let vy = 0;
+        let vz = 0;
+
+        if (inspectPlane === 'axial') {
+          vx = srcX;
+          vy = srcY;
+          vz = idx;
+        } else if (inspectPlane === 'coronal') {
+          vx = srcX;
+          vy = idx;
+          vz = srcY;
+        } else {
+          // sagittal
+          vx = idx;
+          vy = srcX;
+          vz = srcY;
+        }
+
+        const labelId = labels.data[vz * strideZ + vy * strideY + vx] ?? 0;
+        if (labelId !== 0) {
+          const o = labelId * 4;
+          const lr = palette[o] ?? 0;
+          const lg = palette[o + 1] ?? 0;
+          const lb = palette[o + 2] ?? 0;
+
+          const a = overlayAlpha;
+          r = Math.round((1 - a) * r + a * lr);
+          g = Math.round((1 - a) * g + a * lg);
+          b = Math.round((1 - a) * b + a * lb);
+        }
+      }
 
       const j = i * 4;
-      out[j] = b;
-      out[j + 1] = b;
+      out[j] = r;
+      out[j + 1] = g;
       out[j + 2] = b;
       out[j + 3] = 255;
     }
 
     ctx.putImageData(img, 0, 0);
-  }, [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]);
+  }, [hasLabels, inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, labelMix, labels, labelsEnabled, volume]);
 
   useEffect(() => {
     setInitError(null);
@@ -791,11 +865,18 @@ void main() {
     const fsSrc = `#version 300 es
 precision highp float;
 precision highp sampler3D;
+precision highp usampler3D;
+precision highp sampler2D;
 
 in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler3D u_vol;
+uniform usampler3D u_labels;
+uniform sampler2D u_palette;
+uniform int u_labelsEnabled;
+uniform float u_labelMix;
+
 uniform mat3 u_rot;
 uniform vec3 u_box;
 uniform float u_aspect;
@@ -873,7 +954,7 @@ void main() {
   const float EDGE_K = 14.0;
   const float CENTER_EDGE_GAIN = 2.5;
 
-  float accum = 0.0;
+  vec3 accum = vec3(0.0);
   float aAccum = 0.0;
 
   float t = max(t0, 0.0);
@@ -938,7 +1019,18 @@ void main() {
 
       float sampleV = v * shade * (0.6 + 0.4 * edge);
 
-      accum += (1.0 - aAccum) * sampleV * aStep;
+      vec3 sampleColor = vec3(sampleV);
+
+      if (u_labelsEnabled != 0) {
+        uint lid = texture(u_labels, tc).r;
+        if (lid != 0u) {
+          vec3 labelRgb = texelFetch(u_palette, ivec2(int(lid), 0), 0).rgb;
+          float mixK = clamp(u_labelMix, 0.0, 1.0);
+          sampleColor = mix(sampleColor, labelRgb, mixK);
+        }
+      }
+
+      accum += (1.0 - aAccum) * sampleColor * aStep;
       aAccum += (1.0 - aAccum) * aStep;
 
       if (aAccum > 0.98) {
@@ -947,13 +1039,15 @@ void main() {
     }
   }
 
-  outColor = vec4(vec3(saturate(accum)), 1.0);
+  outColor = vec4(clamp(accum, 0.0, 1.0), 1.0);
 }`;
 
     let program: WebGLProgram | null = null;
     let vao: WebGLVertexArrayObject | null = null;
     let vbo: WebGLBuffer | null = null;
-    let tex: WebGLTexture | null = null;
+    let texVol: WebGLTexture | null = null;
+    let texLabels: WebGLTexture | null = null;
+    let texPalette: WebGLTexture | null = null;
     let raf = 0;
 
     try {
@@ -979,11 +1073,11 @@ void main() {
       gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
       // Volume texture (prefer float for fidelity; fall back to 8-bit for compatibility)
-      tex = gl.createTexture();
-      if (!tex) throw new Error('Failed to allocate 3D texture');
+      texVol = gl.createTexture();
+      if (!texVol) throw new Error('Failed to allocate 3D texture');
 
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_3D, tex);
+      gl.bindTexture(gl.TEXTURE_3D, texVol);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
       // We'll try float first; if WebGL rejects it, re-upload as R8.
@@ -1035,8 +1129,63 @@ void main() {
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
+      // Label texture (uint8 IDs). We always allocate a valid texture to keep the shader path stable,
+      // even when no segmentation is present yet.
+      texLabels = gl.createTexture();
+      if (!texLabels) throw new Error('Failed to allocate label 3D texture');
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, texLabels);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      // Initialize to zeros so sampling produces "no label" deterministically.
+      const zeros = new Uint8Array(dims.nx * dims.ny * dims.nz);
+      gl.texImage3D(
+        gl.TEXTURE_3D,
+        0,
+        gl.R8UI,
+        dims.nx,
+        dims.ny,
+        dims.nz,
+        0,
+        gl.RED_INTEGER,
+        gl.UNSIGNED_BYTE,
+        zeros
+      );
+
+      gl.bindTexture(gl.TEXTURE_3D, null);
+
+      // Palette texture: 256x1 RGBA8 lookup table for label->color.
+      texPalette = gl.createTexture();
+      if (!texPalette) throw new Error('Failed to allocate label palette texture');
+
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, texPalette);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(256 * 4));
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
+      glLabelStateRef.current = { gl, texLabels, texPalette, dims };
+
       const u = {
         vol: gl.getUniformLocation(program, 'u_vol'),
+        labels: gl.getUniformLocation(program, 'u_labels'),
+        palette: gl.getUniformLocation(program, 'u_palette'),
+        labelsEnabled: gl.getUniformLocation(program, 'u_labelsEnabled'),
+        labelMix: gl.getUniformLocation(program, 'u_labelMix'),
+
         rot: gl.getUniformLocation(program, 'u_rot'),
         box: gl.getUniformLocation(program, 'u_box'),
         aspect: gl.getUniformLocation(program, 'u_aspect'),
@@ -1076,7 +1225,7 @@ void main() {
       const draw = () => {
         resizeAndViewport();
 
-        const { threshold, steps, gamma, opacity, zoom } = paramsRef.current;
+        const { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels } = paramsRef.current;
 
         gl.disable(gl.DEPTH_TEST);
         gl.disable(gl.CULL_FACE);
@@ -1084,10 +1233,22 @@ void main() {
         gl.useProgram(program);
         gl.bindVertexArray(vao);
 
-        // Bind texture
+        // Bind textures
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_3D, tex);
+        gl.bindTexture(gl.TEXTURE_3D, texVol);
         gl.uniform1i(u.vol, 0);
+
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_3D, texLabels);
+        gl.uniform1i(u.labels, 1);
+
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, texPalette);
+        gl.uniform1i(u.palette, 2);
+
+        const labelsOn = labelsEnabled && hasLabels ? 1 : 0;
+        gl.uniform1i(u.labelsEnabled, labelsOn);
+        gl.uniform1f(u.labelMix, clamp(labelMix, 0, 1));
 
         // Uniforms
         mat3FromQuat(rotationRef.current, rotMat);
@@ -1144,7 +1305,14 @@ void main() {
           }
         }
 
+        // Reset bindings (avoid leaking WebGL state across frames).
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_3D, null);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_3D, null);
+
         gl.bindVertexArray(null);
 
         raf = window.requestAnimationFrame(draw);
@@ -1165,14 +1333,71 @@ void main() {
 
       if (raf) window.cancelAnimationFrame(raf);
 
+      glLabelStateRef.current = null;
+
       if (gl) {
-        if (tex) gl.deleteTexture(tex);
+        if (texVol) gl.deleteTexture(texVol);
+        if (texLabels) gl.deleteTexture(texLabels);
+        if (texPalette) gl.deleteTexture(texPalette);
         if (vbo) gl.deleteBuffer(vbo);
         if (vao) gl.deleteVertexArray(vao);
         if (program) gl.deleteProgram(program);
       }
     };
   }, [boxScale, dims, volume]);
+
+  // Incrementally upload label data + palette without re-initializing the whole GL program.
+  useEffect(() => {
+    if (!volume) return;
+    if (!labels) return;
+
+    if (!hasLabels) {
+      console.warn('[svr3d] Ignoring label volume (dims mismatch)', {
+        volumeDims: volume.dims,
+        labelDims: labels.dims,
+        labelLen: labels.data.length,
+      });
+      return;
+    }
+
+    const st = glLabelStateRef.current;
+    if (!st) return;
+
+    const { gl, texLabels, texPalette, dims } = st;
+
+    try {
+      // Label IDs
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, texLabels);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage3D(
+        gl.TEXTURE_3D,
+        0,
+        0,
+        0,
+        0,
+        dims.nx,
+        dims.ny,
+        dims.nz,
+        gl.RED_INTEGER,
+        gl.UNSIGNED_BYTE,
+        labels.data
+      );
+      gl.bindTexture(gl.TEXTURE_3D, null);
+
+      // Palette lookup table
+      const rgba = buildRgbaPalette256(labels.meta);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, texPalette);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    } catch (e) {
+      console.warn('[svr3d] Failed to upload label textures', e);
+    } finally {
+      gl.activeTexture(gl.TEXTURE0);
+    }
+  }, [hasLabels, labels, volume]);
 
   return (
     <div className={`h-full grid gap-3 ${controlsCollapsed ? 'grid-cols-1' : 'grid-cols-3'}`}>
@@ -1296,6 +1521,56 @@ void main() {
           />
           <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{zoom.toFixed(2)}</div>
         </label>
+
+        <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+          <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Segmentation</div>
+          <div className="p-3 space-y-2">
+            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+              <input
+                type="checkbox"
+                checked={labelsEnabled}
+                onChange={(e) => setLabelsEnabled(e.target.checked)}
+                disabled={!hasLabels}
+              />
+              <span>Show labels</span>
+            </label>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Label mix
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={labelMix}
+                onChange={(e) => setLabelMix(Number(e.target.value))}
+                className="mt-1 w-full"
+                disabled={!hasLabels || !labelsEnabled}
+              />
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
+            </label>
+
+            {!hasLabels || !labels ? (
+              <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
+            ) : (
+              <div className="space-y-1">
+                {labels.meta
+                  .filter((m) => m.id !== 0)
+                  .map((m) => (
+                    <div key={m.id} className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
+                        style={{ backgroundColor: rgbCss(m.color) }}
+                        title={`Label ${m.id}`}
+                      />
+                      <span className="truncate">{m.name}</span>
+                      <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">{m.id}</span>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
 
         <div className="flex items-center gap-2">
           <button

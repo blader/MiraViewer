@@ -120,6 +120,28 @@ export type SvrVolume = {
   };
 };
 
+/**
+ * A semantic label that can be used to colorize the reconstructed volume.
+ *
+ * Notes:
+ * - Label IDs must fit in uint8 (0..255).
+ * - Label ID 0 is reserved for background/unlabeled.
+ */
+export type SvrLabelMeta = {
+  id: number;
+  name: string;
+  /** RGB color in 0..255. */
+  color: [number, number, number];
+};
+
+export type SvrLabelVolume = {
+  /** Per-voxel label IDs, in the same indexing order as `SvrVolume.data`. */
+  data: Uint8Array;
+  /** Must exactly match `SvrVolume.dims`. */
+  dims: [number, number, number];
+  meta: SvrLabelMeta[];
+};
+
 export type SvrPreviewImages = {
   axial: Blob;
   coronal: Blob;
