@@ -1,8 +1,12 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
+import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
+import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
+import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
 import { computeSeedRange01, regionGrow3D, type Vec3i } from '../utils/segmentation/regionGrow3D';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 
@@ -19,6 +23,11 @@ function clamp(x: number, min: number, max: number): number {
  */
 const SVR3D_CAMERA_Z = 1.6;
 const SVR3D_FOCAL_Z = 1.2;
+
+// IndexedDB key for the cached tumor segmentation ONNX model.
+const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
+
+type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
 
 async function rgbaToPngBlob(params: { rgba: Uint8ClampedArray; width: number; height: number }): Promise<Blob> {
   const { rgba, width, height } = params;
@@ -486,6 +495,39 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
   const labels = labelsOverride ?? generatedLabels;
 
+  // Phase 3: ONNX model execution (offline; model cached in IndexedDB).
+  const onnxSessionRef = useRef<Ort.InferenceSession | null>(null);
+  const onnxSessionModeRef = useRef<OnnxSessionMode | null>(null);
+  const onnxFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [onnxStatus, setOnnxStatus] = useState<{
+    cached: boolean;
+    savedAtMs: number | null;
+    loading: boolean;
+    sessionReady: boolean;
+    message?: string;
+    error?: string;
+  }>(() => ({
+    cached: false,
+    savedAtMs: null,
+    loading: false,
+    sessionReady: false,
+  }));
+
+  const refreshOnnxCacheStatus = useCallback(() => {
+    void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
+      .then((savedAtMs) => {
+        setOnnxStatus((s) => ({ ...s, cached: savedAtMs !== null, savedAtMs }));
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setOnnxStatus((s) => ({ ...s, error: msg }));
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshOnnxCacheStatus();
+  }, [refreshOnnxCacheStatus]);
+
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [threshold, setThreshold] = useState(0.05);
@@ -830,6 +872,125 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         }
       });
   }, [growTargetLabel, growTolerance, labels, seedVoxel, volume]);
+
+  const onnxUploadClick = useCallback(() => {
+    onnxFileInputRef.current?.click();
+  }, []);
+
+  const onnxClearModel = useCallback(() => {
+    onnxSessionRef.current = null;
+    onnxSessionModeRef.current = null;
+    setOnnxStatus((s) => ({ ...s, sessionReady: false, loading: true, message: 'Clearing cached model…', error: undefined }));
+
+    void deleteModelBlob(ONNX_TUMOR_MODEL_KEY)
+      .then(() => {
+        setOnnxStatus((s) => ({ ...s, loading: false, message: 'Cleared cached model' }));
+        refreshOnnxCacheStatus();
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
+      });
+  }, [refreshOnnxCacheStatus]);
+
+  const onnxHandleSelectedFile = useCallback(
+    (file: File) => {
+      onnxSessionRef.current = null;
+      onnxSessionModeRef.current = null;
+      setOnnxStatus((s) => ({
+        ...s,
+        loading: true,
+        sessionReady: false,
+        message: `Caching model: ${file.name}`,
+        error: undefined,
+      }));
+
+      void putModelBlob(ONNX_TUMOR_MODEL_KEY, file)
+        .then(() => {
+          setOnnxStatus((s) => ({ ...s, loading: false, message: 'Model cached' }));
+          refreshOnnxCacheStatus();
+        })
+        .catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
+        });
+    },
+    [refreshOnnxCacheStatus]
+  );
+
+  const ensureOnnxSession = useCallback(async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
+    if (onnxSessionRef.current) {
+      return {
+        session: onnxSessionRef.current,
+        mode: onnxSessionModeRef.current ?? 'webgpu-preferred',
+      };
+    }
+
+    const blob = await getModelBlob(ONNX_TUMOR_MODEL_KEY);
+    if (!blob) {
+      throw new Error('No cached ONNX model found. Upload one first.');
+    }
+
+    try {
+      const session = await createOrtSessionFromModelBlob({ model: blob, preferWebGpu: true, logLevel: 'warning' });
+      onnxSessionRef.current = session;
+      onnxSessionModeRef.current = 'webgpu-preferred';
+      return { session, mode: 'webgpu-preferred' };
+    } catch (_eWebGpu) {
+      // Fallback to WASM-only.
+      const session = await createOrtSessionFromModelBlob({ model: blob, preferWebGpu: false, logLevel: 'warning' });
+      onnxSessionRef.current = session;
+      onnxSessionModeRef.current = 'wasm';
+      return { session, mode: 'wasm' };
+    }
+  }, []);
+
+  const initOnnxSession = useCallback(() => {
+    setOnnxStatus((s) => ({ ...s, loading: true, message: 'Initializing ONNX runtime…', error: undefined }));
+
+    void ensureOnnxSession()
+      .then(({ mode }) => {
+        setOnnxStatus((s) => ({
+          ...s,
+          loading: false,
+          sessionReady: true,
+          message: mode === 'wasm' ? 'ONNX session ready (WASM)' : 'ONNX session ready (WebGPU preferred)',
+        }));
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: false, error: msg }));
+      });
+  }, [ensureOnnxSession]);
+
+  const runOnnxSegmentation = useCallback(() => {
+    if (!volume) return;
+
+    const started = performance.now();
+    setOnnxStatus((s) => ({ ...s, loading: true, message: 'Running ONNX segmentation…', error: undefined }));
+
+    void (async () => {
+      const { session, mode } = await ensureOnnxSession();
+      setOnnxStatus((s) => ({
+        ...s,
+        sessionReady: true,
+        loading: true,
+        message: mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
+      }));
+
+      const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
+
+      setGeneratedLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
+      setLabelsEnabled(true);
+
+      const ms = Math.round(performance.now() - started);
+      setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: true, message: `Segmentation complete (${ms}ms)` }));
+    })().catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      const hasSession = onnxSessionRef.current !== null;
+      setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: hasSession, error: msg }));
+    });
+  }, [ensureOnnxSession, volume]);
 
   // Draw the inspector slice to a 2D canvas.
   useEffect(() => {
@@ -1804,6 +1965,75 @@ void main() {
             ) : growStatus.message ? (
               <div className="text-[10px] text-[var(--text-tertiary)]">{growStatus.message}</div>
             ) : null}
+
+            <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
+              <div className="text-xs font-medium text-[var(--text-secondary)]">ONNX tumor model</div>
+
+              <input
+                ref={onnxFileInputRef}
+                type="file"
+                accept={".onnx"}
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) {
+                    onnxHandleSelectedFile(f);
+                  }
+                  // Allow re-uploading the same file.
+                  e.target.value = '';
+                }}
+              />
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onnxUploadClick}
+                  disabled={onnxStatus.loading}
+                  className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                >
+                  Upload
+                </button>
+
+                <button
+                  type="button"
+                  onClick={initOnnxSession}
+                  disabled={!onnxStatus.cached || onnxStatus.loading}
+                  className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                >
+                  Init
+                </button>
+
+                <button
+                  type="button"
+                  onClick={runOnnxSegmentation}
+                  disabled={!volume || !onnxStatus.cached || onnxStatus.loading}
+                  className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                >
+                  Run ML
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onnxClearModel}
+                  disabled={!onnxStatus.cached || onnxStatus.loading}
+                  className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                >
+                  Clear model
+                </button>
+              </div>
+
+              <div className="text-[10px] text-[var(--text-tertiary)]">
+                Cached: {onnxStatus.cached ? 'yes' : 'no'}
+                {onnxStatus.savedAtMs ? ` · saved ${new Date(onnxStatus.savedAtMs).toLocaleString()}` : ''}
+                {onnxStatus.sessionReady ? ' · session ready' : ''}
+              </div>
+
+              {onnxStatus.error ? (
+                <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
+              ) : onnxStatus.message ? (
+                <div className="text-[10px] text-[var(--text-tertiary)]">{onnxStatus.message}</div>
+              ) : null}
+            </div>
 
             {!hasLabels || !labels ? (
               <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
