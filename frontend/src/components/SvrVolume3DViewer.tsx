@@ -4,6 +4,7 @@ import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
+import { buildNifti1Uint8 } from '../utils/segmentation/nifti1';
 import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
@@ -513,6 +514,13 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     sessionReady: false,
   }));
 
+  // Phase 4a: Auto-run + best-effort cancellation.
+  // NOTE: We can't reliably abort ORT execution mid-run in the browser; cancellation just ignores late results.
+  const onnxSegRunIdRef = useRef(0);
+  const [onnxSegRunning, setOnnxSegRunning] = useState(false);
+  const [autoRunOnnx, setAutoRunOnnx] = useState(false);
+  const onnxAutoRunAttemptedForVolumeRef = useRef<Float32Array | null>(null);
+
   const refreshOnnxCacheStatus = useCallback(() => {
     void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
       .then((savedAtMs) => {
@@ -556,6 +564,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setGrowStatus({ running: false });
     growAbortRef.current?.abort();
     growAbortRef.current = null;
+
+    // Cancel any in-flight ONNX segmentation (best-effort).
+    onnxSegRunIdRef.current++;
+    setOnnxSegRunning(false);
+    onnxAutoRunAttemptedForVolumeRef.current = null;
+    setOnnxStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
 
   const hasLabels = useMemo(() => {
@@ -568,6 +582,33 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
     return labels.data.length === nx * ny * nz;
   }, [labels, volume]);
+
+  const labelMetrics = useMemo(() => {
+    if (!volume) return null;
+    if (!labels) return null;
+    if (!hasLabels) return null;
+
+    const counts = new Map<number, number>();
+    const data = labels.data;
+
+    for (let i = 0; i < data.length; i++) {
+      const id = data[i] ?? 0;
+      if (id === 0) continue;
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+
+    const [vx, vy, vz] = volume.voxelSizeMm;
+    const voxelVolMm3 = Math.abs(vx * vy * vz);
+
+    let totalCount = 0;
+    for (const c of counts.values()) {
+      totalCount += c;
+    }
+
+    const totalMl = voxelVolMm3 > 0 ? (totalCount * voxelVolMm3) / 1000 : 0;
+
+    return { counts, voxelVolMm3, totalCount, totalMl };
+  }, [hasLabels, labels, volume]);
 
   // Slice inspector (orthogonal slices).
   const sliceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -601,6 +642,34 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     rotationRef.current = [0, 0, 0, 1];
     setZoom(1.0);
   }, []);
+
+  const downloadLabelsNifti = useCallback(() => {
+    if (!volume) return;
+    if (!labels) return;
+    if (!hasLabels) return;
+
+    const buf = buildNifti1Uint8({
+      data: labels.data,
+      dims: volume.dims,
+      voxelSizeMm: volume.voxelSizeMm,
+      description: 'MiraViewer SVR labels (uint8)',
+      units: { spatial: 'mm' },
+    });
+
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    try {
+      const date = new Date().toISOString().slice(0, 10);
+      const [nx, ny, nz] = volume.dims;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `svr_labels_${nx}x${ny}x${nz}_${date}.nii`;
+      a.rel = 'noopener';
+      a.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }, [hasLabels, labels, volume]);
 
   useImperativeHandle(
     ref,
@@ -966,31 +1035,70 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const runOnnxSegmentation = useCallback(() => {
     if (!volume) return;
 
+    const runId = ++onnxSegRunIdRef.current;
+    setOnnxSegRunning(true);
+
     const started = performance.now();
     setOnnxStatus((s) => ({ ...s, loading: true, message: 'Running ONNX segmentation…', error: undefined }));
 
     void (async () => {
-      const { session, mode } = await ensureOnnxSession();
-      setOnnxStatus((s) => ({
-        ...s,
-        sessionReady: true,
-        loading: true,
-        message: mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
-      }));
+      try {
+        const { session, mode } = await ensureOnnxSession();
+        if (onnxSegRunIdRef.current !== runId) return;
 
-      const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
+        setOnnxStatus((s) => ({
+          ...s,
+          sessionReady: true,
+          loading: true,
+          message: mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
+        }));
 
-      setGeneratedLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
-      setLabelsEnabled(true);
+        const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
+        if (onnxSegRunIdRef.current !== runId) return;
 
-      const ms = Math.round(performance.now() - started);
-      setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: true, message: `Segmentation complete (${ms}ms)` }));
-    })().catch((e) => {
-      const msg = e instanceof Error ? e.message : String(e);
-      const hasSession = onnxSessionRef.current !== null;
-      setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: hasSession, error: msg }));
-    });
+        setGeneratedLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
+        setLabelsEnabled(true);
+
+        const ms = Math.round(performance.now() - started);
+        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: true, message: `Segmentation complete (${ms}ms)` }));
+      } catch (e) {
+        if (onnxSegRunIdRef.current !== runId) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        const hasSession = onnxSessionRef.current !== null;
+        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: hasSession, error: msg }));
+      } finally {
+        if (onnxSegRunIdRef.current === runId) {
+          setOnnxSegRunning(false);
+        }
+      }
+    })();
   }, [ensureOnnxSession, volume]);
+
+  const cancelOnnxSegmentation = useCallback(() => {
+    if (!onnxSegRunning) return;
+    onnxSegRunIdRef.current++;
+    setOnnxSegRunning(false);
+    setOnnxStatus((s) => ({ ...s, loading: false, message: 'Segmentation cancelled', error: undefined }));
+  }, [onnxSegRunning]);
+
+  // Auto-run ONNX segmentation once per SVR volume (when enabled and a model is cached).
+  useEffect(() => {
+    if (!autoRunOnnx) return;
+    if (!volume) return;
+    if (!onnxStatus.cached) return;
+
+    // Don't clobber externally-provided labels or manual work.
+    if (labels) {
+      onnxAutoRunAttemptedForVolumeRef.current = volume.data;
+      return;
+    }
+
+    // Only attempt once per volume.
+    if (onnxAutoRunAttemptedForVolumeRef.current === volume.data) return;
+    onnxAutoRunAttemptedForVolumeRef.current = volume.data;
+
+    runOnnxSegmentation();
+  }, [autoRunOnnx, labels, onnxStatus.cached, runOnnxSegmentation, volume]);
 
   // Draw the inspector slice to a 2D canvas.
   useEffect(() => {
@@ -2012,6 +2120,16 @@ void main() {
                   Run ML
                 </button>
 
+                {onnxSegRunning ? (
+                  <button
+                    type="button"
+                    onClick={cancelOnnxSegmentation}
+                    className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+
                 <button
                   type="button"
                   onClick={onnxClearModel}
@@ -2028,6 +2146,11 @@ void main() {
                 {onnxStatus.sessionReady ? ' · session ready' : ''}
               </div>
 
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                <input type="checkbox" checked={autoRunOnnx} onChange={(e) => setAutoRunOnnx(e.target.checked)} />
+                <span>Auto-run after SVR (if model cached)</span>
+              </label>
+
               {onnxStatus.error ? (
                 <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
               ) : onnxStatus.message ? (
@@ -2041,19 +2164,48 @@ void main() {
               <div className="space-y-1">
                 {labels.meta
                   .filter((m) => m.id !== 0)
-                  .map((m) => (
-                    <div key={m.id} className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]">
-                      <span
-                        className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
-                        style={{ backgroundColor: rgbCss(m.color) }}
-                        title={`Label ${m.id}`}
-                      />
-                      <span className="truncate">{m.name}</span>
-                      <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">{m.id}</span>
-                    </div>
-                  ))}
+                  .map((m) => {
+                    const count = labelMetrics?.counts.get(m.id) ?? 0;
+                    const ml = labelMetrics ? (count * labelMetrics.voxelVolMm3) / 1000 : 0;
+
+                    return (
+                      <div
+                        key={m.id}
+                        className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]"
+                        title={`${m.name} (id ${m.id})`}
+                      >
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
+                          style={{ backgroundColor: rgbCss(m.color) }}
+                        />
+                        <span className="truncate">{m.name}</span>
+                        <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
+                          {count.toLocaleString()} vox · {ml.toFixed(2)} mL
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                {labelMetrics ? (
+                  <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                    Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
+                  </div>
+                ) : null}
               </div>
             )}
+
+            <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
+              <div className="text-xs font-medium text-[var(--text-secondary)]">Export</div>
+              <button
+                type="button"
+                onClick={downloadLabelsNifti}
+                disabled={!hasLabels || !labels}
+                className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+              >
+                Download labels (.nii)
+              </button>
+              <div className="text-[10px] text-[var(--text-tertiary)]">Exports a uint8 label volume in NIfTI-1 format (single-file .nii).</div>
+            </div>
           </div>
         </div>
 
