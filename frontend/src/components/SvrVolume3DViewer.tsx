@@ -500,6 +500,25 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const onnxSessionRef = useRef<Ort.InferenceSession | null>(null);
   const onnxSessionModeRef = useRef<OnnxSessionMode | null>(null);
   const onnxFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const releaseOnnxSession = useCallback((reason: string) => {
+    const session = onnxSessionRef.current;
+    onnxSessionRef.current = null;
+    onnxSessionModeRef.current = null;
+
+    if (session) {
+      // Avoid leaking WebGPU/WASM resources if the user swaps/clears models.
+      void session.release().catch((e) => {
+        console.warn('[onnx] Failed to release session', { reason, e });
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      releaseOnnxSession('unmount');
+    };
+  }, [releaseOnnxSession]);
   const [onnxStatus, setOnnxStatus] = useState<{
     cached: boolean;
     savedAtMs: number | null;
@@ -1127,7 +1146,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       .then((res) => {
         if (controller.signal.aborted) return;
 
-        const next = labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
+        const next = hasLabels && labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
         for (let i = 0; i < res.mask.length; i++) {
           if (res.mask[i]) next[i] = growTargetLabel;
         }
@@ -1150,15 +1169,14 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           growAbortRef.current = null;
         }
       });
-  }, [growTargetLabel, growTolerance, labels, seedVoxel, volume]);
+  }, [growTargetLabel, growTolerance, hasLabels, labels, seedVoxel, volume]);
 
   const onnxUploadClick = useCallback(() => {
     onnxFileInputRef.current?.click();
   }, []);
 
   const onnxClearModel = useCallback(() => {
-    onnxSessionRef.current = null;
-    onnxSessionModeRef.current = null;
+    releaseOnnxSession('clear-model');
     setOnnxStatus((s) => ({ ...s, sessionReady: false, loading: true, message: 'Clearing cached model…', error: undefined }));
 
     void deleteModelBlob(ONNX_TUMOR_MODEL_KEY)
@@ -1170,12 +1188,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         const msg = e instanceof Error ? e.message : String(e);
         setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
       });
-  }, [refreshOnnxCacheStatus]);
+  }, [refreshOnnxCacheStatus, releaseOnnxSession]);
 
   const onnxHandleSelectedFile = useCallback(
     (file: File) => {
-      onnxSessionRef.current = null;
-      onnxSessionModeRef.current = null;
+      releaseOnnxSession('upload-model');
       setOnnxStatus((s) => ({
         ...s,
         loading: true,
@@ -1193,8 +1210,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           const msg = e instanceof Error ? e.message : String(e);
           setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
         });
-    },
-    [refreshOnnxCacheStatus]
+  },
+    [refreshOnnxCacheStatus, releaseOnnxSession]
   );
 
   const ensureOnnxSession = useCallback(async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
