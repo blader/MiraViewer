@@ -2079,7 +2079,7 @@ void main() {
   return (
     <div
       className={`h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
-        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(300px,360px)_minmax(320px,420px)]'
+        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(320px,420px)_minmax(300px,360px)]'
       }`}
     >
       <div className="min-h-0">
@@ -2123,7 +2123,7 @@ void main() {
       </div>
 
       {controlsCollapsed ? null : (
-        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
+        <div className="order-2 min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -2540,7 +2540,7 @@ void main() {
       )}
 
       {controlsCollapsed ? null : (
-        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
+        <div className="order-1 min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
             <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
             <div className="p-3 space-y-2">
