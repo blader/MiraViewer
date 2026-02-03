@@ -9,6 +9,14 @@ function sumMask(mask: Uint8Array): number {
   return s;
 }
 
+function indicesToMask(indices: Uint32Array, n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  for (let i = 0; i < indices.length; i++) {
+    out[indices[i]!] = 1;
+  }
+  return out;
+}
+
 describe('regionGrow3D', () => {
   it('grows a simple 3D cube region from a seed', async () => {
     const dims: [number, number, number] = [4, 4, 4];
@@ -38,7 +46,8 @@ describe('regionGrow3D', () => {
     expect(res.seedValue).toBeCloseTo(0.8, 6);
     expect(res.hitMaxVoxels).toBe(false);
     expect(res.count).toBe(8);
-    expect(sumMask(res.mask)).toBe(8);
+    expect(res.indices.length).toBe(8);
+    expect(sumMask(indicesToMask(res.indices, n))).toBe(8);
   });
 
   it('returns an empty mask if the seed is out of range', async () => {
@@ -56,7 +65,7 @@ describe('regionGrow3D', () => {
     });
 
     expect(res.count).toBe(0);
-    expect(sumMask(res.mask)).toBe(0);
+    expect(res.indices.length).toBe(0);
   });
 });
 

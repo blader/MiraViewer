@@ -28,6 +28,11 @@ const SVR3D_FOCAL_Z = 1.2;
 // IndexedDB key for the cached tumor segmentation ONNX model.
 const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 
+// ONNX preflight: extremely large 3D volumes can trigger huge intermediate/logits allocations.
+// We block full-res runs by default above a conservative budget, with an explicit user override.
+const ONNX_PREFLIGHT_CLASS_COUNT = 4;
+const ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES = 384 * 1024 * 1024;
+
 type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
 
 async function rgbaToPngBlob(params: { rgba: Uint8ClampedArray; width: number; height: number }): Promise<Blob> {
@@ -384,7 +389,6 @@ function mat3FromQuat(q: Quat, out: Float32Array): void {
   out[8] = m22;
 }
 
-
 function toUint8Volume(data: Float32Array): Uint8Array {
   const out = new Uint8Array(data.length);
   for (let i = 0; i < data.length; i++) {
@@ -474,21 +478,18 @@ export type SvrVolume3DViewerHandle = {
 
 export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3DViewerProps>(function SvrVolume3DViewer(
   { volume, labels: labelsOverride },
-  ref
+  ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pendingCapture3dRef = useRef<{ resolve: (b: Blob | null) => void } | null>(null);
 
-  const glLabelStateRef = useRef<
-    | {
-        gl: WebGL2RenderingContext;
-        texLabels: WebGLTexture;
-        texPalette: WebGLTexture;
-        dims: { nx: number; ny: number; nz: number };
-      }
-    | null
-  >(null);
+  const glLabelStateRef = useRef<{
+    gl: WebGL2RenderingContext;
+    texLabels: WebGLTexture;
+    texPalette: WebGLTexture;
+    dims: { nx: number; ny: number; nz: number };
+  } | null>(null);
 
   const [initError, setInitError] = useState<string | null>(null);
 
@@ -538,6 +539,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const onnxSegRunIdRef = useRef(0);
   const [onnxSegRunning, setOnnxSegRunning] = useState(false);
   const [autoRunOnnx, setAutoRunOnnx] = useState(false);
+  const [allowUnsafeOnnxFullRes, setAllowUnsafeOnnxFullRes] = useState(false);
   const onnxAutoRunAttemptedForVolumeRef = useRef<Float32Array | null>(null);
 
   const refreshOnnxCacheStatus = useCallback(() => {
@@ -600,6 +602,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     onnxSegRunIdRef.current++;
     setOnnxSegRunning(false);
     onnxAutoRunAttemptedForVolumeRef.current = null;
+    setAllowUnsafeOnnxFullRes(false);
     setOnnxStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
 
@@ -736,7 +739,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         resetView();
       },
     }),
-    [resetView, volume]
+    [resetView, volume],
   );
 
   // Pointer drag rotation (viewport-relative yaw/pitch).
@@ -893,7 +896,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       // sagittal
       return { x: sliceIdx, y: sx, z: sy };
     },
-    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]
+    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume],
   );
 
   const paintBrushAtVoxel = useCallback(
@@ -952,7 +955,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         }
       }
     },
-    [brushLabel, brushRadiusVox, inspectPlane, volume]
+    [brushLabel, brushRadiusVox, inspectPlane, volume],
   );
 
   const paintBrushStroke = useCallback(
@@ -1014,7 +1017,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         paintBrushAtVoxel(labelData, v);
       }
     },
-    [inspectPlane, paintBrushAtVoxel]
+    [inspectPlane, paintBrushAtVoxel],
   );
 
   const onSliceInspectorPointerDown = useCallback(
@@ -1033,7 +1036,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         if (generatedLabels) {
           editable = generatedLabels;
         } else if (labelsOverride) {
-          editable = { data: new Uint8Array(labelsOverride.data), dims: labelsOverride.dims, meta: labelsOverride.meta };
+          editable = {
+            data: new Uint8Array(labelsOverride.data),
+            dims: labelsOverride.dims,
+            meta: labelsOverride.meta,
+          };
           setGeneratedLabels(editable);
         } else {
           editable = { data: new Uint8Array(volume.data.length), dims: volume.dims, meta: BRATS_BASE_LABEL_META };
@@ -1059,7 +1066,16 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       e.preventDefault();
       e.stopPropagation();
     },
-    [generatedLabels, growStatus.running, inspectorPointerToVoxel, labelsOverride, onnxSegRunning, paintBrushStroke, segTool, volume]
+    [
+      generatedLabels,
+      growStatus.running,
+      inspectorPointerToVoxel,
+      labelsOverride,
+      onnxSegRunning,
+      paintBrushStroke,
+      segTool,
+      volume,
+    ],
   );
 
   const onSliceInspectorPointerMove = useCallback(
@@ -1080,7 +1096,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       e.preventDefault();
       e.stopPropagation();
     },
-    [inspectorPointerToVoxel, onnxSegRunning, paintBrushStroke, segTool, volume]
+    [inspectorPointerToVoxel, onnxSegRunning, paintBrushStroke, segTool, volume],
   );
 
   const onSliceInspectorPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1151,8 +1167,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         if (controller.signal.aborted) return;
 
         const next = hasLabels && labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
-        for (let i = 0; i < res.mask.length; i++) {
-          if (res.mask[i]) next[i] = growTargetLabel;
+        const idx = res.indices;
+        for (let i = 0; i < idx.length; i++) {
+          next[idx[i]!] = growTargetLabel;
         }
 
         setGeneratedLabels({ data: next, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
@@ -1175,13 +1192,44 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       });
   }, [growTargetLabel, growTolerance, hasLabels, labels, seedVoxel, volume]);
 
+  const onnxPreflight = useMemo(() => {
+    if (!volume) return null;
+
+    const [nx, ny, nz] = volume.dims;
+    const nvox = nx * ny * nz;
+
+    // Lower-bound estimate: logits are float32 with C channels.
+    const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
+    const inputBytes = nvox * 4;
+    const labelsBytes = nvox; // uint8
+
+    const blockedByDefault = logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES;
+
+    return {
+      nx,
+      ny,
+      nz,
+      nvox,
+      logitsBytes,
+      inputBytes,
+      labelsBytes,
+      blockedByDefault,
+    };
+  }, [volume]);
+
   const onnxUploadClick = useCallback(() => {
     onnxFileInputRef.current?.click();
   }, []);
 
   const onnxClearModel = useCallback(() => {
     releaseOnnxSession('clear-model');
-    setOnnxStatus((s) => ({ ...s, sessionReady: false, loading: true, message: 'Clearing cached model…', error: undefined }));
+    setOnnxStatus((s) => ({
+      ...s,
+      sessionReady: false,
+      loading: true,
+      message: 'Clearing cached model…',
+      error: undefined,
+    }));
 
     void deleteModelBlob(ONNX_TUMOR_MODEL_KEY)
       .then(() => {
@@ -1214,8 +1262,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           const msg = e instanceof Error ? e.message : String(e);
           setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
         });
-  },
-    [refreshOnnxCacheStatus, releaseOnnxSession]
+    },
+    [refreshOnnxCacheStatus, releaseOnnxSession],
   );
 
   const ensureOnnxSession = useCallback(async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
@@ -1266,6 +1314,14 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const runOnnxSegmentation = useCallback(() => {
     if (!volume) return;
 
+    // Guardrail: full-res ONNX on huge volumes can OOM the tab.
+    if (onnxPreflight?.blockedByDefault && !allowUnsafeOnnxFullRes) {
+      const dims = `${onnxPreflight.nx}×${onnxPreflight.ny}×${onnxPreflight.nz}`;
+      const msg = `ONNX blocked for huge volume by default (${dims}; est logits ${formatMiB(onnxPreflight.logitsBytes)}). Re-run SVR at lower resolution/ROI or enable the unsafe override.`;
+      setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
+      return;
+    }
+
     const runId = ++onnxSegRunIdRef.current;
     setOnnxSegRunning(true);
 
@@ -1281,7 +1337,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           ...s,
           sessionReady: true,
           loading: true,
-          message: mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
+          message:
+            mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
         }));
 
         const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
@@ -1291,7 +1348,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         setLabelsEnabled(true);
 
         const ms = Math.round(performance.now() - started);
-        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: true, message: `Segmentation complete (${ms}ms)` }));
+        setOnnxStatus((s) => ({
+          ...s,
+          loading: false,
+          sessionReady: true,
+          message: `Segmentation complete (${ms}ms)`,
+        }));
       } catch (e) {
         if (onnxSegRunIdRef.current !== runId) return;
         const msg = e instanceof Error ? e.message : String(e);
@@ -1303,7 +1365,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         }
       }
     })();
-  }, [ensureOnnxSession, volume]);
+  }, [allowUnsafeOnnxFullRes, ensureOnnxSession, onnxPreflight, volume]);
 
   const cancelOnnxSegmentation = useCallback(() => {
     if (!onnxSegRunning) return;
@@ -1469,10 +1531,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
             : seedVoxel.x === idx;
 
       if (isOnSlice) {
-        const seedCol =
-          inspectPlane === 'axial' ? seedVoxel.x : inspectPlane === 'coronal' ? seedVoxel.x : seedVoxel.y;
-        const seedRow =
-          inspectPlane === 'axial' ? seedVoxel.y : inspectPlane === 'coronal' ? seedVoxel.z : seedVoxel.z;
+        const seedCol = inspectPlane === 'axial' ? seedVoxel.x : inspectPlane === 'coronal' ? seedVoxel.x : seedVoxel.y;
+        const seedRow = inspectPlane === 'axial' ? seedVoxel.y : inspectPlane === 'coronal' ? seedVoxel.z : seedVoxel.z;
 
         const cx = srcCols > 1 ? (seedCol / (srcCols - 1)) * (dsCols - 1) : 0;
         const cy = srcRows > 1 ? (seedRow / (srcRows - 1)) * (dsRows - 1) : 0;
@@ -1779,7 +1839,7 @@ void main() {
           0,
           candidate.format,
           candidate.type,
-          candidateData
+          candidateData,
         );
 
         const err = gl.getError();
@@ -1823,18 +1883,7 @@ void main() {
 
       // Initialize to zeros so sampling produces "no label" deterministically.
       const zeros = new Uint8Array(dims.nx * dims.ny * dims.nz);
-      gl.texImage3D(
-        gl.TEXTURE_3D,
-        0,
-        gl.R8UI,
-        dims.nx,
-        dims.ny,
-        dims.nz,
-        0,
-        gl.RED_INTEGER,
-        gl.UNSIGNED_BYTE,
-        zeros
-      );
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims.nx, dims.ny, dims.nz, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, zeros);
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -1898,7 +1947,6 @@ void main() {
         gl.viewport(0, 0, canvas.width, canvas.height);
       };
 
-
       const draw = () => {
         resizeAndViewport();
 
@@ -1938,12 +1986,7 @@ void main() {
         gl.uniform1i(u.steps, Math.round(clamp(steps, 8, 256)));
         gl.uniform1f(u.gamma, clamp(gamma, 0.1, 10));
         gl.uniform1f(u.opacity, clamp(opacity, 0.1, 20));
-        gl.uniform3f(
-          u.texel,
-          1 / Math.max(1, dims.nx),
-          1 / Math.max(1, dims.ny),
-          1 / Math.max(1, dims.nz)
-        );
+        gl.uniform3f(u.texel, 1 / Math.max(1, dims.nx), 1 / Math.max(1, dims.ny), 1 / Math.max(1, dims.nz));
 
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -2058,7 +2101,7 @@ void main() {
         dims.nz,
         gl.RED_INTEGER,
         gl.UNSIGNED_BYTE,
-        labels.data
+        labels.data,
       );
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -2217,7 +2260,8 @@ void main() {
           </div>
 
           <div className="text-[10px] text-[var(--text-tertiary)]">
-            Composite rendering with edge shading: tune opacity/threshold, and increase edge strength to make boundaries pop (stronger near the box center).
+            Composite rendering with edge shading: tune opacity/threshold, and increase edge strength to make boundaries
+            pop (stronger near the box center).
           </div>
 
           <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
@@ -2284,7 +2328,9 @@ void main() {
                       className="mt-1 w-full"
                       disabled={!volume || segTool !== 'brush' || growStatus.running}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(brushRadiusVox)} vox</div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                      {Math.round(brushRadiusVox)} vox
+                    </div>
                   </label>
                 </div>
 
@@ -2302,7 +2348,9 @@ void main() {
                     <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
                   </select>
                   <div className="mt-1 text-[10px] text-[var(--text-tertiary)]">
-                    {segTool === 'brush' ? 'Drag in the slice inspector to paint labels.' : 'Click the slice inspector to set a seed.'}
+                    {segTool === 'brush'
+                      ? 'Drag in the slice inspector to paint labels.'
+                      : 'Click the slice inspector to set a seed.'}
                   </div>
                 </label>
 
@@ -2356,7 +2404,9 @@ void main() {
                       className="mt-1 w-full"
                       disabled={!volume || growStatus.running}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                      ±{growTolerance.toFixed(3)}
+                    </div>
                   </label>
                 </div>
 
@@ -2405,7 +2455,7 @@ void main() {
                   <input
                     ref={onnxFileInputRef}
                     type="file"
-                    accept={".onnx"}
+                    accept={'.onnx'}
                     className="hidden"
                     onChange={(e) => {
                       const f = e.target.files?.[0];
@@ -2439,7 +2489,12 @@ void main() {
                     <button
                       type="button"
                       onClick={runOnnxSegmentation}
-                      disabled={!volume || !onnxStatus.cached || onnxStatus.loading}
+                      disabled={
+                        !volume ||
+                        !onnxStatus.cached ||
+                        onnxStatus.loading ||
+                        !!(onnxPreflight?.blockedByDefault && !allowUnsafeOnnxFullRes)
+                      }
                       className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
                     >
                       Run ML
@@ -2470,6 +2525,24 @@ void main() {
                     {onnxStatus.savedAtMs ? ` · saved ${new Date(onnxStatus.savedAtMs).toLocaleString()}` : ''}
                     {onnxStatus.sessionReady ? ' · session ready' : ''}
                   </div>
+
+                  {onnxPreflight?.blockedByDefault ? (
+                    <div className="space-y-2">
+                      <div className="text-[10px] text-yellow-200 bg-yellow-400/10 px-2 py-1 rounded">
+                        Full-res ONNX is disabled by default for this volume ({onnxPreflight.nx}×{onnxPreflight.ny}×
+                        {onnxPreflight.nz}; est logits {formatMiB(onnxPreflight.logitsBytes)}). This may crash the tab.
+                      </div>
+
+                      <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <input
+                          type="checkbox"
+                          checked={allowUnsafeOnnxFullRes}
+                          onChange={(e) => setAllowUnsafeOnnxFullRes(e.target.checked)}
+                        />
+                        <span>Allow unsafe full-res ONNX</span>
+                      </label>
+                    </div>
+                  ) : null}
 
                   <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
                     <input type="checkbox" checked={autoRunOnnx} onChange={(e) => setAutoRunOnnx(e.target.checked)} />
@@ -2513,7 +2586,8 @@ void main() {
 
                     {labelMetrics ? (
                       <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
+                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
+                        {labelMetrics.totalMl.toFixed(2)} mL
                       </div>
                     ) : null}
                   </div>
@@ -2542,7 +2616,9 @@ void main() {
       {controlsCollapsed ? null : (
         <div className="order-1 min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
-            <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
+            <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
+              Slice Inspector
+            </div>
             <div className="p-3 space-y-2">
               <div className="grid grid-cols-2 gap-2">
                 <label className="block text-xs text-[var(--text-secondary)]">
@@ -2577,7 +2653,9 @@ void main() {
                 </label>
               </div>
 
-              <div className="text-[10px] text-[var(--text-tertiary)]">Intensities are shown with a fixed 0 to 1 mapping.</div>
+              <div className="text-[10px] text-[var(--text-tertiary)]">
+                Intensities are shown with a fixed 0 to 1 mapping.
+              </div>
 
               <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
                 <canvas

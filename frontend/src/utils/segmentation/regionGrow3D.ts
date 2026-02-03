@@ -1,9 +1,13 @@
 export type Vec3i = { x: number; y: number; z: number };
 
 export type RegionGrow3DResult = {
-  /** Binary mask (0/1) in the same indexing order as the input volume. */
-  mask: Uint8Array;
-  /** Number of voxels included in the region (<= mask.length). */
+  /**
+   * Sparse list of voxel indices included in the region.
+   *
+   * NOTE: indices are in the same indexing order as the input volume: `idx = z*(nx*ny) + y*nx + x`.
+   */
+  indices: Uint32Array;
+  /** Number of voxels included in the region (<= indices.length). */
   count: number;
   /** Seed intensity value (raw value from `volume[seedIdx]`). */
   seedValue: number;
@@ -93,23 +97,36 @@ export async function regionGrow3D(params: {
   const yieldEvery = Math.max(0, Math.floor(opts?.yieldEvery ?? 120_000));
   const yieldFn = opts?.yieldFn ?? (() => new Promise<void>((r) => window.setTimeout(r, 0)));
 
-  const mask = new Uint8Array(n);
-
   const seedIdx = idx3(seed.x, seed.y, seed.z, nx, ny);
   const seedValue = volume[seedIdx] ?? 0;
 
   // Fast exit if seed is outside the acceptance range.
   if (!(seedValue >= minV && seedValue <= maxV)) {
-    return { mask, count: 0, seedValue, hitMaxVoxels: false };
+    return { indices: new Uint32Array(0), count: 0, seedValue, hitMaxVoxels: false };
   }
 
-  // Queue holds voxel indices.
+  // Track visited voxels with a 1-bit-per-voxel bitset to avoid allocating a full-size mask.
+  const visited = new Uint32Array((n + 31) >>> 5);
+
+  const isVisited = (i: number): boolean => {
+    const w = i >>> 5;
+    const b = i & 31;
+    return (visited[w]! & (1 << b)) !== 0;
+  };
+
+  const markVisited = (i: number): void => {
+    const w = i >>> 5;
+    const b = i & 31;
+    visited[w] = (visited[w]! | (1 << b)) >>> 0;
+  };
+
+  // Queue holds voxel indices; we reuse the same buffer as the returned sparse index list.
   const queue = new Uint32Array(maxVoxels);
   let head = 0;
   let tail = 0;
 
   queue[tail++] = seedIdx;
-  mask[seedIdx] = 1;
+  markVisited(seedIdx);
 
   const strideY = nx;
   const strideZ = nx * ny;
@@ -120,7 +137,7 @@ export async function regionGrow3D(params: {
   };
 
   const enqueue = (i: number): void => {
-    mask[i] = 1;
+    markVisited(i);
     queue[tail++] = i;
   };
 
@@ -136,7 +153,7 @@ export async function regionGrow3D(params: {
     const i = queue[head++]!;
     processed++;
 
-    if (yieldEvery > 0 && (processed % yieldEvery === 0)) {
+    if (yieldEvery > 0 && processed % yieldEvery === 0) {
       opts?.onProgress?.({ processed, queued: tail });
       // Yield to keep the UI responsive.
       await yieldFn();
@@ -155,7 +172,7 @@ export async function regionGrow3D(params: {
       }
       if (!inBounds(nx0, ny0, nz0, nx, ny, nz)) return;
       const ni = idx3(nx0, ny0, nz0, nx, ny);
-      if (mask[ni]) return;
+      if (isVisited(ni)) return;
       if (!accept(ni)) return;
       enqueue(ni);
     };
@@ -185,7 +202,7 @@ export async function regionGrow3D(params: {
   }
 
   return {
-    mask,
+    indices: queue.subarray(0, tail),
     count: tail,
     seedValue,
     hitMaxVoxels,
