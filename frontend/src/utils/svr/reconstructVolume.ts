@@ -188,12 +188,7 @@ function orthonormalizeRowCol(rowDir: Vec3, colDir: Vec3): { rowDir: Vec3; colDi
   return { rowDir: r, colDir: c };
 }
 
-function applyRigidToSeriesSlices(params: {
-  slices: LoadedSlice[];
-  centerMm: Vec3;
-  rot: Mat3;
-  tMm: Vec3;
-}): void {
+function applyRigidToSeriesSlices(params: { slices: LoadedSlice[]; centerMm: Vec3; rot: Mat3; tMm: Vec3 }): void {
   const { slices, centerMm, rot, tMm } = params;
 
   for (const s of slices) {
@@ -450,7 +445,7 @@ async function rigidAlignSeriesInRoi(params: {
   onProgress?: (p: SvrProgress) => void;
   debug: boolean;
 }): Promise<void> {
-  const { allSlices, selectedSeries, roiBounds, dims, originMm, voxelSizeMm, roi, signal, onProgress, debug } = params;
+  const { allSlices, selectedSeries, roiBounds, dims, voxelSizeMm, roi, signal, onProgress, debug } = params;
 
   // This stage exists because multi-plane fusion is extremely sensitive to even small spatial-tag mismatches.
   // If series are misregistered, SVR will smear details rather than sharpen them.
@@ -482,15 +477,39 @@ async function rigidAlignSeriesInRoi(params: {
 
   const centerMm = boundsCenterMm(roiBounds);
 
+  // Power-user memory optimization:
+  // ROI-rigid alignment builds "leave-one-out" reference volumes that are only used for scoring.
+  // Using the full reconstruction grid here can be unnecessarily expensive for large volumes.
+  let scoreMaxDim = 160;
+  try {
+    const raw = localStorage.getItem('miraviewer:svr-roi-rigid-score-max-dim');
+    if (raw) {
+      scoreMaxDim = Math.max(64, Math.min(256, Math.round(Number(raw))));
+    }
+  } catch {
+    // Ignore.
+  }
+
+  const scoreGridSelected = chooseOutputGrid({ bounds: roiBounds, voxelSizeMm, maxDim: scoreMaxDim });
+  const scoreGrid: SvrReconstructionGrid = {
+    dims: scoreGridSelected.dims,
+    originMm: scoreGridSelected.originMm,
+    voxelSizeMm: scoreGridSelected.voxelSizeMm,
+  };
+
   debugSvrLog(
     'registration.roi-rigid.plan',
     {
       referenceUid,
-      centerMm: { x: Number(centerMm.x.toFixed(3)), y: Number(centerMm.y.toFixed(3)), z: Number(centerMm.z.toFixed(3)) },
-      dims,
-      voxelSizeMm: Number(voxelSizeMm.toFixed(4)),
+      centerMm: {
+        x: Number(centerMm.x.toFixed(3)),
+        y: Number(centerMm.y.toFixed(3)),
+        z: Number(centerMm.z.toFixed(3)),
+      },
+      fineGrid: { dims, voxelSizeMm: Number(voxelSizeMm.toFixed(4)) },
+      scoreGrid: { dims: scoreGrid.dims, voxelSizeMm: Number(scoreGrid.voxelSizeMm.toFixed(4)), maxDim: scoreMaxDim },
     },
-    debug
+    debug,
   );
 
   // Align each non-reference series to the reconstruction of the other series.
@@ -521,7 +540,7 @@ async function rigidAlignSeriesInRoi(params: {
 
     if (otherSlices.length === 0) continue;
 
-    const refGrid: SvrReconstructionGrid = { dims, originMm, voxelSizeMm };
+    const refGrid: SvrReconstructionGrid = scoreGrid;
     const refOptions: SvrReconstructionOptions = {
       iterations: 0,
       stepSize: 0,
@@ -557,21 +576,29 @@ async function rigidAlignSeriesInRoi(params: {
     const before = scoreNcc({
       samples,
       refVolume: refVol,
-      dims,
-      originMm,
-      voxelSizeMm,
+      dims: scoreGrid.dims,
+      originMm: scoreGrid.originMm,
+      voxelSizeMm: scoreGrid.voxelSizeMm,
       centerMm,
       rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
     });
 
-    const opt = await optimizeRigidNcc({ samples, refVolume: refVol, dims, originMm, voxelSizeMm, centerMm, signal });
+    const opt = await optimizeRigidNcc({
+      samples,
+      refVolume: refVol,
+      dims: scoreGrid.dims,
+      originMm: scoreGrid.originMm,
+      voxelSizeMm: scoreGrid.voxelSizeMm,
+      centerMm,
+      signal,
+    });
 
     const after = scoreNcc({
       samples,
       refVolume: refVol,
-      dims,
-      originMm,
-      voxelSizeMm,
+      dims: scoreGrid.dims,
+      originMm: scoreGrid.originMm,
+      voxelSizeMm: scoreGrid.voxelSizeMm,
       centerMm,
       rigid: opt.best,
     });
@@ -587,7 +614,7 @@ async function rigidAlignSeriesInRoi(params: {
           nccAfter: after.ncc,
           used: after.used,
         },
-        debug
+        debug,
       );
       continue;
     }
@@ -629,7 +656,7 @@ async function rigidAlignSeriesInRoi(params: {
         translateMm: { x: opt.best.tx, y: opt.best.ty, z: opt.best.tz },
         rotateRad: { x: opt.best.rx, y: opt.best.ry, z: opt.best.rz },
       },
-      debug
+      debug,
     );
 
     await yieldToMain();
@@ -679,7 +706,7 @@ async function loadSeriesSlices(params: {
       label: series.label,
       kernel: resampleKernel,
     },
-    !!debug
+    !!debug,
   );
 
   for (let i = 0; i < uids.length; i++) {
@@ -691,7 +718,8 @@ async function loadSeriesSlices(params: {
     const inst = (await db.get('instances', sopInstanceUid)) as DicomInstance | undefined;
     if (!inst) continue;
 
-    const sliceThicknessMm = typeof inst.sliceThickness === 'number' && inst.sliceThickness > 0 ? inst.sliceThickness : null;
+    const sliceThicknessMm =
+      typeof inst.sliceThickness === 'number' && inst.sliceThickness > 0 ? inst.sliceThickness : null;
     const spacingBetweenSlicesMm =
       typeof inst.spacingBetweenSlices === 'number' && inst.spacingBetweenSlices > 0 ? inst.spacingBetweenSlices : null;
 
@@ -730,14 +758,28 @@ async function loadSeriesSlices(params: {
         : resample2dAreaAverage(pixelData, geom.rows, geom.cols, dsRows, dsCols);
 
     // Apply modality scaling when available. (Linear, so applying post-downsample is equivalent.)
-    const slope = typeof (image as unknown as { slope?: unknown }).slope === 'number' ? (image as unknown as { slope: number }).slope : 1;
+    const slope =
+      typeof (image as unknown as { slope?: unknown }).slope === 'number'
+        ? (image as unknown as { slope: number }).slope
+        : 1;
     const intercept =
-      typeof (image as unknown as { intercept?: unknown }).intercept === 'number' ? (image as unknown as { intercept: number }).intercept : 0;
+      typeof (image as unknown as { intercept?: unknown }).intercept === 'number'
+        ? (image as unknown as { intercept: number }).intercept
+        : 0;
 
     if (slope !== 1 || intercept !== 0) {
       for (let p = 0; p < down.length; p++) {
         down[p] = down[p] * slope + intercept;
       }
+    }
+
+    // Best-effort: drop the decoded DICOM image from Cornerstone's global image cache.
+    // SVR decoding loads many slices; letting them accumulate in the cache can cause large
+    // memory spikes and crashes, especially in power-user runs.
+    try {
+      cornerstone.imageCache?.removeImageLoadObject?.(imageId);
+    } catch {
+      // Ignore.
     }
 
     // Sample intensities deterministically for robust global normalization.
@@ -813,10 +855,12 @@ async function loadSeriesSlices(params: {
       : null;
 
     const median = (values: Array<number | null>): number | null => {
-      const v = values.filter((x) => typeof x === 'number' && Number.isFinite(x)).sort((a, b) => (a as number) - (b as number));
+      const v = values
+        .filter((x) => typeof x === 'number' && Number.isFinite(x))
+        .sort((a, b) => (a as number) - (b as number));
       if (v.length === 0) return null;
       const mid = Math.floor(v.length / 2);
-      return v.length % 2 === 1 ? (v[mid] as number) : (((v[mid - 1] as number) + (v[mid] as number)) / 2);
+      return v.length % 2 === 1 ? (v[mid] as number) : ((v[mid - 1] as number) + (v[mid] as number)) / 2;
     };
 
     const sliceThicknessMedianMm = median(slices.map((s) => s.sliceThicknessMm));
@@ -846,7 +890,7 @@ async function loadSeriesSlices(params: {
           samples: intensitySamples.length,
         },
       },
-      true
+      true,
     );
 
     if (minAbsNDot < 0.999) {
@@ -860,7 +904,6 @@ async function loadSeriesSlices(params: {
 
   return { slices, intensitySamples };
 }
-
 
 function computeBoundsMm(slices: LoadedSlice[]): { min: Vec3; max: Vec3 } {
   let minX = Number.POSITIVE_INFINITY;
@@ -948,7 +991,6 @@ function chooseOutputGrid(params: { bounds: { min: Vec3; max: Vec3 }; voxelSizeM
   };
 }
 
-
 export async function reconstructVolumeMultiPlane(params: {
   selectedSeries: SvrSelectedSeries[];
   svrParams: SvrParams;
@@ -993,8 +1035,20 @@ export async function reconstructVolumeMultiPlane(params: {
     stepSize: svrParams.stepSize,
   });
 
+  if (debug) {
+    try {
+      const cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
+      debugSvrLog('cornerstone.imageCache', { when: 'svr-start', cacheInfo }, debug);
+    } catch {
+      // Ignore.
+    }
+  }
+
   const MAX_INTENSITY_SAMPLES_TOTAL = 50_000;
-  const maxIntensitySamplesPerSeries = Math.max(2048, Math.ceil(MAX_INTENSITY_SAMPLES_TOTAL / Math.max(1, selectedSeries.length)));
+  const maxIntensitySamplesPerSeries = Math.max(
+    2048,
+    Math.ceil(MAX_INTENSITY_SAMPLES_TOTAL / Math.max(1, selectedSeries.length)),
+  );
 
   for (const series of selectedSeries) {
     assertNotAborted(signal);
@@ -1052,6 +1106,26 @@ export async function reconstructVolumeMultiPlane(params: {
 
   if (allSlices.length === 0) {
     throw new Error('No slices loaded for SVR');
+  }
+
+  if (debug) {
+    const sliceBytes = allSlices.reduce((acc, s) => acc + (s.pixels?.byteLength ?? 0), 0);
+    debugSvrLog(
+      'slices.bytes',
+      {
+        when: 'after-decode',
+        slices: allSlices.length,
+        pixelsMiB: Number((sliceBytes / (1024 * 1024)).toFixed(1)),
+      },
+      debug,
+    );
+
+    try {
+      const cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
+      debugSvrLog('cornerstone.imageCache', { when: 'after-decode', cacheInfo }, debug);
+    } catch {
+      // Ignore.
+    }
   }
 
   // Normalize all slices to [0,1] using a robust global percentile window.
@@ -1226,7 +1300,7 @@ export async function reconstructVolumeMultiPlane(params: {
       const refCenter = v3(
         (refBounds.min.x + refBounds.max.x) * 0.5,
         (refBounds.min.y + refBounds.max.y) * 0.5,
-        (refBounds.min.z + refBounds.max.z) * 0.5
+        (refBounds.min.z + refBounds.max.z) * 0.5,
       );
 
       debugSvrLog(
@@ -1236,7 +1310,7 @@ export async function reconstructVolumeMultiPlane(params: {
           loadedSlices: refSlices.length,
           centerMm: { x: refCenter.x, y: refCenter.y, z: refCenter.z },
         },
-        debug
+        debug,
       );
 
       for (const [uid, slices] of bySeries) {
@@ -1260,7 +1334,7 @@ export async function reconstructVolumeMultiPlane(params: {
             translateMm: { x: Number(t.x.toFixed(3)), y: Number(t.y.toFixed(3)), z: Number(t.z.toFixed(3)) },
             magnitudeMm: Number(tMag.toFixed(3)),
           },
-          debug
+          debug,
         );
 
         // Warn if we're doing something large; this is often a sign of inconsistent DICOM spatial tags.
@@ -1295,11 +1369,12 @@ export async function reconstructVolumeMultiPlane(params: {
 
   const estimatePeakBytes = (nvox: number, iters: number): number => {
     // Persistent arrays:
-    // - volume, weight
-    // Per-iteration arrays (allocated once per iter, but they overlap with volume/weight at peak):
-    // - update, updateW
+    // - volume
+    // - weight (reused as updateW during refinement)
+    // Per-iteration arrays:
+    // - update
     const floatBytes = 4;
-    const arrays = iters > 0 ? 4 : 2;
+    const arrays = iters > 0 ? 3 : 2;
     return arrays * nvox * floatBytes;
   };
 
@@ -1352,8 +1427,8 @@ export async function reconstructVolumeMultiPlane(params: {
   if (peakBytes > MAX_PEAK_BYTES) {
     throw new Error(
       `SVR volume too large (${dims.nx}×${dims.ny}×${dims.nz}); estimated peak ${formatMiB(peakBytes)} exceeds budget ${formatMiB(
-        MAX_PEAK_BYTES
-      )}. Try enabling ROI, increasing voxel size, lowering maxVolumeDim, or reducing iterations.`
+        MAX_PEAK_BYTES,
+      )}. Try enabling ROI, increasing voxel size, lowering maxVolumeDim, or reducing iterations.`,
     );
   }
 
@@ -1368,8 +1443,16 @@ export async function reconstructVolumeMultiPlane(params: {
     estimatedPeak: formatMiB(peakBytes),
     iterations,
     boundsMm: {
-      min: { x: Number(bounds.min.x.toFixed(3)), y: Number(bounds.min.y.toFixed(3)), z: Number(bounds.min.z.toFixed(3)) },
-      max: { x: Number(bounds.max.x.toFixed(3)), y: Number(bounds.max.y.toFixed(3)), z: Number(bounds.max.z.toFixed(3)) },
+      min: {
+        x: Number(bounds.min.x.toFixed(3)),
+        y: Number(bounds.min.y.toFixed(3)),
+        z: Number(bounds.min.z.toFixed(3)),
+      },
+      max: {
+        x: Number(bounds.max.x.toFixed(3)),
+        y: Number(bounds.max.y.toFixed(3)),
+        z: Number(bounds.max.z.toFixed(3)),
+      },
     },
   });
 
@@ -1428,6 +1511,19 @@ export async function reconstructVolumeMultiPlane(params: {
       beforeCount,
       afterCount: allSlices.length,
     });
+
+    if (debug) {
+      const sliceBytes = allSlices.reduce((acc, s) => acc + (s.pixels?.byteLength ?? 0), 0);
+      debugSvrLog(
+        'slices.bytes',
+        {
+          when: 'after-roi-crop',
+          slices: allSlices.length,
+          pixelsMiB: Number((sliceBytes / (1024 * 1024)).toFixed(1)),
+        },
+        debug,
+      );
+    }
   }
 
   // 5) Reconstruction (higher-fidelity forward model + solver).
@@ -1454,7 +1550,7 @@ export async function reconstructVolumeMultiPlane(params: {
       multiResolutionFactor: svrParams.multiResolutionFactor,
       multiResolutionCoarseIterations: svrParams.multiResolutionCoarseIterations,
     },
-    debug
+    debug,
   );
 
   const fineGrid: SvrReconstructionGrid = { dims, originMm, voxelSizeMm };
@@ -1489,7 +1585,7 @@ export async function reconstructVolumeMultiPlane(params: {
 
     onProgress?.({ phase: 'reconstructing', current: 62, total: 100, message: 'Coarse reconstruction…' });
 
-    const coarse = await reconstructVolumeFromSlices({
+    let coarse: Float32Array | null = await reconstructVolumeFromSlices({
       slices: allSlices,
       grid: coarseGrid,
       options: {
@@ -1502,6 +1598,10 @@ export async function reconstructVolumeMultiPlane(params: {
       },
     });
 
+    if (!coarse) {
+      throw new Error('SVR coarse reconstruction failed');
+    }
+
     onProgress?.({ phase: 'reconstructing', current: 66, total: 100, message: 'Upsampling coarse volume…' });
 
     volume = await resampleVolumeToGridTrilinear({
@@ -1513,6 +1613,9 @@ export async function reconstructVolumeMultiPlane(params: {
         yieldToMain,
       },
     });
+
+    // Best-effort: drop the coarse reference as early as possible to reduce peak memory.
+    coarse = null;
 
     onProgress?.({ phase: 'reconstructing', current: 70, total: 100, message: 'Refining volume…' });
 
@@ -1547,7 +1650,12 @@ export async function reconstructVolumeMultiPlane(params: {
     maxSize: 256,
   });
 
-  onProgress?.({ phase: 'finalizing', current: 100, total: 100, message: `Done (${Math.round(performance.now() - t0)}ms)` });
+  onProgress?.({
+    phase: 'finalizing',
+    current: 100,
+    total: 100,
+    message: `Done (${Math.round(performance.now() - t0)}ms)`,
+  });
 
   return {
     volume: {

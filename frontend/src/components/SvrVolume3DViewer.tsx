@@ -10,6 +10,17 @@ import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoa
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
 import { computeSeedRange01, regionGrow3D, type Vec3i } from '../utils/segmentation/regionGrow3D';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
+import { formatMiB } from '../utils/svr/svrUtils';
+import {
+  buildRenderVolumeTexData,
+  computeRenderPlan,
+  downsampleLabelsNearest,
+  toUint8Volume,
+  type RenderDims,
+  type RenderQualityPreset,
+  type RenderTextureMode,
+  type RenderVolumeTexData,
+} from '../utils/svr/renderLod';
 
 function clamp(x: number, min: number, max: number): number {
   return x < min ? min : x > max ? max : x;
@@ -32,6 +43,23 @@ const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 // We block full-res runs by default above a conservative budget, with an explicit user override.
 const ONNX_PREFLIGHT_CLASS_COUNT = 4;
 const ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES = 384 * 1024 * 1024;
+
+// Render defaults
+const DEFAULT_RENDER_QUALITY: RenderQualityPreset = 'auto';
+const DEFAULT_RENDER_GPU_BUDGET_MIB = 256;
+const DEFAULT_RENDER_TEXTURE_MODE: RenderTextureMode = 'auto';
+
+const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
+const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
+
+type GlLabelState = {
+  gl: WebGL2RenderingContext;
+  texLabels: WebGLTexture;
+  texPalette: WebGLTexture;
+  texDims: RenderDims;
+  /** Dimensions currently allocated on the GPU for texLabels. */
+  labelsTexDims: RenderDims;
+};
 
 type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
 
@@ -389,16 +417,6 @@ function mat3FromQuat(q: Quat, out: Float32Array): void {
   out[8] = m22;
 }
 
-function toUint8Volume(data: Float32Array): Uint8Array {
-  const out = new Uint8Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    const v = data[i] ?? 0;
-    const b = Math.round(clamp(v, 0, 1) * 255);
-    out[i] = b;
-  }
-  return out;
-}
-
 type VolumeTextureFormat =
   | { kind: 'f32'; internalFormat: number; format: number; type: number; minMagFilter: number }
   | { kind: 'u8'; internalFormat: number; format: number; type: number; minMagFilter: number };
@@ -464,6 +482,14 @@ function createProgram(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string)
   return prog;
 }
 
+type RenderBuildState = {
+  status: 'idle' | 'building' | 'ready' | 'error';
+  key: string | null;
+  data: RenderVolumeTexData | null;
+  buildMs?: number;
+  error?: string;
+};
+
 export type SvrVolume3DViewerProps = {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
@@ -484,14 +510,17 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pendingCapture3dRef = useRef<{ resolve: (b: Blob | null) => void } | null>(null);
 
-  const glLabelStateRef = useRef<{
-    gl: WebGL2RenderingContext;
-    texLabels: WebGLTexture;
-    texPalette: WebGLTexture;
-    dims: { nx: number; ny: number; nz: number };
-  } | null>(null);
+  const glLabelStateRef = useRef<GlLabelState | null>(null);
 
   const [initError, setInitError] = useState<string | null>(null);
+  const [glEpoch, setGlEpoch] = useState(0);
+
+  const renderBuildIdRef = useRef(0);
+  const [renderBuild, setRenderBuild] = useState<RenderBuildState>(() => ({
+    status: 'idle',
+    key: null,
+    data: null,
+  }));
 
   // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
@@ -564,6 +593,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [gamma, setGamma] = useState(1.0);
   const [opacity, setOpacity] = useState(4.0);
   const [zoom, setZoom] = useState(1.0);
+
+  // Render quality (GPU-budgeted LOD) to avoid allocating full-res 3D textures on huge volumes.
+  const [renderQuality, setRenderQuality] = useState<RenderQualityPreset>(DEFAULT_RENDER_QUALITY);
+  const [renderGpuBudgetMiB, setRenderGpuBudgetMiB] = useState(DEFAULT_RENDER_GPU_BUDGET_MIB);
+  const [renderTextureMode, setRenderTextureMode] = useState<RenderTextureMode>(DEFAULT_RENDER_TEXTURE_MODE);
 
   // Optional segmentation overlay (label volume).
   const [labelsEnabled, setLabelsEnabled] = useState(true);
@@ -656,10 +690,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
   const rotationRef = useRef<Quat>([0, 0, 0, 1]);
 
-  const { boxScale, dims } = useMemo(() => {
+  const { boxScale, volDims } = useMemo(() => {
     if (!volume) {
       return {
-        dims: { nx: 1, ny: 1, nz: 1 },
+        volDims: { nx: 1, ny: 1, nz: 1 },
         boxScale: [1, 1, 1] as const,
       };
     }
@@ -667,10 +701,88 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     const [nx, ny, nz] = volume.dims;
     const maxDim = Math.max(1, nx, ny, nz);
     return {
-      dims: { nx, ny, nz },
+      volDims: { nx, ny, nz },
       boxScale: [nx / maxDim, ny / maxDim, nz / maxDim] as const,
     };
   }, [volume]);
+
+  const renderPlan = useMemo(() => {
+    if (!volume) return null;
+
+    return computeRenderPlan({
+      srcDims: volDims,
+      labelsEnabled,
+      hasLabels,
+      budgetMiB: renderGpuBudgetMiB,
+      quality: renderQuality,
+      textureMode: renderTextureMode,
+    });
+  }, [hasLabels, labelsEnabled, renderGpuBudgetMiB, renderQuality, renderTextureMode, volume, volDims]);
+
+  const renderBuildKey = useMemo(() => {
+    if (!renderPlan) return null;
+    const d = renderPlan.dims;
+    return `${renderPlan.kind}:${d.nx}x${d.ny}x${d.nz}`;
+  }, [renderPlan]);
+
+  useEffect(() => {
+    if (!volume || !renderPlan || !renderBuildKey) {
+      setRenderBuild({ status: 'idle', key: null, data: null });
+      return;
+    }
+
+    setInitError(null);
+
+    const key = renderBuildKey;
+
+    const srcDims: RenderDims = volDims;
+    const dstDims: RenderDims = renderPlan.dims;
+
+    const isSameDims = srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz;
+
+    // Preserve the fast-path: full-res float uses the SVR volume buffer directly (no extra allocations).
+    if (isSameDims && renderPlan.kind === 'f32') {
+      setRenderBuild({
+        status: 'ready',
+        key,
+        data: { kind: 'f32', dims: dstDims, data: volume.data },
+        buildMs: 0,
+      });
+      return;
+    }
+
+    const buildId = ++renderBuildIdRef.current;
+    const started = performance.now();
+
+    setRenderBuild({ status: 'building', key, data: null });
+
+    void (async () => {
+      try {
+        const isCancelled = () => renderBuildIdRef.current !== buildId;
+
+        const tex = await buildRenderVolumeTexData({
+          src: volume.data,
+          srcDims,
+          plan: { kind: renderPlan.kind, dims: dstDims },
+          isCancelled,
+        });
+
+        if (renderBuildIdRef.current !== buildId) return;
+
+        const ms = Math.round(performance.now() - started);
+        setRenderBuild({
+          status: 'ready',
+          key,
+          data: tex,
+          buildMs: ms,
+        });
+      } catch (e) {
+        if (renderBuildIdRef.current !== buildId) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        setRenderBuild({ status: 'error', key, data: null, error: msg });
+      }
+    })();
+  }, [renderBuildKey, renderPlan, volume, volDims]);
 
   const resetView = useCallback(() => {
     rotationRef.current = [0, 0, 0, 1];
@@ -735,6 +847,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         setSteps(160);
         setGamma(1.0);
         setOpacity(4.0);
+
+        // Keep the 3D render memory bounded for harness runs.
+        setRenderQuality(DEFAULT_RENDER_QUALITY);
+        setRenderGpuBudgetMiB(DEFAULT_RENDER_GPU_BUDGET_MIB);
+        setRenderTextureMode(DEFAULT_RENDER_TEXTURE_MODE);
+
         setControlsCollapsed(false);
         resetView();
       },
@@ -1201,20 +1319,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     // Lower-bound estimate: logits are float32 with C channels.
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
-    const labelsBytes = nvox; // uint8
 
     const blockedByDefault = logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES;
 
-    return {
-      nx,
-      ny,
-      nz,
-      nvox,
-      logitsBytes,
-      inputBytes,
-      labelsBytes,
-      blockedByDefault,
-    };
+    return { nx, ny, nz, nvox, logitsBytes, inputBytes, blockedByDefault };
   }, [volume]);
 
   const onnxUploadClick = useCallback(() => {
@@ -1575,6 +1683,14 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       return;
     }
 
+    if (renderBuild.status !== 'ready' || !renderBuild.data) {
+      // Render volume is still being prepared (or failed).
+      return;
+    }
+
+    const renderTex = renderBuild.data;
+    const texDims = renderTex.dims;
+
     const gl = canvas.getContext('webgl2', {
       antialias: true,
       alpha: false,
@@ -1817,9 +1933,9 @@ void main() {
       gl.bindTexture(gl.TEXTURE_3D, texVol);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
-      // We'll try float first; if WebGL rejects it, re-upload as R8.
-      let fmt: VolumeTextureFormat = primary;
-      let data: ArrayBufferView = volume.data;
+      // Prefer float textures for fidelity, but honor the GPU-budgeted plan (which may request u8).
+      let fmt: VolumeTextureFormat;
+      let uploadedData: ArrayBufferView;
 
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -1833,9 +1949,9 @@ void main() {
           gl.TEXTURE_3D,
           0,
           candidate.internalFormat,
-          dims.nx,
-          dims.ny,
-          dims.nz,
+          texDims.nx,
+          texDims.ny,
+          texDims.nz,
           0,
           candidate.format,
           candidate.type,
@@ -1846,23 +1962,36 @@ void main() {
         return err === gl.NO_ERROR;
       };
 
-      try {
-        const ok = tryUpload(primary, volume.data);
-        if (!ok) {
-          // Fall back to 8-bit normalized.
-          const u8 = toUint8Volume(volume.data);
-          fmt = fallback;
-          data = u8;
-          tryUpload(fallback, data);
-        }
-      } catch {
-        const u8 = toUint8Volume(volume.data);
+      if (renderTex.kind === 'u8') {
         fmt = fallback;
-        data = u8;
-        tryUpload(fallback, data);
+        uploadedData = renderTex.data;
+        tryUpload(fallback, uploadedData);
+      } else {
+        fmt = primary;
+        uploadedData = renderTex.data;
+
+        try {
+          const ok = tryUpload(primary, uploadedData);
+          if (!ok) {
+            // Fall back to 8-bit normalized.
+            const u8 = toUint8Volume(renderTex.data as Float32Array);
+            fmt = fallback;
+            uploadedData = u8;
+            tryUpload(fallback, uploadedData);
+          }
+        } catch {
+          const u8 = toUint8Volume(renderTex.data as Float32Array);
+          fmt = fallback;
+          uploadedData = u8;
+          tryUpload(fallback, uploadedData);
+        }
       }
 
-      console.info('[svr3d] Volume texture format', { kind: fmt.kind, dims });
+      console.info('[svr3d] Volume texture format', {
+        kind: fmt.kind,
+        texDims,
+        sourceDims: { nx: volume.dims[0], ny: volume.dims[1], nz: volume.dims[2] },
+      });
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -1881,9 +2010,19 @@ void main() {
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-      // Initialize to zeros so sampling produces "no label" deterministically.
-      const zeros = new Uint8Array(dims.nx * dims.ny * dims.nz);
-      gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8UI, dims.nx, dims.ny, dims.nz, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, zeros);
+      // Lazy allocation: keep a tiny 1x1x1 "no label" texture until we actually need to show labels.
+      gl.texImage3D(
+        gl.TEXTURE_3D,
+        0,
+        gl.R8UI,
+        LABEL_PLACEHOLDER_DIMS.nx,
+        LABEL_PLACEHOLDER_DIMS.ny,
+        LABEL_PLACEHOLDER_DIMS.nz,
+        0,
+        gl.RED_INTEGER,
+        gl.UNSIGNED_BYTE,
+        LABEL_PLACEHOLDER_DATA,
+      );
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -1903,7 +2042,14 @@ void main() {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(256 * 4));
       gl.bindTexture(gl.TEXTURE_2D, null);
 
-      glLabelStateRef.current = { gl, texLabels, texPalette, dims };
+      glLabelStateRef.current = {
+        gl,
+        texLabels,
+        texPalette,
+        texDims,
+        labelsTexDims: LABEL_PLACEHOLDER_DIMS,
+      };
+      setGlEpoch((v) => v + 1);
 
       const u = {
         vol: gl.getUniformLocation(program, 'u_vol'),
@@ -1986,7 +2132,7 @@ void main() {
         gl.uniform1i(u.steps, Math.round(clamp(steps, 8, 256)));
         gl.uniform1f(u.gamma, clamp(gamma, 0.1, 10));
         gl.uniform1f(u.opacity, clamp(opacity, 0.1, 20));
-        gl.uniform3f(u.texel, 1 / Math.max(1, dims.nx), 1 / Math.max(1, dims.ny), 1 / Math.max(1, dims.nz));
+        gl.uniform3f(u.texel, 1 / Math.max(1, texDims.nx), 1 / Math.max(1, texDims.ny), 1 / Math.max(1, texDims.nz));
 
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -2064,45 +2210,109 @@ void main() {
         if (program) gl.deleteProgram(program);
       }
     };
-  }, [boxScale, dims, volume]);
+  }, [boxScale, renderBuild.key, renderBuild.status, renderBuild.data, volume]);
 
   // Incrementally upload label data + palette without re-initializing the whole GL program.
+  // IMPORTANT: allocate the full 3D label texture only when labels are enabled + present.
   useEffect(() => {
-    if (!volume) return;
-    if (!labels) return;
-
-    if (!hasLabels) {
-      console.warn('[svr3d] Ignoring label volume (dims mismatch)', {
-        volumeDims: volume.dims,
-        labelDims: labels.dims,
-        labelLen: labels.data.length,
-      });
-      return;
-    }
-
     const st = glLabelStateRef.current;
     if (!st) return;
 
-    const { gl, texLabels, texPalette, dims } = st;
+    const { gl, texLabels, texPalette, texDims } = st;
+
+    if (!labelsEnabled || !volume || !labels || !hasLabels) {
+      if (volume && labels && !hasLabels) {
+        console.warn('[svr3d] Ignoring label volume (dims mismatch)', {
+          volumeDims: volume.dims,
+          labelDims: labels.dims,
+          labelLen: labels.data.length,
+        });
+      }
+
+      // Free GPU label texture memory when not in use.
+      if (
+        st.labelsTexDims.nx !== LABEL_PLACEHOLDER_DIMS.nx ||
+        st.labelsTexDims.ny !== LABEL_PLACEHOLDER_DIMS.ny ||
+        st.labelsTexDims.nz !== LABEL_PLACEHOLDER_DIMS.nz
+      ) {
+        try {
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_3D, texLabels);
+          gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+          gl.texImage3D(
+            gl.TEXTURE_3D,
+            0,
+            gl.R8UI,
+            LABEL_PLACEHOLDER_DIMS.nx,
+            LABEL_PLACEHOLDER_DIMS.ny,
+            LABEL_PLACEHOLDER_DIMS.nz,
+            0,
+            gl.RED_INTEGER,
+            gl.UNSIGNED_BYTE,
+            LABEL_PLACEHOLDER_DATA,
+          );
+          gl.bindTexture(gl.TEXTURE_3D, null);
+
+          st.labelsTexDims = LABEL_PLACEHOLDER_DIMS;
+        } catch (e) {
+          console.warn('[svr3d] Failed to reset label texture to placeholder', e);
+        } finally {
+          gl.activeTexture(gl.TEXTURE0);
+        }
+      }
+
+      return;
+    }
+
+    const srcDims = { nx: volume.dims[0], ny: volume.dims[1], nz: volume.dims[2] };
+    const dstDims = texDims;
+
+    const dataForUpload =
+      srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz
+        ? labels.data
+        : downsampleLabelsNearest({ src: labels.data, srcDims, dstDims });
 
     try {
-      // Label IDs
+      // Label IDs (uint8)
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_3D, texLabels);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texSubImage3D(
-        gl.TEXTURE_3D,
-        0,
-        0,
-        0,
-        0,
-        dims.nx,
-        dims.ny,
-        dims.nz,
-        gl.RED_INTEGER,
-        gl.UNSIGNED_BYTE,
-        labels.data,
-      );
+
+      if (
+        st.labelsTexDims.nx !== dstDims.nx ||
+        st.labelsTexDims.ny !== dstDims.ny ||
+        st.labelsTexDims.nz !== dstDims.nz
+      ) {
+        // Allocate+upload in one go (avoids ever allocating a full-size zero fill array).
+        gl.texImage3D(
+          gl.TEXTURE_3D,
+          0,
+          gl.R8UI,
+          dstDims.nx,
+          dstDims.ny,
+          dstDims.nz,
+          0,
+          gl.RED_INTEGER,
+          gl.UNSIGNED_BYTE,
+          dataForUpload,
+        );
+        st.labelsTexDims = { nx: dstDims.nx, ny: dstDims.ny, nz: dstDims.nz };
+      } else {
+        gl.texSubImage3D(
+          gl.TEXTURE_3D,
+          0,
+          0,
+          0,
+          0,
+          dstDims.nx,
+          dstDims.ny,
+          dstDims.nz,
+          gl.RED_INTEGER,
+          gl.UNSIGNED_BYTE,
+          dataForUpload,
+        );
+      }
+
       gl.bindTexture(gl.TEXTURE_3D, null);
 
       // Palette lookup table
@@ -2117,7 +2327,7 @@ void main() {
     } finally {
       gl.activeTexture(gl.TEXTURE0);
     }
-  }, [hasLabels, labels, volume]);
+  }, [glEpoch, hasLabels, labels, labelsEnabled, volume]);
 
   return (
     <div
@@ -2152,6 +2362,22 @@ void main() {
               <div className="absolute inset-0 flex items-center justify-center text-xs text-white/70 bg-black/40 p-4 text-center">
                 Run SVR to generate a volume for 3D viewing.
               </div>
+            ) : renderBuild.status === 'error' ? (
+              <div className="absolute inset-0 flex items-center justify-center text-xs text-red-300 bg-black/60 p-4 text-center">
+                {renderBuild.error ?? 'Failed to prepare 3D render volume.'}
+              </div>
+            ) : renderBuild.status !== 'ready' ? (
+              <div className="absolute inset-0 flex items-center justify-center text-xs text-white/80 bg-black/60 p-4 text-center">
+                <div className="space-y-2">
+                  <div>Preparing 3D render…</div>
+                  {renderPlan ? (
+                    <div className="text-[10px] text-white/60 tabular-nums">
+                      {renderPlan.dims.nx}×{renderPlan.dims.ny}×{renderPlan.dims.nz} ·{' '}
+                      {renderPlan.kind === 'f32' ? 'float' : 'u8'} · {renderPlan.note}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             ) : initError ? (
               <div className="absolute inset-0 flex items-center justify-center text-xs text-red-300 bg-black/60 p-4 text-center">
                 {initError}
@@ -2168,6 +2394,73 @@ void main() {
       {controlsCollapsed ? null : (
         <div className="order-2 min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
+
+          <div className="border border-[var(--border-color)] rounded-lg bg-[var(--bg-secondary)] p-3 space-y-2">
+            <div className="text-xs font-medium text-[var(--text-secondary)]">Render</div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Quality
+                <select
+                  value={renderQuality}
+                  onChange={(e) => setRenderQuality(e.target.value as RenderQualityPreset)}
+                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                  disabled={!volume}
+                >
+                  <option value="auto">Auto (budgeted)</option>
+                  <option value="full">Full (if fits)</option>
+                  <option value="512">MaxDim ≤ 512</option>
+                  <option value="384">MaxDim ≤ 384</option>
+                  <option value="256">MaxDim ≤ 256</option>
+                  <option value="192">MaxDim ≤ 192</option>
+                  <option value="128">MaxDim ≤ 128</option>
+                </select>
+              </label>
+
+              <label className="block text-xs text-[var(--text-secondary)]">
+                Texture
+                <select
+                  value={renderTextureMode}
+                  onChange={(e) => setRenderTextureMode(e.target.value as RenderTextureMode)}
+                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                  disabled={!volume}
+                >
+                  <option value="auto">Auto (float preferred)</option>
+                  <option value="u8">Force 8-bit</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              GPU budget
+              <input
+                type="range"
+                min={64}
+                max={2048}
+                step={16}
+                value={renderGpuBudgetMiB}
+                onChange={(e) => setRenderGpuBudgetMiB(Number(e.target.value))}
+                className="mt-1 w-full"
+                disabled={!volume}
+              />
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                {Math.round(renderGpuBudgetMiB)} MiB
+              </div>
+            </label>
+
+            {renderPlan ? (
+              <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                Plan: {renderPlan.dims.nx}×{renderPlan.dims.ny}×{renderPlan.dims.nz} ·{' '}
+                {renderPlan.kind === 'f32' ? 'float' : 'u8'} · est GPU {formatMiB(renderPlan.estGpuTotalBytes)}
+                {renderPlan.estGpuLabelBytes > 0 ? ` (labels ${formatMiB(renderPlan.estGpuLabelBytes)})` : ''}
+                {renderBuild.status === 'building'
+                  ? ' · building…'
+                  : renderBuild.status === 'ready'
+                    ? ` · built ${Math.round(renderBuild.buildMs ?? 0)}ms`
+                    : ''}
+              </div>
+            ) : null}
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <label className="block text-xs text-[var(--text-secondary)]">
@@ -2674,7 +2967,7 @@ void main() {
 
               {volume ? (
                 <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                  Volume dims: {dims.nx}×{dims.ny}×{dims.nz}
+                  Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
                 </div>
               ) : null}
             </div>

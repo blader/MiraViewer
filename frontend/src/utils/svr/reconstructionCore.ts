@@ -54,11 +54,7 @@ export type SvrCoreHooks = {
 
 type SlicePsf = { offsetsMm: Float32Array; weights: Float32Array; count: number; effectiveThicknessMm: number };
 
-function buildSlicePsf(params: {
-  slice: SvrReconstructionSlice;
-  voxelSizeMm: number;
-  mode: SvrPsfMode;
-}): SlicePsf {
+function buildSlicePsf(params: { slice: SvrReconstructionSlice; voxelSizeMm: number; mode: SvrPsfMode }): SlicePsf {
   const { slice, voxelSizeMm, mode } = params;
 
   if (mode === 'none') {
@@ -259,7 +255,10 @@ export async function reconstructVolumeFromSlices(params: {
 
   normalizeVolumeInPlace(volume, weight);
 
-  await refineVolumeInPlace({ volume, slices, grid, options, hooks, psfBySlice });
+  // Memory optimization: the `weight` buffer is only needed for the initial splat normalization.
+  // After that, we can reuse it as the per-iteration `updateW` accumulator to avoid allocating
+  // an additional full-size Float32Array.
+  await refineVolumeInPlace({ volume, slices, grid, options, hooks, psfBySlice, scratch: { updateW: weight } });
 
   return volume;
 }
@@ -271,25 +270,44 @@ export async function refineVolumeInPlace(params: {
   options: SvrReconstructionOptions;
   hooks?: SvrCoreHooks;
   psfBySlice?: SlicePsf[];
+  /** Optional scratch buffers to reduce allocations / peak memory. */
+  scratch?: {
+    update?: Float32Array;
+    updateW?: Float32Array;
+  };
 }): Promise<void> {
   const { volume, slices, grid, options, hooks } = params;
   const { dims, originMm, voxelSizeMm } = grid;
 
   const yieldToMain = hooks?.yieldToMain ?? (async () => {});
 
+  // Iterative refinement: forward-project → residual → backproject.
+  const iterations = Math.max(0, Math.round(options.iterations));
+  if (iterations <= 0) {
+    // IMPORTANT: avoid allocating full-volume scratch buffers when we aren't refining.
+    return;
+  }
+
   const invVox = 1 / voxelSizeMm;
 
-  const psfBySlice = params.psfBySlice ?? slices.map((s) => buildSlicePsf({ slice: s, voxelSizeMm, mode: options.psfMode }));
+  const psfBySlice =
+    params.psfBySlice ?? slices.map((s) => buildSlicePsf({ slice: s, voxelSizeMm, mode: options.psfMode }));
 
   const nvox = dims.nx * dims.ny * dims.nz;
 
-  // Iterative refinement: forward-project → residual → backproject.
-  const iterations = Math.max(0, Math.round(options.iterations));
   const stepSize = options.stepSize;
 
   // Scratch reused for update accumulation and regularization.
-  const update = new Float32Array(nvox);
-  const updateW = new Float32Array(nvox);
+  // Allow callers to provide/reuse buffers so peak memory doesn't scale as badly for large volumes.
+  let update = params.scratch?.update;
+  if (!update || update.length !== nvox) {
+    update = new Float32Array(nvox);
+  }
+
+  let updateW = params.scratch?.updateW;
+  if (!updateW || updateW.length !== nvox) {
+    updateW = new Float32Array(nvox);
+  }
 
   for (let iter = 0; iter < iterations; iter++) {
     assertNotAborted(hooks?.signal);
