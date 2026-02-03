@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
@@ -566,6 +566,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   // Optional segmentation overlay (label volume).
   const [labelsEnabled, setLabelsEnabled] = useState(true);
   const [labelMix, setLabelMix] = useState(0.65);
+
+  const [segmentationCollapsed, setSegmentationCollapsed] = useState(false);
 
   // Baseline interactive segmentation (Phase 2): seeded 3D region-growing.
   const [seedVoxel, setSeedVoxel] = useState<Vec3i | null>(null);
@@ -2075,15 +2077,19 @@ void main() {
   }, [hasLabels, labels, volume]);
 
   return (
-    <div className={`h-full grid gap-3 ${controlsCollapsed ? 'grid-cols-1' : 'grid-cols-3'}`}>
-      <div className={controlsCollapsed ? 'col-span-1' : 'col-span-2'}>
-        <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-black h-full">
-          <div className="relative w-full h-full">
+    <div
+      className={`h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
+        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(300px,360px)_minmax(320px,420px)]'
+      }`}
+    >
+      <div className="min-h-0">
+        <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-black h-full min-h-0">
+          <div className="relative w-full h-full min-h-0">
             <button
               type="button"
               onClick={() => setControlsCollapsed((v) => !v)}
               className="absolute right-2 top-2 z-20 p-1 rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
-              title={controlsCollapsed ? 'Show 3D controls' : 'Hide 3D controls'}
+              title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
             >
               {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
             </button>
@@ -2117,468 +2123,485 @@ void main() {
       </div>
 
       {controlsCollapsed ? null : (
-        <div className="col-span-1 space-y-3">
+        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
 
-          <label className="block text-xs text-[var(--text-secondary)]">
-            Opacity
-            <input
-              type="range"
-              min={0.1}
-              max={20}
-              step={0.1}
-              value={opacity}
-              onChange={(e) => setOpacity(Number(e.target.value))}
-              className="mt-1 w-full"
-              disabled={!volume}
-            />
-            <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
-          </label>
-
-          <label className="block text-xs text-[var(--text-secondary)]">
-            Threshold (radial)
-            <input
-              type="range"
-              min={0}
-              max={5}
-              step={0.01}
-              value={threshold}
-              onChange={(e) => setThreshold(Number(e.target.value))}
-              className="mt-1 w-full"
-              disabled={!volume}
-            />
-            <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-              Center 0.00 · Edge scale {threshold.toFixed(2)}
-            </div>
-          </label>
-
-        <label className="block text-xs text-[var(--text-secondary)]">
-          Steps (ray samples)
-          <input
-            type="range"
-            min={32}
-            max={256}
-            step={1}
-            value={steps}
-            onChange={(e) => setSteps(Number(e.target.value))}
-            className="mt-1 w-full"
-            disabled={!volume}
-          />
-          <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(steps)}</div>
-        </label>
-
-        <label className="block text-xs text-[var(--text-secondary)]">
-          Edge shading strength
-          <input
-            type="range"
-            min={0.1}
-            max={6}
-            step={0.05}
-            value={gamma}
-            onChange={(e) => setGamma(Number(e.target.value))}
-            className="mt-1 w-full"
-            disabled={!volume}
-          />
-          <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
-        </label>
-
-        <label className="block text-xs text-[var(--text-secondary)]">
-          Zoom
-          <input
-            type="range"
-            min={0.6}
-            max={10.0}
-            step={0.02}
-            value={zoom}
-            onChange={(e) => setZoom(Number(e.target.value))}
-            className="mt-1 w-full"
-            disabled={!volume}
-          />
-          <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{zoom.toFixed(2)}</div>
-        </label>
-
-        <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
-          <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Segmentation</div>
-          <div className="p-3 space-y-2">
-            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Opacity
               <input
-                type="checkbox"
-                checked={labelsEnabled}
-                onChange={(e) => setLabelsEnabled(e.target.checked)}
+                type="range"
+                min={0.1}
+                max={20}
+                step={0.1}
+                value={opacity}
+                onChange={(e) => setOpacity(Number(e.target.value))}
+                className="mt-1 w-full"
                 disabled={!volume}
               />
-              <span>Show labels</span>
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
             </label>
 
             <label className="block text-xs text-[var(--text-secondary)]">
-              Label mix
+              Zoom
+              <input
+                type="range"
+                min={0.6}
+                max={10.0}
+                step={0.02}
+                value={zoom}
+                onChange={(e) => setZoom(Number(e.target.value))}
+                className="mt-1 w-full"
+                disabled={!volume}
+              />
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{zoom.toFixed(2)}</div>
+            </label>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Steps (ray samples)
+              <input
+                type="range"
+                min={32}
+                max={256}
+                step={1}
+                value={steps}
+                onChange={(e) => setSteps(Number(e.target.value))}
+                className="mt-1 w-full"
+                disabled={!volume}
+              />
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(steps)}</div>
+            </label>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Edge shading
+              <input
+                type="range"
+                min={0.1}
+                max={6}
+                step={0.05}
+                value={gamma}
+                onChange={(e) => setGamma(Number(e.target.value))}
+                className="mt-1 w-full"
+                disabled={!volume}
+              />
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
+            </label>
+
+            <label className="col-span-2 block text-xs text-[var(--text-secondary)]">
+              Threshold (radial)
               <input
                 type="range"
                 min={0}
-                max={1}
+                max={5}
                 step={0.01}
-                value={labelMix}
-                onChange={(e) => setLabelMix(Number(e.target.value))}
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value))}
                 className="mt-1 w-full"
-                disabled={!hasLabels || !labelsEnabled}
+                disabled={!volume}
               />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
-            </label>
-
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Tool
-                <select
-                  value={segTool}
-                  onChange={(e) => setSegTool(e.target.value as 'seed' | 'brush')}
-                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume || growStatus.running || onnxSegRunning}
-                >
-                  <option value="seed">Seed</option>
-                  <option value="brush">Brush</option>
-                </select>
-              </label>
-
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Brush radius
-                <input
-                  type="range"
-                  min={0}
-                  max={12}
-                  step={1}
-                  value={brushRadiusVox}
-                  onChange={(e) => setBrushRadiusVox(Number(e.target.value))}
-                  className="mt-1 w-full"
-                  disabled={!volume || segTool !== 'brush' || growStatus.running}
-                />
-                <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(brushRadiusVox)} vox</div>
-              </label>
-            </div>
-
-            <label className="block text-xs text-[var(--text-secondary)]">
-              Brush label
-              <select
-                value={brushLabel}
-                onChange={(e) => setBrushLabel(Number(e.target.value))}
-                className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                disabled={!volume || segTool !== 'brush' || growStatus.running || onnxSegRunning}
-              >
-                <option value={0}>Erase (0)</option>
-                <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
-                <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
-                <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
-              </select>
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)]">
-                {segTool === 'brush' ? 'Drag in the slice inspector to paint labels.' : 'Click the slice inspector to set a seed.'}
+              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                Center 0.00 · Edge scale {threshold.toFixed(2)}
               </div>
             </label>
+          </div>
 
-            <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
-              <span className="truncate">
-                Seed:{' '}
-                {seedVoxel ? (
-                  <span className="tabular-nums">
-                    {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={resetView}
+              disabled={!volume}
+              className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+            >
+              Reset view
+            </button>
+          </div>
+
+          <div className="text-[10px] text-[var(--text-tertiary)]">
+            Composite rendering with edge shading: tune opacity/threshold, and increase edge strength to make boundaries pop (stronger near the box center).
+          </div>
+
+          <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+            <button
+              type="button"
+              onClick={() => setSegmentationCollapsed((v) => !v)}
+              className="w-full px-3 py-2 flex items-center justify-between text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              aria-expanded={!segmentationCollapsed}
+            >
+              <span>Segmentation</span>
+              {segmentationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+
+            {segmentationCollapsed ? null : (
+              <div className="p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                  <input
+                    type="checkbox"
+                    checked={labelsEnabled}
+                    onChange={(e) => setLabelsEnabled(e.target.checked)}
+                    disabled={!volume}
+                  />
+                  <span>Show labels</span>
+                </label>
+
+                <label className="block text-xs text-[var(--text-secondary)]">
+                  Label mix
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={labelMix}
+                    onChange={(e) => setLabelMix(Number(e.target.value))}
+                    className="mt-1 w-full"
+                    disabled={!hasLabels || !labelsEnabled}
+                  />
+                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
+                </label>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block text-xs text-[var(--text-secondary)]">
+                    Tool
+                    <select
+                      value={segTool}
+                      onChange={(e) => setSegTool(e.target.value as 'seed' | 'brush')}
+                      className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                      disabled={!volume || growStatus.running || onnxSegRunning}
+                    >
+                      <option value="seed">Seed</option>
+                      <option value="brush">Brush</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-xs text-[var(--text-secondary)]">
+                    Brush radius
+                    <input
+                      type="range"
+                      min={0}
+                      max={12}
+                      step={1}
+                      value={brushRadiusVox}
+                      onChange={(e) => setBrushRadiusVox(Number(e.target.value))}
+                      className="mt-1 w-full"
+                      disabled={!volume || segTool !== 'brush' || growStatus.running}
+                    />
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(brushRadiusVox)} vox</div>
+                  </label>
+                </div>
+
+                <label className="block text-xs text-[var(--text-secondary)]">
+                  Brush label
+                  <select
+                    value={brushLabel}
+                    onChange={(e) => setBrushLabel(Number(e.target.value))}
+                    className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                    disabled={!volume || segTool !== 'brush' || growStatus.running || onnxSegRunning}
+                  >
+                    <option value={0}>Erase (0)</option>
+                    <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
+                    <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
+                    <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
+                  </select>
+                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)]">
+                    {segTool === 'brush' ? 'Drag in the slice inspector to paint labels.' : 'Click the slice inspector to set a seed.'}
+                  </div>
+                </label>
+
+                <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
+                  <span className="truncate">
+                    Seed:{' '}
+                    {seedVoxel ? (
+                      <span className="tabular-nums">
+                        {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
+                      </span>
+                    ) : segTool === 'brush' ? (
+                      <span>Switch tool to Seed, then click slice inspector</span>
+                    ) : (
+                      <span>Click the slice inspector to set</span>
+                    )}
                   </span>
-                ) : segTool === 'brush' ? (
-                  <span>Switch tool to Seed, then click slice inspector</span>
-                ) : (
-                  <span>Click the slice inspector to set</span>
-                )}
-              </span>
-              <button
-                type="button"
-                onClick={() => setSeedVoxel(null)}
-                disabled={!seedVoxel || growStatus.running || onnxSegRunning}
-                className="ml-auto px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-              >
-                Clear
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Target
-                <select
-                  value={growTargetLabel}
-                  onChange={(e) => setGrowTargetLabel(Number(e.target.value) as BratsBaseLabelId)}
-                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume || growStatus.running}
-                >
-                  <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
-                  <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
-                  <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
-                </select>
-              </label>
-
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Tolerance
-                <input
-                  type="range"
-                  min={0}
-                  max={0.5}
-                  step={0.005}
-                  value={growTolerance}
-                  onChange={(e) => setGrowTolerance(Number(e.target.value))}
-                  className="mt-1 w-full"
-                  disabled={!volume || growStatus.running}
-                />
-                <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
-              </label>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={runSeedGrow}
-                disabled={!volume || !seedVoxel || growStatus.running || onnxSegRunning}
-                className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-              >
-                Grow from seed
-              </button>
-
-              {growStatus.running ? (
-                <button
-                  type="button"
-                  onClick={cancelSeedGrow}
-                  className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
-                >
-                  Cancel
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                onClick={() => {
-                  setGeneratedLabels(null);
-                  setGrowStatus({ running: false, message: 'Cleared segmentation' });
-                }}
-                disabled={!generatedLabels || growStatus.running || onnxSegRunning}
-                className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-              >
-                Clear seg
-              </button>
-            </div>
-
-            {growStatus.error ? (
-              <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{growStatus.error}</div>
-            ) : growStatus.message ? (
-              <div className="text-[10px] text-[var(--text-tertiary)]">{growStatus.message}</div>
-            ) : null}
-
-            <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
-              <div className="text-xs font-medium text-[var(--text-secondary)]">ONNX tumor model</div>
-
-              <input
-                ref={onnxFileInputRef}
-                type="file"
-                accept={".onnx"}
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) {
-                    onnxHandleSelectedFile(f);
-                  }
-                  // Allow re-uploading the same file.
-                  e.target.value = '';
-                }}
-              />
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onnxUploadClick}
-                  disabled={onnxStatus.loading}
-                  className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                >
-                  Upload
-                </button>
-
-                <button
-                  type="button"
-                  onClick={initOnnxSession}
-                  disabled={!onnxStatus.cached || onnxStatus.loading}
-                  className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-                >
-                  Init
-                </button>
-
-                <button
-                  type="button"
-                  onClick={runOnnxSegmentation}
-                  disabled={!volume || !onnxStatus.cached || onnxStatus.loading}
-                  className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-                >
-                  Run ML
-                </button>
-
-                {onnxSegRunning ? (
                   <button
                     type="button"
-                    onClick={cancelOnnxSegmentation}
-                    className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                    onClick={() => setSeedVoxel(null)}
+                    disabled={!seedVoxel || growStatus.running || onnxSegRunning}
+                    className="ml-auto px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                   >
-                    Cancel
+                    Clear
                   </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block text-xs text-[var(--text-secondary)]">
+                    Target
+                    <select
+                      value={growTargetLabel}
+                      onChange={(e) => setGrowTargetLabel(Number(e.target.value) as BratsBaseLabelId)}
+                      className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                      disabled={!volume || growStatus.running}
+                    >
+                      <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
+                      <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
+                      <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-xs text-[var(--text-secondary)]">
+                    Tolerance
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.5}
+                      step={0.005}
+                      value={growTolerance}
+                      onChange={(e) => setGrowTolerance(Number(e.target.value))}
+                      className="mt-1 w-full"
+                      disabled={!volume || growStatus.running}
+                    />
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={runSeedGrow}
+                    disabled={!volume || !seedVoxel || growStatus.running || onnxSegRunning}
+                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                  >
+                    Grow from seed
+                  </button>
+
+                  {growStatus.running ? (
+                    <button
+                      type="button"
+                      onClick={cancelSeedGrow}
+                      className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGeneratedLabels(null);
+                      setGrowStatus({ running: false, message: 'Cleared segmentation' });
+                    }}
+                    disabled={!generatedLabels || growStatus.running || onnxSegRunning}
+                    className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                  >
+                    Clear seg
+                  </button>
+                </div>
+
+                {growStatus.error ? (
+                  <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{growStatus.error}</div>
+                ) : growStatus.message ? (
+                  <div className="text-[10px] text-[var(--text-tertiary)]">{growStatus.message}</div>
                 ) : null}
 
-                <button
-                  type="button"
-                  onClick={onnxClearModel}
-                  disabled={!onnxStatus.cached || onnxStatus.loading}
-                  className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                >
-                  Clear model
-                </button>
-              </div>
+                <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
+                  <div className="text-xs font-medium text-[var(--text-secondary)]">ONNX tumor model</div>
 
-              <div className="text-[10px] text-[var(--text-tertiary)]">
-                Cached: {onnxStatus.cached ? 'yes' : 'no'}
-                {onnxStatus.savedAtMs ? ` · saved ${new Date(onnxStatus.savedAtMs).toLocaleString()}` : ''}
-                {onnxStatus.sessionReady ? ' · session ready' : ''}
-              </div>
+                  <input
+                    ref={onnxFileInputRef}
+                    type="file"
+                    accept={".onnx"}
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        onnxHandleSelectedFile(f);
+                      }
+                      // Allow re-uploading the same file.
+                      e.target.value = '';
+                    }}
+                  />
 
-              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                <input type="checkbox" checked={autoRunOnnx} onChange={(e) => setAutoRunOnnx(e.target.checked)} />
-                <span>Auto-run after SVR (if model cached)</span>
-              </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={onnxUploadClick}
+                      disabled={onnxStatus.loading}
+                      className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    >
+                      Upload
+                    </button>
 
-              {onnxStatus.error ? (
-                <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
-              ) : onnxStatus.message ? (
-                <div className="text-[10px] text-[var(--text-tertiary)]">{onnxStatus.message}</div>
-              ) : null}
-            </div>
+                    <button
+                      type="button"
+                      onClick={initOnnxSession}
+                      disabled={!onnxStatus.cached || onnxStatus.loading}
+                      className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                    >
+                      Init
+                    </button>
 
-            {!hasLabels || !labels ? (
-              <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
-            ) : (
-              <div className="space-y-1">
-                {labels.meta
-                  .filter((m) => m.id !== 0)
-                  .map((m) => {
-                    const count = labelMetrics?.counts.get(m.id) ?? 0;
-                    const ml = labelMetrics ? (count * labelMetrics.voxelVolMm3) / 1000 : 0;
+                    <button
+                      type="button"
+                      onClick={runOnnxSegmentation}
+                      disabled={!volume || !onnxStatus.cached || onnxStatus.loading}
+                      className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                    >
+                      Run ML
+                    </button>
 
-                    return (
-                      <div
-                        key={m.id}
-                        className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]"
-                        title={`${m.name} (id ${m.id})`}
+                    {onnxSegRunning ? (
+                      <button
+                        type="button"
+                        onClick={cancelOnnxSegmentation}
+                        className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
                       >
-                        <span
-                          className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
-                          style={{ backgroundColor: rgbCss(m.color) }}
-                        />
-                        <span className="truncate">{m.name}</span>
-                        <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
-                          {count.toLocaleString()} vox · {ml.toFixed(2)} mL
-                        </span>
-                      </div>
-                    );
-                  })}
+                        Cancel
+                      </button>
+                    ) : null}
 
-                {labelMetrics ? (
-                  <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                    Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
+                    <button
+                      type="button"
+                      onClick={onnxClearModel}
+                      disabled={!onnxStatus.cached || onnxStatus.loading}
+                      className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    >
+                      Clear model
+                    </button>
                   </div>
-                ) : null}
+
+                  <div className="text-[10px] text-[var(--text-tertiary)]">
+                    Cached: {onnxStatus.cached ? 'yes' : 'no'}
+                    {onnxStatus.savedAtMs ? ` · saved ${new Date(onnxStatus.savedAtMs).toLocaleString()}` : ''}
+                    {onnxStatus.sessionReady ? ' · session ready' : ''}
+                  </div>
+
+                  <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                    <input type="checkbox" checked={autoRunOnnx} onChange={(e) => setAutoRunOnnx(e.target.checked)} />
+                    <span>Auto-run after SVR (if model cached)</span>
+                  </label>
+
+                  {onnxStatus.error ? (
+                    <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
+                  ) : onnxStatus.message ? (
+                    <div className="text-[10px] text-[var(--text-tertiary)]">{onnxStatus.message}</div>
+                  ) : null}
+                </div>
+
+                {!hasLabels || !labels ? (
+                  <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
+                ) : (
+                  <div className="space-y-1">
+                    {labels.meta
+                      .filter((m) => m.id !== 0)
+                      .map((m) => {
+                        const count = labelMetrics?.counts.get(m.id) ?? 0;
+                        const ml = labelMetrics ? (count * labelMetrics.voxelVolMm3) / 1000 : 0;
+
+                        return (
+                          <div
+                            key={m.id}
+                            className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]"
+                            title={`${m.name} (id ${m.id})`}
+                          >
+                            <span
+                              className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
+                              style={{ backgroundColor: rgbCss(m.color) }}
+                            />
+                            <span className="truncate">{m.name}</span>
+                            <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
+                              {count.toLocaleString()} vox · {ml.toFixed(2)} mL
+                            </span>
+                          </div>
+                        );
+                      })}
+
+                    {labelMetrics ? (
+                      <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
+                  <div className="text-xs font-medium text-[var(--text-secondary)]">Export</div>
+                  <button
+                    type="button"
+                    onClick={downloadLabelsNifti}
+                    disabled={!hasLabels || !labels}
+                    className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                  >
+                    Download labels (.nii)
+                  </button>
+                  <div className="text-[10px] text-[var(--text-tertiary)]">
+                    Exports a uint8 label volume in NIfTI-1 format (single-file .nii).
+                  </div>
+                </div>
               </div>
             )}
-
-            <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
-              <div className="text-xs font-medium text-[var(--text-secondary)]">Export</div>
-              <button
-                type="button"
-                onClick={downloadLabelsNifti}
-                disabled={!hasLabels || !labels}
-                className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-              >
-                Download labels (.nii)
-              </button>
-              <div className="text-[10px] text-[var(--text-tertiary)]">Exports a uint8 label volume in NIfTI-1 format (single-file .nii).</div>
-            </div>
           </div>
         </div>
+      )}
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={resetView}
-            disabled={!volume}
-            className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-          >
-            Reset view
-          </button>
-        </div>
+      {controlsCollapsed ? null : (
+        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
+          <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+            <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
+            <div className="p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block text-xs text-[var(--text-secondary)]">
+                  Plane
+                  <select
+                    value={inspectPlane}
+                    onChange={(e) => setInspectPlane(e.target.value as 'axial' | 'coronal' | 'sagittal')}
+                    className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                    disabled={!volume}
+                  >
+                    <option value="axial">Axial (z)</option>
+                    <option value="coronal">Coronal (y)</option>
+                    <option value="sagittal">Sagittal (x)</option>
+                  </select>
+                </label>
 
-        <div className="text-[10px] text-[var(--text-tertiary)]">
-          Composite rendering with edge shading: tune opacity/threshold, and increase edge strength to make boundaries pop (stronger near the box center).
-        </div>
-
-        <div className="mt-3 border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
-          <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
-          <div className="p-3 space-y-2">
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Plane
-                <select
-                  value={inspectPlane}
-                  onChange={(e) => setInspectPlane(e.target.value as 'axial' | 'coronal' | 'sagittal')}
-                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume}
-                >
-                  <option value="axial">Axial (z)</option>
-                  <option value="coronal">Coronal (y)</option>
-                  <option value="sagittal">Sagittal (x)</option>
-                </select>
-              </label>
-
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Slice
-                <input
-                  type="range"
-                  min={0}
-                  max={inspectorInfo.maxIndex}
-                  step={1}
-                  value={Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}
-                  onChange={(e) => setInspectIndex(Number(e.target.value))}
-                  className="mt-1 w-full"
-                  disabled={!volume}
-                />
-                <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                  {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
-                </div>
-              </label>
-            </div>
-
-            <div className="text-[10px] text-[var(--text-tertiary)]">
-              Intensities are shown with a fixed 0 to 1 mapping.
-            </div>
-
-            <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
-              <canvas
-                ref={sliceCanvasRef}
-                className="w-full h-auto"
-                style={{
-                  imageRendering: 'pixelated',
-                  cursor: volume ? (segTool === 'brush' ? 'cell' : 'crosshair') : 'default',
-                }}
-                onPointerDown={onSliceInspectorPointerDown}
-                onPointerMove={onSliceInspectorPointerMove}
-                onPointerUp={onSliceInspectorPointerUp}
-                onPointerCancel={onSliceInspectorPointerUp}
-              />
-            </div>
-
-            {volume ? (
-              <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                Volume dims: {dims.nx}×{dims.ny}×{dims.nz}
+                <label className="block text-xs text-[var(--text-secondary)]">
+                  Slice
+                  <input
+                    type="range"
+                    min={0}
+                    max={inspectorInfo.maxIndex}
+                    step={1}
+                    value={Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}
+                    onChange={(e) => setInspectIndex(Number(e.target.value))}
+                    className="mt-1 w-full"
+                    disabled={!volume}
+                  />
+                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                    {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
+                  </div>
+                </label>
               </div>
-            ) : null}
+
+              <div className="text-[10px] text-[var(--text-tertiary)]">Intensities are shown with a fixed 0 to 1 mapping.</div>
+
+              <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
+                <canvas
+                  ref={sliceCanvasRef}
+                  className="w-full h-auto"
+                  style={{
+                    imageRendering: 'pixelated',
+                    cursor: volume ? (segTool === 'brush' ? 'cell' : 'crosshair') : 'default',
+                  }}
+                  onPointerDown={onSliceInspectorPointerDown}
+                  onPointerMove={onSliceInspectorPointerMove}
+                  onPointerUp={onSliceInspectorPointerUp}
+                  onPointerCancel={onSliceInspectorPointerUp}
+                />
+              </div>
+
+              {volume ? (
+                <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                  Volume dims: {dims.nx}×{dims.ny}×{dims.nz}
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
-      </div>
       )}
     </div>
   );
