@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, EyeOff, Sparkles, X } from 'lucide-react';
-import type { MaskMetrics } from '../utils/segmentation/maskMetrics';
-import { computeMaskMetrics } from '../utils/segmentation/maskMetrics';
+import { Sparkles, X } from 'lucide-react';
 import type {
   NormalizedPoint,
   TumorGrow2dMeta,
@@ -24,8 +22,6 @@ import {
   type CostDistanceGrow2dTuning,
 } from '../utils/segmentation/costDistanceGrow2d';
 import { marchingSquaresContour } from '../utils/segmentation/marchingSquares';
-import { rasterizePolygonToMask } from '../utils/segmentation/rasterizePolygon';
-import { computePolygonBoundaryMetrics, type PolygonBoundaryMetrics } from '../utils/segmentation/polygonBoundaryMetrics';
 import {
   normalizeViewerTransform,
   remapPointBetweenViewerTransforms,
@@ -47,28 +43,30 @@ function getGrow2dUiStorageKey(params: { comboId: string; dateIso: string }): st
   return `${GROW2D_UI_STORAGE_KEY_PREFIX}:${params.dateIso}:${params.comboId}`;
 }
 
-type Grow2dTuningUi = Pick<Required<CostDistanceGrow2dTuning>, 'baseStepScale'>;
+type Grow2dTuningUi = Pick<Required<CostDistanceGrow2dTuning>, 'surfaceTension'>;
 
 type Grow2dUiSettings = {
   tuning: Grow2dTuningUi;
   targetAreaPx: number;
 };
 
+const LOCKED_BASE_STEP_SCALE = 15;
+
 const DEFAULT_GROW2D_TUNING: Grow2dTuningUi = {
-  baseStepScale: 1.65,
+  surfaceTension: 1.0,
 };
 
 function normalizeGrow2dTuning(raw: unknown): Grow2dTuningUi {
   const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
 
-  const baseStepScaleRaw = obj.baseStepScale;
-  const baseStepScale =
-    typeof baseStepScaleRaw === 'number' && Number.isFinite(baseStepScaleRaw)
-      ? baseStepScaleRaw
-      : DEFAULT_GROW2D_TUNING.baseStepScale;
+  const surfaceTensionRaw = obj.surfaceTension;
+  const surfaceTension =
+    typeof surfaceTensionRaw === 'number' && Number.isFinite(surfaceTensionRaw)
+      ? surfaceTensionRaw
+      : DEFAULT_GROW2D_TUNING.surfaceTension;
 
   return {
-    baseStepScale: clamp(baseStepScale, 0.25, 50),
+    surfaceTension: clamp(surfaceTension, 0, 10),
   };
 }
 
@@ -350,12 +348,6 @@ export function TumorSegmentationOverlay({
   const [groundTruthPolygon, setGroundTruthPolygon] = useState<TumorPolygon | null>(null);
   const [groundTruthPolygonViewTransform, setGroundTruthPolygonViewTransform] = useState<ViewerTransform | null>(null);
 
-  const [gtMetrics, setGtMetrics] = useState<MaskMetrics | null>(null);
-  const [gtBoundaryMetrics, setGtBoundaryMetrics] = useState<PolygonBoundaryMetrics | null>(null);
-
-  const [diffOverlayEnabled, setDiffOverlayEnabled] = useState(true);
-  const diffCanvasRef = useRef<HTMLCanvasElement | null>(null);
-
   const abortRef = useRef<AbortController | null>(null);
 
   const startGrowRef = useRef<((params: { seedBox: NormalizedRoi }) => Promise<void>) | null>(null);
@@ -382,58 +374,6 @@ export function TumorSegmentationOverlay({
   }, [enabled]);
 
 
-  const clearDiffOverlay = useCallback(() => {
-    const canvas = diffCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }, []);
-
-  const drawDiffOverlay = useCallback((predMask: Uint8Array, gtMask: Uint8Array, w: number, h: number) => {
-    const canvas = diffCanvasRef.current;
-    if (!canvas) return;
-
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const rgba = new Uint8ClampedArray(w * h * 4);
-
-    // FN (miss): red. FP (over-seg): magenta.
-    for (let i = 0; i < predMask.length; i++) {
-      const p = predMask[i] ? 1 : 0;
-      const g = gtMask[i] ? 1 : 0;
-
-      const o = i * 4;
-      if (g && !p) {
-        rgba[o] = 255;
-        rgba[o + 1] = 0;
-        rgba[o + 2] = 0;
-        rgba[o + 3] = 150;
-      } else if (!g && p) {
-        rgba[o] = 255;
-        rgba[o + 1] = 0;
-        rgba[o + 2] = 255;
-        rgba[o + 3] = 110;
-      }
-    }
-
-    const img =
-      typeof ImageData !== 'undefined'
-        ? new ImageData(rgba, w, h)
-        : (() => {
-            const id = ctx.createImageData(w, h);
-            id.data.set(rgba);
-            return id;
-          })();
-
-    ctx.putImageData(img, 0, 0);
-  }, []);
 
   // Load saved segmentation + GT when enabled or slice changes.
   // IMPORTANT: clear any draft/captured state immediately so we don't render stale overlays while loading.
@@ -467,9 +407,6 @@ export function TumorSegmentationOverlay({
     setDraftPolygonViewTransform(null);
     setDraftAreaPx(null);
 
-    setGtMetrics(null);
-    setGtBoundaryMetrics(null);
-    clearDiffOverlay();
 
     // Clear per-slice saved/GT state until the async load completes.
     setSopInstanceUid(null);
@@ -525,7 +462,7 @@ export function TumorSegmentationOverlay({
     return () => {
       cancelled = true;
     };
-  }, [clearDiffOverlay, enabled, effectiveInstanceIndex, seriesUid]);
+  }, [enabled, effectiveInstanceIndex, seriesUid]);
 
 
   // If we have a saved grow2d row and no per-sequence/date slider settings yet, seed the settings from it.
@@ -726,7 +663,7 @@ export function TumorSegmentationOverlay({
           h: cap.h,
           seedPx,
           seedCount: SEED_COUNT,
-          tuning: grow2dTuning,
+          tuning: { ...grow2dTuning, baseStepScale: LOCKED_BASE_STEP_SCALE },
           yieldEvery: 20000,
           yieldToUi: () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
           signal: ac.signal,
@@ -817,7 +754,7 @@ export function TumorSegmentationOverlay({
         h: cap.h,
         seedPx,
         seedCount: SEED_COUNT,
-        tuning: grow2dTuning,
+        tuning: { ...grow2dTuning, baseStepScale: LOCKED_BASE_STEP_SCALE },
         yieldEvery: 20000,
         yieldToUi: () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
         signal: ac.signal,
@@ -891,7 +828,7 @@ export function TumorSegmentationOverlay({
 
     const diff = (a: number, b: number) => Math.abs(a - b) > 1e-6;
 
-    const changed = diff(cur.baseStepScale, grow2dTuning.baseStepScale);
+    const changed = diff(cur.surfaceTension, grow2dTuning.surfaceTension);
 
     if (!changed) return;
 
@@ -996,14 +933,6 @@ export function TumorSegmentationOverlay({
       await start({ seedBox: { x0: ax, y0: ay, x1: ax, y1: ay } });
     })();
   }, [debugEnabled, draftSeed, effectiveInstanceIndex, enabled, savedSeed, seedBoxToStart, seriesUid, studyId, viewerRef]);
-
-  const seedDisplay = useMemo(() => {
-    if (!draftSeed) return null;
-    if (viewSize.w <= 0 || viewSize.h <= 0) return draftSeed;
-
-    const from = draftSeedViewTransform ?? viewerTransform;
-    return remapPointBetweenViewerTransforms(draftSeed, viewSize, from, viewerTransform);
-  }, [draftSeed, draftSeedViewTransform, viewSize, viewerTransform]);
 
   const seedBoxPath = useMemo(() => {
     // Depend on capture/grow versions so we recompute when the underlying refs update.
@@ -1190,7 +1119,7 @@ export function TumorSegmentationOverlay({
           threshold,
           seed,
           meta: { areaPx: ctx.draftAreaPx ?? undefined, viewTransform: view, viewportSize, grow2d },
-          algorithmVersion: 'v8-seedbox-areacap10000-costgrow2d-directional-v2',
+          algorithmVersion: 'v12-seedbox-areacap10000-costgrow2d-directional-v6-tensionq-step15',
         });
 
         setSopInstanceUid(sop);
@@ -1238,182 +1167,61 @@ export function TumorSegmentationOverlay({
     };
   }, [draftAreaPx, draftPolygon, draftSeed, enabled, flushAutoSave, targetAreaPx, busy]);
 
-  // Debounced GT metrics + diff overlay.
-  useEffect(() => {
-    if (!enabled) return;
-
-    const cap = capturedRef.current;
-    const gtRaw = groundTruthPolygon;
-    const predRaw = draftPolygon ?? savedPolygon;
-
-    if (!cap || !gtRaw || !predRaw) {
-      setGtMetrics(null);
-      setGtBoundaryMetrics(null);
-      clearDiffOverlay();
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      const size = { w: cap.w, h: cap.h };
-      const evalView = cap.viewTransform;
-
-      const predFrom = draftPolygon
-        ? draftPolygonViewTransform ?? evalView
-        : savedPolygonViewTransform ?? evalView;
-
-      const gtFrom = groundTruthPolygonViewTransform ?? evalView;
-
-      try {
-        // Metrics computed in capture/eval view for stability.
-        const gtEval = remapPolygonBetweenViewerTransforms(gtRaw, size, gtFrom, evalView);
-        const predEval = remapPolygonBetweenViewerTransforms(predRaw, size, predFrom, evalView);
-
-        const gtMaskEval = rasterizePolygonToMask(gtEval, cap.w, cap.h);
-        const predMaskEval = rasterizePolygonToMask(predEval, cap.w, cap.h);
-
-        const metrics = computeMaskMetrics(predMaskEval, gtMaskEval);
-        const boundary = computePolygonBoundaryMetrics(predEval, gtEval, cap.w, cap.h);
-
-        setGtMetrics(metrics);
-        setGtBoundaryMetrics(boundary);
-
-        if (diffOverlayEnabled) {
-          // Draw diff overlay in current viewer transform so it stays visually aligned.
-          const gtDisplay = remapPolygonBetweenViewerTransforms(gtRaw, size, gtFrom, viewerTransform);
-          const predDisplay = remapPolygonBetweenViewerTransforms(predRaw, size, predFrom, viewerTransform);
-
-          const gtMaskDisplay = rasterizePolygonToMask(gtDisplay, cap.w, cap.h);
-          const predMaskDisplay = rasterizePolygonToMask(predDisplay, cap.w, cap.h);
-
-          drawDiffOverlay(predMaskDisplay, gtMaskDisplay, cap.w, cap.h);
-        } else {
-          clearDiffOverlay();
-        }
-      } catch (e) {
-        console.error('[TumorSeedGrow] GT evaluation failed:', e);
-        setGtMetrics(null);
-        setGtBoundaryMetrics(null);
-        clearDiffOverlay();
-      }
-    }, 120);
-
-    return () => window.clearTimeout(timeout);
-  }, [
-    captureVersion,
-    clearDiffOverlay,
-    diffOverlayEnabled,
-    drawDiffOverlay,
-    draftPolygon,
-    draftPolygonViewTransform,
-    enabled,
-    groundTruthPolygon,
-    groundTruthPolygonViewTransform,
-    savedPolygon,
-    savedPolygonViewTransform,
-    viewerTransform,
-  ]);
-
   if (!enabled) return null;
 
   const panel = (() => {
-    if (!seedDisplay || containerSize.w <= 0 || containerSize.h <= 0) return null;
+    if (containerSize.w <= 0 || containerSize.h <= 0) return null;
 
-    const desiredPanelWidth = groundTruthPolygon ? 320 : 280;
-    const panelWidth = Math.max(220, Math.min(desiredPanelWidth, Math.floor(containerSize.w - 16)));
-    const sliderHeight = 220;
-    const gtSectionHeight = groundTruthPolygon ? 168 : 0;
+    const sliderHeight = 200;
 
     const aClamped = Math.max(1, Math.min(MAX_TARGET_AREA_PX, Math.round(targetAreaPx)));
 
-    const curCostThreshold = (() => {
-      const grow = growRef.current;
-      if (!grow) return null;
-
-      const thresholds = areaThresholdsRef.current;
-      if (thresholds && thresholds.length > 0) {
-        const idx = Math.min(aClamped, thresholds.length) - 1;
-        return thresholds[idx] ?? thresholds[thresholds.length - 1] ?? 0;
-      }
-
-      // Fallback: quantile LUT (coarser, but better than nothing).
-      const s = clamp01(aClamped / MAX_TARGET_AREA_PX);
-      return distThresholdFromSlider({ quantileLut: grow.quantileLut, slider01: s, gamma: 1 });
-    })();
-
-    // Panel is clamped to the right edge of the viewport (per-cell), with a little padding.
-    // Keep this in the right ballpark for positioning; it's not exact.
-    // NOTE: the header can wrap to 2 lines, so keep a slightly larger estimate.
-    const panelHeight = sliderHeight + 44 + gtSectionHeight;
-
-    const sy = seedDisplay.y * containerSize.h;
-
-    const left = Math.max(8, containerSize.w - panelWidth - 8);
-
-    let top = sy - panelHeight / 2;
-    top = Math.max(8, Math.min(containerSize.h - panelHeight - 8, top));
-
     return (
       <div
-        className="absolute z-20 rounded-lg bg-black/70 border border-white/10 shadow-xl p-0.5 flex flex-col items-stretch gap-1 pointer-events-auto"
-        style={{ left, top, width: panelWidth }}
+        className="absolute z-20 flex items-end justify-center gap-0 pointer-events-auto"
+        style={{ right: 8, top: '50%', transform: 'translateY(-50%)' }}
         data-tumor-ui="true"
       >
-        {/* Tuning sliders (left) + vertical growth slider (right) */}
-        <div className="w-full flex items-stretch justify-between gap-2">
-          <div className="flex-1 min-w-0 flex flex-col gap-1 pl-1">
-            <div className="w-full flex items-start justify-between gap-2">
-              <div className="text-[10px] text-white/60 shrink-0">Tune</div>
-              <div
-                className="text-[10px] text-white/70 tabular-nums leading-tight text-right"
-                title="capPx is the target area cap (pixels). T(cost) is the derived cost-distance threshold selecting dist≤T."
-              >
-                <div>
-                  capPx {aClamped} · areaPx {draftAreaPx ?? '—'}
-                </div>
-                <div>
-                  T(cost) {curCostThreshold != null ? curCostThreshold.toFixed(2) : '—'}
-                </div>
-              </div>
-            </div>
-
-            <label className="w-full flex items-center gap-2" title="Global base step scale (distance penalty)">
-              <span className="text-[10px] text-white/60 w-12 shrink-0">step</span>
-              <input
-                type="range"
-                min={0.25}
-                max={50}
-                step={0.05}
-                value={grow2dTuning.baseStepScale}
-                onChange={(e) =>
-                  setGrow2dTuning((t) => ({
-                    ...t,
-                    baseStepScale: parseFloat(e.target.value),
-                  }))
-                }
-                className="flex-1 min-w-0"
-              />
-              <span className="text-[10px] text-white/80 tabular-nums w-10 text-right shrink-0">
-                {grow2dTuning.baseStepScale.toFixed(2)}
-              </span>
-            </label>
-
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={() => setGrow2dTuning({ ...DEFAULT_GROW2D_TUNING })}
-                className="text-[10px] px-1 py-0.5 rounded border border-white/10 bg-black/40 text-white/70 hover:text-white"
-                title="Reset tuning sliders"
-              >
-                Reset
-              </button>
-            </div>
+        {/* tension */}
+        <div
+          className="flex flex-col items-center gap-1 select-none"
+          title="Surface tension: discourages thin peninsulas/leaks near strong edges"
+        >
+          <div className="text-[10px] text-white/90 tabular-nums whitespace-nowrap bg-black/60 border border-white/10 px-1.5 py-0.5 rounded">
+            tension {grow2dTuning.surfaceTension.toFixed(2)}
           </div>
+          <div className="relative flex items-center justify-center" style={{ width: 18, height: sliderHeight }}>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={0.05}
+              value={grow2dTuning.surfaceTension}
+              onChange={(e) =>
+                setGrow2dTuning((t) => ({
+                  ...t,
+                  surfaceTension: parseFloat(e.target.value),
+                }))
+              }
+              className="tumor-vert-slider absolute"
+              style={{
+                width: sliderHeight,
+                left: '50%',
+                top: '50%',
+                transform: 'translate(-50%, -50%) rotate(-90deg)',
+                transformOrigin: 'center',
+              }}
+              aria-label="Surface tension"
+            />
+          </div>
+        </div>
 
-          {/* Area / threshold slider */}
-          <div
-            className="relative shrink-0 flex items-center justify-center"
-            style={{ width: 18, height: sliderHeight }}
-          >
+        {/* capPx */}
+        <div className="flex flex-col items-center gap-1 select-none" title={`capPx is the target area cap (pixels).${saving ? ' saving…' : ''}`}>
+          <div className="text-[10px] text-white/90 tabular-nums whitespace-nowrap bg-black/60 border border-white/10 px-1.5 py-0.5 rounded">
+            capPx {aClamped}
+          </div>
+          <div className="relative flex items-center justify-center" style={{ width: 18, height: sliderHeight }}>
             <input
               type="range"
               min={1}
@@ -1434,72 +1242,6 @@ export function TumorSegmentationOverlay({
             />
           </div>
         </div>
-
-        {groundTruthPolygon ? (
-          <div className="w-full pt-2 mt-1 border-t border-white/10 flex flex-col gap-1">
-            <div className="w-full flex items-center justify-between">
-              <div className="text-[10px] text-white/70">GT Eval</div>
-
-              <button
-                type="button"
-                onClick={() => setDiffOverlayEnabled((v) => !v)}
-                className="p-1 rounded border border-white/10 bg-black/50 text-white/80 hover:text-white"
-                title={diffOverlayEnabled ? 'Hide diff overlay' : 'Show diff overlay'}
-              >
-                {diffOverlayEnabled ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-
-            {gtMetrics ? (
-              <div className="w-full text-[10px] text-white/80 tabular-nums">
-                <div className="flex justify-between">
-                  <span className="text-white/70">F2</span>
-                  <span>{gtMetrics.f2.toFixed(3)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-white/70">Recall</span>
-                  <span>{gtMetrics.recall.toFixed(3)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-white/70">Prec</span>
-                  <span>{gtMetrics.precision.toFixed(3)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-white/70">IoU</span>
-                  <span>{gtMetrics.iou.toFixed(3)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-white/70">Dice</span>
-                  <span>{gtMetrics.dice.toFixed(3)}</span>
-                </div>
-
-                {gtBoundaryMetrics ? (
-                  <>
-                    <div className="flex justify-between">
-                      <span className="text-white/70">Bnd μ</span>
-                      <span>{gtBoundaryMetrics.meanSymPx.toFixed(2)} px</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white/70">Bnd max</span>
-                      <span>{gtBoundaryMetrics.maxSymPx.toFixed(1)} px</span>
-                    </div>
-                  </>
-                ) : null}
-
-                <div className="flex justify-between">
-                  <span className="text-white/70">FN</span>
-                  <span className="text-red-200">{gtMetrics.fn}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-white/70">FP</span>
-                  <span className="text-fuchsia-200">{gtMetrics.fp}</span>
-                </div>
-              </div>
-            ) : (
-              <div className="text-[10px] text-white/60">Draw a seed box to evaluate vs GT.</div>
-            )}
-          </div>
-        ) : null}
       </div>
     );
   })();
@@ -1546,16 +1288,6 @@ export function TumorSegmentationOverlay({
       ) : null}
 
       {panel}
-
-      {/* GT diff overlay (FN red, FP magenta) */}
-      {groundTruthPolygon && diffOverlayEnabled ? (
-        <canvas
-          ref={diffCanvasRef}
-          className="absolute inset-0 pointer-events-none"
-          style={{ width: '100%', height: '100%', opacity: 0.75 }}
-          aria-hidden
-        />
-      ) : null}
 
       {/* Seed sampling box + markers */}
       {debugEnabled && seedBoxPath ? (

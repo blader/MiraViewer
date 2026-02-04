@@ -296,6 +296,14 @@ export type CostDistanceGrow2dTuning = {
   /** Global path-length penalty scale. */
   baseStepScale?: number;
 
+  /**
+   * Soft "surface tension" penalty strength.
+   *
+   * Implemented as an added cost for pixels with low clearance to strong edges.
+   * Higher values discourage thin peninsulas/leaks without hard gating.
+   */
+  surfaceTension?: number;
+
   /** Exponent shaping the low/mid intensity penalty ramp (lower => harsher mid). */
   preferHighExponent?: number;
   /** Multiplier for the low/mid intensity penalty (relative to edgeCostStrength). */
@@ -443,6 +451,11 @@ export async function computeCostDistanceMap(params: {
       typeof params.tuning?.baseStepScale === 'number' && Number.isFinite(params.tuning.baseStepScale)
         ? clamp(params.tuning.baseStepScale, 0.25, 50)
         : 1.65,
+
+    surfaceTension:
+      typeof params.tuning?.surfaceTension === 'number' && Number.isFinite(params.tuning.surfaceTension)
+        ? clamp(params.tuning.surfaceTension, 0, 10)
+        : 1.0,
 
     preferHighExponent:
       typeof params.tuning?.preferHighExponent === 'number' && Number.isFinite(params.tuning.preferHighExponent)
@@ -599,6 +612,119 @@ export async function computeCostDistanceMap(params: {
     const med = edgeSamples.length ? medianOfNumbers(edgeSamples) : 0;
     return Math.max(25, Math.round(med * 1.2));
   })();
+
+  // Automatic soft regularizer:
+  // Penalize pixels that lie very close to strong edges (low "edge clearance").
+  //
+  // Intuition: small protrusions/leaks often pass through narrow necks where the interior pixels are
+  // only ~1-2px away from strong edges on either side. Adding a smooth penalty there can make those
+  // peninsulas more expensive without hard-cutting anything or significantly affecting the main mass.
+  //
+  // This is *not* a hard filter: the penalty is continuous and can be overcome if the user increases
+  // the target area cap enough.
+  const edgeClearance = (() => {
+    if (!(tuning.surfaceTension > 0)) return null;
+
+    const strongGrad = (() => {
+      // Estimate a "strong edge" threshold from the gradient distribution in the ROI.
+      //
+      // A fixed absolute threshold (e.g. 140) is often too high for MRI slices after
+      // 8-bit capture+Sobel, yielding *no* strong edges and making surface tension
+      // appear to do nothing.
+      const stride = 2;
+      const hist = new Uint32Array(256);
+      let n = 0;
+
+      for (let y = roi.y0; y <= roi.y1; y += stride) {
+        const row = y * w;
+        for (let x = roi.x0; x <= roi.x1; x += stride) {
+          const g = grad[row + x] ?? 0;
+          hist[g]++;
+          n++;
+        }
+      }
+
+      if (n <= 0) return 255;
+
+      // Choose a high quantile so we mostly key off large boundaries, not texture.
+      const topFrac = 0.03;
+      const target = Math.max(1, Math.round(n * topFrac));
+
+      let cum = 0;
+      for (let g = 255; g >= 0; g--) {
+        cum += hist[g]!;
+        if (cum >= target) return g;
+      }
+
+      return 255;
+    })();
+
+    const INF = 0xffff;
+    const d = new Uint16Array(w * h);
+    d.fill(INF);
+
+    // Multi-source BFS from strong-edge pixels within the ROI.
+    const q = new Int32Array(w * h);
+    let qHead = 0;
+    let qTail = 0;
+
+    for (let y = roi.y0; y <= roi.y1; y++) {
+      for (let x = roi.x0; x <= roi.x1; x++) {
+        const i = y * w + x;
+        if ((grad[i] ?? 0) < strongGrad) continue;
+        d[i] = 0;
+        q[qTail++] = i;
+      }
+    }
+
+    if (debugEnabled) {
+      console.log('[grow2d] surface tension edges', {
+        surfaceTension: tuning.surfaceTension,
+        strongGrad,
+        strongEdgeCount: qTail,
+      });
+    }
+
+    // If we found no strong edges, leave clearance as INF everywhere.
+    if (qTail === 0) return d;
+
+    while (qHead < qTail) {
+      const i = q[qHead++]!;
+      const cur = d[i]!;
+      const next = (cur + 1) & 0xffff;
+
+      const x = i % w;
+      const y = (i - x) / w;
+
+      const tryPush = (nx: number, ny: number) => {
+        if (nx < roi.x0 || nx > roi.x1 || ny < roi.y0 || ny > roi.y1) return;
+        const ni = ny * w + nx;
+        if (d[ni]! <= next) return;
+        d[ni] = next;
+        q[qTail++] = ni;
+      };
+
+      tryPush(x - 1, y);
+      tryPush(x + 1, y);
+      tryPush(x, y - 1);
+      tryPush(x, y + 1);
+    }
+
+    return d;
+  })();
+
+  const surfaceTensionPenaltyAtIdx = (i: number): number => {
+    const s = tuning.surfaceTension;
+    if (!(s > 0) || !edgeClearance) return 0;
+
+    const sigmaPx = 1.25;
+
+    const c = edgeClearance[i] ?? 0xffff;
+    if (c === 0xffff) return 0;
+
+    // Smooth decay with distance from strong edges.
+    return s * Math.exp(-c / sigmaPx);
+  };
 
   const seedCount = clampInt(params.seedCount ?? 1, 1, 64);
 
@@ -946,7 +1072,12 @@ export async function computeCostDistanceMap(params: {
       if (nx < x0 || nx > x1 || ny < y0 || ny > y1) continue;
       const ni = ny * w + nx;
 
-      const nd = d0 + tuning.baseStepScale * o.len + stepCost(idx, ni) + radialPenaltyAt(nx, ny);
+      const nd =
+        d0 +
+        tuning.baseStepScale * o.len +
+        stepCost(idx, ni) +
+        radialPenaltyAt(nx, ny) +
+        surfaceTensionPenaltyAtIdx(ni);
 
       // IMPORTANT: dist is Float32. Compare the Float32-rounded candidate distance to avoid
       // pathological "phantom improvements" where nd < dist[ni] in double precision but
