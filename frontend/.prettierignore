@@ -1,0 +1,6 @@
+dist
+release
+node_modules
+tmp
+.logs
+*.log

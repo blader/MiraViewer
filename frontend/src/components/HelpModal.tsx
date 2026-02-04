@@ -41,7 +41,10 @@ export function HelpModal({ onClose }: HelpModalProps) {
             <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">Viewing</h3>
             <ul className="space-y-2">
               <li>
-                <Kbd>Scroll</Kbd> anywhere in the center pane to navigate slices.
+                <Kbd>Scroll</Kbd> over an image to zoom.
+              </li>
+              <li>
+                <Kbd>Scroll</Kbd> elsewhere in the center pane to navigate slices.
               </li>
               <li>
                 <Kbd>Click</Kbd> on an image to center that point.
@@ -80,11 +83,13 @@ export function HelpModal({ onClose }: HelpModalProps) {
             </h3>
             <ul className="space-y-2">
               <li>
-                <Label>Drag a rectangle</Label> on any image (Grid or Overlay) to define an exclusion region, then click
-                the <Label>Align All</Label> button that appears.
+                <Label>Drag a rectangle</Label> on any image (Grid or Overlay), then choose an action:
+                <Label>Align All</Label> (use the rectangle as an exclusion region) or <Label>Segment</Label> (start a
+                tumor segmentation from that rectangle).
               </li>
               <li>
-                The exclusion region tells the algorithm to ignore that area (e.g. a tumor) when matching slices.
+                For alignment, the exclusion region tells the algorithm to ignore that area (e.g. a tumor) when matching
+                slices.
               </li>
               <li>
                 Press <Kbd>Esc</Kbd> or the <Label>X</Label> button to clear the selection.

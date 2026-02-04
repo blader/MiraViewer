@@ -125,6 +125,11 @@ export interface AlignmentProgress {
   dateIndex: number;
   totalDates: number;
   slicesChecked: number;
-  /** Mutual information (natural log) from the coarse slice search. Higher is better. */
+  /**
+   * Slice-search score. Higher is better.
+   *
+   * This value corresponds to whatever metric is being used for slice search (e.g. SSIM or
+   * LNCC). It is not necessarily MI/NMI.
+   */
   bestMiSoFar: number;
 }

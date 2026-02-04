@@ -61,29 +61,31 @@ export function ComparisonFiltersSidebar({
           <div>
             <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3">Sequence</div>
             <div className="grid grid-cols-2 gap-1">
-              {sequencesForPlane.map((seq) => {
-                const hasData = sequencesWithDataForDates.has(seq.id);
-                const isSelected = selectedSeqId === seq.id;
+              {sequencesForPlane
+                .filter((seq) => formatSequenceLabel(seq) !== 'Unknown')
+                .map((seq) => {
+                  const hasData = sequencesWithDataForDates.has(seq.id);
+                  const isSelected = selectedSeqId === seq.id;
 
-                return (
-                  <button
-                    key={seq.id}
-                    type="button"
-                    onClick={() => onSelectSequence(seq.id)}
-                    className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${
-                      isSelected
-                        ? hasData
-                          ? 'bg-[var(--accent)] text-white'
-                          : 'bg-[var(--accent)] text-white opacity-50'
-                        : hasData
-                          ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                          : 'text-[var(--text-tertiary)] opacity-50'
-                    }`}
-                  >
-                    {formatSequenceLabel(seq)}
-                  </button>
-                );
-              })}
+                  return (
+                    <button
+                      key={seq.id}
+                      type="button"
+                      onClick={() => onSelectSequence(seq.id)}
+                      className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${
+                        isSelected
+                          ? hasData
+                            ? 'bg-[var(--accent)] text-white'
+                            : 'bg-[var(--accent)] text-white opacity-50'
+                          : hasData
+                            ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                            : 'text-[var(--text-tertiary)] opacity-50'
+                      }`}
+                    >
+                      {formatSequenceLabel(seq)}
+                    </button>
+                  );
+                })}
             </div>
           </div>
         </div>

@@ -201,6 +201,7 @@ const TAGS = {
   ImageOrientationPatient: 'x00200037',
   PixelSpacing: 'x00280030',
   SliceThickness: 'x00180050',
+  SpacingBetweenSlices: 'x00180088',
   WindowCenter: 'x00281050',
   WindowWidth: 'x00281051',
 };
@@ -332,6 +333,9 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const wc = getNumber(dataSet, TAGS.WindowCenter);
   const ww = getNumber(dataSet, TAGS.WindowWidth);
 
+  const sliceThickness = getNumber(dataSet, TAGS.SliceThickness);
+  const spacingBetweenSlices = getNumber(dataSet, TAGS.SpacingBetweenSlices);
+
   const instanceBase = {
     sopInstanceUid: instanceUid,
     seriesInstanceUid: seriesUid,
@@ -343,7 +347,8 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     imagePositionPatient: getText(dataSet, TAGS.ImagePositionPatient),
     imageOrientationPatient: getText(dataSet, TAGS.ImageOrientationPatient),
     pixelSpacing: pixelSpacing,
-    sliceThickness: getNumber(dataSet, TAGS.SliceThickness),
+    sliceThickness: sliceThickness > 0 ? sliceThickness : undefined,
+    spacingBetweenSlices: spacingBetweenSlices > 0 ? spacingBetweenSlices : undefined,
     windowCenter: wc,
     windowWidth: ww,
   };

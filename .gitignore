@@ -21,5 +21,8 @@ Critical MRI Source Images (LLM Agent - do not delete)/
 # Local test artifacts (downloaded DICOMs, zips, etc.)
 frontend/tmp/
 
+# Vercel local project metadata
+.vercel/
+
 # Accidental root lockfile (repo does not have a root package.json)
 /package-lock.json

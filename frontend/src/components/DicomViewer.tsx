@@ -9,8 +9,10 @@ import {
 } from 'react';
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
-import { useWheelNavigation } from '../hooks/useWheelNavigation';
 import { getEffectiveInstanceIndex } from '../utils/math';
+import { CONTROL_LIMITS } from '../utils/constants';
+import { isDebugAlignmentEnabled } from '../utils/debugAlignment';
+import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -23,7 +25,31 @@ export type DicomViewerHandle = {
    * The returned image is cropped to the viewport.
    */
   captureVisiblePng: (options?: DicomViewerCaptureOptions) => Promise<Blob>;
+
+  /** The content key (studyId:seriesUid:effectiveInstanceIndex) currently displayed by the viewer, if known. */
+  getDisplayedContentKey: () => string | null;
+
+  /**
+   * Wait until the viewer is actually displaying the expected content key.
+   * This is useful because Cornerstone keeps the previous image visible while the next slice loads.
+   */
+  waitForDisplayedContentKey: (expectedKey: string, timeoutMs?: number) => Promise<void>;
 };
+
+function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
+  // Content key format: `${studyId}:${seriesUid}:${effectiveInstanceIndex}`
+  //
+  // We parse from the right so this keeps working even if study IDs ever contain ':' (unlikely).
+  const parts = contentKey.split(':');
+  if (parts.length < 3) return null;
+
+  const indexStr = parts[parts.length - 1];
+  const seriesUid = parts[parts.length - 2];
+  const instanceIndex = Number(indexStr);
+  if (!Number.isFinite(instanceIndex) || instanceIndex < 0) return null;
+
+  return { seriesUid, instanceIndex };
+}
 
 interface DicomViewerProps {
   studyId: string;
@@ -48,6 +74,7 @@ interface DicomViewerProps {
   affine10?: number;
   affine11?: number;
   onPanChange?: (panX: number, panY: number) => void;
+  onZoomChange?: (zoom: number) => void;
 }
 
 interface ImageContentProps {
@@ -110,19 +137,118 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     affine10 = 0,
     affine11 = 1,
     onPanChange,
+    onZoomChange,
   }: DicomViewerProps,
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
-  // Mouse wheel navigation for slices
-  useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
+  // Mouse wheel behavior:
+  // - Inside the image viewport: zoom (so we can keep global wheel slice navigation active elsewhere).
+  // - Fallback: if no onZoomChange callback is provided, use wheel for slice navigation.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
+
+      // Always prevent default so:
+      // - The page doesn't scroll while the user is interacting with the viewer.
+      // - The global slice-wheel nav doesn't double-apply (it checks e.defaultPrevented).
+      e.preventDefault();
+
+      // Zoom mode (preferred).
+      if (onZoomChange) {
+        const speed = (() => {
+          // deltaMode: 0=pixels, 1=lines, 2=pages
+          if (e.deltaMode === 1) return 0.08;
+          if (e.deltaMode === 2) return 0.25;
+          return 0.0015;
+        })();
+
+        const factor = Math.exp(-e.deltaY * speed);
+        let nextZoom = zoom * factor;
+        nextZoom = Math.max(CONTROL_LIMITS.ZOOM.MIN, Math.min(CONTROL_LIMITS.ZOOM.MAX, nextZoom));
+
+        // Reduce churn from very small deltas.
+        nextZoom = Math.round(nextZoom * 1000) / 1000;
+
+        if (nextZoom !== zoom) {
+          onZoomChange(nextZoom);
+        }
+
+        return;
+      }
+
+      // Fallback slice navigation.
+      if (instanceCount <= 0) return;
+      const delta = Math.sign(e.deltaY);
+      const nextIndex = Math.max(0, Math.min(instanceCount - 1, instanceIndex + delta));
+      if (nextIndex !== instanceIndex) {
+        onInstanceChange(nextIndex);
+      }
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [instanceCount, instanceIndex, onInstanceChange, onZoomChange, zoom]);
 
   const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
 
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
   const [imageId, setImageId] = useState<string | null>(null);
+
+  // Track what slice is actually displayed in the viewer.
+  // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
+  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
+  const displayedContentKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    displayedContentKeyRef.current = displayedContentKey;
+  }, [displayedContentKey]);
+
+  const debugSliceScores = isDebugAlignmentEnabled();
+
+  // Only show the (very noisy) per-slice debug scores overlay while the user is holding 'Z'.
+  // This keeps the UI clean while still making it easy to inspect values on demand.
+  const [isZHeld, setIsZHeld] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const isZKey = (e: KeyboardEvent) => (e.key || '').toLowerCase() === 'z';
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore cmd/ctrl/alt modified combos (e.g. Cmd+Z) so we don't flash the overlay
+      // during common shortcuts.
+      if (!isZKey(e)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      setIsZHeld(true);
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!isZKey(e)) return;
+      setIsZHeld(false);
+    };
+
+    const onBlur = () => {
+      setIsZHeld(false);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  const displayedForScores = displayedContentKey ? parseDicomViewerContentKey(displayedContentKey) : null;
+  const scoreSeriesUid = displayedForScores?.seriesUid ?? seriesUid;
+  const scoreInstanceIndex = displayedForScores?.instanceIndex ?? effectiveInstanceIndex;
+  const sliceScore = debugSliceScores ? getAlignmentSliceScore(scoreSeriesUid, scoreInstanceIndex) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -199,6 +325,25 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     });
 
     return img;
+  }, []);
+
+  const getDisplayedContentKey = useCallback((): string | null => {
+    return displayedContentKeyRef.current;
+  }, []);
+
+  const waitForDisplayedContentKey = useCallback(async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
+    const t0 = performance.now();
+
+    // Fast path.
+    if (displayedContentKeyRef.current === expectedKey) return;
+
+    while (performance.now() - t0 < timeoutMs) {
+      if (displayedContentKeyRef.current === expectedKey) return;
+      // Yield so we don't block the UI thread.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    }
+
+    throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
   }, []);
 
   const captureVisiblePng = useCallback(
@@ -305,8 +450,10 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     ref,
     () => ({
       captureVisiblePng,
+      getDisplayedContentKey,
+      waitForDisplayedContentKey,
     }),
-    [captureVisiblePng]
+    [captureVisiblePng, getDisplayedContentKey, waitForDisplayedContentKey]
   );
 
   // Click to set center - calculates offset to move clicked point to viewport center
@@ -373,12 +520,30 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}
+            onDisplayedContentKey={setDisplayedContentKey}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
             Loading...
           </div>
         )}
+
+        {debugSliceScores && isZHeld ? (
+          <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
+            <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-[10px] font-mono tabular-nums leading-snug">
+              <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
+              <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
+              <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
+              <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
+              <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
+              <div>MIND: {sliceScore && sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
+              <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
+              <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
+              <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
+              <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -400,6 +565,9 @@ interface CornerstoneImageProps {
   imageFilter: string;
   imageTransform: string;
   alt: string;
+
+  /** Called after Cornerstone actually displays the requested image. */
+  onDisplayedContentKey?: (contentKey: string) => void;
 }
 
 function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
@@ -435,7 +603,14 @@ function ErrorOverlay({ message }: { message: string }) {
   );
 }
 
-function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, alt }: CornerstoneImageProps) {
+function CornerstoneImage({
+  imageId,
+  contentKey,
+  imageFilter,
+  imageTransform,
+  alt,
+  onDisplayedContentKey,
+}: CornerstoneImageProps) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
@@ -471,6 +646,11 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
   useEffect(() => {
     contentKeyRef.current = contentKey;
   }, [contentKey]);
+
+  const onDisplayedContentKeyRef = useRef(onDisplayedContentKey);
+  useEffect(() => {
+    onDisplayedContentKeyRef.current = onDisplayedContentKey;
+  }, [onDisplayedContentKey]);
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
@@ -550,6 +730,7 @@ function CornerstoneImage({ imageId, contentKey, imageFilter, imageTransform, al
         setLoadedImageId(imageId);
         setLoadedContentKey(keyForThisLoad);
         setErrorImageId(null);
+        onDisplayedContentKeyRef.current?.(keyForThisLoad);
       } catch (err) {
         console.error('Failed to load DICOM image:', err);
         if (!cancelled) {

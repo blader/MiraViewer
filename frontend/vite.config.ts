@@ -20,6 +20,12 @@ export default defineConfig(() => {
             src: 'node_modules/@itk-wasm/elastix/dist/pipelines/*.{js,wasm,wasm.zst}',
             dest: 'pipelines/',
           },
+          // onnxruntime-web dynamically loads helper .mjs modules + .wasm binaries at runtime.
+          // We vendor these into the output so segmentation can run fully offline.
+          {
+            src: 'node_modules/onnxruntime-web/dist/ort*.{mjs,wasm}',
+            dest: 'onnxruntime/',
+          },
         ],
       })
     );
@@ -40,7 +46,7 @@ export default defineConfig(() => {
     // Avoid pre-bundling ITK-Wasm packages. These rely on lazy-loaded web workers
     // and Emscripten modules that can break when optimized.
     optimizeDeps: {
-      exclude: ['itk-wasm', '@itk-wasm/elastix', '@thewtex/zstddec'],
+      exclude: ['itk-wasm', '@itk-wasm/elastix', '@thewtex/zstddec', 'onnxruntime-web'],
     },
     // Expose only Vite-prefixed env vars to the client.
     envPrefix: ['VITE_'],
