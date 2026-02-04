@@ -1,14 +1,16 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
-import { buildNifti1Uint8 } from '../utils/segmentation/nifti1';
 import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
-import { computeSeedRange01, regionGrow3D, type Vec3i } from '../utils/segmentation/regionGrow3D';
+import { computeSeedRange01, type RegionGrow3DRoi, type Vec3i } from '../utils/segmentation/regionGrow3D';
+import { regionGrow3D_v2 } from '../utils/segmentation/regionGrow3D_v2';
+import { computeRoiCubeBoundsFromSliceDrag } from '../utils/segmentation/roiCube3d';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 import { formatMiB } from '../utils/svr/svrUtils';
 import {
@@ -25,6 +27,7 @@ import {
 function clamp(x: number, min: number, max: number): number {
   return x < min ? min : x > max ? max : x;
 }
+
 
 /**
  * Camera model constants used by both:
@@ -493,6 +496,13 @@ type RenderBuildState = {
 export type SvrVolume3DViewerProps = {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
+  /**
+   * Optional portal target used to render the Slice Inspector outside of the viewer layout
+   * (e.g. inside the SVR generation panel).
+   *
+   * If this prop is provided (even as null), the viewer will NOT render the Slice Inspector inline.
+   */
+  sliceInspectorPortalTarget?: Element | null;
 };
 
 export type SvrVolume3DViewerHandle = {
@@ -503,7 +513,7 @@ export type SvrVolume3DViewerHandle = {
 };
 
 export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3DViewerProps>(function SvrVolume3DViewer(
-  { volume, labels: labelsOverride },
+  { volume, labels: labelsOverride, sliceInspectorPortalTarget },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -563,13 +573,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     sessionReady: false,
   }));
 
-  // Phase 4a: Auto-run + best-effort cancellation.
+  // Phase 4a: Best-effort cancellation.
   // NOTE: We can't reliably abort ORT execution mid-run in the browser; cancellation just ignores late results.
   const onnxSegRunIdRef = useRef(0);
   const [onnxSegRunning, setOnnxSegRunning] = useState(false);
-  const [autoRunOnnx, setAutoRunOnnx] = useState(false);
   const [allowUnsafeOnnxFullRes, setAllowUnsafeOnnxFullRes] = useState(false);
-  const onnxAutoRunAttemptedForVolumeRef = useRef<Float32Array | null>(null);
 
   const refreshOnnxCacheStatus = useCallback(() => {
     void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
@@ -588,8 +596,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
+  // Radial threshold is applied as a center->edge ramp in the shader.
+  // Keep the UI range small so the slider isn't overly sensitive.
   const [threshold, setThreshold] = useState(0.05);
-  const [steps, setSteps] = useState(160);
+  const THRESHOLD_EDGE_MAX = 0.12;
+  // Always use max raymarch samples for quality; no UI control.
+  const steps = 256;
   const [gamma, setGamma] = useState(1.0);
   const [opacity, setOpacity] = useState(4.0);
   const [zoom, setZoom] = useState(1.0);
@@ -600,8 +612,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [renderTextureMode, setRenderTextureMode] = useState<RenderTextureMode>(DEFAULT_RENDER_TEXTURE_MODE);
 
   // Optional segmentation overlay (label volume).
-  const [labelsEnabled, setLabelsEnabled] = useState(true);
-  const [labelMix, setLabelMix] = useState(0.65);
+  // No UI controls: labels are always shown when available.
+  const labelsEnabled = true;
+  const labelMix = 0.65;
 
   const [segmentationCollapsed, setSegmentationCollapsed] = useState(false);
 
@@ -609,33 +622,74 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [seedVoxel, setSeedVoxel] = useState<Vec3i | null>(null);
   const [growTargetLabel, setGrowTargetLabel] = useState<BratsBaseLabelId>(BRATS_LABEL_ID.ENHANCING);
   const [growTolerance, setGrowTolerance] = useState(0.12);
+  const [growAuto, setGrowAuto] = useState(true);
+
+  // ROI guidance: draw a box on the slice inspector to reduce leakage.
+  // NOTE: the 2D rectangle is interpreted as an axis-aligned *3D* cube-like ROI whose depth is
+  // chosen to be roughly isotropic in mm (and centered on the current inspector slice).
+  // The ROI acts as a smooth radial prior about its centroid (not a hard clamp).
+  const [growRoiOutsideScale, setGrowRoiOutsideScale] = useState(0.6);
+  const [growRoiBounds, setGrowRoiBounds] = useState<{ min: Vec3i; max: Vec3i } | null>(null);
+  const [growRoiDraftBounds, setGrowRoiDraftBounds] = useState<{ min: Vec3i; max: Vec3i } | null>(null);
+
   const [growStatus, setGrowStatus] = useState<{ running: boolean; message?: string; error?: string }>(() => ({
     running: false,
   }));
   const growAbortRef = useRef<AbortController | null>(null);
+  const growRunIdRef = useRef(0);
+  const growAutoTimerRef = useRef<number | null>(null);
 
-  // Phase 4b: manual refinement brush.
-  const [segTool, setSegTool] = useState<'seed' | 'brush'>('seed');
-  const [brushLabel, setBrushLabel] = useState<number>(BRATS_LABEL_ID.ENHANCING);
-  const [brushRadiusVox, setBrushRadiusVox] = useState(2);
-  const [labelsEditTick, setLabelsEditTick] = useState(0);
-  const brushDragRef = useRef<{ pointerId: number; last: Vec3i | null; data: Uint8Array } | null>(null);
+  // For live-updating tolerance we need to *replace* the previous preview rather than accumulate.
+  // We store sparse previous label values so we can revert without copying the entire label volume.
+  const growOverlayRef = useRef<
+    | {
+        key: string;
+        seedKey: string;
+        workLabels: Uint8Array;
+        prevIndices: Uint32Array | null;
+        prevValues: Uint8Array | null;
+      }
+    | null
+  >(null);
 
-  // When the underlying volume changes, drop any internally-generated labels and seed.
+  const sliceInspectorDragRef = useRef<
+    | {
+        pointerId: number;
+        startClientX: number;
+        startClientY: number;
+        startVoxel: Vec3i;
+        lastVoxel: Vec3i;
+        draggingRoi: boolean;
+      }
+    | null
+  >(null);
+
+  // When the underlying volume changes, drop any internally-generated labels, seeds, and ROI state.
   useEffect(() => {
     setGeneratedLabels(null);
     setSeedVoxel(null);
+    setGrowAuto(true);
+    setGrowRoiOutsideScale(0.6);
+    setGrowRoiBounds(null);
+    setGrowRoiDraftBounds(null);
+
+    // Clear any pending/active grow.
     setGrowStatus({ running: false });
     growAbortRef.current?.abort();
     growAbortRef.current = null;
+    growRunIdRef.current++;
 
-    brushDragRef.current = null;
-    setLabelsEditTick(0);
+    if (growAutoTimerRef.current !== null) {
+      window.clearTimeout(growAutoTimerRef.current);
+      growAutoTimerRef.current = null;
+    }
+
+    growOverlayRef.current = null;
+    sliceInspectorDragRef.current = null;
 
     // Cancel any in-flight ONNX segmentation (best-effort).
     onnxSegRunIdRef.current++;
     setOnnxSegRunning(false);
-    onnxAutoRunAttemptedForVolumeRef.current = null;
     setAllowUnsafeOnnxFullRes(false);
     setOnnxStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
@@ -789,34 +843,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setZoom(1.0);
   }, []);
 
-  const downloadLabelsNifti = useCallback(() => {
-    if (!volume) return;
-    if (!labels) return;
-    if (!hasLabels) return;
-
-    const buf = buildNifti1Uint8({
-      data: labels.data,
-      dims: volume.dims,
-      voxelSizeMm: volume.voxelSizeMm,
-      description: 'MiraViewer SVR labels (uint8)',
-      units: { spatial: 'mm' },
-    });
-
-    const blob = new Blob([buf], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    try {
-      const date = new Date().toISOString().slice(0, 10);
-      const [nx, ny, nz] = volume.dims;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `svr_labels_${nx}x${ny}x${nz}_${date}.nii`;
-      a.rel = 'noopener';
-      a.click();
-    } finally {
-      URL.revokeObjectURL(url);
-    }
-  }, [hasLabels, labels, volume]);
-
   useImperativeHandle(
     ref,
     () => ({
@@ -844,7 +870,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       applyHarnessPreset: () => {
         // Stable defaults for harness screenshots.
         setThreshold(0.05);
-        setSteps(160);
         setGamma(1.0);
         setOpacity(4.0);
 
@@ -1017,298 +1042,343 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume],
   );
 
-  const paintBrushAtVoxel = useCallback(
-    (labelData: Uint8Array, voxel: Vec3i) => {
+  const computeRoiBoundsFromSliceVoxels = useCallback(
+    (a: Vec3i, b: Vec3i): { min: Vec3i; max: Vec3i } | null => {
+      if (!volume) return null;
+
+      // Convert the 2D drag rectangle into a bounded 3D "cube" centered on the current inspector slice.
+      // This keeps the ROI as a meaningful spatial prior (instead of spanning the full depth).
+      const axisIndex = Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex));
+
+      return computeRoiCubeBoundsFromSliceDrag({
+        plane: inspectPlane,
+        dims: volume.dims,
+        voxelSizeMm: volume.voxelSizeMm,
+        sliceIndex: axisIndex,
+        a,
+        b,
+        depthScale: 1,
+      });
+    },
+    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, volume],
+  );
+
+  type StartSeedGrowParams = {
+    seed?: Vec3i;
+    tolerance?: number;
+    targetLabel?: BratsBaseLabelId;
+    roiBounds?: { min: Vec3i; max: Vec3i } | null;
+    roiOutsideScale?: number;
+    auto?: boolean;
+  };
+
+  const cancelSeedGrow = useCallback((message?: string) => {
+    growRunIdRef.current++;
+    growAbortRef.current?.abort();
+    growAbortRef.current = null;
+
+    if (growAutoTimerRef.current !== null) {
+      window.clearTimeout(growAutoTimerRef.current);
+      growAutoTimerRef.current = null;
+    }
+
+    setGrowStatus({ running: false, message: message ?? 'Cancelled' });
+  }, []);
+
+  const startSeedGrow = useCallback(
+    (params?: StartSeedGrowParams) => {
       if (!volume) return;
+      if (onnxSegRunning) return;
 
-      const [nx, ny, nz] = volume.dims;
-      const strideY = nx;
-      const strideZ = nx * ny;
+      const roiBounds = params && 'roiBounds' in params ? (params.roiBounds ?? null) : growRoiBounds;
+      if (!roiBounds) {
+        setGrowStatus({ running: false, error: 'Draw an ROI box in the slice inspector first.' });
+        return;
+      }
 
-      const r = Math.max(0, Math.round(brushRadiusVox));
-      const r2 = r * r;
-      const labelId = (brushLabel & 0xff) >>> 0;
-
-      const set = (x: number, y: number, z: number) => {
-        if (x < 0 || x >= nx) return;
-        if (y < 0 || y >= ny) return;
-        if (z < 0 || z >= nz) return;
-        labelData[z * strideZ + y * strideY + x] = labelId;
+      // Use a single seed at the ROI center.
+      const seed: Vec3i = {
+        x: Math.floor((roiBounds.min.x + roiBounds.max.x) * 0.5),
+        y: Math.floor((roiBounds.min.y + roiBounds.max.y) * 0.5),
+        z: Math.floor((roiBounds.min.z + roiBounds.max.z) * 0.5),
       };
 
-      if (inspectPlane === 'axial') {
-        const z = voxel.z;
-        for (let dy = -r; dy <= r; dy++) {
-          const y = voxel.y + dy;
-          const dy2 = dy * dy;
-          for (let dx = -r; dx <= r; dx++) {
-            if (dx * dx + dy2 > r2) continue;
-            set(voxel.x + dx, y, z);
+      const tolerance = params?.tolerance ?? growTolerance;
+      const targetLabel = params?.targetLabel ?? growTargetLabel;
+
+      const roiOutsideScale = params?.roiOutsideScale ?? growRoiOutsideScale;
+
+      const isAuto = params?.auto ?? false;
+
+      if (growAutoTimerRef.current !== null) {
+        window.clearTimeout(growAutoTimerRef.current);
+        growAutoTimerRef.current = null;
+      }
+
+      growAbortRef.current?.abort();
+
+      const controller = new AbortController();
+      growAbortRef.current = controller;
+
+      const runId = ++growRunIdRef.current;
+
+      setGrowStatus({ running: true, message: isAuto ? 'Previewing…' : 'Growing…' });
+
+      const [nx, ny, nz] = volume.dims;
+      const strideZ = nx * ny;
+      const seedIdx = seed.z * strideZ + seed.y * nx + seed.x;
+      const seedValue = volume.data[seedIdx] ?? 0;
+
+      const { min, max } = computeSeedRange01({ seedValue, tolerance });
+
+      const maxVoxels = (() => {
+        const rx = Math.abs(roiBounds.max.x - roiBounds.min.x) + 1;
+        const ry = Math.abs(roiBounds.max.y - roiBounds.min.y) + 1;
+        const rz = Math.abs(roiBounds.max.z - roiBounds.min.z) + 1;
+        const roiVoxels = rx * ry * rz;
+
+        // Prefer sizing relative to the ROI so we don't allocate enormous output buffers.
+        // Allow some slack for guide-mode margin expansion.
+        return Math.min(volume.data.length, Math.min(Math.max(roiVoxels * 4, 50_000), 2_000_000));
+      })();
+
+      const roi: RegionGrow3DRoi = {
+        mode: 'guide',
+        min: roiBounds.min,
+        max: roiBounds.max,
+        outsideToleranceScale: roiOutsideScale,
+      };
+
+      const volumeKey = `${nx}x${ny}x${nz}`;
+      const seedKey = `${seed.x},${seed.y},${seed.z}:${targetLabel}`;
+
+      // Keep one working label buffer per volume. When the seed/target changes, we "commit" the
+      // previous preview by dropping its bookkeeping (prevIndices/prevValues).
+      let overlay = growOverlayRef.current;
+      if (!overlay || overlay.key !== volumeKey) {
+        const workLabels = hasLabels && labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
+        overlay = { key: volumeKey, seedKey, workLabels, prevIndices: null, prevValues: null };
+        growOverlayRef.current = overlay;
+      } else if (overlay.seedKey !== seedKey) {
+        overlay.seedKey = seedKey;
+        overlay.prevIndices = null;
+        overlay.prevValues = null;
+      }
+
+      const yieldEvery = isAuto ? 60_000 : 160_000;
+
+      const debugGrow3d =
+        typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow3d') === '1';
+
+      const growPromise = regionGrow3D_v2({
+        volume: volume.data,
+        dims: volume.dims,
+        seed,
+        min,
+        max,
+        roi,
+        opts: {
+          signal: controller.signal,
+          maxVoxels,
+          connectivity: 6,
+          yieldEvery,
+          debug: debugGrow3d,
+          onProgress: (p) => {
+            const prefix = isAuto ? 'Previewing…' : 'Growing…';
+            setGrowStatus((s) => (s.running ? { ...s, message: `${prefix} ${p.queued.toLocaleString()} voxels` } : s));
+          },
+        },
+      });
+
+      void growPromise
+        .then((res) => {
+          if (controller.signal.aborted) return;
+          if (growRunIdRef.current !== runId) return;
+
+          const o = growOverlayRef.current;
+          if (!o || o.key !== volumeKey || o.seedKey !== seedKey) return;
+
+          // Restore the previous preview region (sparse).
+          if (o.prevIndices && o.prevValues && o.prevValues.length === o.prevIndices.length) {
+            const prev = o.prevIndices;
+            const vals = o.prevValues;
+            for (let i = 0; i < prev.length; i++) {
+              o.workLabels[prev[i]!] = vals[i] ?? 0;
+            }
           }
-        }
-        return;
-      }
 
-      if (inspectPlane === 'coronal') {
-        const y = voxel.y;
-        for (let dz = -r; dz <= r; dz++) {
-          const z = voxel.z + dz;
-          const dz2 = dz * dz;
-          for (let dx = -r; dx <= r; dx++) {
-            if (dx * dx + dz2 > r2) continue;
-            set(voxel.x + dx, y, z);
+          // Apply the new preview, capturing previous values so we can restore on the next update.
+          const idx = res.indices;
+          const nextPrevValues = new Uint8Array(idx.length);
+          for (let i = 0; i < idx.length; i++) {
+            const vi = idx[i]!;
+            nextPrevValues[i] = o.workLabels[vi] ?? 0;
+            o.workLabels[vi] = targetLabel;
           }
-        }
-        return;
-      }
+          o.prevIndices = idx;
+          o.prevValues = nextPrevValues;
 
-      // sagittal
-      const x = voxel.x;
-      for (let dz = -r; dz <= r; dz++) {
-        const z = voxel.z + dz;
-        const dz2 = dz * dz;
-        for (let dy = -r; dy <= r; dy++) {
-          if (dy * dy + dz2 > r2) continue;
-          set(x, voxel.y + dy, z);
-        }
-      }
-    },
-    [brushLabel, brushRadiusVox, inspectPlane, volume],
-  );
+          setGeneratedLabels({ data: o.workLabels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
 
-  const paintBrushStroke = useCallback(
-    (labelData: Uint8Array, from: Vec3i | null, to: Vec3i) => {
-      if (!from) {
-        paintBrushAtVoxel(labelData, to);
-        return;
-      }
-
-      // Interpolate in the 2D slice plane so fast drags don't leave gaps.
-      let a0 = 0;
-      let b0 = 0;
-      let a1 = 0;
-      let b1 = 0;
-      let fixed = 0;
-
-      if (inspectPlane === 'axial') {
-        a0 = from.x;
-        b0 = from.y;
-        a1 = to.x;
-        b1 = to.y;
-        fixed = to.z;
-      } else if (inspectPlane === 'coronal') {
-        a0 = from.x;
-        b0 = from.z;
-        a1 = to.x;
-        b1 = to.z;
-        fixed = to.y;
-      } else {
-        // sagittal
-        a0 = from.y;
-        b0 = from.z;
-        a1 = to.y;
-        b1 = to.z;
-        fixed = to.x;
-      }
-
-      const da = a1 - a0;
-      const db = b1 - b0;
-      const steps = Math.max(Math.abs(da), Math.abs(db));
-
-      if (steps <= 1) {
-        paintBrushAtVoxel(labelData, to);
-        return;
-      }
-
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const aa = Math.round(a0 + da * t);
-        const bb = Math.round(b0 + db * t);
-
-        const v: Vec3i =
-          inspectPlane === 'axial'
-            ? { x: aa, y: bb, z: fixed }
-            : inspectPlane === 'coronal'
-              ? { x: aa, y: fixed, z: bb }
-              : { x: fixed, y: aa, z: bb };
-
-        paintBrushAtVoxel(labelData, v);
-      }
-    },
-    [inspectPlane, paintBrushAtVoxel],
-  );
-
-  const onSliceInspectorPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!volume) return;
-
-      const voxel = inspectorPointerToVoxel(e);
-      if (!voxel) return;
-
-      if (segTool === 'brush') {
-        if (growStatus.running) return;
-        if (onnxSegRunning) return;
-
-        // Ensure we have a mutable label volume to edit.
-        let editable: SvrLabelVolume;
-        if (generatedLabels) {
-          editable = generatedLabels;
-        } else if (labelsOverride) {
-          editable = {
-            data: new Uint8Array(labelsOverride.data),
-            dims: labelsOverride.dims,
-            meta: labelsOverride.meta,
-          };
-          setGeneratedLabels(editable);
-        } else {
-          editable = { data: new Uint8Array(volume.data.length), dims: volume.dims, meta: BRATS_BASE_LABEL_META };
-          setGeneratedLabels(editable);
-        }
-
-        setLabelsEnabled(true);
-
-        brushDragRef.current = { pointerId: e.pointerId, last: voxel, data: editable.data };
-        e.currentTarget.setPointerCapture(e.pointerId);
-
-        paintBrushStroke(editable.data, null, voxel);
-        setLabelsEditTick((t) => t + 1);
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
-      // Seed tool: click to set the seed voxel.
-      setSeedVoxel(voxel);
-
-      e.preventDefault();
-      e.stopPropagation();
+          setGrowStatus({
+            running: false,
+            message: `Seed ${seedValue.toFixed(3)} ±${tolerance.toFixed(3)} → ${res.count.toLocaleString()} voxels${
+              res.hitMaxVoxels ? ' (hit limit)' : ''
+            } · ROI decay`,
+          });
+        })
+        .catch((e) => {
+          if (controller.signal.aborted) return;
+          if (growRunIdRef.current !== runId) return;
+          const msg = e instanceof Error ? e.message : String(e);
+          setGrowStatus({ running: false, error: msg });
+        })
+        .finally(() => {
+          if (growAbortRef.current === controller) {
+            growAbortRef.current = null;
+          }
+        });
     },
     [
-      generatedLabels,
-      growStatus.running,
-      inspectorPointerToVoxel,
-      labelsOverride,
+      growRoiBounds,
+      growRoiOutsideScale,
+      growTargetLabel,
+      growTolerance,
+      hasLabels,
+      labels,
       onnxSegRunning,
-      paintBrushStroke,
-      segTool,
       volume,
     ],
   );
 
-  const onSliceInspectorPointerMove = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
-      const st = brushDragRef.current;
-      if (!st || st.pointerId !== e.pointerId) return;
+  const scheduleSeedGrow = useCallback(
+    (params?: Omit<StartSeedGrowParams, 'auto'>) => {
+      if (!growAuto) return;
       if (!volume) return;
-      if (segTool !== 'brush') return;
+      if (onnxSegRunning) return;
+
+      const roiBounds = params && 'roiBounds' in params ? (params.roiBounds ?? null) : growRoiBounds;
+      if (!roiBounds) return;
+
+      // Stop any in-flight grow quickly so slider changes feel responsive.
+      growAbortRef.current?.abort();
+
+      if (growAutoTimerRef.current !== null) {
+        window.clearTimeout(growAutoTimerRef.current);
+      }
+
+      growAutoTimerRef.current = window.setTimeout(() => {
+        growAutoTimerRef.current = null;
+        startSeedGrow({ ...params, auto: true, roiBounds });
+      }, 150);
+    },
+    [growAuto, growRoiBounds, onnxSegRunning, startSeedGrow, volume],
+  );
+
+
+  const onSliceInspectorPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!volume) return;
       if (onnxSegRunning) return;
 
       const voxel = inspectorPointerToVoxel(e);
       if (!voxel) return;
 
-      paintBrushStroke(st.data, st.last, voxel);
-      st.last = voxel;
-      setLabelsEditTick((t) => t + 1);
+      sliceInspectorDragRef.current = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startVoxel: voxel,
+        lastVoxel: voxel,
+        draggingRoi: false,
+      };
+
+      setGrowRoiDraftBounds(null);
+
+      e.currentTarget.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [inspectorPointerToVoxel, onnxSegRunning, volume],
+  );
+
+  const onSliceInspectorPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const drag = sliceInspectorDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+
+      const voxel = inspectorPointerToVoxel(e);
+      if (voxel) {
+        drag.lastVoxel = voxel;
+      }
+
+      const dx = e.clientX - drag.startClientX;
+      const dy = e.clientY - drag.startClientY;
+      const dist2 = dx * dx + dy * dy;
+
+      // Promote from click -> drag when the pointer moves a little.
+      if (!drag.draggingRoi && dist2 >= 16) {
+        drag.draggingRoi = true;
+      }
+
+      if (drag.draggingRoi && voxel) {
+        setGrowRoiDraftBounds(computeRoiBoundsFromSliceVoxels(drag.startVoxel, voxel));
+      }
 
       e.preventDefault();
       e.stopPropagation();
     },
-    [inspectorPointerToVoxel, onnxSegRunning, paintBrushStroke, segTool, volume],
+    [computeRoiBoundsFromSliceVoxels, inspectorPointerToVoxel],
   );
 
-  const onSliceInspectorPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    const st = brushDragRef.current;
-    if (!st || st.pointerId !== e.pointerId) return;
+  const onSliceInspectorPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const drag = sliceInspectorDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
 
-    brushDragRef.current = null;
+      sliceInspectorDragRef.current = null;
 
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      // Ignore.
-    }
+      const voxel = inspectorPointerToVoxel(e) ?? drag.lastVoxel;
+      if (!voxel) return;
 
-    // Commit labels object to trigger the 3D label texture upload once at the end of the stroke.
-    setGeneratedLabels((prev) => (prev ? { ...prev } : prev));
+      if (drag.draggingRoi) {
+        const bounds = computeRoiBoundsFromSliceVoxels(drag.startVoxel, voxel);
+        setGrowRoiDraftBounds(null);
+        if (bounds) {
+          setGrowRoiBounds(bounds);
+
+          const seed: Vec3i = {
+            x: Math.floor((bounds.min.x + bounds.max.x) * 0.5),
+            y: Math.floor((bounds.min.y + bounds.max.y) * 0.5),
+            z: Math.floor((bounds.min.z + bounds.max.z) * 0.5),
+          };
+          setSeedVoxel(seed);
+
+          if (growAuto) {
+            startSeedGrow({ auto: true, roiBounds: bounds, seed });
+          }
+        }
+      } else {
+        // No single-click seeding: box draw is required.
+        setGrowRoiDraftBounds(null);
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [computeRoiBoundsFromSliceVoxels, growAuto, inspectorPointerToVoxel, startSeedGrow],
+  );
+
+  const onSliceInspectorPointerCancel = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = sliceInspectorDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+
+    sliceInspectorDragRef.current = null;
+    setGrowRoiDraftBounds(null);
 
     e.preventDefault();
     e.stopPropagation();
   }, []);
-
-  const cancelSeedGrow = useCallback(() => {
-    growAbortRef.current?.abort();
-    growAbortRef.current = null;
-    setGrowStatus({ running: false, message: 'Cancelled' });
-  }, []);
-
-  const runSeedGrow = useCallback(() => {
-    if (!volume) return;
-
-    if (!seedVoxel) {
-      setGrowStatus({ running: false, error: 'Click the slice inspector to place a seed first.' });
-      return;
-    }
-
-    growAbortRef.current?.abort();
-
-    const controller = new AbortController();
-    growAbortRef.current = controller;
-
-    setGrowStatus({ running: true, message: 'Growing…' });
-
-    const [nx, ny] = volume.dims;
-    const strideZ = nx * ny;
-    const seedIdx = seedVoxel.z * strideZ + seedVoxel.y * nx + seedVoxel.x;
-    const seedValue = volume.data[seedIdx] ?? 0;
-
-    const { min, max } = computeSeedRange01({ seedValue, tolerance: growTolerance });
-    const maxVoxels = Math.min(volume.data.length, 2_000_000);
-
-    void regionGrow3D({
-      volume: volume.data,
-      dims: volume.dims,
-      seed: seedVoxel,
-      min,
-      max,
-      opts: {
-        signal: controller.signal,
-        maxVoxels,
-        connectivity: 6,
-        yieldEvery: 160_000,
-        onProgress: (p) => {
-          setGrowStatus((s) => (s.running ? { ...s, message: `Growing… ${p.queued.toLocaleString()} voxels` } : s));
-        },
-      },
-    })
-      .then((res) => {
-        if (controller.signal.aborted) return;
-
-        const next = hasLabels && labels ? new Uint8Array(labels.data) : new Uint8Array(volume.data.length);
-        const idx = res.indices;
-        for (let i = 0; i < idx.length; i++) {
-          next[idx[i]!] = growTargetLabel;
-        }
-
-        setGeneratedLabels({ data: next, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
-        setLabelsEnabled(true);
-
-        setGrowStatus({
-          running: false,
-          message: `Seed ${seedValue.toFixed(3)} → ${res.count.toLocaleString()} voxels${res.hitMaxVoxels ? ' (hit limit)' : ''}`,
-        });
-      })
-      .catch((e) => {
-        if (controller.signal.aborted) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        setGrowStatus({ running: false, error: msg });
-      })
-      .finally(() => {
-        if (growAbortRef.current === controller) {
-          growAbortRef.current = null;
-        }
-      });
-  }, [growTargetLabel, growTolerance, hasLabels, labels, seedVoxel, volume]);
 
   const onnxPreflight = useMemo(() => {
     if (!volume) return null;
@@ -1453,7 +1523,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         if (onnxSegRunIdRef.current !== runId) return;
 
         setGeneratedLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
-        setLabelsEnabled(true);
 
         const ms = Math.round(performance.now() - started);
         setOnnxStatus((s) => ({
@@ -1481,25 +1550,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     setOnnxSegRunning(false);
     setOnnxStatus((s) => ({ ...s, loading: false, message: 'Segmentation cancelled', error: undefined }));
   }, [onnxSegRunning]);
-
-  // Auto-run ONNX segmentation once per SVR volume (when enabled and a model is cached).
-  useEffect(() => {
-    if (!autoRunOnnx) return;
-    if (!volume) return;
-    if (!onnxStatus.cached) return;
-
-    // Don't clobber externally-provided labels or manual work.
-    if (labels) {
-      onnxAutoRunAttemptedForVolumeRef.current = volume.data;
-      return;
-    }
-
-    // Only attempt once per volume.
-    if (onnxAutoRunAttemptedForVolumeRef.current === volume.data) return;
-    onnxAutoRunAttemptedForVolumeRef.current = volume.data;
-
-    runOnnxSegmentation();
-  }, [autoRunOnnx, labels, onnxStatus.cached, runOnnxSegmentation, volume]);
 
   // Draw the inspector slice to a 2D canvas.
   useEffect(() => {
@@ -1657,7 +1707,88 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         ctx.restore();
       }
     }
+
+    const drawRoiBounds = (bounds: { min: Vec3i; max: Vec3i }, opts: { stroke: string; fill?: string; dashed?: boolean }) => {
+      const toCanvasX = (col: number) => (srcCols > 1 ? (col / (srcCols - 1)) * (dsCols - 1) : 0);
+      const toCanvasY = (row: number) => (srcRows > 1 ? (row / (srcRows - 1)) * (dsRows - 1) : 0);
+
+      let col0 = 0;
+      let col1 = 0;
+      let row0 = 0;
+      let row1 = 0;
+
+      if (inspectPlane === 'axial') {
+        col0 = bounds.min.x;
+        col1 = bounds.max.x;
+        row0 = bounds.min.y;
+        row1 = bounds.max.y;
+      } else if (inspectPlane === 'coronal') {
+        col0 = bounds.min.x;
+        col1 = bounds.max.x;
+        row0 = bounds.min.z;
+        row1 = bounds.max.z;
+      } else {
+        // sagittal
+        col0 = bounds.min.y;
+        col1 = bounds.max.y;
+        row0 = bounds.min.z;
+        row1 = bounds.max.z;
+      }
+
+      const x0 = toCanvasX(col0);
+      const x1 = toCanvasX(col1);
+      const y0 = toCanvasY(row0);
+      const y1 = toCanvasY(row1);
+
+      const left = Math.min(x0, x1);
+      const right = Math.max(x0, x1);
+      const top = Math.min(y0, y1);
+      const bottom = Math.max(y0, y1);
+
+      const w = right - left;
+      const h = bottom - top;
+
+      ctx.save();
+      if (opts.dashed) ctx.setLineDash([4, 3]);
+
+      if (opts.fill) {
+        ctx.fillStyle = opts.fill;
+        ctx.fillRect(left, top, w, h);
+      }
+
+      ctx.strokeStyle = opts.stroke;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(left, top, w, h);
+      ctx.restore();
+    };
+
+    const roiIntersectsCurrentSlice = (bounds: { min: Vec3i; max: Vec3i }): boolean => {
+      if (inspectPlane === 'axial') {
+        return idx >= bounds.min.z && idx <= bounds.max.z;
+      }
+      if (inspectPlane === 'coronal') {
+        return idx >= bounds.min.y && idx <= bounds.max.y;
+      }
+      return idx >= bounds.min.x && idx <= bounds.max.x;
+    };
+
+    if (growRoiBounds && roiIntersectsCurrentSlice(growRoiBounds)) {
+      drawRoiBounds(growRoiBounds, {
+        stroke: 'rgba(0, 220, 255, 0.95)',
+        fill: 'rgba(0, 220, 255, 0.08)',
+      });
+    }
+
+    if (growRoiDraftBounds && roiIntersectsCurrentSlice(growRoiDraftBounds)) {
+      drawRoiBounds(growRoiDraftBounds, {
+        stroke: 'rgba(255, 210, 0, 0.95)',
+        fill: 'rgba(255, 210, 0, 0.06)',
+        dashed: true,
+      });
+    }
   }, [
+    growRoiBounds,
+    growRoiDraftBounds,
     hasLabels,
     inspectIndex,
     inspectPlane,
@@ -1666,7 +1797,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     inspectorInfo.srcRows,
     labelMix,
     labels,
-    labelsEditTick,
     labelsEnabled,
     seedVoxel,
     volume,
@@ -2127,8 +2257,8 @@ void main() {
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
         gl.uniform1f(u.zoom, zoom);
-        // Threshold is an edge "scale" (0..5). The shader maps it to a linear 0-at-center threshold.
-        gl.uniform1f(u.thr, clamp(threshold, 0, 5));
+        // Threshold is the *edge* threshold (center is always ~0); shader applies a linear center→edge ramp.
+        gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_EDGE_MAX));
         gl.uniform1i(u.steps, Math.round(clamp(steps, 8, 256)));
         gl.uniform1f(u.gamma, clamp(gamma, 0.1, 10));
         gl.uniform1f(u.opacity, clamp(opacity, 0.1, 20));
@@ -2329,12 +2459,83 @@ void main() {
     }
   }, [glEpoch, hasLabels, labels, labelsEnabled, volume]);
 
+  const sliceInspectorCard = (
+    <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+      <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
+      <div className="p-3 space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block text-xs text-[var(--text-secondary)]">
+            Plane
+            <select
+              value={inspectPlane}
+              onChange={(e) => setInspectPlane(e.target.value as 'axial' | 'coronal' | 'sagittal')}
+              className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+              disabled={!volume}
+            >
+              <option value="axial">Axial (z)</option>
+              <option value="coronal">Coronal (y)</option>
+              <option value="sagittal">Sagittal (x)</option>
+            </select>
+          </label>
+
+          <label className="block text-xs text-[var(--text-secondary)]">
+            Slice
+            <input
+              type="range"
+              min={0}
+              max={inspectorInfo.maxIndex}
+              step={1}
+              value={Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}
+              onChange={(e) => setInspectIndex(Number(e.target.value))}
+              className="mt-1 w-full"
+              disabled={!volume}
+            />
+            <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+              {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
+            </div>
+          </label>
+        </div>
+
+        <div className="text-[10px] text-[var(--text-tertiary)]">
+          Drag to draw ROI box (required) · Intensities are shown with a fixed 0 to 1 mapping.
+        </div>
+
+        <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
+            <canvas
+            ref={sliceCanvasRef}
+            className="w-full h-auto"
+            style={{
+              imageRendering: 'pixelated',
+              cursor: volume ? 'crosshair' : 'default',
+            }}
+            onPointerDown={onSliceInspectorPointerDown}
+            onPointerMove={onSliceInspectorPointerMove}
+            onPointerUp={onSliceInspectorPointerUp}
+            onPointerCancel={onSliceInspectorPointerCancel}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+        </div>
+
+        {volume ? (
+          <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
+            Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const wantsSliceInspectorPortal = sliceInspectorPortalTarget !== undefined;
+  const sliceInspectorPortal = sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;
+
   return (
     <div
       className={`h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
-        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(320px,420px)_minmax(300px,360px)]'
+        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(320px,420px)]'
       }`}
     >
+      {sliceInspectorPortal}
+
       <div className="min-h-0">
         <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-black h-full min-h-0">
           <div className="relative w-full h-full min-h-0">
@@ -2392,75 +2593,8 @@ void main() {
       </div>
 
       {controlsCollapsed ? null : (
-        <div className="order-2 min-h-0 overflow-y-auto space-y-3 pr-1">
+        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
-
-          <div className="border border-[var(--border-color)] rounded-lg bg-[var(--bg-secondary)] p-3 space-y-2">
-            <div className="text-xs font-medium text-[var(--text-secondary)]">Render</div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Quality
-                <select
-                  value={renderQuality}
-                  onChange={(e) => setRenderQuality(e.target.value as RenderQualityPreset)}
-                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume}
-                >
-                  <option value="auto">Auto (budgeted)</option>
-                  <option value="full">Full (if fits)</option>
-                  <option value="512">MaxDim ≤ 512</option>
-                  <option value="384">MaxDim ≤ 384</option>
-                  <option value="256">MaxDim ≤ 256</option>
-                  <option value="192">MaxDim ≤ 192</option>
-                  <option value="128">MaxDim ≤ 128</option>
-                </select>
-              </label>
-
-              <label className="block text-xs text-[var(--text-secondary)]">
-                Texture
-                <select
-                  value={renderTextureMode}
-                  onChange={(e) => setRenderTextureMode(e.target.value as RenderTextureMode)}
-                  className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                  disabled={!volume}
-                >
-                  <option value="auto">Auto (float preferred)</option>
-                  <option value="u8">Force 8-bit</option>
-                </select>
-              </label>
-            </div>
-
-            <label className="block text-xs text-[var(--text-secondary)]">
-              GPU budget
-              <input
-                type="range"
-                min={64}
-                max={2048}
-                step={16}
-                value={renderGpuBudgetMiB}
-                onChange={(e) => setRenderGpuBudgetMiB(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                {Math.round(renderGpuBudgetMiB)} MiB
-              </div>
-            </label>
-
-            {renderPlan ? (
-              <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                Plan: {renderPlan.dims.nx}×{renderPlan.dims.ny}×{renderPlan.dims.nz} ·{' '}
-                {renderPlan.kind === 'f32' ? 'float' : 'u8'} · est GPU {formatMiB(renderPlan.estGpuTotalBytes)}
-                {renderPlan.estGpuLabelBytes > 0 ? ` (labels ${formatMiB(renderPlan.estGpuLabelBytes)})` : ''}
-                {renderBuild.status === 'building'
-                  ? ' · building…'
-                  : renderBuild.status === 'ready'
-                    ? ` · built ${Math.round(renderBuild.buildMs ?? 0)}ms`
-                    : ''}
-              </div>
-            ) : null}
-          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <label className="block text-xs text-[var(--text-secondary)]">
@@ -2476,36 +2610,6 @@ void main() {
                 disabled={!volume}
               />
               <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
-            </label>
-
-            <label className="block text-xs text-[var(--text-secondary)]">
-              Zoom
-              <input
-                type="range"
-                min={0.6}
-                max={10.0}
-                step={0.02}
-                value={zoom}
-                onChange={(e) => setZoom(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{zoom.toFixed(2)}</div>
-            </label>
-
-            <label className="block text-xs text-[var(--text-secondary)]">
-              Steps (ray samples)
-              <input
-                type="range"
-                min={32}
-                max={256}
-                step={1}
-                value={steps}
-                onChange={(e) => setSteps(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{Math.round(steps)}</div>
             </label>
 
             <label className="block text-xs text-[var(--text-secondary)]">
@@ -2528,15 +2632,15 @@ void main() {
               <input
                 type="range"
                 min={0}
-                max={5}
-                step={0.01}
+                max={THRESHOLD_EDGE_MAX}
+                step={0.001}
                 value={threshold}
                 onChange={(e) => setThreshold(Number(e.target.value))}
                 className="mt-1 w-full"
                 disabled={!volume}
               />
               <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                Center 0.00 · Edge scale {threshold.toFixed(2)}
+                Center 0.000 · Edge {threshold.toFixed(3)}
               </div>
             </label>
           </div>
@@ -2570,104 +2674,53 @@ void main() {
 
             {segmentationCollapsed ? null : (
               <div className="p-3 space-y-2">
-                <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                  <input
-                    type="checkbox"
-                    checked={labelsEnabled}
-                    onChange={(e) => setLabelsEnabled(e.target.checked)}
-                    disabled={!volume}
-                  />
-                  <span>Show labels</span>
-                </label>
-
-                <label className="block text-xs text-[var(--text-secondary)]">
-                  Label mix
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={labelMix}
-                    onChange={(e) => setLabelMix(Number(e.target.value))}
-                    className="mt-1 w-full"
-                    disabled={!hasLabels || !labelsEnabled}
-                  />
-                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{labelMix.toFixed(2)}</div>
-                </label>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="block text-xs text-[var(--text-secondary)]">
-                    Tool
-                    <select
-                      value={segTool}
-                      onChange={(e) => setSegTool(e.target.value as 'seed' | 'brush')}
-                      className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                      disabled={!volume || growStatus.running || onnxSegRunning}
-                    >
-                      <option value="seed">Seed</option>
-                      <option value="brush">Brush</option>
-                    </select>
-                  </label>
-
-                  <label className="block text-xs text-[var(--text-secondary)]">
-                    Brush radius
+                <div className="flex items-end gap-2">
+                  <label className="block flex-1 text-xs text-[var(--text-secondary)]">
+                    ROI falloff
                     <input
                       type="range"
                       min={0}
-                      max={12}
-                      step={1}
-                      value={brushRadiusVox}
-                      onChange={(e) => setBrushRadiusVox(Number(e.target.value))}
+                      max={1}
+                      step={0.05}
+                      value={growRoiOutsideScale}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        setGrowRoiOutsideScale(next);
+                        scheduleSeedGrow({ roiOutsideScale: next });
+                      }}
                       className="mt-1 w-full"
-                      disabled={!volume || segTool !== 'brush' || growStatus.running}
+                      disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                      {Math.round(brushRadiusVox)} vox
-                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">×{growRoiOutsideScale.toFixed(2)}</div>
                   </label>
-                </div>
 
-                <label className="block text-xs text-[var(--text-secondary)]">
-                  Brush label
-                  <select
-                    value={brushLabel}
-                    onChange={(e) => setBrushLabel(Number(e.target.value))}
-                    className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                    disabled={!volume || segTool !== 'brush' || growStatus.running || onnxSegRunning}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGrowRoiBounds(null);
+                      setGrowRoiDraftBounds(null);
+                      setSeedVoxel(null);
+                      cancelSeedGrow('Cleared ROI');
+                      scheduleSeedGrow({ roiBounds: null });
+                    }}
+                    disabled={!growRoiBounds || onnxSegRunning}
+                    className="px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                   >
-                    <option value={0}>Erase (0)</option>
-                    <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
-                    <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
-                    <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
-                  </select>
-                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)]">
-                    {segTool === 'brush'
-                      ? 'Drag in the slice inspector to paint labels.'
-                      : 'Click the slice inspector to set a seed.'}
-                  </div>
-                </label>
+                    Clear ROI
+                  </button>
+                </div>
 
                 <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
                   <span className="truncate">
-                    Seed:{' '}
+                    Seed (ROI center):{' '}
                     {seedVoxel ? (
                       <span className="tabular-nums">
                         {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
                       </span>
-                    ) : segTool === 'brush' ? (
-                      <span>Switch tool to Seed, then click slice inspector</span>
                     ) : (
-                      <span>Click the slice inspector to set</span>
+                      <span>—</span>
                     )}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => setSeedVoxel(null)}
-                    disabled={!seedVoxel || growStatus.running || onnxSegRunning}
-                    className="ml-auto px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                  >
-                    Clear
-                  </button>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -2675,9 +2728,13 @@ void main() {
                     Target
                     <select
                       value={growTargetLabel}
-                      onChange={(e) => setGrowTargetLabel(Number(e.target.value) as BratsBaseLabelId)}
+                      onChange={(e) => {
+                        const next = Number(e.target.value) as BratsBaseLabelId;
+                        setGrowTargetLabel(next);
+                        scheduleSeedGrow({ targetLabel: next });
+                      }}
                       className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                      disabled={!volume || growStatus.running}
+                      disabled={!volume || onnxSegRunning || !growRoiBounds}
                     >
                       <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
                       <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
@@ -2693,30 +2750,23 @@ void main() {
                       max={0.5}
                       step={0.005}
                       value={growTolerance}
-                      onChange={(e) => setGrowTolerance(Number(e.target.value))}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        setGrowTolerance(next);
+                        scheduleSeedGrow({ tolerance: next });
+                      }}
                       className="mt-1 w-full"
-                      disabled={!volume || growStatus.running}
+                      disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                      ±{growTolerance.toFixed(3)}
-                    </div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
                   </label>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={runSeedGrow}
-                    disabled={!volume || !seedVoxel || growStatus.running || onnxSegRunning}
-                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-                  >
-                    Grow from seed
-                  </button>
-
                   {growStatus.running ? (
                     <button
                       type="button"
-                      onClick={cancelSeedGrow}
+                      onClick={() => cancelSeedGrow()}
                       className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
                     >
                       Cancel
@@ -2726,10 +2776,11 @@ void main() {
                   <button
                     type="button"
                     onClick={() => {
+                      cancelSeedGrow('Cleared segmentation');
+                      growOverlayRef.current = null;
                       setGeneratedLabels(null);
-                      setGrowStatus({ running: false, message: 'Cleared segmentation' });
                     }}
-                    disabled={!generatedLabels || growStatus.running || onnxSegRunning}
+                    disabled={!generatedLabels || onnxSegRunning}
                     className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                   >
                     Clear seg
@@ -2813,11 +2864,6 @@ void main() {
                     </button>
                   </div>
 
-                  <div className="text-[10px] text-[var(--text-tertiary)]">
-                    Cached: {onnxStatus.cached ? 'yes' : 'no'}
-                    {onnxStatus.savedAtMs ? ` · saved ${new Date(onnxStatus.savedAtMs).toLocaleString()}` : ''}
-                    {onnxStatus.sessionReady ? ' · session ready' : ''}
-                  </div>
 
                   {onnxPreflight?.blockedByDefault ? (
                     <div className="space-y-2">
@@ -2836,11 +2882,6 @@ void main() {
                       </label>
                     </div>
                   ) : null}
-
-                  <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                    <input type="checkbox" checked={autoRunOnnx} onChange={(e) => setAutoRunOnnx(e.target.checked)} />
-                    <span>Auto-run after SVR (if model cached)</span>
-                  </label>
 
                   {onnxStatus.error ? (
                     <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
@@ -2879,99 +2920,17 @@ void main() {
 
                     {labelMetrics ? (
                       <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
-                        {labelMetrics.totalMl.toFixed(2)} mL
+                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
                       </div>
                     ) : null}
                   </div>
                 )}
 
-                <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
-                  <div className="text-xs font-medium text-[var(--text-secondary)]">Export</div>
-                  <button
-                    type="button"
-                    onClick={downloadLabelsNifti}
-                    disabled={!hasLabels || !labels}
-                    className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                  >
-                    Download labels (.nii)
-                  </button>
-                  <div className="text-[10px] text-[var(--text-tertiary)]">
-                    Exports a uint8 label volume in NIfTI-1 format (single-file .nii).
-                  </div>
-                </div>
               </div>
             )}
           </div>
-        </div>
-      )}
 
-      {controlsCollapsed ? null : (
-        <div className="order-1 min-h-0 overflow-y-auto space-y-3 pr-1">
-          <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
-            <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
-              Slice Inspector
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                <label className="block text-xs text-[var(--text-secondary)]">
-                  Plane
-                  <select
-                    value={inspectPlane}
-                    onChange={(e) => setInspectPlane(e.target.value as 'axial' | 'coronal' | 'sagittal')}
-                    className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
-                    disabled={!volume}
-                  >
-                    <option value="axial">Axial (z)</option>
-                    <option value="coronal">Coronal (y)</option>
-                    <option value="sagittal">Sagittal (x)</option>
-                  </select>
-                </label>
-
-                <label className="block text-xs text-[var(--text-secondary)]">
-                  Slice
-                  <input
-                    type="range"
-                    min={0}
-                    max={inspectorInfo.maxIndex}
-                    step={1}
-                    value={Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}
-                    onChange={(e) => setInspectIndex(Number(e.target.value))}
-                    className="mt-1 w-full"
-                    disabled={!volume}
-                  />
-                  <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                    {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
-                  </div>
-                </label>
-              </div>
-
-              <div className="text-[10px] text-[var(--text-tertiary)]">
-                Intensities are shown with a fixed 0 to 1 mapping.
-              </div>
-
-              <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
-                <canvas
-                  ref={sliceCanvasRef}
-                  className="w-full h-auto"
-                  style={{
-                    imageRendering: 'pixelated',
-                    cursor: volume ? (segTool === 'brush' ? 'cell' : 'crosshair') : 'default',
-                  }}
-                  onPointerDown={onSliceInspectorPointerDown}
-                  onPointerMove={onSliceInspectorPointerMove}
-                  onPointerUp={onSliceInspectorPointerUp}
-                  onPointerCancel={onSliceInspectorPointerUp}
-                />
-              </div>
-
-              {volume ? (
-                <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                  Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
-                </div>
-              ) : null}
-            </div>
-          </div>
+          {!wantsSliceInspectorPortal ? sliceInspectorCard : null}
         </div>
       )}
     </div>

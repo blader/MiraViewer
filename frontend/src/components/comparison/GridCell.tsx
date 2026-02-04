@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Pencil, Sparkles } from 'lucide-react';
+import { Link2, Pencil, Sparkles } from 'lucide-react';
 import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
@@ -8,7 +8,8 @@ import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
 import { GroundTruthPolygonOverlay } from '../GroundTruthPolygonOverlay';
-import { TumorSegmentationOverlay } from '../TumorSegmentationOverlay';
+import { TumorSavedSegmentationOverlay } from '../TumorSavedSegmentationOverlay';
+import { TumorSegmentationOverlay } from '../TumorSegmentationOverlaySeedGrow';
 
 export type GridCellProps = {
   comboId: string;
@@ -27,6 +28,8 @@ export type GridCellProps = {
   startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
 };
 
+type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
+
 export function GridCell({
   comboId,
   date,
@@ -40,7 +43,9 @@ export function GridCell({
   isAligning,
   startAlignAll,
 }: GridCellProps) {
+  const [showSavedTumor, setShowSavedTumor] = useState(false);
   const [tumorToolOpen, setTumorToolOpen] = useState(false);
+  const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
 
@@ -73,19 +78,16 @@ export function GridCell({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                setTumorToolOpen((v) => {
-                  const next = !v;
-                  if (next) setGtPolygonToolOpen(false);
-                  return next;
-                });
-              }}
+              onClick={() => setShowSavedTumor((v) => !v)}
+              disabled={tumorToolOpen}
               className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
                 tumorToolOpen
-                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                  : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
+                  ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]'
+                  : showSavedTumor
+                    ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                    : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
               }`}
-              title="Tumor segmentation tool"
+              title={tumorToolOpen ? 'Close segmentation tool to view saved tumor overlay' : 'Toggle saved tumor segmentation overlay'}
             >
               <Sparkles className="w-3.5 h-3.5" />
               Tumor
@@ -161,20 +163,48 @@ export function GridCell({
             affine10: settings.affine10,
             affine11: settings.affine11,
           }}
-          disabled={overlayColumns.length < 2 || isAligning || tumorToolOpen || gtPolygonToolOpen}
-          onConfirm={(mask) => {
-            void startAlignAll(
-              {
-                date,
-                seriesUid: refData.series_uid,
-                sliceIndex: effectiveIdx,
-                sliceCount: refData.instance_count,
-                settings,
+          disabled={isAligning || gtPolygonToolOpen}
+          actions={[
+            {
+              key: 'align-all',
+              label: 'Align All',
+              title: `Align all other dates to ${formatDate(date)}`,
+              icon: <Link2 className="w-4 h-4" />,
+              variant: 'primary',
+              minSizeSpace: 'base',
+              disabled: overlayColumns.length < 2 || isAligning,
+              onConfirm: (masks) => {
+                void startAlignAll(
+                  {
+                    date,
+                    seriesUid: refData.series_uid,
+                    sliceIndex: effectiveIdx,
+                    sliceCount: refData.instance_count,
+                    settings,
+                  },
+                  masks.base
+                );
               },
-              mask
-            );
-          }}
-          actionTitle={`Align all other dates to ${formatDate(date)}`}
+            },
+            {
+              key: 'segment-tumor',
+              label: 'Segment',
+              title: 'Segment tumor from this rectangle',
+              icon: <Sparkles className="w-4 h-4" />,
+              variant: 'secondary',
+              minSizeSpace: 'screen',
+              disabled: isAligning,
+              onConfirm: (masks) => {
+                setTumorToolOpen(true);
+                setTumorSeedBoxToStart({
+                  x0: masks.screen.x,
+                  y0: masks.screen.y,
+                  x1: masks.screen.x + masks.screen.width,
+                  y1: masks.screen.y + masks.screen.height,
+                });
+              },
+            },
+          ]}
         >
           <DicomViewer
             ref={tumorViewerRef}
@@ -199,11 +229,26 @@ export function GridCell({
             onPanChange={(newPanX, newPanY) => {
               updatePanelSetting(date, { panX: newPanX, panY: newPanY });
             }}
+            onZoomChange={(newZoom) => {
+              updatePanelSetting(date, { zoom: newZoom });
+            }}
+          />
+
+          <TumorSavedSegmentationOverlay
+            enabled={showSavedTumor && !tumorToolOpen}
+            seriesUid={refData.series_uid}
+            effectiveInstanceIndex={effectiveIdx}
+            viewerTransform={settings}
           />
 
           <TumorSegmentationOverlay
             enabled={tumorToolOpen}
-            onRequestClose={() => setTumorToolOpen(false)}
+            onRequestClose={() => {
+              setTumorToolOpen(false);
+              setTumorSeedBoxToStart(null);
+            }}
+            seedBoxToStart={tumorSeedBoxToStart}
+            onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
             viewerRef={tumorViewerRef}
             comboId={comboId}
             dateIso={date}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import cornerstone from 'cornerstone-core';
 import { getDB } from '../db/db';
@@ -434,6 +434,11 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
   }));
   const [generationCollapsed, setGenerationCollapsed] = useState(false);
 
+  const [sliceInspectorPortalTarget, setSliceInspectorPortalTarget] = useState<Element | null>(null);
+  const sliceInspectorPortalRef = useCallback((el: HTMLElement | null) => {
+    setSliceInspectorPortalTarget(el);
+  }, []);
+
   const { isRunning, progress, result, error, run, cancel, clear } = useSvrReconstruction();
 
   const sequenceGroupsForDate = useMemo(() => {
@@ -573,6 +578,11 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
   const [roiSliceGeom, setRoiSliceGeom] = useState<SliceGeometry | null>(null);
   const [roiSliceGeomError, setRoiSliceGeomError] = useState<string | null>(null);
 
+  // Keep a stable preview slice so we don't clear the canvas between fast slice changes.
+  const [roiPreviewSliceStable, setRoiPreviewSliceStable] = useState<{ sopInstanceUid: string; geom: SliceGeometry } | null>(
+    null,
+  );
+
   const [roiRect, setRoiRect] = useState<RoiRect01 | null>(null);
   const roiDragRef = useRef<{ x0: number; y0: number } | null>(null);
 
@@ -597,6 +607,7 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
     setRoiRect(null);
     roiDragRef.current = null;
     setRoiWorld(null);
+    setRoiPreviewSliceStable(null);
 
     clear();
   }, [clear, dateIso]);
@@ -636,6 +647,7 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
     setRoiRect(null);
     roiDragRef.current = null;
     setRoiWorld(null);
+    setRoiPreviewSliceStable(null);
 
     if (!effectiveRoiSeriesUid) return;
 
@@ -712,10 +724,10 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
     };
   }, [roiSopInstanceUid]);
 
-  const roiPreviewSlice = useMemo(() => {
-    if (!roiSopInstanceUid || !roiSliceGeom) return null;
-    return { sopInstanceUid: roiSopInstanceUid, geom: roiSliceGeom };
-  }, [roiSopInstanceUid, roiSliceGeom]);
+  useEffect(() => {
+    if (!roiSopInstanceUid || !roiSliceGeom) return;
+    setRoiPreviewSliceStable({ sopInstanceUid: roiSopInstanceUid, geom: roiSliceGeom });
+  }, [roiSliceGeom, roiSopInstanceUid]);
 
   const roiSideMm = useMemo(() => {
     if (!roiWorld) return null;
@@ -929,7 +941,7 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
               </div>
 
               <DicomRoiSlicePreview
-                slice={roiPreviewSlice}
+                slice={roiPreviewSliceStable}
                 sourceSeriesUid={effectiveRoiSeriesUid}
                 maxSize={512}
                 roiRect={roiRect}
@@ -1069,6 +1081,8 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
               Volume: {result.volume.dims[0]}×{result.volume.dims[1]}×{result.volume.dims[2]} @ {result.volume.voxelSizeMm[0]}mm
             </div>
           )}
+
+          <div ref={sliceInspectorPortalRef} />
         </div>
         )}
 
@@ -1082,7 +1096,7 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
             {generationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
           </button>
 
-          <SvrVolume3DViewer volume={result ? result.volume : null} />
+          <SvrVolume3DViewer volume={result ? result.volume : null} sliceInspectorPortalTarget={sliceInspectorPortalTarget} />
         </div>
       </div>
     </div>

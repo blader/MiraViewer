@@ -45,6 +45,48 @@ export type TumorPolygon = {
   points: NormalizedPoint[];
 };
 
+export type TumorGrow2dMeta = {
+  kind: 'cost-distance';
+  slider: {
+    /** Slider value in [0..1]. */
+    value01: number;
+    /** Optional gamma used for slider→threshold mapping. */
+    gamma?: number;
+
+    /** Optional area-based control metadata (newer UI). */
+    targetAreaPx?: number;
+    maxTargetAreaPx?: number;
+  };
+  roi: { x0: number; y0: number; x1: number; y1: number };
+  captureSize: { w: number; h: number };
+  stats?: {
+    tumorMu: number;
+    tumorSigma: number;
+    bgMu?: number;
+    bgSigma?: number;
+    edgeBarrier?: number;
+  };
+  weights?: {
+    edgeCostStrength?: number;
+    crossCostStrength?: number;
+    tumorCostStrength?: number;
+    bgCostStrength?: number;
+    bgRejectMarginZ?: number;
+    allowDiagonal?: boolean;
+  };
+  tuning?: {
+    radialOuterW?: number;
+    radialOuterCap?: number;
+    baseStepScale?: number;
+    preferHighExponent?: number;
+    preferHighStrengthMul?: number;
+    uphillFromLowMult?: number;
+  };
+  dist?: {
+    maxFiniteDist?: number;
+  };
+};
+
 export type TumorThreshold = {
   /** Inclusive lower bound in segmentation pixel domain (typically 0..255). */
   low: number;
@@ -100,6 +142,9 @@ export interface TumorSegmentationRow {
 
     /** Viewport size (CSS pixels) at the time this polygon was saved. */
     viewportSize?: ViewportSize;
+
+    /** Optional parameters for the newer seed-based 2D grow tool. */
+    grow2d?: TumorGrow2dMeta;
   };
 }
 

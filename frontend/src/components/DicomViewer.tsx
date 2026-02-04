@@ -9,8 +9,8 @@ import {
 } from 'react';
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
-import { useWheelNavigation } from '../hooks/useWheelNavigation';
 import { getEffectiveInstanceIndex } from '../utils/math';
+import { CONTROL_LIMITS } from '../utils/constants';
 import { isDebugAlignmentEnabled } from '../utils/debugAlignment';
 import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
 
@@ -25,6 +25,15 @@ export type DicomViewerHandle = {
    * The returned image is cropped to the viewport.
    */
   captureVisiblePng: (options?: DicomViewerCaptureOptions) => Promise<Blob>;
+
+  /** The content key (studyId:seriesUid:effectiveInstanceIndex) currently displayed by the viewer, if known. */
+  getDisplayedContentKey: () => string | null;
+
+  /**
+   * Wait until the viewer is actually displaying the expected content key.
+   * This is useful because Cornerstone keeps the previous image visible while the next slice loads.
+   */
+  waitForDisplayedContentKey: (expectedKey: string, timeoutMs?: number) => Promise<void>;
 };
 
 function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
@@ -65,6 +74,7 @@ interface DicomViewerProps {
   affine10?: number;
   affine11?: number;
   onPanChange?: (panX: number, panY: number) => void;
+  onZoomChange?: (zoom: number) => void;
 }
 
 interface ImageContentProps {
@@ -127,14 +137,63 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     affine10 = 0,
     affine11 = 1,
     onPanChange,
+    onZoomChange,
   }: DicomViewerProps,
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
-  // Mouse wheel navigation for slices
-  useWheelNavigation(containerRef, instanceIndex, instanceCount, onInstanceChange);
+  // Mouse wheel behavior:
+  // - Inside the image viewport: zoom (so we can keep global wheel slice navigation active elsewhere).
+  // - Fallback: if no onZoomChange callback is provided, use wheel for slice navigation.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
+
+      // Always prevent default so:
+      // - The page doesn't scroll while the user is interacting with the viewer.
+      // - The global slice-wheel nav doesn't double-apply (it checks e.defaultPrevented).
+      e.preventDefault();
+
+      // Zoom mode (preferred).
+      if (onZoomChange) {
+        const speed = (() => {
+          // deltaMode: 0=pixels, 1=lines, 2=pages
+          if (e.deltaMode === 1) return 0.08;
+          if (e.deltaMode === 2) return 0.25;
+          return 0.0015;
+        })();
+
+        const factor = Math.exp(-e.deltaY * speed);
+        let nextZoom = zoom * factor;
+        nextZoom = Math.max(CONTROL_LIMITS.ZOOM.MIN, Math.min(CONTROL_LIMITS.ZOOM.MAX, nextZoom));
+
+        // Reduce churn from very small deltas.
+        nextZoom = Math.round(nextZoom * 1000) / 1000;
+
+        if (nextZoom !== zoom) {
+          onZoomChange(nextZoom);
+        }
+
+        return;
+      }
+
+      // Fallback slice navigation.
+      if (instanceCount <= 0) return;
+      const delta = Math.sign(e.deltaY);
+      const nextIndex = Math.max(0, Math.min(instanceCount - 1, instanceIndex + delta));
+      if (nextIndex !== instanceIndex) {
+        onInstanceChange(nextIndex);
+      }
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [instanceCount, instanceIndex, onInstanceChange, onZoomChange, zoom]);
 
   const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
 
@@ -144,6 +203,10 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // Track what slice is actually displayed in the viewer.
   // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
   const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
+  const displayedContentKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    displayedContentKeyRef.current = displayedContentKey;
+  }, [displayedContentKey]);
 
   const debugSliceScores = isDebugAlignmentEnabled();
 
@@ -264,6 +327,25 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     return img;
   }, []);
 
+  const getDisplayedContentKey = useCallback((): string | null => {
+    return displayedContentKeyRef.current;
+  }, []);
+
+  const waitForDisplayedContentKey = useCallback(async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
+    const t0 = performance.now();
+
+    // Fast path.
+    if (displayedContentKeyRef.current === expectedKey) return;
+
+    while (performance.now() - t0 < timeoutMs) {
+      if (displayedContentKeyRef.current === expectedKey) return;
+      // Yield so we don't block the UI thread.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    }
+
+    throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
+  }, []);
+
   const captureVisiblePng = useCallback(
     async (options?: DicomViewerCaptureOptions): Promise<Blob> => {
       const container = containerRef.current;
@@ -368,8 +450,10 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     ref,
     () => ({
       captureVisiblePng,
+      getDisplayedContentKey,
+      waitForDisplayedContentKey,
     }),
-    [captureVisiblePng]
+    [captureVisiblePng, getDisplayedContentKey, waitForDisplayedContentKey]
   );
 
   // Click to set center - calculates offset to move clicked point to viewport center

@@ -1,5 +1,22 @@
 export type Vec3i = { x: number; y: number; z: number };
 
+export type RegionGrow3DRoiMode = 'hard' | 'guide';
+
+export type RegionGrow3DRoi = {
+  mode: RegionGrow3DRoiMode;
+  min: Vec3i;
+  max: Vec3i;
+  /**
+   * Tolerance shrinkage factor used as a *spatial prior* outside the ROI.
+   *
+   * Implementations may apply this as a smooth radial decay about the ROI centroid (instead of a
+   * hard inside/outside step).
+   * - 1: no spatial prior (outside behaves like inside)
+   * - 0: extremely strict outside (only values very close to the seed are accepted)
+   */
+  outsideToleranceScale?: number;
+};
+
 export type RegionGrow3DResult = {
   /**
    * Sparse list of voxel indices included in the region.
@@ -47,6 +64,12 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+function clampInt(x: number, min: number, max: number): number {
+  if (!Number.isFinite(x)) return min;
+  const xi = Math.floor(x);
+  return xi < min ? min : xi > max ? max : xi;
+}
+
 function inBounds(x: number, y: number, z: number, nx: number, ny: number, nz: number): boolean {
   return x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz;
 }
@@ -70,8 +93,11 @@ export async function regionGrow3D(params: {
   volume: Float32Array;
   dims: [number, number, number];
   seed: Vec3i;
+  /** Optional additional seed voxel indices (same indexing order as `indices` in the result). */
+  seedIndices?: Uint32Array;
   min: number;
   max: number;
+  roi?: RegionGrow3DRoi;
   opts?: RegionGrow3DOptions;
 }): Promise<RegionGrow3DResult> {
   const { volume, dims, seed } = params;
@@ -97,11 +123,71 @@ export async function regionGrow3D(params: {
   const yieldEvery = Math.max(0, Math.floor(opts?.yieldEvery ?? 120_000));
   const yieldFn = opts?.yieldFn ?? (() => new Promise<void>((r) => window.setTimeout(r, 0)));
 
+  const strideY = nx;
+  const strideZ = nx * ny;
+
   const seedIdx = idx3(seed.x, seed.y, seed.z, nx, ny);
   const seedValue = volume[seedIdx] ?? 0;
 
+  const roi = (() => {
+    const r = params.roi;
+    if (!r) return null;
+
+    const mode = r.mode;
+    if (mode !== 'hard' && mode !== 'guide') return null;
+
+    const maxX = Math.max(0, nx - 1);
+    const maxY = Math.max(0, ny - 1);
+    const maxZ = Math.max(0, nz - 1);
+
+    const minX = clampInt(Math.min(r.min.x, r.max.x), 0, maxX);
+    const maxX2 = clampInt(Math.max(r.min.x, r.max.x), 0, maxX);
+    const minY = clampInt(Math.min(r.min.y, r.max.y), 0, maxY);
+    const maxY2 = clampInt(Math.max(r.min.y, r.max.y), 0, maxY);
+    const minZ = clampInt(Math.min(r.min.z, r.max.z), 0, maxZ);
+    const maxZ2 = clampInt(Math.max(r.min.z, r.max.z), 0, maxZ);
+
+    // Outside the ROI we shrink the acceptance range around the seed by this scale factor.
+    const rawOutsideScale = r.outsideToleranceScale;
+    const outsideScale = clamp01(
+      typeof rawOutsideScale === 'number' && Number.isFinite(rawOutsideScale) ? rawOutsideScale : 0.25,
+    );
+
+    return { mode, minX, maxX: maxX2, minY, maxY: maxY2, minZ, maxZ: maxZ2, outsideScale };
+  })();
+
+  const tolLo = seedValue - minV;
+  const tolHi = maxV - seedValue;
+
+  const outsideScale = roi?.outsideScale ?? 1;
+  const minOutRaw = seedValue - tolLo * outsideScale;
+  const maxOutRaw = seedValue + tolHi * outsideScale;
+  const minOut = Math.min(minOutRaw, maxOutRaw);
+  const maxOut = Math.max(minOutRaw, maxOutRaw);
+
+  const acceptAt = (x: number, y: number, z: number, i: number): boolean => {
+    const v = volume[i] ?? 0;
+
+    if (roi) {
+      const inside =
+        x >= roi.minX &&
+        x <= roi.maxX &&
+        y >= roi.minY &&
+        y <= roi.maxY &&
+        z >= roi.minZ &&
+        z <= roi.maxZ;
+
+      if (!inside) {
+        if (roi.mode === 'hard') return false;
+        return v >= minOut && v <= maxOut;
+      }
+    }
+
+    return v >= minV && v <= maxV;
+  };
+
   // Fast exit if seed is outside the acceptance range.
-  if (!(seedValue >= minV && seedValue <= maxV)) {
+  if (!acceptAt(seed.x, seed.y, seed.z, seedIdx)) {
     return { indices: new Uint32Array(0), count: 0, seedValue, hitMaxVoxels: false };
   }
 
@@ -125,17 +211,6 @@ export async function regionGrow3D(params: {
   let head = 0;
   let tail = 0;
 
-  queue[tail++] = seedIdx;
-  markVisited(seedIdx);
-
-  const strideY = nx;
-  const strideZ = nx * ny;
-
-  const accept = (i: number): boolean => {
-    const v = volume[i] ?? 0;
-    return v >= minV && v <= maxV;
-  };
-
   const enqueue = (i: number): void => {
     markVisited(i);
     queue[tail++] = i;
@@ -143,6 +218,37 @@ export async function regionGrow3D(params: {
 
   let processed = 0;
   let hitMaxVoxels = false;
+
+  const enqueueSeedIndex = (i: number): void => {
+    if (hitMaxVoxels) return;
+    if (!(i >= 0 && i < n)) return;
+    if (isVisited(i)) return;
+
+    const z = Math.floor(i / strideZ);
+    const yz = i - z * strideZ;
+    const y = Math.floor(yz / strideY);
+    const x = yz - y * strideY;
+
+    if (!acceptAt(x, y, z, i)) return;
+
+    if (tail >= maxVoxels) {
+      hitMaxVoxels = true;
+      return;
+    }
+
+    enqueue(i);
+  };
+
+  enqueueSeedIndex(seedIdx);
+
+  // Optional additional seeds (useful for multi-island selection).
+  if (params.seedIndices) {
+    const seeds = params.seedIndices;
+    for (let si = 0; si < seeds.length; si++) {
+      enqueueSeedIndex(seeds[si]!);
+      if (hitMaxVoxels) break;
+    }
+  }
 
   while (head < tail) {
     if (opts?.signal?.aborted) {
@@ -166,14 +272,16 @@ export async function regionGrow3D(params: {
     const x = yz - y * strideY;
 
     const tryNeighbor = (nx0: number, ny0: number, nz0: number) => {
+      if (!inBounds(nx0, ny0, nz0, nx, ny, nz)) return;
+      const ni = idx3(nx0, ny0, nz0, nx, ny);
+      if (isVisited(ni)) return;
+      if (!acceptAt(nx0, ny0, nz0, ni)) return;
+
       if (tail >= maxVoxels) {
         hitMaxVoxels = true;
         return;
       }
-      if (!inBounds(nx0, ny0, nz0, nx, ny, nz)) return;
-      const ni = idx3(nx0, ny0, nz0, nx, ny);
-      if (isVisited(ni)) return;
-      if (!accept(ni)) return;
+
       enqueue(ni);
     };
 

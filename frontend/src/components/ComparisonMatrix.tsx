@@ -367,8 +367,8 @@ export function ComparisonMatrix() {
   // Notes:
   // - We intentionally do NOT run this when the wheel event is over a scrollable container
   //   (e.g. the sidebars), so normal scrolling still works.
-  // - Individual DicomViewer instances still handle wheel events directly; those events call
-  //   preventDefault, and we skip them here via `e.defaultPrevented`.
+  // - Individual DicomViewer instances handle wheel events over images (zoom) and call preventDefault.
+  //   We skip them here via `e.defaultPrevented`.
   const wheelNavContextRef = useRef<{ instanceCount: number; offset: number } | null>(null);
   useEffect(() => {
     if (viewMode === 'svr3d') {
