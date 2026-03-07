@@ -157,6 +157,79 @@ function makeItkFloat32ScalarImage(pixels: Float32Array, size: number, name: str
   return img;
 }
 
+type NormalizedRect = { x: number; y: number; width: number; height: number };
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/**
+ * Best-effort exclusion for Elastix registration.
+ *
+ * The upstream elastix pipeline build we use appears to crash when passing `-fMask` / `-mMask`.
+ * Instead of true mask support, we neutralize (flatten) the excluded region to make it
+ * low-information for the optimizer.
+ *
+ * We feather the boundary so we don't introduce sharp edges that could become artificial
+ * alignment features.
+ */
+function applyExclusionRectFeather(
+  pixels: Float32Array,
+  size: number,
+  exclusionRect: NormalizedRect,
+  featherPx: number
+): { pixels: Float32Array; excludedFrac: number } | null {
+  if (size <= 0) return null;
+
+  const x0 = clamp(Math.floor(exclusionRect.x * size), 0, size);
+  const y0 = clamp(Math.floor(exclusionRect.y * size), 0, size);
+  const x1 = clamp(Math.ceil((exclusionRect.x + exclusionRect.width) * size), 0, size);
+  const y1 = clamp(Math.ceil((exclusionRect.y + exclusionRect.height) * size), 0, size);
+
+  if (x1 <= x0 || y1 <= y0) return null;
+
+  // Mean of pixels outside the rect (fallback to mid-gray).
+  let sum = 0;
+  let count = 0;
+  for (let y = 0; y < size; y++) {
+    const row = y * size;
+    const inY = y >= y0 && y < y1;
+    for (let x = 0; x < size; x++) {
+      if (inY && x >= x0 && x < x1) continue;
+      sum += pixels[row + x] ?? 0;
+      count++;
+    }
+  }
+  const mean = count > 0 ? sum / count : 0.5;
+
+  const out = Float32Array.from(pixels);
+
+  const feather = Math.max(0, Math.round(featherPx));
+
+  for (let y = y0; y < y1; y++) {
+    const row = y * size;
+    for (let x = x0; x < x1; x++) {
+      const idx = row + x;
+
+      if (feather <= 0) {
+        out[idx] = mean;
+        continue;
+      }
+
+      const d = Math.min(x - x0, x1 - 1 - x, y - y0, y1 - 1 - y);
+      // Replace more aggressively as we move deeper inside the rect.
+      const t = clamp((d + 1) / (feather + 1), 0, 1);
+      const v = pixels[idx] ?? mean;
+      out[idx] = v * (1 - t) + mean * t;
+    }
+  }
+
+  const excludedPx = (x1 - x0) * (y1 - y0);
+  const excludedFrac = excludedPx / (size * size);
+
+  return { pixels: out, excludedFrac };
+}
+
 export type ElastixAffine2DRegistrationResult = {
   /** Moving -> fixed linear matrix (about image center when applied with translatePx). */
   A: Mat2;
@@ -248,6 +321,16 @@ export async function registerAffine2DWithElastix(
     numberOfResolutions?: number;
     initialTransformParameterObject?: JsonCompatible;
     webWorker?: Worker;
+
+    /**
+     * Optional exclusion rectangle in normalized [0,1] coordinates (fixed image space).
+     *
+     * Note: the current `@itk-wasm/elastix` pipeline build we use appears to crash when passing
+     * real mask args (`-fMask` / `-mMask`) under `--memory-io`. As a practical workaround, we
+     * preprocess the pixels inside this rect (feathered fill) so the region becomes
+     * low-information for the optimizer.
+     */
+    exclusionRect?: NormalizedRect;
   }
 ): Promise<ElastixAffine2DRegistrationResult> {
   assertSquareSize(fixedPixels, size, 'fixedPixels');
@@ -257,8 +340,28 @@ export async function registerAffine2DWithElastix(
 
   const webWorker = opts?.webWorker ?? (await getElastixWorker());
 
-  const fixed = makeItkFloat32ScalarImage(fixedPixels, size, 'fixed');
-  const moving = makeItkFloat32ScalarImage(movingPixels, size, 'moving');
+  const debug = isDebugAlignmentEnabled();
+
+  const exclusion =
+    opts?.exclusionRect ? applyExclusionRectFeather(fixedPixels, size, opts.exclusionRect, 4) : null;
+
+  const fixedPixelsForReg = exclusion ? exclusion.pixels : fixedPixels;
+
+  const movingPixelsForReg = opts?.exclusionRect
+    ? (applyExclusionRectFeather(movingPixels, size, opts.exclusionRect, 4)?.pixels ?? movingPixels)
+    : movingPixels;
+
+  if (debug && opts?.exclusionRect) {
+    console.info('[alignment] Elastix exclusion rect (preprocess)', {
+      size,
+      exclusionRect: opts.exclusionRect,
+      excludedFrac: exclusion ? Number(exclusion.excludedFrac.toFixed(4)) : null,
+      mode: 'feathered-mean-fill',
+    });
+  }
+
+  const fixed = makeItkFloat32ScalarImage(fixedPixelsForReg, size, 'fixed');
+  const moving = makeItkFloat32ScalarImage(movingPixelsForReg, size, 'moving');
 
   const affineParameterMap = await getAffineParameterMap(webWorker, numberOfResolutions);
 
@@ -267,7 +370,6 @@ export async function registerAffine2DWithElastix(
 
   // We run the pipeline directly (instead of calling the generated `elastix()` wrapper)
   // so we can capture stdout/stderr and optionally parse Elastix' own metric trace.
-  const debug = isDebugAlignmentEnabled();
 
   let result: {
     webWorker: Worker;
@@ -289,6 +391,8 @@ export async function registerAffine2DWithElastix(
         type ElastixPipelineInput =
           | { type: typeof InterfaceTypes.JsonCompatible; data: JsonCompatible }
           | { type: typeof InterfaceTypes.Image; data: Image };
+
+        const pipelineBaseUrl = getAppPipelinesBaseUrl();
 
         const inputs: ElastixPipelineInput[] = [{ type: InterfaceTypes.JsonCompatible, data: parameterObject }];
         const args: string[] = [];
@@ -324,8 +428,6 @@ export async function registerAffine2DWithElastix(
           inputs.push({ type: InterfaceTypes.JsonCompatible, data: opts.initialTransformParameterObject });
           args.push('--initial-transform-parameter-object', inputCountString);
         }
-
-        const pipelineBaseUrl = getAppPipelinesBaseUrl();
 
         const { webWorker: usedWebWorker, returnValue, stdout, stderr, outputs } = await runPipeline(
           'elastix',
@@ -391,7 +493,7 @@ export async function registerAffine2DWithElastix(
   // This prevents subtle convention mismatches (or chain ordering issues) from silently
   // producing incorrect on-screen geometry despite the registration output looking plausible.
   const { best, candidates } = chooseBestElastixTransformCandidateAboutOrigin({
-    movingPixels,
+    movingPixels: movingPixelsForReg,
     resampledMovingPixels,
     size,
     candidatesStd,
@@ -417,7 +519,18 @@ export async function registerAffine2DWithElastix(
   const m2fAboutOrigin = best.aboutOrigin;
 
   // Quality metrics (computed in fixed space against elastix' resampled moving).
-  const miResult = computeMutualInformation(fixedPixels, resampledMovingPixels, 64);
+  const miResult = computeMutualInformation(
+    fixedPixelsForReg,
+    resampledMovingPixels,
+    opts?.exclusionRect
+      ? {
+          bins: 64,
+          exclusionRect: opts.exclusionRect,
+          imageWidth: size,
+          imageHeight: size,
+        }
+      : 64
+  );
   const metricFromLogs = tryParseElastixFinalMetricFromLogs(result.stdout, result.stderr);
 
   const elastixLogTail = debug

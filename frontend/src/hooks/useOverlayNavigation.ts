@@ -4,7 +4,7 @@ import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistenc
 import { OVERLAY_NAV_STORAGE_KEY } from '../utils/storageKeys';
 
 type PersistedOverlayNav = {
-  viewMode?: 'grid' | 'overlay';
+  viewMode?: 'grid' | 'overlay' | 'svr3d';
   overlayDate?: string;
   playSpeed?: number;
 };
@@ -15,7 +15,14 @@ function readPersistedOverlayNav(): PersistedOverlayNav {
 
   const obj = parsed as Record<string, unknown>;
 
-  const viewMode = obj.viewMode === 'overlay' ? 'overlay' : obj.viewMode === 'grid' ? 'grid' : undefined;
+  const viewMode =
+    obj.viewMode === 'overlay'
+      ? 'overlay'
+      : obj.viewMode === 'grid'
+        ? 'grid'
+        : obj.viewMode === 'svr3d'
+          ? 'svr3d'
+          : undefined;
   const overlayDate = typeof obj.overlayDate === 'string' ? obj.overlayDate : undefined;
   const playSpeed = typeof obj.playSpeed === 'number' && Number.isFinite(obj.playSpeed) ? obj.playSpeed : undefined;
 
@@ -44,8 +51,9 @@ export function useOverlayNavigation(
     writeLocalStorageJson(OVERLAY_NAV_STORAGE_KEY, next);
   }, []);
 
-  const [viewMode, setViewModeState] = useState<'grid' | 'overlay'>(() => {
-    return readPersistedOverlayNav().viewMode === 'overlay' ? 'overlay' : 'grid';
+  const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(() => {
+    const restored = readPersistedOverlayNav().viewMode;
+    return restored === 'overlay' ? 'overlay' : restored === 'svr3d' ? 'svr3d' : 'grid';
   });
   const [overlayDateIndex, setOverlayDateIndexState] = useState(0);
   const [previousOverlayDateIndex, setPreviousOverlayDateIndex] = useState<number | null>(null);
@@ -57,7 +65,7 @@ export function useOverlayNavigation(
   // Track spacebar held state for compare feature
   const [spaceHeld, setSpaceHeld] = useState(false);
 
-  const setViewMode = useCallback((next: 'grid' | 'overlay') => {
+  const setViewMode = useCallback((next: 'grid' | 'overlay' | 'svr3d') => {
     setViewModeState(next);
 
     // Avoid getting stuck in compare mode if the user releases Space while not in overlay mode.

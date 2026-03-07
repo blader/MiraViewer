@@ -13,6 +13,10 @@ import { clamp, nowMs } from '../utils/math';
 import { registerAffine2DWithElastix } from '../utils/elastixRegistration';
 import { warpGrayscaleAffine } from '../utils/warpAffine';
 import {
+  computeGradientMagnitudeL1Square,
+  buildInclusionMaskFromThresholdSquare,
+} from '../utils/imageFeatures';
+import {
   affineAboutOriginToStandard,
   composeStandardAffine2D,
   standardToAffineAboutOrigin,
@@ -23,6 +27,7 @@ import {
   type PanelGeometry,
 } from '../utils/panelTransform';
 import { isDebugAlignmentEnabled, debugAlignmentLog } from '../utils/debugAlignment';
+import { recordAlignmentSliceScore, resetAlignmentSliceScoreStore } from '../utils/alignmentSliceScoreStore';
 
 // Perf tuning for the MI-based slice search.
 //
@@ -33,14 +38,49 @@ import { isDebugAlignmentEnabled, debugAlignmentLog } from '../utils/debugAlignm
 //
 // Type note: keep this typed as `number` (not a numeric literal) so we can compare it to
 // ALIGNMENT_IMAGE_SIZE without TS treating the comparison as always-false.
-const SLICE_SEARCH_IMAGE_SIZE: number = 128;
-const SLICE_SEARCH_MI_BINS: number = 32;
-const SLICE_SEARCH_STOP_DECREASE_STREAK: number = 4;
+const SLICE_SEARCH_IMAGE_SIZE: number = 512;
+
+// MI scoring tuning.
+const SLICE_SEARCH_MI_BINS: number = 64;
+
+// Stop logic tuning.
+const SLICE_SEARCH_STOP_DECREASE_STREAK: number = 3;
+// Ensure we search far enough to avoid “off by ~5 slices” misses due to early noisy dips.
+const SLICE_SEARCH_MIN_SEARCH_RADIUS: number = 5;
+
+// Keep UI responsive during heavy 512px scoring.
+const SLICE_SEARCH_YIELD_EVERY_SLICES: number = 2;
+
+// Background suppression in scoring.
+const SLICE_SEARCH_FOREGROUND_THRESHOLD: number = 0.02;
+
+// Gradient scoring (MI/NMI on grad magnitude).
+//
+// Note: currently disabled because grad magnitude was not correlating well with correct slice
+// matches in practice.
+const SLICE_SEARCH_GRADIENT_WEIGHT: number = 0;
+
+// Similarity metric used for coarse slice search.
+const SLICE_SEARCH_SCORE_METRIC: 'ssim' | 'lncc' | 'zncc' | 'ngf' | 'census' | 'mind' | 'phase' = 'phase';
+const SLICE_SEARCH_SSIM_BLOCK_SIZE: number = 16;
+
+// Downsample sizes for more expensive metrics.
+const SLICE_SEARCH_MIND_SIZE: number = 64;
+const SLICE_SEARCH_PHASE_SIZE: number = 64;
+
+// Optional: constrain the slice search to a window around the best guess.
+const SLICE_SEARCH_WINDOW_RADIUS: number = 40;
 
 // Registration perf tuning.
 //
 // User-requested: run single-pass registrations (no multi-resolution pyramid). This is the
 // fastest configuration but can reduce robustness on some inputs.
+//
+// Important: keep the Elastix seed registration at a smaller size than the 512px slice search.
+// We previously attempted seed registration at 512 and observed failures in practice (progress
+// flashing + immediate abort). The seed transform is only used to pre-warp candidates; it does
+// not need to be computed at full slice-search resolution.
+const SEED_REGISTRATION_IMAGE_SIZE: number = ALIGNMENT_IMAGE_SIZE;
 const SEED_REGISTRATION_RESOLUTIONS = 1;
 const REFINEMENT_REGISTRATION_RESOLUTIONS = 1;
 
@@ -136,7 +176,11 @@ export function useAutoAlign() {
 
       // Single render element used for all captures. We also keep scratch canvases around to
       // avoid allocating a new <canvas> + ImageData buffers on every slice capture.
-      const renderElement = createCornerstoneRenderElement(ALIGNMENT_IMAGE_SIZE);
+      //
+      // Important: The element size must be >= any target capture size, otherwise larger captures
+      // would just upsample a smaller source canvas ("fake 512").
+      const renderElementSize = Math.max(ALIGNMENT_IMAGE_SIZE, SLICE_SEARCH_IMAGE_SIZE);
+      const renderElement = createCornerstoneRenderElement(renderElementSize);
       const captureScratchFull = createPixelCaptureScratch(ALIGNMENT_IMAGE_SIZE);
       const captureScratchSliceSearch = createPixelCaptureScratch(SLICE_SEARCH_IMAGE_SIZE);
 
@@ -150,6 +194,12 @@ export function useAutoAlign() {
         targetDates: targetDates.length,
         exclusionMask: reference.exclusionMask ?? null,
         debug: debugAlignment,
+      });
+
+      // In-memory store used by the per-cell debug overlay (SSIM/LNCC + MI/NMI breakdown).
+      resetAlignmentSliceScoreStore({
+        referenceSeriesUid: reference.seriesUid,
+        referenceSliceIndex: reference.sliceIndex,
       });
 
       if (!debugAlignment) {
@@ -187,6 +237,42 @@ export function useAutoAlign() {
             );
 
       const referencePixelsForSliceSearch = referenceRenderForSliceSearch.pixels;
+
+      // Slice-search feature prep (shared across all target dates).
+      const inclusion = buildInclusionMaskFromThresholdSquare(
+        referencePixelsForSliceSearch,
+        SLICE_SEARCH_IMAGE_SIZE,
+        SLICE_SEARCH_FOREGROUND_THRESHOLD,
+        { minIncludedFrac: 0.05 }
+      );
+      const sliceSearchInclusionMask = inclusion?.mask;
+
+      const referenceGradPixelsForSliceSearch =
+        SLICE_SEARCH_GRADIENT_WEIGHT !== 0
+          ? computeGradientMagnitudeL1Square(referencePixelsForSliceSearch, SLICE_SEARCH_IMAGE_SIZE)
+          : null;
+
+      if (debugAlignment) {
+          console.info('[alignment] Slice-search scoring config', {
+            sliceSearchImageSize: SLICE_SEARCH_IMAGE_SIZE,
+            scoreMetric: SLICE_SEARCH_SCORE_METRIC,
+            // SSIM/LNCC are the primary score used for bestIndex selection.
+            ssimBlockSize: SLICE_SEARCH_SSIM_BLOCK_SIZE,
+            // Downsample config for heavier metrics.
+            mindSize: SLICE_SEARCH_MIND_SIZE,
+            phaseSize: SLICE_SEARCH_PHASE_SIZE,
+            // MI/NMI are still computed in debug mode so we can compare metrics.
+            miBins: SLICE_SEARCH_MI_BINS,
+            stopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
+            minSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
+            yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+            foregroundThreshold: SLICE_SEARCH_FOREGROUND_THRESHOLD,
+            inclusionMask: inclusion
+              ? { includedFrac: Number(inclusion.includedFrac.toFixed(4)), includedCount: inclusion.includedCount }
+              : null,
+            gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
+          });
+      }
 
       const referenceDisplayedPixels = applyBrightnessContrastToPixels(
         referencePixels,
@@ -239,19 +325,30 @@ export function useAutoAlign() {
           );
           const startIdx = clamp(startIdxUnclamped, 0, Math.max(0, seriesRef.instance_count - 1));
 
+          // Best initial guess: normalized index mapping from reference -> target.
+          const seedIdx = startIdx;
+
+          const sliceSearchMinIndex = clamp(seedIdx - SLICE_SEARCH_WINDOW_RADIUS, 0, Math.max(0, seriesRef.instance_count - 1));
+          const sliceSearchMaxIndex = clamp(seedIdx + SLICE_SEARCH_WINDOW_RADIUS, 0, Math.max(0, seriesRef.instance_count - 1));
+
           debugAlignmentLog(
             'date.plan',
             {
               date,
               startIdx,
+              seedIdx,
               strategy: {
                 // User-requested: seed the slice search with a coarse 2D affine transform.
                 sliceSearchWarp: true,
-                seedImageSize: SLICE_SEARCH_IMAGE_SIZE,
+                seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
                 seedResolutions: SEED_REGISTRATION_RESOLUTIONS,
                 sliceSearchImageSize: SLICE_SEARCH_IMAGE_SIZE,
                 sliceSearchMiBins: SLICE_SEARCH_MI_BINS,
                 sliceSearchStopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
+                sliceSearchMinSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
+                sliceSearchWindowRadius: SLICE_SEARCH_WINDOW_RADIUS,
+                sliceSearchYieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+                gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
                 refinementImageSize: ALIGNMENT_IMAGE_SIZE,
                 refinementResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
               },
@@ -268,7 +365,12 @@ export function useAutoAlign() {
             seriesUid: seriesRef.series_uid,
             instanceCount: seriesRef.instance_count,
             startIdx,
-            seedImageSize: SLICE_SEARCH_IMAGE_SIZE,
+            seedIdx,
+            sliceSearchBounds: {
+              minIndex: sliceSearchMinIndex,
+              maxIndex: sliceSearchMaxIndex,
+            },
+            seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
             refinementImageSize: ALIGNMENT_IMAGE_SIZE,
             resolutions: {
               seed: SEED_REGISTRATION_RESOLUTIONS,
@@ -280,12 +382,11 @@ export function useAutoAlign() {
           //
           // This is used to pre-warp slices during the slice search so the similarity metric is
           // less dominated by in-plane pose differences.
-          const seedIdx = startIdx;
 
           console.info('[alignment] Seed registration starting', {
             date,
             seedIdx,
-            size: SLICE_SEARCH_IMAGE_SIZE,
+            size: SEED_REGISTRATION_IMAGE_SIZE,
             numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
           });
 
@@ -293,29 +394,31 @@ export function useAutoAlign() {
             renderElement,
             seriesRef.series_uid,
             seedIdx,
-            SLICE_SEARCH_IMAGE_SIZE,
-            captureScratchSliceSearch
+            SEED_REGISTRATION_IMAGE_SIZE,
+            captureScratchFull
           );
 
           const tSeed0 = nowMs();
-          const seedReg = await registerAffine2DWithElastix(
-            referencePixelsForSliceSearch,
-            seedRender.pixels,
-            SLICE_SEARCH_IMAGE_SIZE,
-            {
-              numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
-              webWorker: sharedWebWorker,
-            }
-          );
+          const seedReg = await registerAffine2DWithElastix(referencePixels, seedRender.pixels, SEED_REGISTRATION_IMAGE_SIZE, {
+            numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
+            webWorker: sharedWebWorker,
+            exclusionRect: reference.exclusionMask,
+          });
           const seedRegistrationMs = nowMs() - tSeed0;
 
           sharedWebWorker = seedReg.webWorker;
 
+          // Seed transform is computed at SEED_REGISTRATION_IMAGE_SIZE, but applied to the
+          // slice-search grid (SLICE_SEARCH_IMAGE_SIZE). Translation is in pixels, so scale it.
+          const seedScale = SLICE_SEARCH_IMAGE_SIZE / SEED_REGISTRATION_IMAGE_SIZE;
           const seed: SeedRegistrationResult = {
             idx: seedIdx,
             nmi: seedReg.quality.nmi,
             transformA: seedReg.A,
-            transformT: seedReg.translatePx,
+            transformT: {
+              x: seedReg.translatePx.x * seedScale,
+              y: seedReg.translatePx.y * seedScale,
+            },
             transformParameterObject: seedReg.transformParameterObject,
           };
 
@@ -359,7 +462,7 @@ export function useAutoAlign() {
             debugAlignment
           );
 
-          // 2) Use the seed transform to drive a fast MI-based slice search.
+          // 2) Use the seed transform to drive a fast similarity-based slice search.
           //
           // We pre-warp each candidate slice by the seed transform before scoring against the
           // reference. This helps slice search focus on the through-plane match instead of
@@ -403,9 +506,39 @@ export function useAutoAlign() {
           const onSliceScored = debugAlignment
             ? (
                 index: number,
-                metrics: { mi: number; nmi: number },
+                metrics: {
+                  ssim: number;
+                  lncc: number;
+                  zncc: number;
+                  ngf: number;
+                  census: number;
+                  mind?: number;
+                  phase?: number;
+                  mi: number;
+                  nmi: number;
+                  score: number;
+                  miGrad?: number;
+                  nmiGrad?: number;
+                  pixelsUsed?: number;
+                },
                 direction: 'start' | 'left' | 'right'
               ) => {
+                // Store per-slice metrics for UI debugging overlays.
+                recordAlignmentSliceScore(seriesRef.series_uid, index, {
+                  ssim: metrics.ssim,
+                  lncc: metrics.lncc,
+                  zncc: metrics.zncc,
+                  ngf: metrics.ngf,
+                  census: metrics.census,
+                  mind: metrics.mind ?? null,
+                  phase: metrics.phase ?? null,
+                  mi: metrics.mi,
+                  nmi: metrics.nmi,
+                  miGrad: metrics.miGrad ?? null,
+                  nmiGrad: metrics.nmiGrad ?? null,
+                  score: metrics.score,
+                });
+
                 // Extremely verbose: log per-slice similarity metrics only when debug alignment is enabled.
                 debugAlignmentLog(
                   'slice-search.score',
@@ -413,8 +546,19 @@ export function useAutoAlign() {
                     date,
                     direction,
                     index,
+                    score: Number(metrics.score.toFixed(6)),
+                    ssim: Number(metrics.ssim.toFixed(6)),
+                    lncc: Number(metrics.lncc.toFixed(6)),
+                    zncc: Number(metrics.zncc.toFixed(6)),
+                    ngf: Number(metrics.ngf.toFixed(6)),
+                    census: Number(metrics.census.toFixed(6)),
+                    mind: metrics.mind != null ? Number(metrics.mind.toFixed(6)) : null,
+                    phase: metrics.phase != null ? Number(metrics.phase.toFixed(6)) : null,
                     mi: Number(metrics.mi.toFixed(6)),
                     nmi: Number(metrics.nmi.toFixed(6)),
+                    miGrad: metrics.miGrad != null ? Number(metrics.miGrad.toFixed(6)) : null,
+                    nmiGrad: metrics.nmiGrad != null ? Number(metrics.nmiGrad.toFixed(6)) : null,
+                    pixelsUsed: metrics.pixelsUsed ?? null,
                   },
                   debugAlignment
                 );
@@ -448,13 +592,27 @@ export function useAutoAlign() {
             },
             {
               startIndexOverride: seedIdx,
+              minIndex: sliceSearchMinIndex,
+              maxIndex: sliceSearchMaxIndex,
+              scoreMetric: SLICE_SEARCH_SCORE_METRIC,
+              ssimBlockSize: SLICE_SEARCH_SSIM_BLOCK_SIZE,
+              mindSize: SLICE_SEARCH_MIND_SIZE,
+              phaseSize: SLICE_SEARCH_PHASE_SIZE,
               miBins: SLICE_SEARCH_MI_BINS,
               stopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
+              minSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
+              yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+              yieldFn: yieldToMain,
               onSliceScored,
+              inclusionMask: sliceSearchInclusionMask,
               // Pass exclusion mask for tumor avoidance.
               exclusionRect: reference.exclusionMask,
               imageWidth: SLICE_SEARCH_IMAGE_SIZE,
               imageHeight: SLICE_SEARCH_IMAGE_SIZE,
+              gradient:
+                referenceGradPixelsForSliceSearch && SLICE_SEARCH_GRADIENT_WEIGHT !== 0
+                  ? { referenceGradPixels: referenceGradPixelsForSliceSearch, weight: SLICE_SEARCH_GRADIENT_WEIGHT }
+                  : undefined,
             }
           );
 
@@ -473,8 +631,9 @@ export function useAutoAlign() {
           console.info('[alignment] Slice search finished', {
             date,
             strategy: 'seeded',
+            scoreMetric: SLICE_SEARCH_SCORE_METRIC,
             bestIndex: searchResult.bestIndex,
-            bestMi: Number(searchResult.bestMI.toFixed(6)),
+            bestScore: Number(searchResult.bestMI.toFixed(6)),
             slicesChecked: searchResult.slicesChecked,
           });
 
@@ -483,9 +642,18 @@ export function useAutoAlign() {
             {
               date,
               strategy: 'seeded',
+              scoreMetric: SLICE_SEARCH_SCORE_METRIC,
               size: SLICE_SEARCH_IMAGE_SIZE,
+              ssimBlockSize: SLICE_SEARCH_SSIM_BLOCK_SIZE,
               bins: SLICE_SEARCH_MI_BINS,
               stopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
+              minSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
+              bounds: {
+                minIndex: sliceSearchMinIndex,
+                maxIndex: sliceSearchMaxIndex,
+              },
+              yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+              gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
               slicesChecked: searchResult.slicesChecked,
               scoreMs: searchResult.timingMs?.scoreMs,
               renderMs: sliceSearchRenderMs,
@@ -524,6 +692,7 @@ export function useAutoAlign() {
           const refined = await registerAffine2DWithElastix(referencePixels, bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
             numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
             webWorker: sharedWebWorker,
+            exclusionRect: reference.exclusionMask,
           });
           const refinementMs = nowMs() - tRefine0;
 

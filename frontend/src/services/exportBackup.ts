@@ -39,6 +39,7 @@ function toMetadata(instance: DicomInstance) {
     imageOrientationPatient: instance.imageOrientationPatient ?? null,
     pixelSpacing: instance.pixelSpacing ?? null,
     sliceThickness: instance.sliceThickness ?? null,
+    spacingBetweenSlices: instance.spacingBetweenSlices ?? null,
     windowCenter: instance.windowCenter ?? null,
     windowWidth: instance.windowWidth ?? null,
   };

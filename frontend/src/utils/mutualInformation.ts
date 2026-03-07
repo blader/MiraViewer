@@ -23,11 +23,21 @@ import { clamp01 } from './math';
 export type MutualInformationOptions = {
   /** Number of histogram bins (default: 64). */
   bins?: number;
+
+  /**
+   * Optional inclusion mask.
+   *
+   * If provided, only pixels where inclusionMask[idx] != 0 are used.
+   * This is useful for ignoring background / low-information regions during slice search.
+   */
+  inclusionMask?: Uint8Array;
+
   /**
    * Optional exclusion rectangle in normalized [0,1] image coordinates.
    * Pixels inside this rect are excluded from the histogram computation.
    */
   exclusionRect?: { x: number; y: number; width: number; height: number };
+
   /** Image width in pixels (required if exclusionRect is provided). */
   imageWidth?: number;
   /** Image height in pixels (required if exclusionRect is provided). */
@@ -70,6 +80,7 @@ export function computeMutualInformation(
     typeof optionsOrBins === 'number' ? { bins: optionsOrBins } : optionsOrBins;
 
   const bins = opts.bins ?? 64;
+  const inclusionMask = opts.inclusionMask;
   const exclusionRect = opts.exclusionRect;
   const imageWidth = opts.imageWidth;
   const imageHeight = opts.imageHeight;
@@ -98,12 +109,20 @@ export function computeMutualInformation(
     hasExclusion = exclX1 > exclX0 && exclY1 > exclY0;
   }
 
-  // Helper to check if pixel index is inside exclusion rect.
-  const isExcluded = (idx: number): boolean => {
-    if (!hasExclusion) return false;
+  if (inclusionMask && inclusionMask.length !== n) {
+    throw new Error(
+      `computeMutualInformation: inclusionMask length mismatch (mask=${inclusionMask.length}, image=${n})`
+    );
+  }
+
+  // Helper to check if pixel index is included by masks.
+  const isIncluded = (idx: number): boolean => {
+    if (inclusionMask && inclusionMask[idx] === 0) return false;
+
+    if (!hasExclusion) return true;
     const px = idx % imgW;
     const py = Math.floor(idx / imgW);
-    return px >= exclX0 && px < exclX1 && py >= exclY0 && py < exclY1;
+    return !(px >= exclX0 && px < exclX1 && py >= exclY0 && py < exclY1);
   };
 
   let minA = Number.POSITIVE_INFINITY;
@@ -112,7 +131,7 @@ export function computeMutualInformation(
   let maxB = Number.NEGATIVE_INFINITY;
 
   for (let i = 0; i < n; i++) {
-    if (isExcluded(i)) continue;
+    if (!isIncluded(i)) continue;
 
     const a = imageA[i];
     const b = imageB[i];
@@ -145,7 +164,7 @@ export function computeMutualInformation(
   let pixelsUsed = 0;
 
   for (let i = 0; i < n; i++) {
-    if (isExcluded(i)) continue;
+    if (!isIncluded(i)) continue;
 
     const a = imageA[i];
     const b = imageB[i];

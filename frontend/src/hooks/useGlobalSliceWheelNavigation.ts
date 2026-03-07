@@ -14,8 +14,8 @@ export type GlobalSliceWheelNavContext = {
  * This is a catch-all: it listens on `window` and only reacts to wheel events whose targets
  * are inside `centerPaneRef`.
  *
- * It is designed to coexist with per-viewer `useWheelNavigation`:
- * - If a DicomViewer handled the wheel event, it calls `preventDefault()`.
+ * It is designed to coexist with per-viewer wheel handlers (e.g. DicomViewer zoom):
+ * - If a nested component handled the wheel event, it calls `preventDefault()`.
  * - This global handler checks `e.defaultPrevented` and bails out to avoid double-applying.
  *
  * It also avoids hijacking normal scrolling by bailing out when:

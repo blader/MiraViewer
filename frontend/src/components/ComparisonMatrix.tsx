@@ -13,11 +13,13 @@ import {
   Trash2,
   MoreVertical,
   HelpCircle,
+  Box,
 } from 'lucide-react';
 import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
 import { ExportModal } from './ExportModal';
 import { ClearDataModal } from './ClearDataModal';
+import { Svr3DView } from './Svr3DView';
 import { SliceLoopNavigator } from './comparison/SliceLoopNavigator';
 import { GridView } from './comparison/GridView';
 import { OverlayView } from './comparison/OverlayView';
@@ -139,6 +141,8 @@ export function ComparisonMatrix() {
     isAligning,
     progress: alignmentProgress,
     results: alignmentResults,
+    error: alignmentError,
+    clearState: clearAlignmentState,
     alignAllDates,
     abort: abortAlignment,
   } = useAutoAlign();
@@ -161,7 +165,8 @@ export function ComparisonMatrix() {
     const planeKey = (plane: string | null) => (plane && plane.trim() ? plane : 'Other');
 
     return data.sequences
-      .filter(s => planeKey(s.plane) === selectedPlane)
+      .filter((s) => planeKey(s.plane) === selectedPlane)
+      .filter((s) => formatSequenceLabel(s) !== 'Unknown')
       .sort((a, b) => formatSequenceLabel(b).localeCompare(formatSequenceLabel(a))); // reverse alpha
   }, [data, selectedPlane]);
 
@@ -280,6 +285,45 @@ export function ComparisonMatrix() {
 
   const overlayViewerSize = getOverlayViewerSize(gridSize);
 
+  // Seed SVR 3D ROI preview slice:
+  // - Prefer the currently displayed overlay slice when available.
+  // - Otherwise fall back to the newest enabled date in the grid.
+  const svr3dSeed = useMemo(() => {
+    if (overlayDisplayedDate && overlayDisplayedRef) {
+      return {
+        defaultDateIso: overlayDisplayedDate,
+        fallbackRoiSeriesUid: overlayDisplayedRef.series_uid,
+        fallbackRoiSliceIndex: overlayDisplayedEffectiveSliceIndex,
+      };
+    }
+
+    const first = columns.find((c) => c.ref);
+    if (!first?.ref) {
+      return {
+        defaultDateIso: null,
+        fallbackRoiSeriesUid: null,
+        fallbackRoiSliceIndex: null,
+      };
+    }
+
+    const settings = panelSettings.get(first.date) || DEFAULT_PANEL_SETTINGS;
+    const sliceIndex = getSliceIndex(first.ref.instance_count, progress, settings.offset);
+    const effectiveIndex = getEffectiveInstanceIndex(sliceIndex, first.ref.instance_count, settings.reverseSliceOrder);
+
+    return {
+      defaultDateIso: first.date,
+      fallbackRoiSeriesUid: first.ref.series_uid,
+      fallbackRoiSliceIndex: effectiveIndex,
+    };
+  }, [
+    columns,
+    overlayDisplayedDate,
+    overlayDisplayedEffectiveSliceIndex,
+    overlayDisplayedRef,
+    panelSettings,
+    progress,
+  ]);
+
   const startAlignAll = useCallback(
     async (reference: AlignmentReference, exclusionMask: ExclusionMask) => {
       if (isAligning) {
@@ -323,10 +367,16 @@ export function ComparisonMatrix() {
   // Notes:
   // - We intentionally do NOT run this when the wheel event is over a scrollable container
   //   (e.g. the sidebars), so normal scrolling still works.
-  // - Individual DicomViewer instances still handle wheel events directly; those events call
-  //   preventDefault, and we skip them here via `e.defaultPrevented`.
+  // - Individual DicomViewer instances handle wheel events over images (zoom) and call preventDefault.
+  //   We skip them here via `e.defaultPrevented`.
   const wheelNavContextRef = useRef<{ instanceCount: number; offset: number } | null>(null);
   useEffect(() => {
+    if (viewMode === 'svr3d') {
+      // The SVR 3D view uses mousewheel for zoom; don't hijack wheel events for slice navigation.
+      wheelNavContextRef.current = null;
+      return;
+    }
+
     let instanceCount = 1;
     let offset = DEFAULT_PANEL_SETTINGS.offset;
 
@@ -438,11 +488,19 @@ export function ComparisonMatrix() {
               </button>
               <button
                 onClick={() => setViewMode('overlay')}
-                className={`px-3 py-1.5 text-xs rounded-r-lg transition-colors flex items-center gap-1.5 ${viewMode === 'overlay' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+                className={`px-3 py-1.5 text-xs transition-colors flex items-center gap-1.5 ${viewMode === 'overlay' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
                 title="Overlay view - toggle between dates"
               >
                 <Layers className="w-3.5 h-3.5" />
                 Overlay
+              </button>
+              <button
+                onClick={() => setViewMode('svr3d')}
+                className={`px-3 py-1.5 text-xs rounded-r-lg transition-colors flex items-center gap-1.5 ${viewMode === 'svr3d' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+                title="SVR 3D view"
+              >
+                <Box className="w-3.5 h-3.5" />
+                3D
               </button>
             </div>
           </div>
@@ -582,20 +640,36 @@ export function ComparisonMatrix() {
 
       {/* Main area with sidebar */}
       <div className="flex-1 flex overflow-hidden relative">
-        <ComparisonFiltersSidebar
-          open={sidebarOpen}
-          onToggleOpen={() => setSidebarOpen((v) => !v)}
-          availablePlanes={availablePlanes}
-          selectedPlane={selectedPlane}
-          onSelectPlane={selectPlane}
-          sequencesForPlane={sequencesForPlane}
-          sequencesWithDataForDates={sequencesWithDataForDates}
-          selectedSeqId={selectedSeqId}
-          onSelectSequence={selectSequence}
-        />
+        {viewMode !== 'svr3d' ? (
+          <ComparisonFiltersSidebar
+            open={sidebarOpen}
+            onToggleOpen={() => setSidebarOpen((v) => !v)}
+            availablePlanes={availablePlanes}
+            selectedPlane={selectedPlane}
+            onSelectPlane={selectPlane}
+            sequencesForPlane={sequencesForPlane}
+            sequencesWithDataForDates={sequencesWithDataForDates}
+            selectedSeqId={selectedSeqId}
+            onSelectSequence={selectSequence}
+          />
+        ) : null}
 
-        {/* Main content area - Grid or Overlay */}
+        {/* Main content area - Grid / Overlay / SVR 3D */}
         <div ref={setCenterPaneRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
+          {alignmentError && !isAligning ? (
+            <div className="absolute top-2 left-2 right-2 z-50 flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-red-950/80 border border-red-500/30 text-red-100 text-sm">
+              <div className="min-w-0 truncate">
+                <span className="font-medium">Alignment failed:</span> {alignmentError}
+              </div>
+              <button
+                type="button"
+                className="shrink-0 px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/30"
+                onClick={() => clearAlignmentState()}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
           {!hasData ? (
             /* Empty state */
             <div className="flex-1 flex flex-col items-center justify-center gap-8 text-center p-8 max-w-2xl mx-auto">
@@ -628,6 +702,7 @@ export function ComparisonMatrix() {
             </div>
           ) : viewMode === 'grid' ? (
             <GridView
+              comboId={selectedSeqId}
               columns={columns}
               gridCols={gridCols}
               gridCellSize={gridCellSize}
@@ -641,8 +716,9 @@ export function ComparisonMatrix() {
               abortAlignment={abortAlignment}
               startAlignAll={startAlignAll}
             />
-          ) : (
+          ) : viewMode === 'overlay' ? (
             <OverlayView
+              comboId={selectedSeqId}
               overlayColumns={overlayColumns}
               overlayViewerSize={overlayViewerSize}
               overlayDisplayedRef={overlayDisplayedRef}
@@ -667,6 +743,14 @@ export function ComparisonMatrix() {
               startAlignAll={startAlignAll}
               setProgress={setProgress}
             />
+          ) : (
+            <Svr3DView
+              data={data}
+              defaultDateIso={svr3dSeed.defaultDateIso}
+              defaultSeqId={selectedSeqId}
+              fallbackRoiSeriesUid={svr3dSeed.fallbackRoiSeriesUid}
+              fallbackRoiSliceIndex={svr3dSeed.fallbackRoiSliceIndex}
+            />
           )}
 
         </div>
@@ -684,13 +768,15 @@ export function ComparisonMatrix() {
       </div>
 
       {/* Slice navigator with loop + speed controls */}
-      <SliceLoopNavigator
-        selectedSeqId={selectedSeqId}
-        playbackInstanceCount={playbackInstanceCount}
-        progress={progress}
-        progressRef={progressRef}
-        setProgress={setProgress}
-      />
+      {viewMode !== 'svr3d' ? (
+        <SliceLoopNavigator
+          selectedSeqId={selectedSeqId}
+          playbackInstanceCount={playbackInstanceCount}
+          progress={progress}
+          progressRef={progressRef}
+          setProgress={setProgress}
+        />
+      ) : null}
     </div>
   );
 }

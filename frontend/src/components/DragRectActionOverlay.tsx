@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link2, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import type { ExclusionMask, PanelSettings } from '../types/api';
 import { clamp } from '../utils/math';
 
@@ -79,7 +79,7 @@ function rectFromPoints(a: Point, b: Point): RectPx {
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
-function computeMaskFromScreenRect(
+function computeBaseMaskFromScreenRect(
   rect: RectPx,
   size: { width: number; height: number },
   geometry: Pick<PanelSettings, 'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'>
@@ -122,6 +122,32 @@ function computeMaskFromScreenRect(
   return { x, y, width, height };
 }
 
+function computeScreenMaskFromScreenRect(rect: RectPx, size: { width: number; height: number }): ExclusionMask {
+  const w = size.width;
+  const h = size.height;
+
+  const x = w > 0 ? clamp(rect.x / w, 0, 1) : 0;
+  const y = h > 0 ? clamp(rect.y / h, 0, 1) : 0;
+  const width = w > 0 ? clamp(rect.width / w, 0, 1) : 0;
+  const height = h > 0 ? clamp(rect.height / h, 0, 1) : 0;
+
+  return { x, y, width, height };
+}
+
+export type DragRectActionMasks = { base: ExclusionMask; screen: ExclusionMask };
+
+export type DragRectAction = {
+  key: string;
+  label: string;
+  title?: string;
+  icon?: React.ReactNode;
+  variant?: 'primary' | 'secondary';
+  /** Which mask space should be used to validate minMaskSize for enabling this action. */
+  minSizeSpace?: 'base' | 'screen';
+  disabled?: boolean;
+  onConfirm: (masks: DragRectActionMasks) => void;
+};
+
 export interface DragRectActionOverlayProps {
   /**
    * Geometry used to interpret the drawn rectangle.
@@ -129,37 +155,37 @@ export interface DragRectActionOverlayProps {
    * This should match the *displayed* geometry (pan/zoom/rotation/affine) for the viewer.
    */
   geometry: Pick<PanelSettings, 'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'>;
-  /** Called when user clicks the in-rect action button. */
-  onConfirm: (mask: ExclusionMask) => void;
+
+  /** Actions shown when a rectangle selection is finalized. */
+  actions: DragRectAction[];
+
   /** Optional hook fired once when a drag begins (after threshold). */
   onDragBegin?: () => void;
-  /** Disable interaction (still renders children). */
+
+  /** Disable rectangle drawing (still renders children). */
   disabled?: boolean;
-  /** Action button label (default: Align All). */
-  actionLabel?: string;
-  /** Optional title text shown in the button tooltip. */
-  actionTitle?: string;
+
   /**
    * Minimum drag distance in CSS pixels before we treat the gesture as a rectangle draw.
    * (Default: 4)
    */
   dragThresholdPx?: number;
+
   /**
-   * Minimum rectangle size in normalized units before enabling action.
+   * Minimum rectangle size in normalized units before enabling actions.
    * (Default: 0.01)
    */
   minMaskSize?: number;
+
   className?: string;
   children: React.ReactNode;
 }
 
 export function DragRectActionOverlay({
   geometry,
-  onConfirm,
+  actions,
   onDragBegin,
   disabled = false,
-  actionLabel = 'Align All',
-  actionTitle,
   dragThresholdPx = 4,
   minMaskSize = 0.01,
   className,
@@ -174,7 +200,7 @@ export function DragRectActionOverlay({
     didExceedThreshold: boolean;
   } | null>(null);
 
-  const [selection, setSelection] = useState<{ rect: RectPx; mask: ExclusionMask } | null>(null);
+  const [selection, setSelection] = useState<{ rect: RectPx; masks: DragRectActionMasks } | null>(null);
 
   const didDragRef = useRef(false);
 
@@ -198,6 +224,11 @@ export function DragRectActionOverlay({
       // Ignore pointer downs that originate on the action/close buttons.
       const target = e.target as HTMLElement | null;
       if (target?.closest('[data-drag-rect-action-button="true"]')) return;
+
+      // Don't hijack interactions with other tool UIs that render inside the overlay.
+      // (e.g. the tumor threshold slider).
+      if (target?.closest('[data-tumor-ui="true"]')) return;
+      if (target?.closest('[data-gt-ui="true"]')) return;
 
       const p = getLocalPoint(e);
       if (!p) return;
@@ -269,8 +300,9 @@ export function DragRectActionOverlay({
         const r = el?.getBoundingClientRect();
         const size = { width: r?.width ?? 0, height: r?.height ?? 0 };
 
-        const mask = computeMaskFromScreenRect(rect, size, geometry);
-        setSelection({ rect, mask });
+        const maskBase = computeBaseMaskFromScreenRect(rect, size, geometry);
+        const maskScreen = computeScreenMaskFromScreenRect(rect, size);
+        setSelection({ rect, masks: { base: maskBase, screen: maskScreen } });
       }
 
       setDrag(null);
@@ -313,14 +345,20 @@ export function DragRectActionOverlay({
   }, [clearSelection, selection]);
 
   const effectiveRect = selection?.rect ?? currentRect;
-  const effectiveMask = selection?.mask;
 
-  const actionEnabled =
-    !!selection &&
-    !!effectiveMask &&
-    effectiveMask.width >= minMaskSize &&
-    effectiveMask.height >= minMaskSize &&
-    !disabled;
+  const baseOk = (() => {
+    const m = selection?.masks.base;
+    if (!m) return false;
+    return m.width >= minMaskSize && m.height >= minMaskSize;
+  })();
+
+  const screenOk = (() => {
+    const m = selection?.masks.screen;
+    if (!m) return false;
+    return m.width >= minMaskSize && m.height >= minMaskSize;
+  })();
+
+  const canRunAnyAction = !!selection && !disabled;
 
   return (
     <div
@@ -365,30 +403,43 @@ export function DragRectActionOverlay({
                 <X className="w-4 h-4" />
               </button>
 
-              {/* Action button */}
-              <button
-                type="button"
-                data-drag-rect-action-button="true"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (!effectiveMask) return;
-                  onConfirm(effectiveMask);
-                  clearSelection();
-                }}
-                disabled={!actionEnabled}
-                className={`absolute pointer-events-auto px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-xl transition-colors ${
-                  actionEnabled
-                    ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
-                    : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
-                }`}
-                style={{ left: effectiveRect.x + 40, top: effectiveRect.y + 6 }}
-                title={actionTitle}
-              >
-                <Link2 className="w-4 h-4" />
-                {actionLabel}
-              </button>
+              {/* Action buttons */}
+              {actions.map((action, actionIdx) => {
+                const space = action.minSizeSpace ?? 'base';
+                const sizeOk = space === 'screen' ? screenOk : baseOk;
+                const enabled = canRunAnyAction && sizeOk && !action.disabled;
+                const variant = action.variant ?? 'primary';
+
+                const cls = enabled
+                  ? variant === 'primary'
+                    ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
+                    : 'bg-black/70 text-white/90 hover:bg-black/80 border-white/10'
+                  : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
+
+                return (
+                  <button
+                    key={action.key}
+                    type="button"
+                    data-drag-rect-action-button="true"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!selection) return;
+                      if (!enabled) return;
+                      action.onConfirm(selection.masks);
+                      clearSelection();
+                    }}
+                    disabled={!enabled}
+                    className={`absolute pointer-events-auto px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-xl transition-colors border ${cls}`}
+                    style={{ left: effectiveRect.x + 40, top: effectiveRect.y + 6 + actionIdx * 44 }}
+                    title={action.title}
+                  >
+                    {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
+                    {action.label}
+                  </button>
+                );
+              })}
             </>
           )}
         </div>
