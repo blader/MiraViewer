@@ -33,20 +33,6 @@ function affineIntensity(a: Float32Array, scale: number, offset: number): Float3
   return out;
 }
 
-function addNoise(a: Float32Array, sigma: number, seed: number): Float32Array {
-  let s = seed >>> 0;
-  const out = new Float32Array(a.length);
-  for (let i = 0; i < a.length; i++) {
-    s = (1664525 * s + 1013904223) >>> 0;
-    // Roughly uniform noise in [-sigma, sigma]
-    const u = (s >>> 8) / 0x01000000;
-    const n = (u * 2 - 1) * sigma;
-    const v = (a[i] ?? 0) + n;
-    out[i] = Math.max(0, Math.min(1, v));
-  }
-  return out;
-}
-
 function flipBinaryWithProb(a: Float32Array, flipProb: number, seed: number): Float32Array {
   let s = seed >>> 0;
   const out = new Float32Array(a.length);
@@ -97,37 +83,6 @@ describe('findBestMatchingSlice', () => {
 
     expect(noMin.bestIndex).not.toBe(3);
     expect(withMin.bestIndex).toBe(3);
-  });
-
-  test('scoreMetric=mind prefers same-structure slices despite intensity remapping', async () => {
-    const size = 64;
-    const n = size * size;
-
-    const reference = makeDeterministicRandomFloat(n, 42);
-
-    // Best match: intensity remapped reference (scale + offset).
-    const best = affineIntensity(reference, 0.6, 0.2);
-
-    const slices: Float32Array[] = [];
-    slices[0] = makeDeterministicRandomFloat(n, 1);
-    slices[1] = addNoise(reference, 0.15, 2);
-    slices[2] = best;
-    slices[3] = addNoise(reference, 0.25, 3);
-
-    const getSlice = async (idx: number) => {
-      const s = slices[idx];
-      if (!s) throw new Error('missing slice');
-      return s;
-    };
-
-    const r = await findBestMatchingSlice(reference, getSlice, 0, 1, slices.length, undefined, {
-      scoreMetric: 'mind',
-      mindSize: 64,
-      stopDecreaseStreak: 2,
-      minSearchRadius: 0,
-    });
-
-    expect(r.bestIndex).toBe(2);
   });
 
   test('scoreMetric=phase prefers slices with the same frequency content despite intensity remapping', async () => {

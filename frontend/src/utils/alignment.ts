@@ -2,9 +2,7 @@ import type { ExclusionMask, HistogramStats, PanelSettings } from '../types/api'
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from './constants';
 import { clamp, nowMs } from './math';
 import { computeMutualInformation, type MutualInformationOptions } from './mutualInformation';
-import { computeGradientMagnitudeL1Square } from './imageFeatures';
 import { computeBlockSimilarity } from './ssim';
-import { prepareMindReference, computeMindSimilarity } from './mind';
 import {
   preparePhaseCorrelationReference,
   computePhaseCorrelationSimilarity,
@@ -90,10 +88,9 @@ type FindBestMatchingSliceOptions = {
    * - LNCC/ZNCC can be strong baselines for MRI when intensity changes are mostly affine.
    * - NGF focuses on gradient *direction* alignment (edge orientation).
    * - Census is a rank-based local descriptor (robust to monotonic intensity changes).
-   * - MIND is a modality-robust self-similarity descriptor commonly used in medical registration.
    * - Phase correlation is FFT-based and is most sensitive to translation agreement.
    */
-  scoreMetric?: 'ssim' | 'lncc' | 'zncc' | 'ngf' | 'census' | 'mind' | 'phase';
+  scoreMetric?: 'ssim' | 'lncc' | 'zncc' | 'ngf' | 'census' | 'phase';
 
   /**
    * SSIM / LNCC block config.
@@ -101,12 +98,6 @@ type FindBestMatchingSliceOptions = {
    * Note: we use fast block-based approximations (not Gaussian-window SSIM).
    */
   ssimBlockSize?: number;
-
-  /**
-   * Downsample size (square) used for the MIND descriptor metric.
-   * Default: 64.
-   */
-  mindSize?: number;
 
   /**
    * Downsample size (square, power-of-two) used for phase correlation.
@@ -128,8 +119,6 @@ type FindBestMatchingSliceOptions = {
       ngf: number;
       /** Census similarity (higher is better). */
       census: number;
-      /** MIND-like descriptor similarity (higher is better). */
-      mind?: number;
       /** Phase correlation similarity (higher is better). */
       phase?: number;
       /** Raw MI/NMI on intensity images (debug-only; can be used for comparison). */
@@ -137,9 +126,6 @@ type FindBestMatchingSliceOptions = {
       nmi: number;
       /** Combined slice-search score used for bestIndex selection. */
       score: number;
-      /** Optional MI/NMI on gradient magnitude images (debug-only, when enabled). */
-      miGrad?: number;
-      nmiGrad?: number;
       /** Pixels used for scoring (after masks). */
       pixelsUsed?: number;
     },
@@ -162,14 +148,6 @@ type FindBestMatchingSliceOptions = {
   imageWidth?: number;
   /** Image height in pixels (required if exclusionRect is provided). */
   imageHeight?: number;
-
-  /**
-   * Optional gradient-magnitude scoring (MI/NMI), used for debugging/comparison.
-   */
-  gradient?: {
-    referenceGradPixels: Float32Array;
-    weight: number;
-  };
 
   /** Optional yielding to keep UI responsive during heavy 512px scoring. */
   yieldEverySlices?: number;
@@ -245,10 +223,6 @@ export async function findBestMatchingSlice(
   let slicesSinceYield = 0;
 
   let scoreMs = 0;
-  const grad = options?.gradient;
-  if (grad && grad.referenceGradPixels.length !== referencePixels.length) {
-    throw new Error('findBestMatchingSlice: referenceGradPixels size mismatch');
-  }
 
   const scoreMetric = options?.scoreMetric ?? 'ssim';
 
@@ -257,9 +231,8 @@ export async function findBestMatchingSlice(
   const wantNgf = wantDebugMetrics || scoreMetric === 'ngf';
   const wantCensus = wantDebugMetrics || scoreMetric === 'census';
 
-  // MIND / phase correlation are more expensive, so we only compute them when selected,
+  // Phase correlation is expensive, so we only compute it when selected,
   // OR when debug metrics are enabled (so the in-viewer debug overlay is fully populated).
-  const wantMind = wantDebugMetrics || scoreMetric === 'mind';
   const wantPhase = wantDebugMetrics || scoreMetric === 'phase';
 
   if (inclusionMask && inclusionMask.length !== referencePixels.length) {
@@ -282,9 +255,7 @@ export async function findBestMatchingSlice(
     hasExclusion = exclX1 > exclX0 && exclY1 > exclY0;
   }
 
-  // Optional downsampled metrics.
-  //
-  // MIND and phase correlation are expensive at 512px. We run them on a smaller grid.
+  // Phase correlation is expensive at 512px; run it on a smaller grid.
   const downsampleMaskSquare = (mask: Uint8Array, srcSize: number, dstSize: number): Uint8Array => {
     if (dstSize === srcSize) return mask;
 
@@ -296,9 +267,6 @@ export async function findBestMatchingSlice(
     return out;
   };
 
-  const mindSizeRequested = Math.max(16, Math.round(options?.mindSize ?? 64));
-  const mindSize = Math.min(squareSize, mindSizeRequested);
-
   const phaseSizeRequested = Math.max(8, Math.round(options?.phaseSize ?? 64));
   const phaseSizeClamped = Math.min(squareSize, phaseSizeRequested);
 
@@ -309,29 +277,6 @@ export async function findBestMatchingSlice(
     return n;
   };
   const phaseSize = floorPowerOfTwo(phaseSizeClamped);
-
-  const mindPrepared = wantMind
-    ? (() => {
-        const refMindPixels =
-          mindSize === squareSize
-            ? referencePixels
-            : resample2dAreaAverage(referencePixels, squareSize, squareSize, mindSize, mindSize);
-
-        const mindMask = inclusionMask
-          ? mindSize === squareSize
-            ? inclusionMask
-            : downsampleMaskSquare(inclusionMask, squareSize, mindSize)
-          : undefined;
-
-        return prepareMindReference(refMindPixels, {
-          inclusionMask: mindMask,
-          exclusionRect,
-          imageWidth: mindSize,
-          imageHeight: mindSize,
-          patchRadius: 1,
-        });
-      })()
-    : null;
 
   const phasePrepared = wantPhase
     ? (() => {
@@ -417,13 +362,10 @@ export async function findBestMatchingSlice(
     zncc: number;
     ngf: number;
     census: number;
-    mind?: number;
     phase?: number;
     mi: number;
     nmi: number;
     score: number;
-    miGrad?: number;
-    nmiGrad?: number;
     pixelsUsed?: number;
   } => {
     const t0 = nowMs();
@@ -506,20 +448,6 @@ export async function findBestMatchingSlice(
       census = totalBits > 0 ? 1 - diffBits / totalBits : 0;
     }
 
-    // MIND (downsampled).
-    let mind: number | undefined;
-    let mindPixelsUsed = 0;
-    if (wantMind && mindPrepared && mindSize > 0) {
-      const targetMindPixels =
-        mindSize === squareSize
-          ? targetPixels
-          : resample2dAreaAverage(targetPixels, squareSize, squareSize, mindSize, mindSize);
-
-      const r = computeMindSimilarity(mindPrepared, targetMindPixels);
-      mind = r.mind;
-      mindPixelsUsed = r.pixelsUsed;
-    }
-
     // Phase correlation (downsampled FFT).
     let phase: number | undefined;
     let phasePixelsUsed = 0;
@@ -538,12 +466,9 @@ export async function findBestMatchingSlice(
     // Avoid this work unless the caller has requested per-slice metrics.
     let mi = 0;
     let nmi = 0;
-    let miGrad: number | undefined;
-    let nmiGrad: number | undefined;
     let pixelsUsed: number | undefined = sim.pixelsUsed;
 
     if (wantDebugMetrics) {
-      // We compute MI + NMI together from the histogram.
       const miOptions: MutualInformationOptions = {
         bins: MI_BINS,
         inclusionMask,
@@ -556,18 +481,10 @@ export async function findBestMatchingSlice(
       mi = raw.mi;
       nmi = raw.nmi;
       pixelsUsed = raw.pixelsUsed;
-
-      if (grad && Number.isFinite(grad.weight) && grad.weight !== 0) {
-        const targetGrad = computeGradientMagnitudeL1Square(targetPixels, squareSize);
-        const g = computeMutualInformation(grad.referenceGradPixels, targetGrad, miOptions);
-        miGrad = g.mi;
-        nmiGrad = g.nmi;
-      }
     } else {
       // For non-debug runs, still expose a useful pixel count for the selected metric.
       if (scoreMetric === 'ngf') pixelsUsed = ngfPixelsUsed;
       else if (scoreMetric === 'census') pixelsUsed = censusPixelsUsed;
-      else if (scoreMetric === 'mind') pixelsUsed = mindPixelsUsed;
       else if (scoreMetric === 'phase') pixelsUsed = phasePixelsUsed;
     }
 
@@ -581,8 +498,6 @@ export async function findBestMatchingSlice(
         ? ngf
         : scoreMetric === 'census'
         ? census
-        : scoreMetric === 'mind'
-        ? mind ?? 0
         : scoreMetric === 'phase'
         ? phase ?? 0
         : sim.ssim;
@@ -595,13 +510,10 @@ export async function findBestMatchingSlice(
       zncc: sim.zncc,
       ngf,
       census,
-      mind,
       phase,
       mi,
       nmi,
       score,
-      miGrad,
-      nmiGrad,
       pixelsUsed,
     };
   };

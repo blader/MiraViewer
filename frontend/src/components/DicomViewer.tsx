@@ -535,7 +535,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
               <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
               <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
               <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
-              <div>MIND: {sliceScore && sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
               <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
               <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
               <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>

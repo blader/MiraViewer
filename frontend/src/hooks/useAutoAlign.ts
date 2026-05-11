@@ -12,10 +12,7 @@ import {
 import { clamp, nowMs } from '../utils/math';
 import { registerAffine2DWithElastix } from '../utils/elastixRegistration';
 import { warpGrayscaleAffine } from '../utils/warpAffine';
-import {
-  computeGradientMagnitudeL1Square,
-  buildInclusionMaskFromThresholdSquare,
-} from '../utils/imageFeatures';
+import { buildInclusionMaskFromThresholdSquare } from '../utils/imageFeatures';
 import {
   affineAboutOriginToStandard,
   composeStandardAffine2D,
@@ -54,18 +51,9 @@ const SLICE_SEARCH_YIELD_EVERY_SLICES: number = 2;
 // Background suppression in scoring.
 const SLICE_SEARCH_FOREGROUND_THRESHOLD: number = 0.02;
 
-// Gradient scoring (MI/NMI on grad magnitude).
-//
-// Note: currently disabled because grad magnitude was not correlating well with correct slice
-// matches in practice.
-const SLICE_SEARCH_GRADIENT_WEIGHT: number = 0;
-
 // Similarity metric used for coarse slice search.
-const SLICE_SEARCH_SCORE_METRIC: 'ssim' | 'lncc' | 'zncc' | 'ngf' | 'census' | 'mind' | 'phase' = 'phase';
+const SLICE_SEARCH_SCORE_METRIC: 'ssim' | 'lncc' | 'zncc' | 'ngf' | 'census' | 'phase' = 'phase';
 const SLICE_SEARCH_SSIM_BLOCK_SIZE: number = 16;
-
-// Downsample sizes for more expensive metrics.
-const SLICE_SEARCH_MIND_SIZE: number = 64;
 const SLICE_SEARCH_PHASE_SIZE: number = 64;
 
 // Optional: constrain the slice search to a window around the best guess.
@@ -247,21 +235,12 @@ export function useAutoAlign() {
       );
       const sliceSearchInclusionMask = inclusion?.mask;
 
-      const referenceGradPixelsForSliceSearch =
-        SLICE_SEARCH_GRADIENT_WEIGHT !== 0
-          ? computeGradientMagnitudeL1Square(referencePixelsForSliceSearch, SLICE_SEARCH_IMAGE_SIZE)
-          : null;
-
       if (debugAlignment) {
           console.info('[alignment] Slice-search scoring config', {
             sliceSearchImageSize: SLICE_SEARCH_IMAGE_SIZE,
             scoreMetric: SLICE_SEARCH_SCORE_METRIC,
-            // SSIM/LNCC are the primary score used for bestIndex selection.
             ssimBlockSize: SLICE_SEARCH_SSIM_BLOCK_SIZE,
-            // Downsample config for heavier metrics.
-            mindSize: SLICE_SEARCH_MIND_SIZE,
             phaseSize: SLICE_SEARCH_PHASE_SIZE,
-            // MI/NMI are still computed in debug mode so we can compare metrics.
             miBins: SLICE_SEARCH_MI_BINS,
             stopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
             minSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
@@ -270,7 +249,6 @@ export function useAutoAlign() {
             inclusionMask: inclusion
               ? { includedFrac: Number(inclusion.includedFrac.toFixed(4)), includedCount: inclusion.includedCount }
               : null,
-            gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
           });
       }
 
@@ -348,7 +326,6 @@ export function useAutoAlign() {
                 sliceSearchMinSearchRadius: SLICE_SEARCH_MIN_SEARCH_RADIUS,
                 sliceSearchWindowRadius: SLICE_SEARCH_WINDOW_RADIUS,
                 sliceSearchYieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
-                gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
                 refinementImageSize: ALIGNMENT_IMAGE_SIZE,
                 refinementResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
               },
@@ -512,34 +489,26 @@ export function useAutoAlign() {
                   zncc: number;
                   ngf: number;
                   census: number;
-                  mind?: number;
                   phase?: number;
                   mi: number;
                   nmi: number;
                   score: number;
-                  miGrad?: number;
-                  nmiGrad?: number;
                   pixelsUsed?: number;
                 },
                 direction: 'start' | 'left' | 'right'
               ) => {
-                // Store per-slice metrics for UI debugging overlays.
                 recordAlignmentSliceScore(seriesRef.series_uid, index, {
                   ssim: metrics.ssim,
                   lncc: metrics.lncc,
                   zncc: metrics.zncc,
                   ngf: metrics.ngf,
                   census: metrics.census,
-                  mind: metrics.mind ?? null,
                   phase: metrics.phase ?? null,
                   mi: metrics.mi,
                   nmi: metrics.nmi,
-                  miGrad: metrics.miGrad ?? null,
-                  nmiGrad: metrics.nmiGrad ?? null,
                   score: metrics.score,
                 });
 
-                // Extremely verbose: log per-slice similarity metrics only when debug alignment is enabled.
                 debugAlignmentLog(
                   'slice-search.score',
                   {
@@ -548,16 +517,9 @@ export function useAutoAlign() {
                     index,
                     score: Number(metrics.score.toFixed(6)),
                     ssim: Number(metrics.ssim.toFixed(6)),
-                    lncc: Number(metrics.lncc.toFixed(6)),
-                    zncc: Number(metrics.zncc.toFixed(6)),
-                    ngf: Number(metrics.ngf.toFixed(6)),
-                    census: Number(metrics.census.toFixed(6)),
-                    mind: metrics.mind != null ? Number(metrics.mind.toFixed(6)) : null,
                     phase: metrics.phase != null ? Number(metrics.phase.toFixed(6)) : null,
                     mi: Number(metrics.mi.toFixed(6)),
                     nmi: Number(metrics.nmi.toFixed(6)),
-                    miGrad: metrics.miGrad != null ? Number(metrics.miGrad.toFixed(6)) : null,
-                    nmiGrad: metrics.nmiGrad != null ? Number(metrics.nmiGrad.toFixed(6)) : null,
                     pixelsUsed: metrics.pixelsUsed ?? null,
                   },
                   debugAlignment
@@ -596,7 +558,6 @@ export function useAutoAlign() {
               maxIndex: sliceSearchMaxIndex,
               scoreMetric: SLICE_SEARCH_SCORE_METRIC,
               ssimBlockSize: SLICE_SEARCH_SSIM_BLOCK_SIZE,
-              mindSize: SLICE_SEARCH_MIND_SIZE,
               phaseSize: SLICE_SEARCH_PHASE_SIZE,
               miBins: SLICE_SEARCH_MI_BINS,
               stopDecreaseStreak: SLICE_SEARCH_STOP_DECREASE_STREAK,
@@ -609,10 +570,6 @@ export function useAutoAlign() {
               exclusionRect: reference.exclusionMask,
               imageWidth: SLICE_SEARCH_IMAGE_SIZE,
               imageHeight: SLICE_SEARCH_IMAGE_SIZE,
-              gradient:
-                referenceGradPixelsForSliceSearch && SLICE_SEARCH_GRADIENT_WEIGHT !== 0
-                  ? { referenceGradPixels: referenceGradPixelsForSliceSearch, weight: SLICE_SEARCH_GRADIENT_WEIGHT }
-                  : undefined,
             }
           );
 
@@ -653,7 +610,6 @@ export function useAutoAlign() {
                 maxIndex: sliceSearchMaxIndex,
               },
               yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
-              gradientWeight: SLICE_SEARCH_GRADIENT_WEIGHT,
               slicesChecked: searchResult.slicesChecked,
               scoreMs: searchResult.timingMs?.scoreMs,
               renderMs: sliceSearchRenderMs,

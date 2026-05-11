@@ -4,12 +4,9 @@ export type AlignmentSliceScoreMetrics = {
   zncc: number;
   ngf: number;
   census: number;
-  mind: number | null;
   phase: number | null;
   mi: number;
   nmi: number;
-  miGrad: number | null;
-  nmiGrad: number | null;
   score: number;
 };
 
@@ -43,20 +40,7 @@ export function getAlignmentSliceScoreContext(): AlignmentSliceScoreContext | nu
 export function recordAlignmentSliceScore(
   seriesUid: string,
   instanceIndex: number,
-  metrics: {
-    ssim: number;
-    lncc: number;
-    zncc: number;
-    ngf: number;
-    census: number;
-    mind?: number | null;
-    phase?: number | null;
-    mi: number;
-    nmi: number;
-    miGrad?: number | null;
-    nmiGrad?: number | null;
-    score: number;
-  }
+  metrics: Omit<AlignmentSliceScoreMetrics, 'phase'> & { phase?: number | null }
 ): void {
   if (!seriesUid) return;
   if (!Number.isFinite(instanceIndex) || instanceIndex < 0) return;
@@ -67,20 +51,7 @@ export function recordAlignmentSliceScore(
     scoresBySeries.set(seriesUid, perSeries);
   }
 
-  perSeries.set(instanceIndex, {
-    ssim: metrics.ssim,
-    lncc: metrics.lncc,
-    zncc: metrics.zncc,
-    ngf: metrics.ngf,
-    census: metrics.census,
-    mind: metrics.mind ?? null,
-    phase: metrics.phase ?? null,
-    mi: metrics.mi,
-    nmi: metrics.nmi,
-    miGrad: metrics.miGrad ?? null,
-    nmiGrad: metrics.nmiGrad ?? null,
-    score: metrics.score,
-  });
+  perSeries.set(instanceIndex, { ...metrics, phase: metrics.phase ?? null });
 }
 
 export function getAlignmentSliceScore(
