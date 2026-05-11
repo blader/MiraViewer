@@ -5,6 +5,7 @@ import type { SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries } from '../types
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { useSvrReconstruction } from '../hooks/useSvrReconstruction';
 import { SvrVolume3DModal } from './SvrVolume3DModal';
+import { clamp01 } from '../utils/math';
 
 export type SvrModalProps = {
   data: ComparisonData;
@@ -47,10 +48,6 @@ type RoiRect01 = {
   x1: number;
   y1: number;
 };
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
 
 function normalizeRect01(rect: RoiRect01): { left: number; right: number; top: number; bottom: number } {
   return {

@@ -27,10 +27,7 @@ import {
   type RenderTextureMode,
   type RenderVolumeTexData,
 } from '../utils/svr/renderLod';
-
-function clamp(x: number, min: number, max: number): number {
-  return x < min ? min : x > max ? max : x;
-}
+import { clamp } from '../utils/math';
 
 
 /**

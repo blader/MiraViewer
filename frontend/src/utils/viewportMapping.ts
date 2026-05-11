@@ -1,11 +1,8 @@
 import type { NormalizedPoint } from '../db/schema';
+import { clamp01 } from './math';
 import type { ViewportSize } from './viewTransform';
 
 export type ImageSizePx = { w: number; h: number };
-
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
 
 /**
  * Mirror the viewer's "contain" behavior: scale to fit while preserving aspect ratio.

@@ -1,9 +1,6 @@
 import { sampleTrilinear, type VolumeDims as TrilinearDims } from './trilinear';
 import { formatMiB } from './svrUtils';
-
-function clamp(x: number, min: number, max: number): number {
-  return x < min ? min : x > max ? max : x;
-}
+import { clamp } from '../math';
 
 export type RenderTextureMode = 'auto' | 'u8';
 export type RenderQualityPreset = 'auto' | 'full' | '512' | '384' | '256' | '192' | '128';

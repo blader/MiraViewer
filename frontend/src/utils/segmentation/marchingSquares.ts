@@ -1,9 +1,7 @@
+import { clamp } from '../math';
+
 export type Roi = { x0: number; y0: number; x1: number; y1: number };
 export type PxPoint = { x: number; y: number };
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
-}
 
 function edgeKey(a: string, b: string) {
   return a < b ? `${a}|${b}` : `${b}|${a}`;

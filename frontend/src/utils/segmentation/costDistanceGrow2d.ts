@@ -1,21 +1,12 @@
-export type Roi = { x0: number; y0: number; x1: number; y1: number };
+import { clamp, clampInt } from '../math';
+import { median as medianOfNumbers, mulberry32, robustStats } from '../stats';
 
-type RobustStats = { mu: number; sigma: number };
+export type Roi = { x0: number; y0: number; x1: number; y1: number };
 
 type PxPoint = { x: number; y: number };
 
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function clampInt(v: number, lo: number, hi: number): number {
-  if (!Number.isFinite(v)) return lo;
-  return clamp(Math.round(v), lo, hi);
-}
-
 function mixU32(x: number): number {
-  // A small 32-bit mixing function for deterministic RNG seeding.
-  // https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function (in spirit; not exact)
+  // Small 32-bit mixing function for deterministic RNG seeding.
   let y = x >>> 0;
   y ^= y >>> 16;
   y = Math.imul(y, 0x7feb352d);
@@ -23,46 +14,6 @@ function mixU32(x: number): number {
   y = Math.imul(y, 0x846ca68b);
   y ^= y >>> 16;
   return y >>> 0;
-}
-
-function mulberry32(seed: number): () => number {
-  // Deterministic PRNG returning [0,1).
-  // Good enough for sampling UI seeds; not for crypto.
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function medianOfNumbers(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[mid] ?? 0;
-  const a = sorted[mid - 1] ?? 0;
-  const b = sorted[mid] ?? 0;
-  return (a + b) / 2;
-}
-
-function robustStats(samples: number[], sigmaFloor = 6): RobustStats | null {
-  if (samples.length < 16) return null;
-
-  const mu = medianOfNumbers(samples);
-  const abs = samples.map((v) => Math.abs(v - mu));
-  const mad = medianOfNumbers(abs);
-
-  // Convert MAD to a robust estimate of sigma (normal distribution factor).
-  const sigmaMad = 1.4826 * mad;
-
-  // Keep a floor so we don't become overly confident from small/noisy samples.
-  const sigma = Math.max(sigmaFloor, sigmaMad);
-
-  if (!Number.isFinite(mu) || !Number.isFinite(sigma)) return null;
-  return { mu, sigma };
 }
 
 type GradientCache = { w: number; h: number; grad: Uint8Array };

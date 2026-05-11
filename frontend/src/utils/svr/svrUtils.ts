@@ -7,13 +7,7 @@
 
 import type { VolumeDims } from './trilinear';
 
-/**
- * Clamps a value to the [0, 1] range.
- * Used for normalizing intensity values.
- */
-export function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
+export { clamp01 } from '../math';
 
 /**
  * Throws if the provided AbortSignal has been aborted.

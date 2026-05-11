@@ -17,6 +17,7 @@ import {
   parseTransformParameterObjectToStandardAffines,
 } from './elastixTransform';
 import { isDebugAlignmentEnabled } from './debugAlignment';
+import { clamp } from './math';
 
 function tailString(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
@@ -158,10 +159,6 @@ function makeItkFloat32ScalarImage(pixels: Float32Array, size: number, name: str
 }
 
 type NormalizedRect = { x: number; y: number; width: number; height: number };
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
-}
 
 /**
  * Best-effort exclusion for Elastix registration.

@@ -13,10 +13,7 @@ import {
   remapPointsBetweenViewerTransforms,
   remapPolygonBetweenViewerTransforms,
 } from '../utils/viewTransform';
-
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
+import { clamp01 } from '../utils/math';
 
 function polygonToSvgPath(p: TumorPolygon): string {
   if (!p.points.length) return '';

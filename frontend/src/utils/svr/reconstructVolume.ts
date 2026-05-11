@@ -16,6 +16,7 @@ import { cross, dot, normalize, v3 } from './vec3';
 import { boundsCornersMm, cropSliceToRoiInPlace } from './sliceRoiCrop';
 import { generateVolumePreviews } from './volumePreview';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
+import { clamp01 } from '../math';
 
 type SvrSliceResampleKernel = 'area' | 'lanczos3';
 
@@ -38,10 +39,6 @@ function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new Error('SVR cancelled');
   }
-}
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
 type BoundsMm = { min: Vec3; max: Vec3 };

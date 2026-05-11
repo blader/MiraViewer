@@ -1,3 +1,7 @@
+import { clamp, clamp01, clampInt } from '../math';
+import { idx3, inBounds3 as inBounds } from '../grid3d';
+import { robustStats } from '../stats';
+
 export type Vec3i = { x: number; y: number; z: number };
 
 export type RegionGrow3DRoiMode = 'hard' | 'guide';
@@ -93,51 +97,6 @@ class MinHeap {
   get size() {
     return this.items.length;
   }
-}
-
-type RobustStats = { mu: number; sigma: number };
-
-function clamp(x: number, min: number, max: number): number {
-  return x < min ? min : x > max ? max : x;
-}
-
-function clampInt(x: number, min: number, max: number): number {
-  if (!Number.isFinite(x)) return min;
-  const xi = Math.floor(x);
-  return xi < min ? min : xi > max ? max : xi;
-}
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
-
-function median(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[mid] ?? 0;
-  const a = sorted[mid - 1] ?? 0;
-  const b = sorted[mid] ?? 0;
-  return (a + b) / 2;
-}
-
-function robustStats(samples: number[], sigmaFloor = 0.02): RobustStats | null {
-  if (samples.length < 16) return null;
-  const mu = median(samples);
-  const abs = samples.map((v) => Math.abs(v - mu));
-  const mad = median(abs);
-  const sigmaMad = 1.4826 * mad;
-  const sigma = Math.max(sigmaFloor, sigmaMad);
-  if (!Number.isFinite(mu) || !Number.isFinite(sigma)) return null;
-  return { mu, sigma };
-}
-
-function idx3(x: number, y: number, z: number, nx: number, ny: number): number {
-  return z * (nx * ny) + y * nx + x;
-}
-
-function inBounds(x: number, y: number, z: number, nx: number, ny: number, nz: number): boolean {
-  return x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz;
 }
 
 export type RegionGrow3DV2Tuning = {

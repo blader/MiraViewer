@@ -27,14 +27,7 @@ import {
   remapPointBetweenViewerTransforms,
   remapPolygonBetweenViewerTransforms,
 } from '../utils/viewTransform';
-
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
-}
+import { clamp, clamp01 } from '../utils/math';
 
 const GROW2D_UI_STORAGE_KEY_PREFIX = 'miraviewer:tumor-grow2d-ui-v1';
 const LEGACY_GROW2D_TUNING_STORAGE_KEY = 'miraviewer:tumor-grow2d-tuning-v1';

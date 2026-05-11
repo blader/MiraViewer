@@ -1,9 +1,6 @@
 import type { SvrPreviewImages } from '../../types/svr';
+import { clamp01 } from '../math';
 import type { VolumeDims } from './trilinear';
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
 
 function sliceToImageData(params: {
   width: number;

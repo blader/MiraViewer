@@ -13,6 +13,7 @@ import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
+import { clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
   return [...dates].sort((a, b) => b.localeCompare(a));
@@ -35,10 +36,6 @@ type RoiRect01 = {
   y1: number;
 };
 
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
-
 function normalizeRect01(rect: RoiRect01): { left: number; right: number; top: number; bottom: number } {
   return {
     left: Math.min(rect.x0, rect.x1),
@@ -46,12 +43,6 @@ function normalizeRect01(rect: RoiRect01): { left: number; right: number; top: n
     top: Math.min(rect.y0, rect.y1),
     bottom: Math.max(rect.y0, rect.y1),
   };
-}
-
-function clampInt(x: number, min: number, max: number): number {
-  if (!Number.isFinite(x)) return min;
-  const xi = Math.round(x);
-  return xi < min ? min : xi > max ? max : xi;
 }
 
 function inferRoiPlaneFromNormalDir(normalDir: SliceGeometry['normalDir']): SvrRoiPlane {

@@ -1,12 +1,7 @@
+import { clampInt } from '../math';
 import type { Vec3i } from './regionGrow3D_v2';
 
 export type RoiCubePlane = 'axial' | 'coronal' | 'sagittal';
-
-function clampInt(x: number, min: number, max: number): number {
-  if (!Number.isFinite(x)) return min;
-  const xi = Math.floor(x);
-  return xi < min ? min : xi > max ? max : xi;
-}
 
 function absMm(v: number): number {
   return Math.abs(Number.isFinite(v) ? v : 0);
