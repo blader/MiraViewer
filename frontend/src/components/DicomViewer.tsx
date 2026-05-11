@@ -634,11 +634,6 @@ function CornerstoneImage({
   // during async navigation (e.g. switching overlay dates).
   const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
 
-  // Store the last-applied visual settings so we can keep the previous image stable
-  // until the newly-requested image is actually displayed.
-  const [frozenImageFilter, setFrozenImageFilter] = useState(imageFilter);
-  const [frozenImageTransform, setFrozenImageTransform] = useState(imageTransform);
-
   // Keep a ref of the latest requested key so the imageId load effect can associate
   // a loaded imageId with the correct contentKey without re-running on every key change.
   const contentKeyRef = useRef(contentKey);
@@ -659,26 +654,20 @@ function CornerstoneImage({
 
   const isContentInSync = loadedImageId === imageId && loadedContentKey === contentKey;
 
-  // Update the frozen visual settings only when we're "in sync".
-  //
-  // We intentionally schedule the update to avoid calling setState synchronously
-  // inside an effect body (our lint rules disallow that).
+  // While navigating, keep rendering the previous image with the previous in-sync settings.
+  // We snapshot the latest in-sync filter/transform so they only update once the new image is
+  // actually displayed — without this, brightness/zoom/etc would jump for one frame.
+  // Schedule the update via setTimeout(0) to comply with the project lint rule that disallows
+  // calling setState synchronously inside an effect body.
+  const [frozen, setFrozen] = useState({ filter: imageFilter, transform: imageTransform });
   useEffect(() => {
     if (!isContentInSync) return;
+    const t = window.setTimeout(() => setFrozen({ filter: imageFilter, transform: imageTransform }), 0);
+    return () => clearTimeout(t);
+  }, [isContentInSync, imageFilter, imageTransform]);
 
-    const timeout = window.setTimeout(() => {
-      setFrozenImageFilter(imageFilter);
-      setFrozenImageTransform(imageTransform);
-    }, 0);
-
-    return () => {
-      clearTimeout(timeout);
-    };
-  }, [imageFilter, imageTransform, isContentInSync]);
-
-  // While navigating, keep rendering the previous image with the previous settings.
-  const appliedImageFilter = isContentInSync ? imageFilter : frozenImageFilter;
-  const appliedImageTransform = isContentInSync ? imageTransform : frozenImageTransform;
+  const appliedImageFilter = isContentInSync ? imageFilter : frozen.filter;
+  const appliedImageTransform = isContentInSync ? imageTransform : frozen.transform;
 
   // Enable cornerstone once on mount.
   //

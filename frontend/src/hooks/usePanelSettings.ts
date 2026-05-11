@@ -4,22 +4,14 @@ import { getPanelSettings, savePanelSettings } from '../utils/localApi';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 
 function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): PanelSettings {
-  return {
-    offset: typeof s?.offset === 'number' ? s.offset : DEFAULT_PANEL_SETTINGS.offset,
-    reverseSliceOrder:
-      typeof s?.reverseSliceOrder === 'boolean' ? s.reverseSliceOrder : DEFAULT_PANEL_SETTINGS.reverseSliceOrder,
-    zoom: typeof s?.zoom === 'number' ? s.zoom : DEFAULT_PANEL_SETTINGS.zoom,
-    rotation: typeof s?.rotation === 'number' ? s.rotation : DEFAULT_PANEL_SETTINGS.rotation,
-    brightness: typeof s?.brightness === 'number' ? s.brightness : DEFAULT_PANEL_SETTINGS.brightness,
-    contrast: typeof s?.contrast === 'number' ? s.contrast : DEFAULT_PANEL_SETTINGS.contrast,
-    panX: typeof s?.panX === 'number' ? s.panX : DEFAULT_PANEL_SETTINGS.panX,
-    panY: typeof s?.panY === 'number' ? s.panY : DEFAULT_PANEL_SETTINGS.panY,
-    affine00: typeof s?.affine00 === 'number' ? s.affine00 : DEFAULT_PANEL_SETTINGS.affine00,
-    affine01: typeof s?.affine01 === 'number' ? s.affine01 : DEFAULT_PANEL_SETTINGS.affine01,
-    affine10: typeof s?.affine10 === 'number' ? s.affine10 : DEFAULT_PANEL_SETTINGS.affine10,
-    affine11: typeof s?.affine11 === 'number' ? s.affine11 : DEFAULT_PANEL_SETTINGS.affine11,
-    progress: typeof s?.progress === 'number' ? s.progress : DEFAULT_PANEL_SETTINGS.progress,
-  };
+  const out = { ...DEFAULT_PANEL_SETTINGS } as Record<string, unknown>;
+  if (!s) return out as unknown as PanelSettings;
+
+  for (const [k, def] of Object.entries(DEFAULT_PANEL_SETTINGS) as [keyof PanelSettings, unknown][]) {
+    const v = (s as Record<string, unknown>)[k];
+    if (typeof v === typeof def && v !== null) out[k] = v;
+  }
+  return out as unknown as PanelSettings;
 }
 
 type PanelSettingsHistoryEntry = {
@@ -361,9 +353,9 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     return () => clearTimeout(handle);
   }, [progress, effectiveActivePanel, selectedSeqId, updatePanelSetting]);
 
-  // Persist all panel settings periodically and on page unload
+  // Flush all in-memory settings on page unload (debounced progress writes may not have fired).
   useEffect(() => {
-    const saveAll = () => {
+    const handleUnload = () => {
       const seqId = selectedSeqIdRef.current;
       const settings = panelSettingsRef.current;
       if (!seqId || settings.size === 0) return;
@@ -371,18 +363,8 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
         savePanelSettings(seqId, date, s).catch(() => {});
       }
     };
-    
-    // Save on beforeunload
-    const handleUnload = () => saveAll();
     window.addEventListener('beforeunload', handleUnload);
-    
-    // Also save periodically (every 10 seconds)
-    const interval = setInterval(saveAll, 10000);
-    
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload);
-      clearInterval(interval);
-    };
+    return () => window.removeEventListener('beforeunload', handleUnload);
   }, []);
 
   return {

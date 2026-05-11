@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AlignmentReference, ExclusionMask, SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
-import { readLocalStorageJson, writeLocalStorageJson } from '../utils/persistence';
+import { usePersistedState } from '../hooks/usePersistedState';
 import {
   Brain,
   Layers,
@@ -45,18 +45,22 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
 }
 
 type PersistedComparisonUiState = {
-  sidebarOpen?: boolean;
-  rightSidebarOpen?: boolean;
+  sidebarOpen: boolean;
+  rightSidebarOpen: boolean;
 };
 
-function readPersistedComparisonUiState(): PersistedComparisonUiState {
-  const parsed = readLocalStorageJson(COMPARISON_UI_STORAGE_KEY);
-  if (!parsed || typeof parsed !== 'object') return {};
+const DEFAULT_COMPARISON_UI_STATE: PersistedComparisonUiState = {
+  sidebarOpen: true,
+  rightSidebarOpen: true,
+};
 
-  const obj = parsed as Record<string, unknown>;
+function validateComparisonUiState(raw: unknown): PersistedComparisonUiState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
   return {
-    sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : undefined,
-    rightSidebarOpen: typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : undefined,
+    sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : DEFAULT_COMPARISON_UI_STATE.sidebarOpen,
+    rightSidebarOpen:
+      typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : DEFAULT_COMPARISON_UI_STATE.rightSidebarOpen,
   };
 }
 
@@ -76,30 +80,28 @@ export function ComparisonMatrix() {
     toggleDate,
   } = useComparisonFilters(data);
 
-  const uiPersistedRef = useRef<PersistedComparisonUiState>(readPersistedComparisonUiState());
-
-  const persistUi = useCallback((update: PersistedComparisonUiState) => {
-    const next: PersistedComparisonUiState = { ...uiPersistedRef.current, ...update };
-    uiPersistedRef.current = next;
-    writeLocalStorageJson(COMPARISON_UI_STORAGE_KEY, next);
-  }, []);
-
-  const [sidebarOpen, setSidebarOpen] = useState(() => {
-    const persisted = readPersistedComparisonUiState();
-    return typeof persisted.sidebarOpen === 'boolean' ? persisted.sidebarOpen : true;
-  });
-  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
-    const persisted = readPersistedComparisonUiState();
-    return typeof persisted.rightSidebarOpen === 'boolean' ? persisted.rightSidebarOpen : true;
-  });
-
-  // Persist the user's layout preferences so a hard refresh resumes where they left off.
-  useEffect(() => {
-    persistUi({ sidebarOpen });
-  }, [persistUi, sidebarOpen]);
-  useEffect(() => {
-    persistUi({ rightSidebarOpen });
-  }, [persistUi, rightSidebarOpen]);
+  const [uiState, setUiState] = usePersistedState(
+    COMPARISON_UI_STORAGE_KEY,
+    DEFAULT_COMPARISON_UI_STATE,
+    validateComparisonUiState,
+  );
+  const { sidebarOpen, rightSidebarOpen } = uiState;
+  const setSidebarOpen = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) =>
+      setUiState({
+        ...uiState,
+        sidebarOpen: typeof v === 'function' ? v(uiState.sidebarOpen) : v,
+      }),
+    [setUiState, uiState],
+  );
+  const setRightSidebarOpen = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) =>
+      setUiState({
+        ...uiState,
+        rightSidebarOpen: typeof v === 'function' ? v(uiState.rightSidebarOpen) : v,
+      }),
+    [setUiState, uiState],
+  );
 
   const [helpOpen, setHelpOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -243,43 +245,29 @@ export function ComparisonMatrix() {
   } = useOverlayNavigation(overlayColumns);
 
 
-  const overlayDisplayedCol = overlayColumns[displayedOverlayIndex];
-  const overlayDisplayedRef = overlayDisplayedCol?.ref;
-  const overlayDisplayedDate = overlayDisplayedCol?.date;
-  const overlayDisplayedSettings = overlayDisplayedDate
-    ? panelSettings.get(overlayDisplayedDate) || DEFAULT_PANEL_SETTINGS
-    : DEFAULT_PANEL_SETTINGS;
-  const overlayDisplayedSliceIndex = overlayDisplayedRef
-    ? getSliceIndex(overlayDisplayedRef.instance_count, progress, overlayDisplayedSettings.offset)
-    : 0;
-  const overlayDisplayedEffectiveSliceIndex = overlayDisplayedRef
-    ? getEffectiveInstanceIndex(
-        overlayDisplayedSliceIndex,
-        overlayDisplayedRef.instance_count,
-        overlayDisplayedSettings.reverseSliceOrder
-      )
-    : 0;
+  const positionAt = (index: number) => {
+    const col = overlayColumns[index];
+    const ref = col?.ref;
+    const date = col?.date;
+    const settings = date ? panelSettings.get(date) || DEFAULT_PANEL_SETTINGS : DEFAULT_PANEL_SETTINGS;
+    const sliceIndex = ref ? getSliceIndex(ref.instance_count, progress, settings.offset) : 0;
+    const effectiveSliceIndex = ref
+      ? getEffectiveInstanceIndex(sliceIndex, ref.instance_count, settings.reverseSliceOrder)
+      : 0;
+    return { ref, date, settings, sliceIndex, effectiveSliceIndex };
+  };
 
-  // Selected overlay date (the one highlighted in the strip).
-  const overlaySelectedCol = overlayColumns[overlayDateIndex];
-  const overlaySelectedRef = overlaySelectedCol?.ref;
-  const overlaySelectedDate = overlaySelectedCol?.date;
-  const overlaySelectedSettings = overlaySelectedDate
-    ? panelSettings.get(overlaySelectedDate) || DEFAULT_PANEL_SETTINGS
-    : DEFAULT_PANEL_SETTINGS;
-  const overlaySelectedSliceIndex = overlaySelectedRef
-    ? getSliceIndex(overlaySelectedRef.instance_count, progress, overlaySelectedSettings.offset)
-    : 0;
-  // Space-hold compare target.
-  const overlayCompareCol = overlayColumns[compareTargetIndex];
-  const overlayCompareRef = overlayCompareCol?.ref;
-  const overlayCompareDate = overlayCompareCol?.date;
-  const overlayCompareSettings = overlayCompareDate
-    ? panelSettings.get(overlayCompareDate) || DEFAULT_PANEL_SETTINGS
-    : DEFAULT_PANEL_SETTINGS;
-  const overlayCompareSliceIndex = overlayCompareRef
-    ? getSliceIndex(overlayCompareRef.instance_count, progress, overlayCompareSettings.offset)
-    : 0;
+  const displayed = positionAt(displayedOverlayIndex);
+  const selected = positionAt(overlayDateIndex);
+  const compare = positionAt(compareTargetIndex);
+
+  const { ref: overlayDisplayedRef, date: overlayDisplayedDate, settings: overlayDisplayedSettings,
+          sliceIndex: overlayDisplayedSliceIndex, effectiveSliceIndex: overlayDisplayedEffectiveSliceIndex } = displayed;
+  const { ref: overlaySelectedRef, date: overlaySelectedDate, settings: overlaySelectedSettings,
+          sliceIndex: overlaySelectedSliceIndex } = selected;
+  const { ref: overlayCompareRef, date: overlayCompareDate, settings: overlayCompareSettings,
+          sliceIndex: overlayCompareSliceIndex } = compare;
+
   const isOverlayComparing = displayedOverlayIndex !== overlayDateIndex;
   const hasOverlayCompareTarget = overlayColumns.length > 1 && compareTargetIndex !== overlayDateIndex;
 
