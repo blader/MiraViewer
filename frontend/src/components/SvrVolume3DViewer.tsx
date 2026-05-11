@@ -1,13 +1,9 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
-import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
-import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
-import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
 import {
   computeSeedRange01,
   regionGrow3D_v2,
@@ -36,16 +32,8 @@ import {
   createProgram,
   type VolumeTextureFormat,
 } from '../utils/svr/glRaymarch';
+import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
 import { clamp } from '../utils/math';
-
-
-// IndexedDB key for the cached tumor segmentation ONNX model.
-const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
-
-// ONNX preflight: extremely large 3D volumes can trigger huge intermediate/logits allocations.
-// We block full-res runs by default above a conservative budget, with an explicit user override.
-const ONNX_PREFLIGHT_CLASS_COUNT = 4;
-const ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES = 384 * 1024 * 1024;
 
 // Render defaults
 const DEFAULT_RENDER_QUALITY: RenderQualityPreset = 'auto';
@@ -63,8 +51,6 @@ type GlLabelState = {
   /** Dimensions currently allocated on the GPU for texLabels. */
   labelsTexDims: RenderDims;
 };
-
-type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
 
 async function rgbaToPngBlob(params: { rgba: Uint8ClampedArray; width: number; height: number }): Promise<Blob> {
   const { rgba, width, height } = params;
@@ -471,63 +457,22 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
   const labels = labelsOverride ?? generatedLabels;
 
-  // Phase 3: ONNX model execution (offline; model cached in IndexedDB).
-  const onnxSessionRef = useRef<Ort.InferenceSession | null>(null);
-  const onnxSessionModeRef = useRef<OnnxSessionMode | null>(null);
-  const onnxFileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const releaseOnnxSession = useCallback((reason: string) => {
-    const session = onnxSessionRef.current;
-    onnxSessionRef.current = null;
-    onnxSessionModeRef.current = null;
-
-    if (session) {
-      // Avoid leaking WebGPU/WASM resources if the user swaps/clears models.
-      void session.release().catch((e) => {
-        console.warn('[onnx] Failed to release session', { reason, e });
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      releaseOnnxSession('unmount');
-    };
-  }, [releaseOnnxSession]);
-  const [onnxStatus, setOnnxStatus] = useState<{
-    cached: boolean;
-    savedAtMs: number | null;
-    loading: boolean;
-    sessionReady: boolean;
-    message?: string;
-    error?: string;
-  }>(() => ({
-    cached: false,
-    savedAtMs: null,
-    loading: false,
-    sessionReady: false,
-  }));
-
-  // Phase 4a: Best-effort cancellation.
-  // NOTE: We can't reliably abort ORT execution mid-run in the browser; cancellation just ignores late results.
-  const onnxSegRunIdRef = useRef(0);
-  const [onnxSegRunning, setOnnxSegRunning] = useState(false);
-  const [allowUnsafeOnnxFullRes, setAllowUnsafeOnnxFullRes] = useState(false);
-
-  const refreshOnnxCacheStatus = useCallback(() => {
-    void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
-      .then((savedAtMs) => {
-        setOnnxStatus((s) => ({ ...s, cached: savedAtMs !== null, savedAtMs, error: undefined }));
-      })
-      .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        setOnnxStatus((s) => ({ ...s, error: msg }));
-      });
-  }, []);
-
-  useEffect(() => {
-    refreshOnnxCacheStatus();
-  }, [refreshOnnxCacheStatus]);
+  // ONNX model execution (offline; model cached in IndexedDB).
+  const onnx = useOnnxTumorSession(volume ?? null, setGeneratedLabels);
+  const {
+    status: onnxStatus,
+    preflight: onnxPreflight,
+    segRunning: onnxSegRunning,
+    allowUnsafeFullRes: allowUnsafeOnnxFullRes,
+    setAllowUnsafeFullRes: setAllowUnsafeOnnxFullRes,
+    fileInputRef: onnxFileInputRef,
+    uploadClick: onnxUploadClick,
+    handleSelectedFile: onnxHandleSelectedFile,
+    clearModel: onnxClearModel,
+    initSession: initOnnxSession,
+    runSegmentation: runOnnxSegmentation,
+    cancelSegmentation: cancelOnnxSegmentation,
+  } = onnx;
 
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
@@ -1314,177 +1259,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     e.preventDefault();
     e.stopPropagation();
   }, []);
-
-  const onnxPreflight = useMemo(() => {
-    if (!volume) return null;
-
-    const [nx, ny, nz] = volume.dims;
-    const nvox = nx * ny * nz;
-
-    // Lower-bound estimate: logits are float32 with C channels.
-    const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
-    const inputBytes = nvox * 4;
-
-    const blockedByDefault = logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES;
-
-    return { nx, ny, nz, nvox, logitsBytes, inputBytes, blockedByDefault };
-  }, [volume]);
-
-  const onnxUploadClick = useCallback(() => {
-    onnxFileInputRef.current?.click();
-  }, []);
-
-  const onnxClearModel = useCallback(() => {
-    releaseOnnxSession('clear-model');
-    setOnnxStatus((s) => ({
-      ...s,
-      sessionReady: false,
-      loading: true,
-      message: 'Clearing cached model…',
-      error: undefined,
-    }));
-
-    void deleteModelBlob(ONNX_TUMOR_MODEL_KEY)
-      .then(() => {
-        setOnnxStatus((s) => ({ ...s, loading: false, message: 'Cleared cached model' }));
-        refreshOnnxCacheStatus();
-      })
-      .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
-      });
-  }, [refreshOnnxCacheStatus, releaseOnnxSession]);
-
-  const onnxHandleSelectedFile = useCallback(
-    (file: File) => {
-      releaseOnnxSession('upload-model');
-      setOnnxStatus((s) => ({
-        ...s,
-        loading: true,
-        sessionReady: false,
-        message: `Caching model: ${file.name}`,
-        error: undefined,
-      }));
-
-      void putModelBlob(ONNX_TUMOR_MODEL_KEY, file)
-        .then(() => {
-          setOnnxStatus((s) => ({ ...s, loading: false, message: 'Model cached' }));
-          refreshOnnxCacheStatus();
-        })
-        .catch((e) => {
-          const msg = e instanceof Error ? e.message : String(e);
-          setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
-        });
-    },
-    [refreshOnnxCacheStatus, releaseOnnxSession],
-  );
-
-  const ensureOnnxSession = useCallback(async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
-    if (onnxSessionRef.current) {
-      return {
-        session: onnxSessionRef.current,
-        mode: onnxSessionModeRef.current ?? 'webgpu-preferred',
-      };
-    }
-
-    const blob = await getModelBlob(ONNX_TUMOR_MODEL_KEY);
-    if (!blob) {
-      throw new Error('No cached ONNX model found. Upload one first.');
-    }
-
-    try {
-      const session = await createOrtSessionFromModelBlob({ model: blob, preferWebGpu: true, logLevel: 'warning' });
-      onnxSessionRef.current = session;
-      onnxSessionModeRef.current = 'webgpu-preferred';
-      return { session, mode: 'webgpu-preferred' };
-    } catch {
-      // Fallback to WASM-only.
-      const session = await createOrtSessionFromModelBlob({ model: blob, preferWebGpu: false, logLevel: 'warning' });
-      onnxSessionRef.current = session;
-      onnxSessionModeRef.current = 'wasm';
-      return { session, mode: 'wasm' };
-    }
-  }, []);
-
-  const initOnnxSession = useCallback(() => {
-    setOnnxStatus((s) => ({ ...s, loading: true, message: 'Initializing ONNX runtime…', error: undefined }));
-
-    void ensureOnnxSession()
-      .then(({ mode }) => {
-        setOnnxStatus((s) => ({
-          ...s,
-          loading: false,
-          sessionReady: true,
-          message: mode === 'wasm' ? 'ONNX session ready (WASM)' : 'ONNX session ready (WebGPU preferred)',
-        }));
-      })
-      .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: false, error: msg }));
-      });
-  }, [ensureOnnxSession]);
-
-  const runOnnxSegmentation = useCallback(() => {
-    if (!volume) return;
-
-    // Guardrail: full-res ONNX on huge volumes can OOM the tab.
-    if (onnxPreflight?.blockedByDefault && !allowUnsafeOnnxFullRes) {
-      const dims = `${onnxPreflight.nx}×${onnxPreflight.ny}×${onnxPreflight.nz}`;
-      const msg = `ONNX blocked for huge volume by default (${dims}; est logits ${formatMiB(onnxPreflight.logitsBytes)}). Re-run SVR at lower resolution/ROI or enable the unsafe override.`;
-      setOnnxStatus((s) => ({ ...s, loading: false, error: msg }));
-      return;
-    }
-
-    const runId = ++onnxSegRunIdRef.current;
-    setOnnxSegRunning(true);
-
-    const started = performance.now();
-    setOnnxStatus((s) => ({ ...s, loading: true, message: 'Running ONNX segmentation…', error: undefined }));
-
-    void (async () => {
-      try {
-        const { session, mode } = await ensureOnnxSession();
-        if (onnxSegRunIdRef.current !== runId) return;
-
-        setOnnxStatus((s) => ({
-          ...s,
-          sessionReady: true,
-          loading: true,
-          message:
-            mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
-        }));
-
-        const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
-        if (onnxSegRunIdRef.current !== runId) return;
-
-        setGeneratedLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
-
-        const ms = Math.round(performance.now() - started);
-        setOnnxStatus((s) => ({
-          ...s,
-          loading: false,
-          sessionReady: true,
-          message: `Segmentation complete (${ms}ms)`,
-        }));
-      } catch (e) {
-        if (onnxSegRunIdRef.current !== runId) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        const hasSession = onnxSessionRef.current !== null;
-        setOnnxStatus((s) => ({ ...s, loading: false, sessionReady: hasSession, error: msg }));
-      } finally {
-        if (onnxSegRunIdRef.current === runId) {
-          setOnnxSegRunning(false);
-        }
-      }
-    })();
-  }, [allowUnsafeOnnxFullRes, ensureOnnxSession, onnxPreflight, volume]);
-
-  const cancelOnnxSegmentation = useCallback(() => {
-    if (!onnxSegRunning) return;
-    onnxSegRunIdRef.current++;
-    setOnnxSegRunning(false);
-    setOnnxStatus((s) => ({ ...s, loading: false, message: 'Segmentation cancelled', error: undefined }));
-  }, [onnxSegRunning]);
 
   // Draw the inspector slice to a 2D canvas.
   useEffect(() => {
