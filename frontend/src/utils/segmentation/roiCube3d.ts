@@ -1,4 +1,4 @@
-import type { Vec3i } from './regionGrow3D';
+import type { Vec3i } from './regionGrow3D_v2';
 
 export type RoiCubePlane = 'axial' | 'coronal' | 'sagittal';
 

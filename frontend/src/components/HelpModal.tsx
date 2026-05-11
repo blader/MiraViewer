@@ -41,10 +41,10 @@ export function HelpModal({ onClose }: HelpModalProps) {
             <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">Viewing</h3>
             <ul className="space-y-2">
               <li>
-                <Kbd>Scroll</Kbd> over an image to zoom.
+                <Kbd>⌘</Kbd> + <Kbd>Scroll</Kbd> over an image to zoom.
               </li>
               <li>
-                <Kbd>Scroll</Kbd> elsewhere in the center pane to navigate slices.
+                <Kbd>Scroll</Kbd> in the center pane to navigate slices.
               </li>
               <li>
                 <Kbd>Click</Kbd> on an image to center that point.

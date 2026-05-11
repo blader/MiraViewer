@@ -1,4 +1,45 @@
-import type { RegionGrow3DOptions, RegionGrow3DResult, RegionGrow3DRoi, Vec3i } from './regionGrow3D';
+export type Vec3i = { x: number; y: number; z: number };
+
+export type RegionGrow3DRoiMode = 'hard' | 'guide';
+
+export type RegionGrow3DRoi = {
+  mode: RegionGrow3DRoiMode;
+  min: Vec3i;
+  max: Vec3i;
+  /**
+   * Tolerance shrinkage factor used as a *spatial prior* outside the ROI.
+   * - 1: no spatial prior (outside behaves like inside)
+   * - 0: extremely strict outside
+   */
+  outsideToleranceScale?: number;
+};
+
+export type RegionGrow3DResult = {
+  /** Sparse list of voxel indices: `idx = z*(nx*ny) + y*nx + x`. */
+  indices: Uint32Array;
+  /** Number of voxels included (<= indices.length). */
+  count: number;
+  /** Seed intensity value (raw value from `volume[seedIdx]`). */
+  seedValue: number;
+  /** Whether the grow hit the configured max voxel limit and stopped early. */
+  hitMaxVoxels: boolean;
+};
+
+export type RegionGrow3DOptions = {
+  maxVoxels?: number;
+  connectivity?: 6 | 26;
+  yieldEvery?: number;
+  signal?: AbortSignal;
+  onProgress?: (p: { processed: number; queued: number }) => void;
+  yieldFn?: () => Promise<void>;
+  debug?: boolean;
+};
+
+export function computeSeedRange01(params: { seedValue: number; tolerance: number }): { min: number; max: number } {
+  const tol = Math.max(0, params.tolerance);
+  const c01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
+  return { min: c01(params.seedValue - tol), max: c01(params.seedValue + tol) };
+}
 
 type HeapItem = { i: number; d: number };
 

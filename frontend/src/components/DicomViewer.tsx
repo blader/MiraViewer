@@ -145,8 +145,8 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Mouse wheel behavior:
-  // - Inside the image viewport: zoom (so we can keep global wheel slice navigation active elsewhere).
-  // - Fallback: if no onZoomChange callback is provided, use wheel for slice navigation.
+  // - Plain wheel events advance slices, matching the center-pane global wheel behavior.
+  // - Cmd+wheel zooms the hovered image when zoom control is available.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -154,13 +154,9 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     const handleWheel = (e: WheelEvent) => {
       if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
 
-      // Always prevent default so:
-      // - The page doesn't scroll while the user is interacting with the viewer.
-      // - The global slice-wheel nav doesn't double-apply (it checks e.defaultPrevented).
-      e.preventDefault();
+      if (e.metaKey && onZoomChange) {
+        e.preventDefault();
 
-      // Zoom mode (preferred).
-      if (onZoomChange) {
         const speed = (() => {
           // deltaMode: 0=pixels, 1=lines, 2=pages
           if (e.deltaMode === 1) return 0.08;
@@ -182,8 +178,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         return;
       }
 
-      // Fallback slice navigation.
+      // Trackpad pinch-zoom sends ctrlKey wheel events; don't interpret that as slice scrolling.
+      if (e.ctrlKey) return;
+
       if (instanceCount <= 0) return;
+      e.preventDefault();
       const delta = Math.sign(e.deltaY);
       const nextIndex = Math.max(0, Math.min(instanceCount - 1, instanceIndex + delta));
       if (nextIndex !== instanceIndex) {

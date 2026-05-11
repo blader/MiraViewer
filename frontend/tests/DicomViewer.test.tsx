@@ -79,6 +79,56 @@ describe('DicomViewer', () => {
     });
   });
 
+  it('uses plain wheel events for slice navigation when zoom is available', async () => {
+    const onZoomChange = vi.fn();
+    const onInstanceChange = vi.fn();
+
+    render(
+      <DicomViewer
+        studyId="study"
+        seriesUid="series"
+        instanceIndex={0}
+        instanceCount={3}
+        onInstanceChange={onInstanceChange}
+        onZoomChange={onZoomChange}
+        imageUrlOverride="test.png"
+      />
+    );
+
+    const img = await screen.findByRole('img');
+    const ev = new WheelEvent('wheel', { deltaY: 100, cancelable: true, bubbles: true });
+    img.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(onZoomChange).not.toHaveBeenCalled();
+    expect(onInstanceChange).toHaveBeenCalledWith(1);
+  });
+
+  it('zooms hovered images on Command+wheel', async () => {
+    const onZoomChange = vi.fn();
+
+    render(
+      <DicomViewer
+        studyId="study"
+        seriesUid="series"
+        instanceIndex={0}
+        instanceCount={3}
+        onInstanceChange={() => {}}
+        onZoomChange={onZoomChange}
+        imageUrlOverride="test.png"
+        zoom={1}
+      />
+    );
+
+    const img = await screen.findByRole('img');
+    const ev = new WheelEvent('wheel', { deltaY: -100, metaKey: true, cancelable: true, bubbles: true });
+    img.dispatchEvent(ev);
+
+    expect(ev.defaultPrevented).toBe(true);
+    expect(onZoomChange).toHaveBeenCalledTimes(1);
+    expect(onZoomChange.mock.calls[0]?.[0]).toBeGreaterThan(1);
+  });
+
   it('keeps previous visual settings until the new Cornerstone image is displayed (async swap)', async () => {
     const deferredImageId = createDeferred<string>();
 

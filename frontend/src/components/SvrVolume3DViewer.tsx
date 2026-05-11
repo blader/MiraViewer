@@ -8,8 +8,12 @@ import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette'
 import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
-import { computeSeedRange01, type RegionGrow3DRoi, type Vec3i } from '../utils/segmentation/regionGrow3D';
-import { regionGrow3D_v2 } from '../utils/segmentation/regionGrow3D_v2';
+import {
+  computeSeedRange01,
+  regionGrow3D_v2,
+  type RegionGrow3DRoi,
+  type Vec3i,
+} from '../utils/segmentation/regionGrow3D_v2';
 import { computeRoiCubeBoundsFromSliceDrag } from '../utils/segmentation/roiCube3d';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 import { formatMiB } from '../utils/svr/svrUtils';
