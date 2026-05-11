@@ -87,86 +87,6 @@ export async function getStudies() {
     .sort((a, b) => b.study_date.localeCompare(a.study_date));
 }
 
-export async function getStudy(studyUid: string) {
-  const db = await getDB();
-  const study = await db.get('studies', studyUid);
-  if (!study) throw new Error('Study not found');
-
-  const series = await db.getAllFromIndex('series', 'by-study', studyUid);
-  
-  // For each series, get instances
-  // We can't easily query instances by study, so we query by series
-  const seriesList = [];
-  let totalInstances = 0;
-
-  for (const s of series) {
-    const instances = await db.getAllFromIndex('instances', 'by-series', s.seriesInstanceUid);
-    if (instances.length === 0) continue;
-
-    instances.sort((a, b) => a.instanceNumber - b.instanceNumber);
-    
-    seriesList.push({
-      series_uid: s.seriesInstanceUid,
-      series_description: s.seriesDescription,
-      series_number: s.seriesNumber,
-      modality: s.modality,
-      plane: s.plane,
-      weight: s.weight,
-      sequence_type: s.sequenceType,
-      instance_count: instances.length,
-      instances: instances.map(i => ({
-        id: i.sopInstanceUid,
-        instance_number: i.instanceNumber,
-        slice_location: i.sliceLocation,
-        file_path: 'miradb:' + i.sopInstanceUid, // placeholder, not used by cornerstone loader directly
-      }))
-    });
-    totalInstances += instances.length;
-  }
-  
-  return {
-    study_id: study.studyInstanceUid,
-    study_instance_uid: study.studyInstanceUid,
-    folder_name: study.studyDescription,
-    study_date: study.studyDate,
-    scan_type: study.studyDescription || study.modality,
-    patient_name: study.patientName,
-    patient_id: study.patientId,
-    series: seriesList.sort((a, b) => a.series_number - b.series_number),
-    series_count: seriesList.length,
-    total_instances: totalInstances,
-  };
-}
-
-export async function getSeries(studyUid: string, seriesUid: string) {
-  const db = await getDB();
-  const series = await db.get('series', seriesUid);
-  if (!series) throw new Error('Series not found');
-  if (series.studyInstanceUid !== studyUid) {
-    throw new Error('Series not found');
-  }
-
-  const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
-  instances.sort((a, b) => a.instanceNumber - b.instanceNumber);
-
-  return {
-    series_uid: series.seriesInstanceUid,
-    series_description: series.seriesDescription,
-    series_number: series.seriesNumber,
-    modality: series.modality,
-    plane: series.plane,
-    weight: series.weight,
-    sequence_type: series.sequenceType,
-    instance_count: instances.length,
-    instances: instances.map(i => ({
-      id: i.sopInstanceUid,
-      instance_number: i.instanceNumber,
-      slice_location: i.sliceLocation,
-      file_path: 'miradb:' + i.sopInstanceUid,
-    })),
-  };
-}
-
 export async function getComparisonData(): Promise<ComparisonData> {
   const db = await getDB();
   const allSeries = await db.getAll('series');
@@ -325,47 +245,26 @@ function cacheSeriesInstanceOrder(seriesUid: string, uids: string[]) {
 export async function getSortedSopInstanceUidsForSeries(seriesUid: string): Promise<string[]> {
   const cached = seriesInstanceOrderCache.get(seriesUid);
   if (cached) {
-    // Touch LRU.
     cacheSeriesInstanceOrder(seriesUid, cached.uids);
     return cached.uids;
   }
 
   const db = await getDB();
 
-  // Fast path: use the compound ordering index to fetch SOPInstanceUIDs in slice order
-  // without loading full instance records (which include Blob payloads).
-  try {
-    const range = IDBKeyRange.bound(
-      [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
-      [seriesUid, Number.MAX_SAFE_INTEGER, '\uffff']
-    );
-    const keys = await db.getAllKeysFromIndex('instances', 'by-series-instanceNumber-uid', range);
-    const uids = keys.map((k) => String(k));
+  // Fetch SOPInstanceUIDs in slice order via the compound index, without loading Blob payloads.
+  const range = IDBKeyRange.bound(
+    [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
+    [seriesUid, Number.MAX_SAFE_INTEGER, '\uffff'],
+  );
+  const keys = await db.getAllKeysFromIndex('instances', 'by-series-instanceNumber-uid', range);
+  const uids = keys.map((k) => String(k));
 
-    if (uids.length === 0) {
-      throw new Error('No instances for series');
-    }
-
-    cacheSeriesInstanceOrder(seriesUid, uids);
-    return uids;
-  } catch {
-    // Fallback (older DB / missing index): load values and sort.
-    const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
-    if (!instances || instances.length === 0) {
-      throw new Error('No instances for series');
-    }
-
-    instances.sort((a, b) => {
-      const diff = a.instanceNumber - b.instanceNumber;
-      if (diff !== 0) return diff;
-      // Stable tie-breaker for weird/duplicate instance numbers.
-      return a.sopInstanceUid.localeCompare(b.sopInstanceUid);
-    });
-
-    const uids = instances.map((i) => i.sopInstanceUid);
-    cacheSeriesInstanceOrder(seriesUid, uids);
-    return uids;
+  if (uids.length === 0) {
+    throw new Error('No instances for series');
   }
+
+  cacheSeriesInstanceOrder(seriesUid, uids);
+  return uids;
 }
 
 export async function getSopInstanceUidForInstanceIndex(seriesUid: string, instanceIndex: number): Promise<string> {
