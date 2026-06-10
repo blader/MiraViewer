@@ -309,6 +309,12 @@ export async function refineVolumeInPlace(params: {
     updateW = new Float32Array(nvox);
   }
 
+  // Yield on a wall-clock budget rather than a fixed slice stride: with large slices an
+  // 8-slice stride blocked the UI for hundreds of ms, while a fixed per-slice yield would
+  // overpay on small volumes. ~16ms keeps the page at interactive frame cadence.
+  const YIELD_BUDGET_MS = 16;
+  let lastYieldMs = performance.now();
+
   for (let iter = 0; iter < iterations; iter++) {
     assertNotAborted(hooks?.signal);
 
@@ -391,8 +397,9 @@ export async function refineVolumeInPlace(params: {
         }
       }
 
-      if (sIdx % 8 === 0) {
+      if (performance.now() - lastYieldMs >= YIELD_BUDGET_MS) {
         await yieldToMain();
+        lastYieldMs = performance.now();
       }
     }
 

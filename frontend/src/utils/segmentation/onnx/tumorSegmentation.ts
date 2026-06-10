@@ -49,12 +49,29 @@ export async function runTumorSegmentationOnnx(params: {
     throw new Error(`Unsupported logits tensor type: ${logitsTensor.type}`);
   }
 
-  const labelMap = params.labelMap ?? [BRATS_LABEL_ID.BACKGROUND, BRATS_LABEL_ID.NCR_NET, BRATS_LABEL_ID.EDEMA, BRATS_LABEL_ID.ENHANCING];
+  const labelMap = params.labelMap ?? [
+    BRATS_LABEL_ID.BACKGROUND,
+    BRATS_LABEL_ID.NCR_NET,
+    BRATS_LABEL_ID.EDEMA,
+    BRATS_LABEL_ID.ENHANCING,
+  ];
 
   const { labels, spatialDims } = logitsToLabels({
     logits: { data: logitsTensor.data as Float32Array, dims: logitsTensor.dims },
     labelMap,
   });
+
+  // The logits tensor is the largest transient allocation in the app (classes × nvox × 4
+  // bytes — over a GiB at full resolution). Argmax is done, so release it now: capture the
+  // dims we still need, then dispose, which frees GPU-backed storage immediately on the
+  // WebGPU provider (the WASM path holds plain JS memory that the GC reclaims once this
+  // function's scope dies).
+  const logitsDims = logitsTensor.dims;
+  try {
+    (logitsTensor as { dispose?: () => void }).dispose?.();
+  } catch {
+    // Best-effort: CPU-located tensors may not support (or need) explicit disposal.
+  }
 
   // Sanity check that the model output matches the current SVR volume.
   const expected = nx * ny * nz;
@@ -68,5 +85,5 @@ export async function runTumorSegmentationOnnx(params: {
     console.warn('[onnx] Output dims differ from SVR volume dims', { spatialDims, svrDims: dims });
   }
 
-  return { labels, logitsDims: logitsTensor.dims };
+  return { labels, logitsDims };
 }

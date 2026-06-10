@@ -4,6 +4,7 @@ import {
   computeRenderPlan,
   downsampleLabelsNearest,
   toUint8Volume,
+  updateLabelsNearestRegion,
 } from '../src/utils/svr/renderLod';
 
 describe('svr/renderLod', () => {
@@ -48,6 +49,63 @@ describe('svr/renderLod', () => {
     });
 
     expect(Array.from(out)).toEqual([0, 3]);
+  });
+
+  // The interactive grow preview patches the GPU label texture through a persistent
+  // downsample cache; if the region updater's sampling drifted from the full rebuild, the
+  // texture would show stale/incorrect labels around edits. Pin them to byte equality.
+  it('updateLabelsNearestRegion matches a full nearest-downsample rebuild', () => {
+    const srcDims = { nx: 13, ny: 9, nz: 7 };
+    const dstDims = { nx: 5, ny: 4, nz: 3 };
+    const n = srcDims.nx * srcDims.ny * srcDims.nz;
+
+    // Deterministic pseudo-random labels (no Math.random so failures reproduce).
+    const src = new Uint8Array(n);
+    let s = 1;
+    for (let i = 0; i < n; i++) {
+      s = (s * 16807) % 2147483647;
+      src[i] = s % 5;
+    }
+
+    const cache = downsampleLabelsNearest({ src, srcDims, dstDims });
+
+    // Mutate a sub-box of the source, refresh only the mapped cache region, and compare
+    // against a from-scratch rebuild of the whole downsample.
+    const box = { min: { x: 3, y: 2, z: 1 }, max: { x: 9, y: 6, z: 4 } };
+    for (let z = box.min.z; z <= box.max.z; z++) {
+      for (let y = box.min.y; y <= box.max.y; y++) {
+        for (let x = box.min.x; x <= box.max.x; x++) {
+          src[z * srcDims.nx * srcDims.ny + y * srcDims.nx + x] = (x + y + z) % 5;
+        }
+      }
+    }
+
+    const dstBox = updateLabelsNearestRegion({ src, srcDims, dst: cache, dstDims, srcBox: box });
+
+    expect(dstBox).not.toBeNull();
+    expect(Array.from(cache)).toEqual(Array.from(downsampleLabelsNearest({ src, srcDims, dstDims })));
+  });
+
+  it('updateLabelsNearestRegion handles single-voxel edits and degenerate (size-1) axes', () => {
+    const srcDims = { nx: 8, ny: 6, nz: 5 };
+    const dstDims = { nx: 4, ny: 3, nz: 1 }; // nz=1 exercises the dstN<=1 mapping branch
+
+    const src = new Uint8Array(srcDims.nx * srcDims.ny * srcDims.nz).fill(1);
+    const cache = downsampleLabelsNearest({ src, srcDims, dstDims });
+
+    const vox = { x: 5, y: 2, z: 3 };
+    src[vox.z * srcDims.nx * srcDims.ny + vox.y * srcDims.nx + vox.x] = 4;
+
+    const dstBox = updateLabelsNearestRegion({
+      src,
+      srcDims,
+      dst: cache,
+      dstDims,
+      srcBox: { min: vox, max: vox },
+    });
+
+    expect(dstBox).not.toBeNull();
+    expect(Array.from(cache)).toEqual(Array.from(downsampleLabelsNearest({ src, srcDims, dstDims })));
   });
 
   it('buildRenderVolumeTexData: f32 + same dims returns the original Float32Array', async () => {

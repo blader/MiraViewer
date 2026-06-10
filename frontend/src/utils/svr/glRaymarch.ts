@@ -5,26 +5,30 @@
  * overlay or the overlay will drift relative to the rendered volume.
  */
 
+import { clamp } from '../math';
+
 export const SVR3D_CAMERA_Z = 1.6;
 export const SVR3D_FOCAL_Z = 1.2;
 
 export type VolumeTextureFormat =
-  | { kind: 'f32'; internalFormat: number; format: number; type: number; minMagFilter: number }
+  | { kind: 'f16'; internalFormat: number; format: number; type: number; minMagFilter: number }
   | { kind: 'u8'; internalFormat: number; format: number; type: number; minMagFilter: number };
 
 export function chooseVolumeTextureFormat(gl: WebGL2RenderingContext): {
   primary: VolumeTextureFormat;
   fallback: VolumeTextureFormat;
 } {
-  // Float textures preserve subtle contrast; if linear filtering isn't supported we can still sample with NEAREST.
-  const floatLinear = !!gl.getExtension('OES_texture_float_linear');
-
+  // R16F over R32F: raymarching is texture-bandwidth-bound (up to 7 taps per sample with
+  // gradients), so halving bytes/voxel directly buys frame time and GPU memory. Half-float
+  // is also linearly filterable in core WebGL2, whereas R32F needs OES_texture_float_linear
+  // and silently degraded to NEAREST (blocky sampling) where the extension was missing.
+  // 11-bit mantissa precision is far beyond what a display-normalized [0,1] volume needs.
   const primary: VolumeTextureFormat = {
-    kind: 'f32',
-    internalFormat: gl.R32F,
+    kind: 'f16',
+    internalFormat: gl.R16F,
     format: gl.RED,
-    type: gl.FLOAT,
-    minMagFilter: floatLinear ? gl.LINEAR : gl.NEAREST,
+    type: gl.HALF_FLOAT,
+    minMagFilter: gl.LINEAR,
   };
 
   const fallback: VolumeTextureFormat = {
@@ -36,6 +40,51 @@ export function chooseVolumeTextureFormat(gl: WebGL2RenderingContext): {
   };
 
   return { primary, fallback };
+}
+
+/**
+ * Convert float32 samples to IEEE 754 half-float bit patterns for HALF_FLOAT texture upload
+ * (WebGL2 requires the data view for HALF_FLOAT to be a Uint16Array of raw f16 bits).
+ *
+ * Bit-twiddling port of the classic public-domain float->half routine: reads the f32 bits
+ * directly through a Uint32Array view (no per-element scratch writes), keeps the top 11
+ * mantissa bits and rounds to nearest. Volume data is normalized ~[0,1], so the
+ * subnormal/overflow branches are correctness backstops rather than hot paths.
+ */
+export function float32ToFloat16Bits(src: Float32Array): Uint16Array {
+  const n = src.length;
+  const out = new Uint16Array(n);
+  // Float32Array is always 4-byte aligned, so reinterpreting its buffer is safe.
+  const words = new Uint32Array(src.buffer, src.byteOffset, n);
+
+  for (let i = 0; i < n; i++) {
+    const x = words[i]!;
+    let h = (x >> 16) & 0x8000; // sign
+    const e = (x >> 23) & 0xff; // f32 exponent
+    const m = (x >> 12) & 0x07ff; // top 10 mantissa bits + 1 round bit
+
+    // |v| < 2^-24 underflows to signed zero (h already holds just the sign).
+    if (e >= 103) {
+      if (e > 142) {
+        // |v| >= 2^16 overflows to infinity; preserve NaN-ness with a quiet-NaN bit.
+        h |= 0x7c00;
+        if (e === 255 && (x & 0x7fffff) !== 0) h |= 0x200;
+      } else if (e < 113) {
+        // f16 subnormal range: add the implicit leading 1, shift into place, round.
+        const sub = m | 0x0800;
+        h |= (sub >> (114 - e)) + ((sub >> (113 - e)) & 1);
+      } else {
+        // Normalized: re-bias exponent (127 -> 15) and round the mantissa. A mantissa
+        // rounding carry overflows cleanly into the exponent field by construction.
+        h |= ((e - 112) << 10) | (m >> 1);
+        h += m & 1;
+      }
+    }
+
+    out[i] = h;
+  }
+
+  return out;
 }
 
 export function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -73,6 +122,105 @@ export function createProgram(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: 
   return prog;
 }
 
+/** Edge length (in render-volume voxels) of one occupancy cell. */
+export const SVR3D_OCC_BLOCK = 8;
+
+/**
+ * Build a conservative coarse "max intensity per block" grid for empty-space skipping.
+ *
+ * The raymarcher's visibility test is `v >= thr`; in background regions every sample fails
+ * it, yet each one still costs a full-resolution 3D texture tap. This grid lets the shader
+ * answer "can anything in this 8^3 block ever pass the threshold?" with one tiny-texture
+ * tap and leap empty cells entirely.
+ *
+ * Conservativeness (the skip must NEVER hide a visible sample):
+ * - Each cell stores the max over its own block, then a second pass dilates by taking the
+ *   max over the 3x3x3 neighboring cells — trilinear filtering of a sample inside one cell
+ *   can read voxels up to 1 voxel into a neighbor, and whole-cell dilation covers that
+ *   with simple code (slightly fewer skips than exact 1-voxel dilation, never incorrect).
+ * - Values quantize to u8 with ceil() PLUS one extra quantum of headroom, which also
+ *   swallows the R16F upload's round-to-nearest (which can land a hair above the f32
+ *   source value). Bigger stored max == fewer skips == always safe.
+ */
+export function buildOccupancyMaxGrid(params: {
+  data: Float32Array | Uint8Array;
+  dims: { nx: number; ny: number; nz: number };
+  blockSize?: number;
+}): { data: Uint8Array; dims: { nx: number; ny: number; nz: number } } {
+  const { data, dims } = params;
+  const B = Math.max(2, Math.round(params.blockSize ?? SVR3D_OCC_BLOCK));
+
+  const ox = Math.max(1, Math.ceil(dims.nx / B));
+  const oy = Math.max(1, Math.ceil(dims.ny / B));
+  const oz = Math.max(1, Math.ceil(dims.nz / B));
+
+  // Uint8Array sources are raw R8 texel bytes (the GPU sees byte/255); Float32Array
+  // sources are normalized intensities. Track the max in source units, quantize at the end.
+  const isU8 = data instanceof Uint8Array;
+
+  // Pass 1: plain per-cell max — every voxel visits exactly one cell (O(nvox)).
+  const rawMax = new Float32Array(ox * oy * oz);
+  const strideY = dims.nx;
+  const strideZ = dims.nx * dims.ny;
+  const occStrideY = ox;
+  const occStrideZ = ox * oy;
+
+  for (let z = 0; z < dims.nz; z++) {
+    const cz = (z / B) | 0;
+    const zBase = z * strideZ;
+    const ozBase = cz * occStrideZ;
+
+    for (let y = 0; y < dims.ny; y++) {
+      const cy = (y / B) | 0;
+      const base = zBase + y * strideY;
+      const oBase = ozBase + cy * occStrideY;
+
+      for (let x = 0; x < dims.nx; x++) {
+        const v = data[base + x] ?? 0;
+        const oi = oBase + ((x / B) | 0);
+        if (v > rawMax[oi]!) rawMax[oi] = v;
+      }
+    }
+  }
+
+  // Pass 2: dilate over neighboring cells + quantize conservatively. The occupancy grid is
+  // ~B^3 smaller than the volume, so this pass is negligible.
+  const out = new Uint8Array(ox * oy * oz);
+
+  for (let z = 0; z < oz; z++) {
+    const z0 = Math.max(0, z - 1);
+    const z1 = Math.min(oz - 1, z + 1);
+
+    for (let y = 0; y < oy; y++) {
+      const y0 = Math.max(0, y - 1);
+      const y1 = Math.min(oy - 1, y + 1);
+
+      for (let x = 0; x < ox; x++) {
+        const x0 = Math.max(0, x - 1);
+        const x1 = Math.min(ox - 1, x + 1);
+
+        let m = 0;
+        for (let zz = z0; zz <= z1; zz++) {
+          for (let yy = y0; yy <= y1; yy++) {
+            const nBase = zz * occStrideZ + yy * occStrideY;
+            for (let xx = x0; xx <= x1; xx++) {
+              const v = rawMax[nBase + xx]!;
+              if (v > m) m = v;
+            }
+          }
+        }
+
+        // u8 sources already sit on the 1/255 grid; float sources round up to it. The +1
+        // headroom quantum keeps the stored max strictly above any filtered sample value.
+        const q = isU8 ? m : Math.ceil(clamp(m, 0, 1) * 255);
+        out[z * occStrideZ + y * occStrideY + x] = Math.min(255, q + 1);
+      }
+    }
+  }
+
+  return { data: out, dims: { nx: ox, ny: oy, nz: oz } };
+}
+
 export const RAYMARCH_VERTEX_SHADER = `#version 300 es
 in vec2 a_pos;
 out vec2 v_uv;
@@ -96,7 +244,17 @@ uniform sampler2D u_palette;
 uniform int u_labelsEnabled;
 uniform float u_labelMix;
 
-uniform mat3 u_rot;
+// Empty-space skipping: a coarse per-block conservative max of the volume (see
+// buildOccupancyMaxGrid). u_occMaxCell clamps texelFetch coords at the grid edge.
+uniform sampler3D u_occ;
+uniform int u_occEnabled;
+uniform int u_occBlock;
+uniform ivec3 u_occMaxCell;
+
+// Inverse (camera->object) rotation, computed once per frame on the CPU.
+// A rotation's inverse is its transpose, so the JS side uploads the transpose of the
+// rotation matrix instead of paying for a per-fragment transpose() here.
+uniform mat3 u_invRot;
 uniform vec3 u_box;
 uniform float u_aspect;
 uniform float u_zoom;
@@ -105,6 +263,9 @@ uniform int u_steps;
 uniform float u_gamma;
 uniform float u_opacity;
 uniform vec3 u_texel;
+// 0 at rest, 1 during interaction: scales a per-pixel ray-start offset that converts
+// the banding from a reduced interaction-time step count into imperceptible noise.
+uniform float u_jitter;
 
 const float CAM_Z = ${SVR3D_CAMERA_Z};
 const float FOCAL_Z = ${SVR3D_FOCAL_Z};
@@ -142,10 +303,9 @@ void main() {
   vec3 roW = vec3(0.0, 0.0, CAM_Z);
   vec3 rdW = normalize(vec3(p, -FOCAL_Z));
 
-  // Rotate ray into volume/object space (volume is rotated by u_rot).
-  mat3 invR = transpose(u_rot);
-  vec3 ro = invR * roW;
-  vec3 rd = invR * rdW;
+  // Rotate ray into volume/object space (the volume is rotated; rays go the other way).
+  vec3 ro = u_invRot * roW;
+  vec3 rd = u_invRot * rdW;
 
   vec3 bmin = -0.5 * u_box;
   vec3 bmax =  0.5 * u_box;
@@ -176,10 +336,25 @@ void main() {
   vec3 accum = vec3(0.0);
   float aAccum = 0.0;
 
-  float t = max(t0, 0.0);
+  // Interleaved gradient noise (Jimenez 2014): a stable per-pixel value in [0,1) used to
+  // offset each ray's start by up to one step. During interaction we march fewer steps
+  // (larger dt), which would show as banding; jittering decorrelates the bands across
+  // neighboring pixels so they read as faint noise instead. u_jitter is 0 at rest, so
+  // settled frames remain deterministic (screenshot capture relies on that).
+  float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  float t = max(t0, 0.0) + ign * dt * u_jitter;
 
   // View direction in object space (toward the camera).
   vec3 vDir = normalize(-rd);
+
+  // Frame-constant terms for empty-space skipping, hoisted out of the march loop.
+  // occPad bounds how much the radial coordinate can change across one occupancy cell
+  // (cell size in r-units is 2x its size in texture units, since r normalizes by the half
+  // box): subtracting it from r gives a threshold floor valid for the entire cell.
+  vec3 occCellSizeTc = vec3(float(u_occBlock)) * u_texel;
+  float occPad = 2.0 * length(occCellSizeTc);
+  vec3 rdTc = rd / u_box;
+  vec3 aRdTc = abs(rdTc) + 1e-12;
 
   for (int i = 0; i < MAX_STEPS; i++) {
     if (i >= n) break;
@@ -196,6 +371,31 @@ void main() {
     float centerW = 1.0 - r;
 
     float thr = saturate(u_thr * thrW);
+
+    if (u_occEnabled != 0) {
+      // Empty-space skipping: if even the lowest threshold anywhere in this occupancy
+      // cell exceeds the cell's conservative max, no sample in the cell can pass the
+      // visibility test below — leap the ray to the cell exit instead of sampling the
+      // full-res volume texture step by step through background.
+      ivec3 vox = ivec3(clamp(tc, 0.0, 1.0) / u_texel);
+      ivec3 cell = clamp(vox / u_occBlock, ivec3(0), u_occMaxCell);
+      float occMax = texelFetch(u_occ, cell, 0).r;
+      float thrFloor = saturate(u_thr * saturate(r - occPad));
+
+      if (thrFloor > 0.0 && occMax < thrFloor) {
+        // Distance (in ray-parameter units) to this cell's exit, via per-axis positive
+        // distances — formulated to avoid div-by-zero/NaN for axis-aligned rays. The eps
+        // in aRdTc only shrinks the leap, never overshoots.
+        vec3 cMin = vec3(cell) * occCellSizeTc;
+        vec3 distAx = mix(tc - cMin, cMin + occCellSizeTc - tc, step(vec3(0.0), rdTc));
+        float tExit = max(min(min(distAx.x / aRdTc.x, distAx.y / aRdTc.y), distAx.z / aRdTc.z), 0.0);
+
+        // floor() + the loop's own i++ lands the next sample just past the boundary;
+        // worst case (tExit < dt) this degenerates to normal single-step progress.
+        i += int(floor(tExit / dt));
+        continue;
+      }
+    }
 
     float v = saturate(texture(u_vol, tc).r);
 

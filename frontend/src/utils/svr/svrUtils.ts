@@ -22,8 +22,31 @@ export function assertNotAborted(signal?: AbortSignal): void {
 /**
  * Yields control back to the main thread to prevent UI blocking.
  * Should be called periodically during long-running SVR computations.
+ *
+ * Prefer scheduler.yield (Chrome 129+): purpose-built to let input/rendering run and then
+ * resume with high priority. Fall back to a MessageChannel macrotask, which — unlike
+ * setTimeout(0) — is exempt from the browser's nested-timer ~4ms clamp; a reconstruction
+ * yielding thousands of times in a chain would otherwise pay seconds of pure timer
+ * latency, which is why callers historically yielded only every N slices. Plain setTimeout
+ * remains as the last resort for environments without MessageChannel.
  */
 export function yieldToMain(): Promise<void> {
+  const sched = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  if (typeof sched?.yield === 'function') {
+    return sched.yield();
+  }
+
+  if (typeof MessageChannel !== 'undefined') {
+    return new Promise((resolve) => {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = () => {
+        ch.port1.close();
+        resolve();
+      };
+      ch.port2.postMessage(null);
+    });
+  }
+
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 

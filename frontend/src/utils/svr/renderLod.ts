@@ -88,10 +88,12 @@ export function computeRenderPlan(params: {
     const labelBytes = wantsLabelsTex ? nvox : 0;
 
     // WebGL2 texture byte accounting:
-    // - float volume uses R32F -> 4 bytes/voxel
+    // - the 'f32' plan (Float32Array on the CPU side) uploads as R16F -> 2 bytes/voxel
+    //   (see chooseVolumeTextureFormat: half-float halves bandwidth and is filterable
+    //   in core WebGL2, so the GPU never holds 4-byte voxels)
     // - u8 volume uses R8 -> 1 byte/voxel
     // - labels use R8UI -> 1 byte/voxel
-    const f32Bytes = 4 * nvox;
+    const f32Bytes = 2 * nvox;
     const u8Bytes = 1 * nvox;
 
     return {
@@ -304,6 +306,74 @@ export async function buildRenderVolumeTexData(params: {
       });
 
   return { kind: 'u8', dims: dstDims, data };
+}
+
+export type RegionBox = { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
+
+/**
+ * Incrementally refresh a nearest-neighbor label downsample for a dirty source region.
+ *
+ * Interactive segmentation (grow previews, brush edits) changes a small set of voxels per
+ * tick, but the GPU label texture is a downsampled copy of the full volume — recomputing
+ * the whole downsample per tick is what made large-volume previews stall. This recomputes
+ * only the destination voxels whose nearest-neighbor source falls inside the dirty box,
+ * writing into the persistent `dst` cache, and returns that destination box so the caller
+ * can sub-upload exactly those texels.
+ *
+ * IMPORTANT: the sampling formula must stay identical to `downsampleLabelsNearest` or the
+ * cache would drift from what a full rebuild produces.
+ */
+export function updateLabelsNearestRegion(params: {
+  src: Uint8Array;
+  srcDims: RenderDims;
+  dst: Uint8Array;
+  dstDims: RenderDims;
+  srcBox: RegionBox;
+}): RegionBox | null {
+  const { src, srcDims, dst, dstDims, srcBox } = params;
+
+  // Invert the dst->src nearest mapping (sx = round(dx * k), k = (srcN-1)/(dstN-1)) to a
+  // conservative dst range per axis: every dst index whose rounded source can land inside
+  // [s0, s1]. The ±0.5 accounts for round()'s half-open buckets; clamping handles edges.
+  const mapAxisToDstRange = (s0: number, s1: number, srcN: number, dstN: number): [number, number] => {
+    if (dstN <= 1 || srcN <= 1) return [0, dstN - 1];
+    const k = (srcN - 1) / (dstN - 1);
+    if (!(k > 0)) return [0, dstN - 1];
+    const d0 = Math.max(0, Math.floor((s0 - 0.5) / k));
+    const d1 = Math.min(dstN - 1, Math.ceil((s1 + 0.5) / k));
+    return [d0, d1];
+  };
+
+  const [dx0, dx1] = mapAxisToDstRange(srcBox.min.x, srcBox.max.x, srcDims.nx, dstDims.nx);
+  const [dy0, dy1] = mapAxisToDstRange(srcBox.min.y, srcBox.max.y, srcDims.ny, dstDims.ny);
+  const [dz0, dz1] = mapAxisToDstRange(srcBox.min.z, srcBox.max.z, srcDims.nz, dstDims.nz);
+
+  if (dx1 < dx0 || dy1 < dy0 || dz1 < dz0) return null;
+
+  const srcStrideY = srcDims.nx;
+  const srcStrideZ = srcDims.nx * srcDims.ny;
+
+  const dstStrideY = dstDims.nx;
+  const dstStrideZ = dstDims.nx * dstDims.ny;
+
+  for (let z = dz0; z <= dz1; z++) {
+    // Same nearest formula as downsampleLabelsNearest (see note above).
+    const sz = dstDims.nz > 1 ? Math.round((z / (dstDims.nz - 1)) * Math.max(0, srcDims.nz - 1)) : 0;
+
+    for (let y = dy0; y <= dy1; y++) {
+      const sy = dstDims.ny > 1 ? Math.round((y / (dstDims.ny - 1)) * Math.max(0, srcDims.ny - 1)) : 0;
+
+      const srcBase = sz * srcStrideZ + sy * srcStrideY;
+      const dstBase = z * dstStrideZ + y * dstStrideY;
+
+      for (let x = dx0; x <= dx1; x++) {
+        const sx = dstDims.nx > 1 ? Math.round((x / (dstDims.nx - 1)) * Math.max(0, srcDims.nx - 1)) : 0;
+        dst[dstBase + x] = src[srcBase + sx] ?? 0;
+      }
+    }
+  }
+
+  return { min: { x: dx0, y: dy0, z: dz0 }, max: { x: dx1, y: dy1, z: dz1 } };
 }
 
 export function downsampleLabelsNearest(params: {

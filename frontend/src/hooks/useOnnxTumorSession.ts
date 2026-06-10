@@ -2,12 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
-import {
-  deleteModelBlob,
-  getModelBlob,
-  getModelSavedAtMs,
-  putModelBlob,
-} from '../utils/segmentation/onnx/modelCache';
+import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
 import { formatMiB } from '../utils/svr/svrUtils';
@@ -89,6 +84,17 @@ export function useOnnxTumorSession(
   const [segRunning, setSegRunning] = useState(false);
   const [allowUnsafeFullRes, setAllowUnsafeFullRes] = useState(false);
 
+  // A new volume invalidates any in-flight segmentation (its labels would belong to the
+  // old grid — the run-id bump makes the late result a no-op) and resets the user's
+  // unsafe full-res override, which was a per-volume decision. This hook owns that state,
+  // so the invalidation lives here rather than in the consuming viewer.
+  useEffect(() => {
+    segRunIdRef.current++;
+    setSegRunning(false);
+    setAllowUnsafeFullRes(false);
+    setStatus((s) => (s.loading ? { ...s, loading: false } : s));
+  }, [volume]);
+
   const refreshCacheStatus = useCallback(() => {
     void getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY)
       .then((savedAtMs) => {
@@ -110,14 +116,28 @@ export function useOnnxTumorSession(
     const nvox = nx * ny * nz;
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
-    return { nx, ny, nz, nvox, logitsBytes, inputBytes, blockedByDefault: logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES };
+    return {
+      nx,
+      ny,
+      nz,
+      nvox,
+      logitsBytes,
+      inputBytes,
+      blockedByDefault: logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES,
+    };
   }, [volume]);
 
   const uploadClick = useCallback(() => fileInputRef.current?.click(), []);
 
   const clearModel = useCallback(() => {
     releaseSession('clear-model');
-    setStatus((s) => ({ ...s, sessionReady: false, loading: true, message: 'Clearing cached model…', error: undefined }));
+    setStatus((s) => ({
+      ...s,
+      sessionReady: false,
+      loading: true,
+      message: 'Clearing cached model…',
+      error: undefined,
+    }));
 
     void deleteModelBlob(ONNX_TUMOR_MODEL_KEY)
       .then(() => {

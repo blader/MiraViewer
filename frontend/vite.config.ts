@@ -1,9 +1,9 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-import checker from 'vite-plugin-checker'
-import { viteStaticCopy } from 'vite-plugin-static-copy'
-import type { PluginOption } from 'vite'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+import checker from 'vite-plugin-checker';
+import { viteStaticCopy } from 'vite-plugin-static-copy';
+import type { PluginOption } from 'vite';
 
 // https://vite.dev/config/
 export default defineConfig(() => {
@@ -27,7 +27,7 @@ export default defineConfig(() => {
             dest: 'onnxruntime/',
           },
         ],
-      })
+      }),
     );
 
     plugins.push(
@@ -37,7 +37,7 @@ export default defineConfig(() => {
           lintCommand: 'eslint "src/**/*.{ts,tsx}"',
           useFlatConfig: true,
         },
-      })
+      }),
     );
   }
 
@@ -54,6 +54,20 @@ export default defineConfig(() => {
       // Keep a stable dev URL and avoid Vite auto-incrementing to 43125/43126 if 43124 is already in use.
       port: 43124,
       strictPort: true,
+      // Cross-origin isolation unlocks multithreaded WASM for ONNX inference (see
+      // ortLoader.ts, which keys off crossOriginIsolated). Safe here because every runtime
+      // asset (ORT, ITK pipelines, DICOM data) is same-origin; the offline ZIP build is
+      // served without these headers and falls back to single-threaded inference.
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+      },
+    },
+    preview: {
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+      },
     },
     test: {
       globals: true,

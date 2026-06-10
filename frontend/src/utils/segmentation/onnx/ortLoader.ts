@@ -25,8 +25,15 @@ export async function loadOrtAll(): Promise<typeof Ort> {
     // The ESM bundles export both named exports and a default export.
     const ort: typeof Ort = (mod?.default ?? mod) as typeof Ort;
 
-    // Prefer stability: threads require COOP/COEP (crossOriginIsolated) which we don't assume.
-    ort.env.wasm.numThreads = 1;
+    // Multithreaded WASM needs cross-origin isolation (COOP/COEP response headers). The
+    // Vite dev/preview servers send them (see vite.config.ts), so local dev gets the
+    // multi-core fast path; the offline download-and-run ZIP is served without headers and
+    // safely stays single-threaded. Cap at 8 threads: ORT's intra-op parallelism has
+    // diminishing returns beyond that, and spawning one worker per core on big machines
+    // wastes memory.
+    ort.env.wasm.numThreads = globalThis.crossOriginIsolated
+      ? Math.max(1, Math.min(8, navigator.hardwareConcurrency || 1))
+      : 1;
 
     if (!import.meta.env.DEV) {
       // Ensure ORT can locate its runtime assets.
@@ -49,7 +56,6 @@ export async function createOrtSessionFromModelBlob(params: {
   if (params.logLevel) {
     ort.env.logLevel = params.logLevel;
   }
-
 
   const bytes = await params.model.arrayBuffer();
 

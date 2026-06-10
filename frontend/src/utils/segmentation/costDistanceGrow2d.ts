@@ -1,5 +1,5 @@
 import { clamp, clampInt } from '../math';
-import { median as medianOfNumbers, mulberry32, robustStats } from '../stats';
+import { median as medianOfNumbers, mulberry32, robustStats, type RobustStats } from '../stats';
 
 export type Roi = { x0: number; y0: number; x1: number; y1: number };
 
@@ -18,6 +18,15 @@ function mixU32(x: number): number {
 
 type GradientCache = { w: number; h: number; grad: Uint8Array };
 const gradientCache = new WeakMap<Uint8Array, GradientCache>();
+
+// Edge-clearance (multi-source BFS distance-to-strong-edges) cache, keyed like the
+// gradient cache by the captured grayscale buffer (captures allocate a fresh buffer, so
+// identity keying is safe). The BFS result depends only on (gray, w, h, roi) — the
+// surfaceTension tuning value gates and scales the *penalty* derived from it, not the
+// field itself — so tension-slider adjustments over the same capture+ROI can reuse it
+// instead of re-running an O(ROI) BFS per grow.
+type EdgeClearanceCache = { w: number; h: number; roiKey: string; data: Uint16Array };
+const edgeClearanceCache = new WeakMap<Uint8Array, EdgeClearanceCache>();
 
 function getGradientMagnitude(gray: Uint8Array, w: number, h: number): Uint8Array {
   const existing = gradientCache.get(gray);
@@ -50,81 +59,97 @@ function getGradientMagnitude(gray: Uint8Array, w: number, h: number): Uint8Arra
 }
 
 type Heap = {
-  idx: number[];
-  d: number[];
   lastD: number;
   push: (idx: number, d: number) => void;
   pop: () => number | null;
   size: () => number;
 };
 
-function createMinHeap(): Heap {
-  const idx: number[] = [];
-  const d: number[] = [];
+/**
+ * Binary min-heap over (pixel index, distance) pairs backed by typed arrays.
+ *
+ * The Dijkstra grow pushes one entry per edge relaxation, so the heap can reach millions
+ * of entries on a large ROI; plain number[] storage paid repeated growth reallocations and
+ * GC churn right in the hottest loop. Capacity grows geometrically from the caller's hint.
+ * Distances live in a Float64Array so every comparison sees exactly the same double values
+ * as the previous number[] implementation — results are bit-identical.
+ */
+function createMinHeap(capacityHint = 1024): Heap {
+  let cap = Math.max(64, capacityHint | 0);
+  let idx = new Uint32Array(cap);
+  let d = new Float64Array(cap);
+  let n = 0;
+
+  const grow = () => {
+    cap *= 2;
+    const nIdx = new Uint32Array(cap);
+    nIdx.set(idx);
+    idx = nIdx;
+    const nD = new Float64Array(cap);
+    nD.set(d);
+    d = nD;
+  };
 
   const heap: Heap = {
-    idx,
-    d,
     lastD: 0,
     push: (i: number, dist: number) => {
-      idx.push(i);
-      d.push(dist);
-      let k = idx.length - 1;
+      if (n === cap) grow();
+
+      // Sift up.
+      let k = n++;
       while (k > 0) {
         const p = (k - 1) >> 1;
-        if ((d[p] ?? 0) <= dist) break;
-
-        // Swap with parent.
+        if (d[p]! <= dist) break;
         idx[k] = idx[p]!;
         d[k] = d[p]!;
-        idx[p] = i;
-        d[p] = dist;
         k = p;
       }
+      idx[k] = i;
+      d[k] = dist;
     },
     pop: () => {
-      const n = idx.length;
       if (n === 0) return null;
 
       const outIdx = idx[0]!;
       const outD = d[0]!;
 
-      const lastIdx = idx.pop()!;
-      const lastD = d.pop()!;
-
-      if (n > 1) {
-        idx[0] = lastIdx;
-        d[0] = lastD;
+      n--;
+      if (n > 0) {
+        // Move the last entry to the root and sift down.
+        const li = idx[n]!;
+        const ld = d[n]!;
 
         let k = 0;
         for (;;) {
           const l = k * 2 + 1;
           const r = l + 1;
           let smallest = k;
+          let smallestD = ld;
 
-          if (l < idx.length && (d[l] ?? 0) < (d[smallest] ?? 0)) smallest = l;
-          if (r < idx.length && (d[r] ?? 0) < (d[smallest] ?? 0)) smallest = r;
+          if (l < n && d[l]! < smallestD) {
+            smallest = l;
+            smallestD = d[l]!;
+          }
+          if (r < n && d[r]! < smallestD) {
+            smallest = r;
+            smallestD = d[r]!;
+          }
 
           if (smallest === k) break;
 
-          // Swap.
-          {
-            const ti = idx[k]!;
-            const td = d[k]!;
-            idx[k] = idx[smallest]!;
-            d[k] = d[smallest]!;
-            idx[smallest] = ti;
-            d[smallest] = td;
-          }
-
+          idx[k] = idx[smallest]!;
+          d[k] = d[smallest]!;
           k = smallest;
         }
+
+        idx[k] = li;
+        d[k] = ld;
       }
 
       heap.lastD = outD;
       return outIdx;
     },
-    size: () => idx.length,
+    size: () => n,
   };
 
   return heap;
@@ -202,7 +227,7 @@ function sampleAnnulus(params: {
       if (d2 < rMin2 || d2 > rMax2) continue;
 
       const i = y * w + x;
-      const g = grad ? grad[i] ?? 0 : 0;
+      const g = grad ? (grad[i] ?? 0) : 0;
       if (g > edgeExclusionGrad) continue;
 
       out.push(gray[i] ?? 0);
@@ -349,8 +374,7 @@ export async function computeCostDistanceMap(params: {
     sigmaFloor: params.weights?.sigmaFloor ?? 6,
   };
 
-  const debugEnabled =
-    typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow2d') === '1';
+  const debugEnabled = typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow2d') === '1';
 
   const grad = getGradientMagnitude(gray, w, h);
 
@@ -516,8 +540,8 @@ export async function computeCostDistanceMap(params: {
 
   const tumorStats = tumorPrior.stats;
 
-  const tumorLoGate = clamp(tumorPrior.qLo ?? (tumorStats.mu - 2.0 * tumorStats.sigma), 0, 255);
-  const tumorHiGate = clamp(tumorPrior.qHi ?? (tumorStats.mu + 2.0 * tumorStats.sigma), 0, 255);
+  const tumorLoGate = clamp(tumorPrior.qLo ?? tumorStats.mu - 2.0 * tumorStats.sigma, 0, 255);
+  const tumorHiGate = clamp(tumorPrior.qHi ?? tumorStats.mu + 2.0 * tumorStats.sigma, 0, 255);
 
   // Estimate background stats from an annulus around the seed.
   const bgStats = (() => {
@@ -575,6 +599,12 @@ export async function computeCostDistanceMap(params: {
   // the target area cap enough.
   const edgeClearance = (() => {
     if (!(tuning.surfaceTension > 0)) return null;
+
+    const roiKey = `${roi.x0},${roi.y0},${roi.x1},${roi.y1}`;
+    const cached = edgeClearanceCache.get(gray);
+    if (cached && cached.w === w && cached.h === h && cached.roiKey === roiKey) {
+      return cached.data;
+    }
 
     const strongGrad = (() => {
       // Estimate a "strong edge" threshold from the gradient distribution in the ROI.
@@ -637,7 +667,10 @@ export async function computeCostDistanceMap(params: {
     }
 
     // If we found no strong edges, leave clearance as INF everywhere.
-    if (qTail === 0) return d;
+    if (qTail === 0) {
+      edgeClearanceCache.set(gray, { w, h, roiKey, data: d });
+      return d;
+    }
 
     while (qHead < qTail) {
       const i = q[qHead++]!;
@@ -661,6 +694,7 @@ export async function computeCostDistanceMap(params: {
       tryPush(x, y + 1);
     }
 
+    edgeClearanceCache.set(gray, { w, h, roiKey, data: d });
     return d;
   })();
 
@@ -791,7 +825,9 @@ export async function computeCostDistanceMap(params: {
   const dist = new Float32Array(w * h);
   dist.fill(Number.POSITIVE_INFINITY);
 
-  const heap = createMinHeap();
+  // Size the heap for the ROI up front: Dijkstra pushes roughly one entry per relaxed
+  // edge, so the ROI's pixel count is the right starting magnitude.
+  const heap = createMinHeap((roi.x1 - roi.x0 + 1) * (roi.y1 - roi.y0 + 1));
 
   const pushSeedIdx = (i: number) => {
     if (dist[i] === 0) return;
@@ -929,7 +965,7 @@ export async function computeCostDistanceMap(params: {
       }
 
       // Downhill (high→low): only extremely permissive if we still end in a high intensity region.
-      if (toHigh) return 0.20;
+      if (toHigh) return 0.2;
 
       if (toLow || isBgLike) {
         return fromHigh ? 16.0 : 12.0;
@@ -948,7 +984,7 @@ export async function computeCostDistanceMap(params: {
         if (toHigh) return 0.004 * upLowMult;
         if (toLow || isBgLike) return 3.0;
 
-        const base = 0.30 - 0.22 * toCore01;
+        const base = 0.3 - 0.22 * toCore01;
         return base * upLowMult;
       }
 
@@ -994,9 +1030,7 @@ export async function computeCostDistanceMap(params: {
     // Bright regions are handled primarily via direction-aware edge/jump gating and the bg-like guardrail.
     const hiCoef = 0.0;
 
-    const tumor =
-      weights.tumorCostStrength *
-      (1.35 * Math.min(9, zLo * zLo) + hiCoef * Math.min(9, zHi * zHi));
+    const tumor = weights.tumorCostStrength * (1.35 * Math.min(9, zLo * zLo) + hiCoef * Math.min(9, zHi * zHi));
 
     return edge + cross + endLowDownhill + tumor + bg + preferHighPenalty;
   };
@@ -1091,20 +1125,20 @@ export async function computeCostDistanceMap(params: {
     }
   }
 
-    return {
-      w,
-      h,
-      seedPx,
-      seedPxs,
-      seedBox,
-      roi,
-      dist,
-      quantileLut,
-      maxFiniteDist: maxFinite,
-      stats: { tumor: tumorStats, bg: bgStats, edgeBarrier },
-      weights,
-      tuning,
-    };
+  return {
+    w,
+    h,
+    seedPx,
+    seedPxs,
+    seedBox,
+    roi,
+    dist,
+    quantileLut,
+    maxFiniteDist: maxFinite,
+    stats: { tumor: tumorStats, bg: bgStats, edgeBarrier },
+    weights,
+    tuning,
+  };
 }
 
 export function distThresholdFromSlider(params: {

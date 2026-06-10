@@ -262,8 +262,12 @@ export function buildSeriesSamples(params: {
   // Choose a roughly-uniform stride so we don't spend time scoring every pixel.
   const stride = Math.max(1, Math.floor(Math.sqrt(totalPixels / maxN)));
 
-  const obs: number[] = [];
-  const pos: number[] = [];
+  // Preallocate at the sample cap and write with a cursor: dynamic number[] arrays here
+  // meant repeated growth reallocations plus a full Float32Array.from copy at the end,
+  // for buffers whose maximum size (maxN) is known up front.
+  const obs = new Float32Array(maxN);
+  const pos = new Float32Array(maxN * 3);
+  let count = 0;
 
   for (let sIdx = 0; sIdx < slices.length; sIdx++) {
     assertNotAborted(signal);
@@ -290,25 +294,29 @@ export function buildSeriesSamples(params: {
         const p = v3(wx, wy, wz);
         if (!isWithinBoundsMm(p, roiBounds)) continue;
 
-        obs.push(v);
-        pos.push(wx, wy, wz);
+        obs[count] = v;
+        pos[count * 3] = wx;
+        pos[count * 3 + 1] = wy;
+        pos[count * 3 + 2] = wz;
+        count++;
         usedThisSlice++;
 
         if (usedThisSlice >= perSliceTarget) break;
-        if (obs.length >= maxN) break;
+        if (count >= maxN) break;
       }
 
       if (usedThisSlice >= perSliceTarget) break;
-      if (obs.length >= maxN) break;
+      if (count >= maxN) break;
     }
 
-    if (obs.length >= maxN) break;
+    if (count >= maxN) break;
   }
 
   return {
-    obs: Float32Array.from(obs),
-    pos: Float32Array.from(pos),
-    count: obs.length,
+    // Trim views to the filled prefix; subarray shares the backing buffer (no copy).
+    obs: obs.subarray(0, count),
+    pos: pos.subarray(0, count * 3),
+    count,
   };
 }
 
@@ -435,17 +443,32 @@ export async function optimizeRigidNcc(params: {
     { transStepMm: 0.5, rotStepRad: (0.5 * Math.PI) / 180 },
   ];
 
-  let cur: RigidParams = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+  const cur: RigidParams = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
   const bestEval = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: cur });
   let bestScore = bestEval.ncc;
   let bestUsed = bestEval.used;
   let evals = 1;
 
-  const tryUpdate = (next: RigidParams): boolean => {
-    const e = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: next });
+  // One reusable probe object instead of two fresh spreads per parameter per iteration
+  // (the old version allocated ~hundreds of short-lived objects per series, all inside the
+  // optimizer's hot loop). The probe always equals `cur` except in the single parameter
+  // under test, so accepting an improvement is just writing that one value back into
+  // `cur` — equivalent to the old `cur = next` aliasing, without the escape.
+  const probe: RigidParams = { ...cur };
+
+  const tryProbe = (key: keyof RigidParams, value: number): boolean => {
+    probe.tx = cur.tx;
+    probe.ty = cur.ty;
+    probe.tz = cur.tz;
+    probe.rx = cur.rx;
+    probe.ry = cur.ry;
+    probe.rz = cur.rz;
+    probe[key] = value;
+
+    const e = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: probe });
     evals++;
     if (e.ncc > bestScore + 1e-4) {
-      cur = next;
+      cur[key] = value;
       bestScore = e.ncc;
       bestUsed = e.used;
       return true;
@@ -472,16 +495,16 @@ export async function optimizeRigidNcc(params: {
         const step = key.startsWith('t') ? t : r;
         const maxVal = key.startsWith('t') ? MAX_TRANS_MM : MAX_ROT_RAD;
 
-        const plus: RigidParams = { ...cur };
-        const minus: RigidParams = { ...cur };
-        (plus as Record<string, number>)[key] = clampAbs(cur[key] + step, maxVal);
-        (minus as Record<string, number>)[key] = clampAbs(cur[key] - step, maxVal);
+        // Both candidate values derive from the parameter's value at key-loop entry, as in
+        // the original (the minus candidate was computed before the plus one was tried).
+        const base = cur[key];
 
-        if (tryUpdate(plus)) improved = true;
-        if (tryUpdate(minus)) improved = true;
+        if (tryProbe(key, clampAbs(base + step, maxVal))) improved = true;
+        if (tryProbe(key, clampAbs(base - step, maxVal))) improved = true;
 
-        // Yield periodically to avoid blocking the main thread
-        if (evals % 25 === 0) {
+        // Yield periodically to avoid blocking the main thread. Each eval scans up to 40k
+        // samples, so the old every-25-evals cadence could block for hundreds of ms.
+        if (evals % 5 === 0) {
           await yieldToMain();
         }
       }
@@ -560,11 +583,15 @@ export async function rigidAlignSeriesInRoi(params: {
     'registration.roi-rigid.plan',
     {
       referenceUid,
-      centerMm: { x: Number(centerMm.x.toFixed(3)), y: Number(centerMm.y.toFixed(3)), z: Number(centerMm.z.toFixed(3)) },
+      centerMm: {
+        x: Number(centerMm.x.toFixed(3)),
+        y: Number(centerMm.y.toFixed(3)),
+        z: Number(centerMm.z.toFixed(3)),
+      },
       dims,
       voxelSizeMm: Number(voxelSizeMm.toFixed(4)),
     },
-    debug
+    debug,
   );
 
   // Align each non-reference series
@@ -670,7 +697,7 @@ export async function rigidAlignSeriesInRoi(params: {
           nccAfter: after.ncc,
           used: after.used,
         },
-        debug
+        debug,
       );
       continue;
     }
@@ -713,7 +740,7 @@ export async function rigidAlignSeriesInRoi(params: {
         translateMm: { x: opt.best.tx, y: opt.best.ty, z: opt.best.tz },
         rotateRad: { x: opt.best.rx, y: opt.best.ry, z: opt.best.rz },
       },
-      debug
+      debug,
     );
 
     await yieldToMain();

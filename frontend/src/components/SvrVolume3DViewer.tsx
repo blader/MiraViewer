@@ -18,6 +18,7 @@ import {
   computeRenderPlan,
   downsampleLabelsNearest,
   toUint8Volume,
+  updateLabelsNearestRegion,
   type RenderDims,
   type RenderQualityPreset,
   type RenderTextureMode,
@@ -28,8 +29,11 @@ import {
   RAYMARCH_VERTEX_SHADER,
   SVR3D_CAMERA_Z,
   SVR3D_FOCAL_Z,
+  SVR3D_OCC_BLOCK,
+  buildOccupancyMaxGrid,
   chooseVolumeTextureFormat,
   createProgram,
+  float32ToFloat16Bits,
   type VolumeTextureFormat,
 } from '../utils/svr/glRaymarch';
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
@@ -195,7 +199,8 @@ function drawAxesOverlay(params: DrawAxesOverlayParams): void {
   const aspect = w / Math.max(1, h);
   const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
 
-  // NOTE: `rotMat` here is the same u_rot we send to the shader, so object->world matches.
+  // NOTE: `rotMat` is the forward (object->world) rotation; the shader receives its
+  // transpose as u_invRot, so this overlay stays consistent with the rendered volume.
   const projectObj = (obj: Vec3) => {
     const world = v3ApplyMat3(rotMat, obj);
     return projectWorldToCanvas({ world, canvasW: w, canvasH: h, aspect, zoom });
@@ -457,6 +462,39 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
   const labels = labelsOverride ?? generatedLabels;
 
+  // The 256-entry label->RGBA palette depends only on the label *metadata*, which is a
+  // stable object (BRATS_BASE_LABEL_META) across grow-preview ticks — only the voxel data
+  // changes. Memoizing on meta keeps palette construction out of the per-tick upload and
+  // slice-compositing paths.
+  const labelsMeta = labels?.meta ?? null;
+  const labelPalette = useMemo(() => (labelsMeta ? buildRgbaPalette256(labelsMeta) : null), [labelsMeta]);
+
+  // Dirty-region tracking for the GPU label texture (and its downsampled CPU cache).
+  //
+  // Grow previews mutate a small set of voxels per tick, but a texture upload keyed only
+  // on `labels` identity would re-push the entire volume (and re-downsample it on the CPU
+  // first) every tick. Mutating paths record the changed bounding box here, tagged with
+  // the exact buffer they touched; the upload effect takes the partial path only when the
+  // tag matches the current label buffer AND the texture is already allocated, so unknown
+  // paths (ONNX results, external overrides — always fresh buffers) safely fall back to a
+  // full upload.
+  const labelDirtyRef = useRef<{ data: Uint8Array; min: Vec3i; max: Vec3i } | null>(null);
+  // Persistent downsampled copy of the label volume, mirrored region-by-region; only valid
+  // for the buffer identity + dims it was built from.
+  const labelDsCacheRef = useRef<{ src: Uint8Array; key: string; data: Uint8Array } | null>(null);
+
+  const markLabelsDirty = useCallback((data: Uint8Array, min: Vec3i, max: Vec3i) => {
+    const d = labelDirtyRef.current;
+    if (d && d.data === data) {
+      // Multiple mutations can land before React flushes the upload effect (e.g. two grow
+      // ticks in one frame); merge into one conservative box rather than dropping one.
+      d.min = { x: Math.min(d.min.x, min.x), y: Math.min(d.min.y, min.y), z: Math.min(d.min.z, min.z) };
+      d.max = { x: Math.max(d.max.x, max.x), y: Math.max(d.max.y, max.y), z: Math.max(d.max.z, max.z) };
+    } else {
+      labelDirtyRef.current = { data, min: { ...min }, max: { ...max } };
+    }
+  }, []);
+
   // ONNX model execution (offline; model cached in IndexedDB).
   const onnx = useOnnxTumorSession(volume ?? null, setGeneratedLabels);
   const {
@@ -521,28 +559,22 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
   // For live-updating tolerance we need to *replace* the previous preview rather than accumulate.
   // We store sparse previous label values so we can revert without copying the entire label volume.
-  const growOverlayRef = useRef<
-    | {
-        key: string;
-        seedKey: string;
-        workLabels: Uint8Array;
-        prevIndices: Uint32Array | null;
-        prevValues: Uint8Array | null;
-      }
-    | null
-  >(null);
+  const growOverlayRef = useRef<{
+    key: string;
+    seedKey: string;
+    workLabels: Uint8Array;
+    prevIndices: Uint32Array | null;
+    prevValues: Uint8Array | null;
+  } | null>(null);
 
-  const sliceInspectorDragRef = useRef<
-    | {
-        pointerId: number;
-        startClientX: number;
-        startClientY: number;
-        startVoxel: Vec3i;
-        lastVoxel: Vec3i;
-        draggingRoi: boolean;
-      }
-    | null
-  >(null);
+  const sliceInspectorDragRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startVoxel: Vec3i;
+    lastVoxel: Vec3i;
+    draggingRoi: boolean;
+  } | null>(null);
 
   // When the underlying volume changes, drop any internally-generated labels, seeds, and ROI state.
   useEffect(() => {
@@ -567,11 +599,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     growOverlayRef.current = null;
     sliceInspectorDragRef.current = null;
 
-    // Cancel any in-flight ONNX segmentation (best-effort).
-    onnxSegRunIdRef.current++;
-    setOnnxSegRunning(false);
-    setAllowUnsafeOnnxFullRes(false);
-    setOnnxStatus((s) => (s.loading ? { ...s, loading: false } : s));
+    // In-flight ONNX segmentation is cancelled by useOnnxTumorSession's own volume-change
+    // effect (the hook owns that state since the extraction; the stale direct references
+    // that used to live here didn't compile).
   }, [volume]);
 
   const hasLabels = useMemo(() => {
@@ -617,9 +647,45 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [inspectPlane, setInspectPlane] = useState<'axial' | 'coronal' | 'sagittal'>('axial');
   const [inspectIndex, setInspectIndex] = useState(0);
 
+  // Render-on-demand + interaction-time quality scaling.
+  //
+  // The raymarcher's frame cost is pixels × steps × texture bandwidth, and it used to pay
+  // that cost every RAF forever, at full devicePixelRatio, even with nothing changing.
+  // Instead: frames are scheduled only when something changed (requestRenderRef), and while
+  // the user is actively rotating/zooming we render at reduced resolution + step count
+  // (paired with ray jitter in the shader). A settle timer restores a final full-quality
+  // frame ~180ms after the last interaction event.
+  const requestRenderRef = useRef<(() => void) | null>(null);
+  const interactingRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
+
+  const markInteraction = useCallback(() => {
+    interactingRef.current = true;
+
+    // Debounced settle: each interaction event pushes the full-quality re-render out, so a
+    // continuous drag stays in cheap mode and only the final frame pays full cost.
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null;
+      interactingRef.current = false;
+      requestRenderRef.current?.();
+    }, 180);
+
+    requestRenderRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    };
+  }, []);
+
   const paramsRef = useRef({ threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels });
   useEffect(() => {
     paramsRef.current = { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels };
+    // Render-on-demand: any control change must explicitly schedule a frame, since the GL
+    // loop no longer free-runs (idle viewer = zero GPU work).
+    requestRenderRef.current?.();
   }, [gamma, hasLabels, labelMix, labelsEnabled, opacity, steps, threshold, zoom]);
 
   const rotationRef = useRef<Quat>([0, 0, 0, 1]);
@@ -721,6 +787,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const resetView = useCallback(() => {
     rotationRef.current = [0, 0, 0, 1];
     setZoom(1.0);
+    // If zoom was already 1.0 the params effect won't fire, so the rotation reset needs its
+    // own explicit frame request.
+    requestRenderRef.current?.();
   }, []);
 
   useImperativeHandle(
@@ -737,6 +806,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           }
 
           pendingCapture3dRef.current = { resolve };
+
+          // The renderer is on-demand now: schedule the frame that will service this
+          // capture (draw() forces full quality when a capture is pending).
+          requestRenderRef.current?.();
 
           // Safety: don't leave callers hanging if the GL loop isn't running.
           window.setTimeout(() => {
@@ -787,39 +860,46 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     e.stopPropagation();
   }, []);
 
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const canvas = canvasRef.current;
-    const d = dragRef.current;
-    if (!canvas || !d || d.pointerId !== e.pointerId) return;
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const canvas = canvasRef.current;
+      const d = dragRef.current;
+      if (!canvas || !d || d.pointerId !== e.pointerId) return;
 
-    const dx = e.clientX - d.lastX;
-    const dy = e.clientY - d.lastY;
+      const dx = e.clientX - d.lastX;
+      const dy = e.clientY - d.lastY;
 
-    d.lastX = e.clientX;
-    d.lastY = e.clientY;
+      d.lastX = e.clientX;
+      d.lastY = e.clientY;
 
-    const minDim = Math.max(1, Math.min(canvas.clientWidth, canvas.clientHeight));
-    const anglePerPx = Math.PI / minDim;
+      const minDim = Math.max(1, Math.min(canvas.clientWidth, canvas.clientHeight));
+      const anglePerPx = Math.PI / minDim;
 
-    // Apply *delta* rotations about fixed viewport/world axes.
-    //
-    // Important: composing absolute yaw/pitch as `R = R_pitch * R_yaw` makes yaw behave like a local-axis
-    // rotation once pitch != 0 (unintuitive). Pre-multiplying the current rotation with world-axis deltas
-    // keeps both axes fixed relative to the viewport.
-    // NOTE: positive clientY is down, so `deltaPitch = +dy` feels like “drag down -> tilt down”.
-    const deltaYaw = dx * anglePerPx;
-    const deltaPitch = dy * anglePerPx;
+      // Apply *delta* rotations about fixed viewport/world axes.
+      //
+      // Important: composing absolute yaw/pitch as `R = R_pitch * R_yaw` makes yaw behave like a local-axis
+      // rotation once pitch != 0 (unintuitive). Pre-multiplying the current rotation with world-axis deltas
+      // keeps both axes fixed relative to the viewport.
+      // NOTE: positive clientY is down, so `deltaPitch = +dy` feels like “drag down -> tilt down”.
+      const deltaYaw = dx * anglePerPx;
+      const deltaPitch = dy * anglePerPx;
 
-    const qYaw = quatFromAxisAngle({ x: 0, y: 1, z: 0 }, deltaYaw);
-    const qPitch = quatFromAxisAngle({ x: 1, y: 0, z: 0 }, deltaPitch);
+      const qYaw = quatFromAxisAngle({ x: 0, y: 1, z: 0 }, deltaYaw);
+      const qPitch = quatFromAxisAngle({ x: 1, y: 0, z: 0 }, deltaPitch);
 
-    // Apply yaw first (screen vertical axis), then pitch (screen horizontal axis).
-    const qDelta = quatMultiply(qPitch, qYaw);
-    rotationRef.current = quatNormalize(quatMultiply(qDelta, rotationRef.current));
+      // Apply yaw first (screen vertical axis), then pitch (screen horizontal axis).
+      const qDelta = quatMultiply(qPitch, qYaw);
+      rotationRef.current = quatNormalize(quatMultiply(qDelta, rotationRef.current));
 
-    e.preventDefault();
-    e.stopPropagation();
-  }, []);
+      // Rotation lives in a ref (no React state change), so the on-demand renderer must be
+      // poked explicitly; this also flips the cheap interaction-quality mode on.
+      markInteraction();
+
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [markInteraction],
+  );
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     if (dragRef.current?.pointerId === e.pointerId) {
@@ -841,13 +921,17 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       const factor = Math.exp(-e.deltaY * 0.001);
       setZoom((z) => clamp(z * factor, 0.6, 10.0));
 
+      // The zoom state change schedules a frame via the params effect, but marking the
+      // interaction here is what drops to cheap render quality during a wheel burst.
+      markInteraction();
+
       e.preventDefault();
       e.stopPropagation();
     };
 
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [markInteraction]);
 
   const inspectorInfo = useMemo(() => {
     if (!volume) {
@@ -1078,12 +1162,38 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           const o = growOverlayRef.current;
           if (!o || o.key !== volumeKey || o.seedKey !== seedKey) return;
 
+          // Track the bounding box of every voxel this tick touches (both the restored
+          // previous preview and the newly applied one) so the GPU upload effect can
+          // sub-upload just that region instead of re-pushing the whole label volume.
+          const [bnx, bny] = volume.dims;
+          const sliceVox = bnx * bny;
+          let mnX = Infinity;
+          let mnY = Infinity;
+          let mnZ = Infinity;
+          let mxX = -Infinity;
+          let mxY = -Infinity;
+          let mxZ = -Infinity;
+          const trackIndex = (vi: number) => {
+            const z = (vi / sliceVox) | 0;
+            const rem = vi - z * sliceVox;
+            const y = (rem / bnx) | 0;
+            const x = rem - y * bnx;
+            if (x < mnX) mnX = x;
+            if (y < mnY) mnY = y;
+            if (z < mnZ) mnZ = z;
+            if (x > mxX) mxX = x;
+            if (y > mxY) mxY = y;
+            if (z > mxZ) mxZ = z;
+          };
+
           // Restore the previous preview region (sparse).
           if (o.prevIndices && o.prevValues && o.prevValues.length === o.prevIndices.length) {
             const prev = o.prevIndices;
             const vals = o.prevValues;
             for (let i = 0; i < prev.length; i++) {
-              o.workLabels[prev[i]!] = vals[i] ?? 0;
+              const vi = prev[i]!;
+              o.workLabels[vi] = vals[i] ?? 0;
+              trackIndex(vi);
             }
           }
 
@@ -1094,9 +1204,14 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
             const vi = idx[i]!;
             nextPrevValues[i] = o.workLabels[vi] ?? 0;
             o.workLabels[vi] = targetLabel;
+            trackIndex(vi);
           }
           o.prevIndices = idx;
           o.prevValues = nextPrevValues;
+
+          if (Number.isFinite(mnX)) {
+            markLabelsDirty(o.workLabels, { x: mnX, y: mnY, z: mnZ }, { x: mxX, y: mxY, z: mxZ });
+          }
 
           setGeneratedLabels({ data: o.workLabels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
 
@@ -1126,6 +1241,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       growTolerance,
       hasLabels,
       labels,
+      markLabelsDirty,
       onnxSegRunning,
       volume,
     ],
@@ -1154,7 +1270,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     },
     [growAuto, growRoiBounds, onnxSegRunning, startSeedGrow, volume],
   );
-
 
   const onSliceInspectorPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1260,14 +1375,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     e.stopPropagation();
   }, []);
 
-  // Draw the inspector slice to a 2D canvas.
-  useEffect(() => {
-    const canvas = sliceCanvasRef.current;
-    if (!canvas) return;
-    if (!volume) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  // Extract + downsample the current inspector slice (a plane read over the full volume
+  // plus an area-average resample). Memoized separately from the canvas compositing effect
+  // below so that label-only updates — grow previews re-publish labels several times a
+  // second — reuse the cached slice instead of re-reading a full volume plane each time.
+  const inspectorSlice = useMemo(() => {
+    if (!volume) return null;
 
     const [nx, ny, nz] = volume.dims;
     const data = volume.data;
@@ -1322,6 +1435,25 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
     const down = resample2dAreaAverage(src, srcRows, srcCols, dsRows, dsCols);
 
+    return { down, idx, srcRows, srcCols, dsRows, dsCols };
+  }, [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]);
+
+  // Composite the cached inspector slice with the label overlay and UI decorations
+  // (seed crosshair, ROI boxes) onto the 2D canvas.
+  useEffect(() => {
+    const canvas = sliceCanvasRef.current;
+    if (!canvas) return;
+    if (!volume || !inspectorSlice) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const [nx, ny] = volume.dims;
+    const strideY = nx;
+    const strideZ = nx * ny;
+
+    const { down, idx, srcRows, srcCols, dsRows, dsCols } = inspectorSlice;
+
     if (canvas.width !== dsCols) canvas.width = dsCols;
     if (canvas.height !== dsRows) canvas.height = dsRows;
 
@@ -1329,7 +1461,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     const out = img.data;
 
     const overlayAlpha = hasLabels && labelsEnabled ? clamp(labelMix, 0, 1) : 0;
-    const palette = hasLabels && labelsEnabled && labels ? buildRgbaPalette256(labels.meta) : null;
+    const palette = hasLabels && labelsEnabled && labels ? labelPalette : null;
 
     for (let i = 0; i < down.length; i++) {
       const v = down[i] ?? 0;
@@ -1417,7 +1549,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       }
     }
 
-    const drawRoiBounds = (bounds: { min: Vec3i; max: Vec3i }, opts: { stroke: string; fill?: string; dashed?: boolean }) => {
+    const drawRoiBounds = (
+      bounds: { min: Vec3i; max: Vec3i },
+      opts: { stroke: string; fill?: string; dashed?: boolean },
+    ) => {
       const toCanvasX = (col: number) => (srcCols > 1 ? (col / (srcCols - 1)) * (dsCols - 1) : 0);
       const toCanvasY = (row: number) => (srcRows > 1 ? (row / (srcRows - 1)) * (dsRows - 1) : 0);
 
@@ -1499,12 +1634,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     growRoiBounds,
     growRoiDraftBounds,
     hasLabels,
-    inspectIndex,
     inspectPlane,
-    inspectorInfo.maxIndex,
-    inspectorInfo.srcCols,
-    inspectorInfo.srcRows,
+    inspectorSlice,
     labelMix,
+    labelPalette,
     labels,
     labelsEnabled,
     seedVoxel,
@@ -1531,11 +1664,17 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     const texDims = renderTex.dims;
 
     const gl = canvas.getContext('webgl2', {
-      antialias: true,
+      // MSAA is pure overhead for a fullscreen-quad raymarcher: there are no geometry edges
+      // to antialias (all image content comes from the fragment shader), but the browser
+      // would still allocate a multisampled framebuffer and pay a resolve pass per frame.
+      antialias: false,
       alpha: false,
       depth: false,
       stencil: false,
       preserveDrawingBuffer: false,
+      // Dual-GPU laptops default to the integrated chip for WebGL; volume raymarching is
+      // exactly the workload where the discrete GPU matters.
+      powerPreference: 'high-performance',
     });
 
     if (!gl) {
@@ -1555,7 +1694,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     let texVol: WebGLTexture | null = null;
     let texLabels: WebGLTexture | null = null;
     let texPalette: WebGLTexture | null = null;
+    let texOcc: WebGLTexture | null = null;
+    let occMaxCell: [number, number, number] = [0, 0, 0];
     let raf = 0;
+    let resizeObserverRef: ResizeObserver | null = null;
 
     try {
       program = createProgram(gl, vsSrc, fsSrc);
@@ -1622,7 +1764,10 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         tryUpload(fallback, uploadedData);
       } else {
         fmt = primary;
-        uploadedData = renderTex.data;
+        // The float render volume uploads as R16F (half bandwidth/memory of R32F, and
+        // linearly filterable in core WebGL2). The Uint16Array of half bits is transient:
+        // nothing retains it after texImage3D copies it to the GPU.
+        uploadedData = float32ToFloat16Bits(renderTex.data as Float32Array);
 
         try {
           const ok = tryUpload(primary, uploadedData);
@@ -1646,6 +1791,43 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         texDims,
         sourceDims: { nx: volume.dims[0], ny: volume.dims[1], nz: volume.dims[2] },
       });
+
+      gl.bindTexture(gl.TEXTURE_3D, null);
+
+      // Occupancy max-grid for empty-space skipping: one R8 texel per 8^3 block of the
+      // render volume, built once per upload from the same data the volume texture holds.
+      // Rays leap blocks whose conservative max can't pass the threshold test (the bulk of
+      // the box on a typical brain scan), trading a full-res tap for a tiny-texture tap.
+      const occGrid = buildOccupancyMaxGrid({ data: renderTex.data, dims: texDims });
+      occMaxCell = [occGrid.dims.nx - 1, occGrid.dims.ny - 1, occGrid.dims.nz - 1];
+
+      texOcc = gl.createTexture();
+      if (!texOcc) throw new Error('Failed to allocate occupancy 3D texture');
+
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_3D, texOcc);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+      // The shader reads cells with texelFetch (exact integer coords); filtering modes are
+      // set only to keep the texture complete.
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      gl.texImage3D(
+        gl.TEXTURE_3D,
+        0,
+        gl.R8,
+        occGrid.dims.nx,
+        occGrid.dims.ny,
+        occGrid.dims.nz,
+        0,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        occGrid.data,
+      );
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -1712,7 +1894,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         labelsEnabled: gl.getUniformLocation(program, 'u_labelsEnabled'),
         labelMix: gl.getUniformLocation(program, 'u_labelMix'),
 
-        rot: gl.getUniformLocation(program, 'u_rot'),
+        occ: gl.getUniformLocation(program, 'u_occ'),
+        occEnabled: gl.getUniformLocation(program, 'u_occEnabled'),
+        occBlock: gl.getUniformLocation(program, 'u_occBlock'),
+        occMaxCell: gl.getUniformLocation(program, 'u_occMaxCell'),
+
+        invRot: gl.getUniformLocation(program, 'u_invRot'),
         box: gl.getUniformLocation(program, 'u_box'),
         aspect: gl.getUniformLocation(program, 'u_aspect'),
         zoom: gl.getUniformLocation(program, 'u_zoom'),
@@ -1721,6 +1908,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         gamma: gl.getUniformLocation(program, 'u_gamma'),
         opacity: gl.getUniformLocation(program, 'u_opacity'),
         texel: gl.getUniformLocation(program, 'u_texel'),
+        jitter: gl.getUniformLocation(program, 'u_jitter'),
       } as const;
 
       const rotMat = new Float32Array(9);
@@ -1728,10 +1916,20 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       const axesCanvas = axesCanvasRef.current;
       const axesCtx = axesCanvas ? axesCanvas.getContext('2d') : null;
 
-      const resizeAndViewport = () => {
-        const dpr = window.devicePixelRatio || 1;
-        const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-        const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      // Fragment cost scales with backing-store pixel count, and a shaded volume render
+      // can't visually exploit pixel densities much past ~1.5x CSS resolution — a 2x-DPR
+      // display would otherwise pay 4x the rays of CSS resolution for imperceptible gain.
+      const MAX_DPR = 1.5;
+      // While the user is actively rotating/zooming, drop to half resolution (4x fewer rays)
+      // and ~1/2.7 the march steps; the shader's jittered ray start masks the step banding.
+      // The settle frame after interaction restores full quality.
+      const INTERACTION_SCALE = 0.5;
+      const INTERACTION_STEPS = 96;
+
+      const resizeAndViewport = (scale: number) => {
+        const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+        const w = Math.max(1, Math.floor(canvas.clientWidth * dpr * scale));
+        const h = Math.max(1, Math.floor(canvas.clientHeight * dpr * scale));
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w;
           canvas.height = h;
@@ -1748,7 +1946,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       };
 
       const draw = () => {
-        resizeAndViewport();
+        // A pending screenshot capture must never read back a degraded interaction frame,
+        // so it forces full quality regardless of drag state.
+        const interacting = interactingRef.current && !pendingCapture3dRef.current;
+
+        resizeAndViewport(interacting ? INTERACTION_SCALE : 1);
 
         const { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels } = paramsRef.current;
 
@@ -1771,19 +1973,33 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         gl.bindTexture(gl.TEXTURE_2D, texPalette);
         gl.uniform1i(u.palette, 2);
 
+        gl.activeTexture(gl.TEXTURE3);
+        gl.bindTexture(gl.TEXTURE_3D, texOcc);
+        gl.uniform1i(u.occ, 3);
+        gl.uniform1i(u.occEnabled, texOcc ? 1 : 0);
+        gl.uniform1i(u.occBlock, SVR3D_OCC_BLOCK);
+        gl.uniform3i(u.occMaxCell, occMaxCell[0], occMaxCell[1], occMaxCell[2]);
+
         const labelsOn = labelsEnabled && hasLabels ? 1 : 0;
         gl.uniform1i(u.labelsEnabled, labelsOn);
         gl.uniform1f(u.labelMix, clamp(labelMix, 0, 1));
 
         // Uniforms
         mat3FromQuat(rotationRef.current, rotMat);
-        gl.uniformMatrix3fv(u.rot, false, rotMat);
+        // The shader wants the inverse (camera->object) rotation. For a rotation matrix the
+        // inverse is the transpose, and WebGL2 allows transpose=true here — so the shader
+        // gets its inverse without a per-fragment transpose() and the axes overlay below
+        // keeps using the forward rotation in rotMat.
+        gl.uniformMatrix3fv(u.invRot, true, rotMat);
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
         gl.uniform1f(u.zoom, zoom);
         // Threshold is the *edge* threshold (center is always ~0); shader applies a linear center→edge ramp.
         gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_EDGE_MAX));
-        gl.uniform1i(u.steps, Math.round(clamp(steps, 8, 256)));
+        // Fewer steps while interacting (banding hidden by the jittered ray start); the
+        // settled frame always marches the full configured step count.
+        gl.uniform1i(u.steps, Math.round(clamp(interacting ? Math.min(INTERACTION_STEPS, steps) : steps, 8, 256)));
+        gl.uniform1f(u.jitter, interacting ? 1 : 0);
         gl.uniform1f(u.gamma, clamp(gamma, 0.1, 10));
         gl.uniform1f(u.opacity, clamp(opacity, 0.1, 20));
         gl.uniform3f(u.texel, 1 / Math.max(1, texDims.nx), 1 / Math.max(1, texDims.ny), 1 / Math.max(1, texDims.nz));
@@ -1826,6 +2042,8 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         }
 
         // Reset bindings (avoid leaking WebGL state across frames).
+        gl.activeTexture(gl.TEXTURE3);
+        gl.bindTexture(gl.TEXTURE_3D, null);
         gl.activeTexture(gl.TEXTURE2);
         gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE1);
@@ -1834,11 +2052,29 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         gl.bindTexture(gl.TEXTURE_3D, null);
 
         gl.bindVertexArray(null);
-
-        raf = window.requestAnimationFrame(draw);
       };
 
-      raf = window.requestAnimationFrame(draw);
+      // Render-on-demand scheduler: draw() no longer self-schedules. Every source of visual
+      // change (rotation, zoom, control params, label uploads, captures, resizes) calls
+      // requestRender, which coalesces into at most one frame per RAF. An idle viewer
+      // schedules nothing and costs zero GPU time.
+      const requestRender = () => {
+        if (raf) return;
+        raf = window.requestAnimationFrame(() => {
+          raf = 0;
+          draw();
+        });
+      };
+
+      requestRenderRef.current = requestRender;
+
+      // The free-running loop used to pick up CSS size changes implicitly; on-demand
+      // rendering needs an explicit nudge when the canvas is resized by layout.
+      const resizeObserver = new ResizeObserver(() => requestRender());
+      resizeObserver.observe(canvas);
+      resizeObserverRef = resizeObserver;
+
+      requestRender();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error('[SVR3D] Failed to initialize:', e);
@@ -1851,6 +2087,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         pendingCapture3dRef.current = null;
       }
 
+      // Detach the on-demand entry points first so late invalidations (settle timers,
+      // label effects) can't schedule a frame against torn-down GL state.
+      requestRenderRef.current = null;
+      resizeObserverRef?.disconnect();
+
       if (raf) window.cancelAnimationFrame(raf);
 
       glLabelStateRef.current = null;
@@ -1859,6 +2100,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         if (texVol) gl.deleteTexture(texVol);
         if (texLabels) gl.deleteTexture(texLabels);
         if (texPalette) gl.deleteTexture(texPalette);
+        if (texOcc) gl.deleteTexture(texOcc);
         if (vbo) gl.deleteBuffer(vbo);
         if (vao) gl.deleteVertexArray(vao);
         if (program) gl.deleteProgram(program);
@@ -1882,6 +2124,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           labelLen: labels.data.length,
         });
       }
+
+      // No labels means any pending dirty region / downsample cache describes a buffer
+      // that's no longer rendered.
+      labelDirtyRef.current = null;
+      labelDsCacheRef.current = null;
 
       // Free GPU label texture memory when not in use.
       if (
@@ -1921,10 +2168,19 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     const srcDims = { nx: volume.dims[0], ny: volume.dims[1], nz: volume.dims[2] };
     const dstDims = texDims;
 
-    const dataForUpload =
-      srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz
-        ? labels.data
-        : downsampleLabelsNearest({ src: labels.data, srcDims, dstDims });
+    const sameDims = srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz;
+    const dsKey = `${srcDims.nx}x${srcDims.ny}x${srcDims.nz}>${dstDims.nx}x${dstDims.ny}x${dstDims.nz}`;
+
+    const texAllocated =
+      st.labelsTexDims.nx === dstDims.nx && st.labelsTexDims.ny === dstDims.ny && st.labelsTexDims.nz === dstDims.nz;
+
+    // Consume the dirty marker. The partial path is only sound when (a) the marker
+    // describes the exact buffer we're about to upload (grow ticks mutate workLabels in
+    // place; fresh buffers from ONNX/overrides won't match and take the full path) and
+    // (b) the texture already holds a complete prior upload to patch into.
+    const dirty = labelDirtyRef.current;
+    labelDirtyRef.current = null;
+    const partial = texAllocated && dirty !== null && dirty.data === labels.data;
 
     try {
       // Label IDs (uint8)
@@ -1932,60 +2188,128 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       gl.bindTexture(gl.TEXTURE_3D, texLabels);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
-      if (
-        st.labelsTexDims.nx !== dstDims.nx ||
-        st.labelsTexDims.ny !== dstDims.ny ||
-        st.labelsTexDims.nz !== dstDims.nz
-      ) {
-        // Allocate+upload in one go (avoids ever allocating a full-size zero fill array).
-        gl.texImage3D(
-          gl.TEXTURE_3D,
-          0,
-          gl.R8UI,
-          dstDims.nx,
-          dstDims.ny,
-          dstDims.nz,
-          0,
-          gl.RED_INTEGER,
-          gl.UNSIGNED_BYTE,
-          dataForUpload,
-        );
-        st.labelsTexDims = { nx: dstDims.nx, ny: dstDims.ny, nz: dstDims.nz };
+      // Upload a sub-box straight out of a full-volume array: WebGL2's unpack parameters
+      // describe the source row/image strides + skip offsets, so no CPU-side repack of the
+      // dirty region is needed. Always reset the params — they're context-global state.
+      const uploadSubBox = (data: Uint8Array, dims: RenderDims, min: Vec3i, max: Vec3i) => {
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, dims.nx);
+        gl.pixelStorei(gl.UNPACK_IMAGE_HEIGHT, dims.ny);
+        gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, min.x);
+        gl.pixelStorei(gl.UNPACK_SKIP_ROWS, min.y);
+        gl.pixelStorei(gl.UNPACK_SKIP_IMAGES, min.z);
+        try {
+          gl.texSubImage3D(
+            gl.TEXTURE_3D,
+            0,
+            min.x,
+            min.y,
+            min.z,
+            max.x - min.x + 1,
+            max.y - min.y + 1,
+            max.z - min.z + 1,
+            gl.RED_INTEGER,
+            gl.UNSIGNED_BYTE,
+            data,
+          );
+        } finally {
+          gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+          gl.pixelStorei(gl.UNPACK_IMAGE_HEIGHT, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+          gl.pixelStorei(gl.UNPACK_SKIP_IMAGES, 0);
+        }
+      };
+
+      const dsCache = labelDsCacheRef.current;
+
+      if (partial && sameDims) {
+        // Texture is a 1:1 copy of the label volume: patch the dirty box directly.
+        uploadSubBox(labels.data, srcDims, dirty.min, dirty.max);
+      } else if (partial && dsCache && dsCache.src === labels.data && dsCache.key === dsKey) {
+        // Texture is a downsampled copy: refresh only the mapped region of the persistent
+        // CPU cache, then patch that region. This is what keeps grow previews interactive
+        // on volumes large enough to need a label LOD.
+        const dstBox = updateLabelsNearestRegion({
+          src: labels.data,
+          srcDims,
+          dst: dsCache.data,
+          dstDims,
+          srcBox: { min: dirty.min, max: dirty.max },
+        });
+        if (dstBox) {
+          uploadSubBox(dsCache.data, dstDims, dstBox.min, dstBox.max);
+        }
       } else {
-        gl.texSubImage3D(
-          gl.TEXTURE_3D,
-          0,
-          0,
-          0,
-          0,
-          dstDims.nx,
-          dstDims.ny,
-          dstDims.nz,
-          gl.RED_INTEGER,
-          gl.UNSIGNED_BYTE,
-          dataForUpload,
-        );
+        // Full path: first upload for this texture/buffer, or a buffer we have no dirty
+        // info for. (Re)build the downsample cache here so subsequent ticks can go partial.
+        let dataForUpload: Uint8Array;
+        if (sameDims) {
+          dataForUpload = labels.data;
+          labelDsCacheRef.current = null;
+        } else {
+          dataForUpload = downsampleLabelsNearest({ src: labels.data, srcDims, dstDims });
+          labelDsCacheRef.current = { src: labels.data, key: dsKey, data: dataForUpload };
+        }
+
+        if (!texAllocated) {
+          // Allocate+upload in one go (avoids ever allocating a full-size zero fill array).
+          gl.texImage3D(
+            gl.TEXTURE_3D,
+            0,
+            gl.R8UI,
+            dstDims.nx,
+            dstDims.ny,
+            dstDims.nz,
+            0,
+            gl.RED_INTEGER,
+            gl.UNSIGNED_BYTE,
+            dataForUpload,
+          );
+          st.labelsTexDims = { nx: dstDims.nx, ny: dstDims.ny, nz: dstDims.nz };
+        } else {
+          gl.texSubImage3D(
+            gl.TEXTURE_3D,
+            0,
+            0,
+            0,
+            0,
+            dstDims.nx,
+            dstDims.ny,
+            dstDims.nz,
+            gl.RED_INTEGER,
+            gl.UNSIGNED_BYTE,
+            dataForUpload,
+          );
+        }
       }
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
-      // Palette lookup table
-      const rgba = buildRgbaPalette256(labels.meta);
-      gl.activeTexture(gl.TEXTURE2);
-      gl.bindTexture(gl.TEXTURE_2D, texPalette);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-      gl.bindTexture(gl.TEXTURE_2D, null);
+      // Palette lookup table (memoized buffer — rebuilding it per tick was wasted work,
+      // and the 1 KiB upload itself is negligible).
+      if (labelPalette) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, texPalette);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, labelPalette);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      }
     } catch (e) {
       console.warn('[svr3d] Failed to upload label textures', e);
     } finally {
       gl.activeTexture(gl.TEXTURE0);
+      // New label content must trigger a repaint under on-demand rendering. (The
+      // placeholder-reset early return above doesn't need one: it only runs when labels
+      // were just disabled/removed, and that state change repaints via the params effect.)
+      requestRenderRef.current?.();
     }
-  }, [glEpoch, hasLabels, labels, labelsEnabled, volume]);
+  }, [glEpoch, hasLabels, labelPalette, labels, labelsEnabled, volume]);
 
   const sliceInspectorCard = (
     <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
-      <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">Slice Inspector</div>
+      <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
+        Slice Inspector
+      </div>
       <div className="p-3 space-y-2">
         <div className="grid grid-cols-2 gap-2">
           <label className="block text-xs text-[var(--text-secondary)]">
@@ -2025,7 +2349,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
         </div>
 
         <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
-            <canvas
+          <canvas
             ref={sliceCanvasRef}
             className="w-full h-auto"
             style={{
@@ -2050,7 +2374,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   );
 
   const wantsSliceInspectorPortal = sliceInspectorPortalTarget !== undefined;
-  const sliceInspectorPortal = sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;
+  const sliceInspectorPortal = sliceInspectorPortalTarget
+    ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget)
+    : null;
 
   return (
     <div
@@ -2215,7 +2541,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
                       className="mt-1 w-full"
                       disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">×{growRoiOutsideScale.toFixed(2)}</div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                      ×{growRoiOutsideScale.toFixed(2)}
+                    </div>
                   </label>
 
                   <button
@@ -2282,7 +2610,9 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
                       className="mt-1 w-full"
                       disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
+                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                      ±{growTolerance.toFixed(3)}
+                    </div>
                   </label>
                 </div>
 
@@ -2388,7 +2718,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
                     </button>
                   </div>
 
-
                   {onnxPreflight?.blockedByDefault ? (
                     <div className="space-y-2">
                       <div className="text-[10px] text-yellow-200 bg-yellow-400/10 px-2 py-1 rounded">
@@ -2444,12 +2773,12 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
 
                     {labelMetrics ? (
                       <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMl.toFixed(2)} mL
+                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
+                        {labelMetrics.totalMl.toFixed(2)} mL
                       </div>
                     ) : null}
                   </div>
                 )}
-
               </div>
             )}
           </div>
