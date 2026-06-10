@@ -12,8 +12,9 @@ import { getSortedSopInstanceUidsForSeries } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
+import { quantileSorted } from '../utils/svr/svrUtils';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
-import { clamp01, clampInt } from '../utils/math';
+import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
   return [...dates].sort((a, b) => b.localeCompare(a));
@@ -27,7 +28,6 @@ function formatSeriesLabel(seq: { plane: string | null; weight: string | null; s
 function sequenceGroupKey(seq: { weight: string | null; sequence: string | null }): string {
   return `${seq.weight ?? ''}|||${seq.sequence ?? ''}`;
 }
-
 
 type RoiRect01 = {
   x0: number;
@@ -158,19 +158,6 @@ function drawDicomPixelDataToCanvas(params: {
 
   finite.sort((a, b) => a - b);
 
-  const quantileSorted = (sorted: number[], q: number): number => {
-    const n = sorted.length;
-    if (n === 0) return 0;
-    const qq = q < 0 ? 0 : q > 1 ? 1 : q;
-    const idx = qq * (n - 1);
-    const i0 = Math.floor(idx);
-    const i1 = Math.min(n - 1, i0 + 1);
-    const t = idx - i0;
-    const a = sorted[i0] ?? 0;
-    const b = sorted[i1] ?? a;
-    return a + (b - a) * t;
-  };
-
   let lo = quantileSorted(finite, 0.01);
   let hi = quantileSorted(finite, 0.99);
 
@@ -210,7 +197,8 @@ export function DicomRoiSlicePreview(props: {
   onRoiFinalized: (roi: SvrRoi | null) => void;
   disabled?: boolean;
 }) {
-  const { slice, sourceSeriesUid, maxSize, roiRect, setRoiRect, roiDragRef, onSliceDelta, onRoiFinalized, disabled } = props;
+  const { slice, sourceSeriesUid, maxSize, roiRect, setRoiRect, roiDragRef, onSliceDelta, onRoiFinalized, disabled } =
+    props;
 
   const rect = roiRect ? normalizeRect01(roiRect) : null;
 
@@ -246,9 +234,14 @@ export function DicomRoiSlicePreview(props: {
 
         if (!alive) return;
 
-        const slope = typeof (image as unknown as { slope?: unknown }).slope === 'number' ? (image as unknown as { slope: number }).slope : 1;
+        const slope =
+          typeof (image as unknown as { slope?: unknown }).slope === 'number'
+            ? (image as unknown as { slope: number }).slope
+            : 1;
         const intercept =
-          typeof (image as unknown as { intercept?: unknown }).intercept === 'number' ? (image as unknown as { intercept: number }).intercept : 0;
+          typeof (image as unknown as { intercept?: unknown }).intercept === 'number'
+            ? (image as unknown as { intercept: number }).intercept
+            : 0;
 
         drawDicomPixelDataToCanvas({
           canvas,
@@ -414,7 +407,13 @@ export type Svr3DViewProps = {
   fallbackRoiSliceIndex?: number | null;
 };
 
-export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSeriesUid, fallbackRoiSliceIndex }: Svr3DViewProps) {
+export function Svr3DView({
+  data,
+  defaultDateIso,
+  defaultSeqId,
+  fallbackRoiSeriesUid,
+  fallbackRoiSliceIndex,
+}: Svr3DViewProps) {
   const dates = useMemo(() => sortedDatesDesc(data.dates), [data.dates]);
   const dateIso = defaultDateIso && dates.includes(defaultDateIso) ? defaultDateIso : dates[0] || null;
 
@@ -570,9 +569,10 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
   const [roiSliceGeomError, setRoiSliceGeomError] = useState<string | null>(null);
 
   // Keep a stable preview slice so we don't clear the canvas between fast slice changes.
-  const [roiPreviewSliceStable, setRoiPreviewSliceStable] = useState<{ sopInstanceUid: string; geom: SliceGeometry } | null>(
-    null,
-  );
+  const [roiPreviewSliceStable, setRoiPreviewSliceStable] = useState<{
+    sopInstanceUid: string;
+    geom: SliceGeometry;
+  } | null>(null);
 
   const [roiRect, setRoiRect] = useState<RoiRect01 | null>(null);
   const roiDragRef = useRef<{ x0: number; y0: number } | null>(null);
@@ -742,339 +742,351 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
         {generationCollapsed ? null : (
           <div className="space-y-3 overflow-auto pr-1">
             <div className="border border-[var(--border-color)] rounded-lg overflow-hidden">
-            <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
-              Sequence on this date (uses all planes)
-            </div>
-            <div className="max-h-[260px] overflow-auto">
-              {sequenceGroupsForDate.length === 0 ? (
-                <div className="p-3 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
-              ) : (
-                <div className="divide-y divide-[var(--border-color)]">
-                  {sequenceGroupsForDate.map((g) => {
-                    const checked = selectedSequenceKey === g.key;
-
-                    const planeLabel = `${g.planeCount} plane${g.planeCount === 1 ? '' : 's'}`;
-                    const sliceLabel = `${g.sliceCount} slice${g.sliceCount === 1 ? '' : 's'}`;
-
-                    return (
-                      <label
-                        key={g.key}
-                        className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] cursor-pointer"
-                      >
-                        <input
-                          type="radio"
-                          name="svr-sequence"
-                          checked={checked}
-                          disabled={isRunning}
-                          onChange={() => setSelectedSequenceKey(g.key)}
-                        />
-                        <span className="flex-1 min-w-0 truncate">{g.label}</span>
-                        <span className="text-[var(--text-tertiary)] shrink-0">
-                          {planeLabel} · {sliceLabel}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
-            <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">
-              Advanced SVR settings
-            </summary>
-
-            <div className="mt-2 space-y-3">
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-[var(--text-secondary)]">
-                  Voxel size (mm)
-                  <input
-                    type="number"
-                    step={0.1}
-                    min={0.1}
-                    value={params.targetVoxelSizeMm}
-                    disabled={isRunning}
-                    onChange={(e) => setParams((p) => ({ ...p, targetVoxelSizeMm: Number(e.target.value) }))}
-                    className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                  />
-                </label>
-                <label className="text-xs text-[var(--text-secondary)]">
-                  Iterations
-                  <input
-                    type="number"
-                    step={1}
-                    min={0}
-                    max={10}
-                    value={params.iterations}
-                    disabled={isRunning}
-                    onChange={(e) => setParams((p) => ({ ...p, iterations: Number(e.target.value) }))}
-                    className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                  />
-                </label>
-                <label className="text-xs text-[var(--text-secondary)]">
-                  Slice downsample max (px)
-                  <input
-                    type="number"
-                    step={16}
-                    min={32}
-                    max={512}
-                    value={params.sliceDownsampleMaxSize}
-                    disabled={isRunning}
-                    onChange={(e) => setParams((p) => ({ ...p, sliceDownsampleMaxSize: Number(e.target.value) }))}
-                    className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                  />
-                </label>
-                <label className="text-xs text-[var(--text-secondary)]">
-                  Max volume dim (vox)
-                  <input
-                    type="number"
-                    step={16}
-                    min={64}
-                    max={384}
-                    value={params.maxVolumeDim}
-                    disabled={isRunning}
-                    onChange={(e) => setParams((p) => ({ ...p, maxVolumeDim: Number(e.target.value) }))}
-                    className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                  />
-                </label>
+              <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
+                Sequence on this date (uses all planes)
               </div>
+              <div className="max-h-[260px] overflow-auto">
+                {sequenceGroupsForDate.length === 0 ? (
+                  <div className="p-3 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
+                ) : (
+                  <div className="divide-y divide-[var(--border-color)]">
+                    {sequenceGroupsForDate.map((g) => {
+                      const checked = selectedSequenceKey === g.key;
 
-              <div className="space-y-1 text-[10px] text-[var(--text-tertiary)] leading-snug">
-                <div>
-                  <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing. Smaller = more detail but slower/heavier. The voxel size may be
-                  increased automatically to respect <span className="text-[var(--text-secondary)]">Max volume dim</span>.
-                </div>
-                <div>
-                  <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to run. 0 = quick “splat/average only”; higher can reduce
-                  slice-to-slice inconsistency but costs time.
-                </div>
-                <div>
-                  <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be downsampled before reconstruction, but we won't downsample so far
-                  that in-plane spacing becomes worse than the target voxel size.
-                </div>
-                <div>
-                  <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid dimension (in voxels) by increasing voxel size if needed. Lower =
-                  faster/smaller; higher = more memory/time.
-                </div>
-                <div>
-                  Tip: draw a box on an input slice and run <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller + faster.
-                </div>
-              </div>
-            </div>
-          </details>
+                      const planeLabel = `${g.planeCount} plane${g.planeCount === 1 ? '' : 's'}`;
+                      const sliceLabel = `${g.sliceCount} slice${g.sliceCount === 1 ? '' : 's'}`;
 
-          <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
-            <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">Focus box (optional)</summary>
-            <div className="mt-2 space-y-2">
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-[var(--text-secondary)] w-16">Draw on</label>
-                <select
-                  value={effectiveRoiSeriesUid ?? ''}
-                  onChange={(e) => {
-                    const next = e.target.value || null;
-                    setRoiSeriesUid(next);
-                  }}
-                  disabled={isRunning || selectedSeries.length === 0}
-                  className="flex-1 px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] disabled:opacity-50"
-                >
-                  {selectedSeries.length === 0 ? <option value="">Select a sequence above</option> : null}
-                  {selectedSeries.map((s) => (
-                    <option key={s.seriesUid} value={s.seriesUid}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {roiSeriesSopUidsError ? (
-                <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSeriesSopUidsError}</div>
-              ) : roiSliceGeomError ? (
-                <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSliceGeomError}</div>
-              ) : null}
-
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[10px] text-[var(--text-tertiary)]">
-                  {roiSeriesSopUids && roiSeriesSopUids.length > 0
-                    ? `Slice ${effectiveRoiSliceIndex + 1} / ${roiSeriesSopUids.length}`
-                    : roiSeries
-                      ? 'Loading slices…'
-                      : 'Select a series to preview'}
-                </div>
-
-                <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
-                  <button
-                    type="button"
-                    disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                    onClick={() => {
-                      if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                      const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                      setRoiSliceIndex(clampInt(cur - 1, 0, roiSeriesSopUids.length - 1));
-                    }}
-                    className="px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                  >
-                    ◀
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                    onClick={() => {
-                      if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                      const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                      setRoiSliceIndex(clampInt(cur + 1, 0, roiSeriesSopUids.length - 1));
-                    }}
-                    className="px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                  >
-                    ▶
-                  </button>
-                </div>
-              </div>
-
-              <DicomRoiSlicePreview
-                slice={roiPreviewSliceStable}
-                sourceSeriesUid={effectiveRoiSeriesUid}
-                maxSize={512}
-                roiRect={roiRect}
-                setRoiRect={setRoiRect}
-                roiDragRef={roiDragRef}
-                onSliceDelta={(delta) => {
-                  if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                  const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                  setRoiSliceIndex(clampInt(cur + delta, 0, roiSeriesSopUids.length - 1));
-                }}
-                onRoiFinalized={(roi) => {
-                  setRoiWorld(roi);
-                  if (!roi) return;
-
-                  setParams((p) => {
-                    const clamp = (x: number, min: number, max: number) => (x < min ? min : x > max ? max : x);
-
-                    const inPlaneMm = roiSliceGeom ? Math.min(roiSliceGeom.rowSpacingMm, roiSliceGeom.colSpacingMm) : p.targetVoxelSizeMm;
-                    const nextVoxel = clamp(inPlaneMm, 0.25, 1.0);
-
-                    return {
-                      ...p,
-                      // Favor voxel size at (or slightly above) the best in-plane spacing.
-                      targetVoxelSizeMm: nextVoxel,
-                      // Ensure we don't downsample to a coarser spacing than the output voxels.
-                      sliceDownsampleMode: 'voxel-aware',
-                      // Allow near-native resolution (especially once ROI cropping is in place).
-                      sliceDownsampleMaxSize: Math.max(p.sliceDownsampleMaxSize, 512),
-                      // Allow higher-res grids for ROI work.
-                      maxVolumeDim: Math.max(p.maxVolumeDim, 320),
-                      // More refinement iterations for detail.
-                      iterations: Math.max(p.iterations, 6),
-                      stepSize: 0.5,
-                      // Always use ROI rigid alignment.
-                      seriesRegistrationMode: 'roi-rigid',
-                    };
-                  });
-                }}
-                disabled={isRunning}
-              />
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={isRunning || (!roiRect && !roiWorld)}
-                  onClick={() => {
-                    setRoiRect(null);
-                    roiDragRef.current = null;
-                    setRoiWorld(null);
-                  }}
-                  className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                >
-                  Clear box
-                </button>
-
-                {roiWorld && roiSideMm ? (
-                  <div className="text-[10px] text-[var(--text-tertiary)]">
-                    Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
+                      return (
+                        <label
+                          key={g.key}
+                          className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] cursor-pointer"
+                        >
+                          <input
+                            type="radio"
+                            name="svr-sequence"
+                            checked={checked}
+                            disabled={isRunning}
+                            onChange={() => setSelectedSequenceKey(g.key)}
+                          />
+                          <span className="flex-1 min-w-0 truncate">{g.label}</span>
+                          <span className="text-[var(--text-tertiary)] shrink-0">
+                            {planeLabel} · {sliceLabel}
+                          </span>
+                        </label>
+                      );
+                    })}
                   </div>
-                ) : null}
-              </div>
-
-              <div className="text-[10px] text-[var(--text-tertiary)]">
-                Drag to draw a box on an input slice. When a box is set, <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting
-                with a smaller box lets you decrease voxel size for more detail without making the volume huge.
+                )}
               </div>
             </div>
-          </details>
 
-          <div className="flex items-center justify-between gap-2">
-            <button
-              type="button"
-              disabled={isRunning}
-              onClick={() => {
-                setSelectedSequenceKey(null);
-                setRoiSeriesUid(null);
-                setRoiRect(null);
-                roiDragRef.current = null;
-                setRoiWorld(null);
-                clear();
-              }}
-              className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-            >
-              Clear
-            </button>
+            <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
+              <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">
+                Advanced SVR settings
+              </summary>
 
-            <div className="flex items-center gap-2">
-              {isRunning ? (
-                <button
-                  type="button"
-                  onClick={cancel}
-                  className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white"
-                >
-                  Cancel
-                </button>
-              ) : null}
+              <div className="mt-2 space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs text-[var(--text-secondary)]">
+                    Voxel size (mm)
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={0.1}
+                      value={params.targetVoxelSizeMm}
+                      disabled={isRunning}
+                      onChange={(e) => setParams((p) => ({ ...p, targetVoxelSizeMm: Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+                    />
+                  </label>
+                  <label className="text-xs text-[var(--text-secondary)]">
+                    Iterations
+                    <input
+                      type="number"
+                      step={1}
+                      min={0}
+                      max={10}
+                      value={params.iterations}
+                      disabled={isRunning}
+                      onChange={(e) => setParams((p) => ({ ...p, iterations: Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+                    />
+                  </label>
+                  <label className="text-xs text-[var(--text-secondary)]">
+                    Slice downsample max (px)
+                    <input
+                      type="number"
+                      step={16}
+                      min={32}
+                      max={512}
+                      value={params.sliceDownsampleMaxSize}
+                      disabled={isRunning}
+                      onChange={(e) => setParams((p) => ({ ...p, sliceDownsampleMaxSize: Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+                    />
+                  </label>
+                  <label className="text-xs text-[var(--text-secondary)]">
+                    Max volume dim (vox)
+                    <input
+                      type="number"
+                      step={16}
+                      min={64}
+                      max={384}
+                      value={params.maxVolumeDim}
+                      disabled={isRunning}
+                      onChange={(e) => setParams((p) => ({ ...p, maxVolumeDim: Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+                    />
+                  </label>
+                </div>
 
+                <div className="space-y-1 text-[10px] text-[var(--text-tertiary)] leading-snug">
+                  <div>
+                    <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing.
+                    Smaller = more detail but slower/heavier. The voxel size may be increased automatically to respect{' '}
+                    <span className="text-[var(--text-secondary)]">Max volume dim</span>.
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to
+                    run. 0 = quick “splat/average only”; higher can reduce slice-to-slice inconsistency but costs time.
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be
+                    downsampled before reconstruction, but we won't downsample so far that in-plane spacing becomes
+                    worse than the target voxel size.
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid
+                    dimension (in voxels) by increasing voxel size if needed. Lower = faster/smaller; higher = more
+                    memory/time.
+                  </div>
+                  <div>
+                    Tip: draw a box on an input slice and run{' '}
+                    <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller +
+                    faster.
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
+              <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">
+                Focus box (optional)
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-[var(--text-secondary)] w-16">Draw on</label>
+                  <select
+                    value={effectiveRoiSeriesUid ?? ''}
+                    onChange={(e) => {
+                      const next = e.target.value || null;
+                      setRoiSeriesUid(next);
+                    }}
+                    disabled={isRunning || selectedSeries.length === 0}
+                    className="flex-1 px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] disabled:opacity-50"
+                  >
+                    {selectedSeries.length === 0 ? <option value="">Select a sequence above</option> : null}
+                    {selectedSeries.map((s) => (
+                      <option key={s.seriesUid} value={s.seriesUid}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {roiSeriesSopUidsError ? (
+                  <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSeriesSopUidsError}</div>
+                ) : roiSliceGeomError ? (
+                  <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSliceGeomError}</div>
+                ) : null}
+
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] text-[var(--text-tertiary)]">
+                    {roiSeriesSopUids && roiSeriesSopUids.length > 0
+                      ? `Slice ${effectiveRoiSliceIndex + 1} / ${roiSeriesSopUids.length}`
+                      : roiSeries
+                        ? 'Loading slices…'
+                        : 'Select a series to preview'}
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
+                    <button
+                      type="button"
+                      disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
+                      onClick={() => {
+                        if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
+                        const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
+                        setRoiSliceIndex(clampInt(cur - 1, 0, roiSeriesSopUids.length - 1));
+                      }}
+                      className="px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    >
+                      ◀
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
+                      onClick={() => {
+                        if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
+                        const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
+                        setRoiSliceIndex(clampInt(cur + 1, 0, roiSeriesSopUids.length - 1));
+                      }}
+                      className="px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    >
+                      ▶
+                    </button>
+                  </div>
+                </div>
+
+                <DicomRoiSlicePreview
+                  slice={roiPreviewSliceStable}
+                  sourceSeriesUid={effectiveRoiSeriesUid}
+                  maxSize={512}
+                  roiRect={roiRect}
+                  setRoiRect={setRoiRect}
+                  roiDragRef={roiDragRef}
+                  onSliceDelta={(delta) => {
+                    if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
+                    const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
+                    setRoiSliceIndex(clampInt(cur + delta, 0, roiSeriesSopUids.length - 1));
+                  }}
+                  onRoiFinalized={(roi) => {
+                    setRoiWorld(roi);
+                    if (!roi) return;
+
+                    setParams((p) => {
+                      const inPlaneMm = roiSliceGeom
+                        ? Math.min(roiSliceGeom.rowSpacingMm, roiSliceGeom.colSpacingMm)
+                        : p.targetVoxelSizeMm;
+                      const nextVoxel = clamp(inPlaneMm, 0.25, 1.0);
+
+                      return {
+                        ...p,
+                        // Favor voxel size at (or slightly above) the best in-plane spacing.
+                        targetVoxelSizeMm: nextVoxel,
+                        // Ensure we don't downsample to a coarser spacing than the output voxels.
+                        sliceDownsampleMode: 'voxel-aware',
+                        // Allow near-native resolution (especially once ROI cropping is in place).
+                        sliceDownsampleMaxSize: Math.max(p.sliceDownsampleMaxSize, 512),
+                        // Allow higher-res grids for ROI work.
+                        maxVolumeDim: Math.max(p.maxVolumeDim, 320),
+                        // More refinement iterations for detail.
+                        iterations: Math.max(p.iterations, 6),
+                        stepSize: 0.5,
+                        // Always use ROI rigid alignment.
+                        seriesRegistrationMode: 'roi-rigid',
+                      };
+                    });
+                  }}
+                  disabled={isRunning}
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isRunning || (!roiRect && !roiWorld)}
+                    onClick={() => {
+                      setRoiRect(null);
+                      roiDragRef.current = null;
+                      setRoiWorld(null);
+                    }}
+                    className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                  >
+                    Clear box
+                  </button>
+
+                  {roiWorld && roiSideMm ? (
+                    <div className="text-[10px] text-[var(--text-tertiary)]">
+                      Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="text-[10px] text-[var(--text-tertiary)]">
+                  Drag to draw a box on an input slice. When a box is set,{' '}
+                  <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting
+                  with a smaller box lets you decrease voxel size for more detail without making the volume huge.
+                </div>
+              </div>
+            </details>
+
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                disabled={!canRun}
+                disabled={isRunning}
                 onClick={() => {
-                  const paramsToRun: SvrParams = roiWorld
-                    ? { ...params, roi: roiWorld, seriesRegistrationMode: 'roi-rigid', sliceDownsampleMode: 'voxel-aware' }
-                    : { ...params, seriesRegistrationMode: 'roi-rigid', sliceDownsampleMode: 'voxel-aware' };
-                  void run(selectedSeries, paramsToRun);
+                  setSelectedSequenceKey(null);
+                  setRoiSeriesUid(null);
+                  setRoiRect(null);
+                  roiDragRef.current = null;
+                  setRoiWorld(null);
+                  clear();
                 }}
-                className="px-4 py-2 text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
               >
-                {roiWorld ? 'Run SVR (box)' : 'Run SVR'}
+                Clear
               </button>
+
+              <div className="flex items-center gap-2">
+                {isRunning ? (
+                  <button
+                    type="button"
+                    onClick={cancel}
+                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  disabled={!canRun}
+                  onClick={() => {
+                    const paramsToRun: SvrParams = roiWorld
+                      ? {
+                          ...params,
+                          roi: roiWorld,
+                          seriesRegistrationMode: 'roi-rigid',
+                          sliceDownsampleMode: 'voxel-aware',
+                        }
+                      : { ...params, seriesRegistrationMode: 'roi-rigid', sliceDownsampleMode: 'voxel-aware' };
+                    void run(selectedSeries, paramsToRun);
+                  }}
+                  className="px-4 py-2 text-xs bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {roiWorld ? 'Run SVR (box)' : 'Run SVR'}
+                </button>
+              </div>
             </div>
+
+            {progress && (
+              <div className="mt-2">
+                <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span className="truncate">{progressMessage}</span>
+                  <span className="ml-auto tabular-nums">{percent}%</span>
+                </div>
+                <div className="mt-1 h-2 rounded bg-[var(--bg-primary)] overflow-hidden">
+                  <div className="h-2 bg-[var(--accent)]" style={{ width: `${percent}%` }} />
+                </div>
+              </div>
+            )}
+
+            {error && <div className="mt-2 text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{error}</div>}
+
+            {!result ? (
+              <div className="text-xs text-[var(--text-tertiary)]">
+                Run SVR to generate a 3D volume (uses a focus box when set).
+              </div>
+            ) : (
+              <div className="text-xs text-[var(--text-secondary)]">
+                Volume: {result.volume.dims[0]}×{result.volume.dims[1]}×{result.volume.dims[2]} @{' '}
+                {result.volume.voxelSizeMm[0]}mm
+              </div>
+            )}
+
+            <div ref={sliceInspectorPortalRef} />
           </div>
-
-          {progress && (
-            <div className="mt-2">
-              <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span className="truncate">{progressMessage}</span>
-                <span className="ml-auto tabular-nums">{percent}%</span>
-              </div>
-              <div className="mt-1 h-2 rounded bg-[var(--bg-primary)] overflow-hidden">
-                <div className="h-2 bg-[var(--accent)]" style={{ width: `${percent}%` }} />
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <div className="mt-2 text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">
-              {error}
-            </div>
-          )}
-
-          {!result ? (
-            <div className="text-xs text-[var(--text-tertiary)]">Run SVR to generate a 3D volume (uses a focus box when set).</div>
-          ) : (
-            <div className="text-xs text-[var(--text-secondary)]">
-              Volume: {result.volume.dims[0]}×{result.volume.dims[1]}×{result.volume.dims[2]} @ {result.volume.voxelSizeMm[0]}mm
-            </div>
-          )}
-
-          <div ref={sliceInspectorPortalRef} />
-        </div>
         )}
 
         <div className="overflow-hidden relative">
@@ -1087,7 +1099,10 @@ export function Svr3DView({ data, defaultDateIso, defaultSeqId, fallbackRoiSerie
             {generationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
           </button>
 
-          <SvrVolume3DViewer volume={result ? result.volume : null} sliceInspectorPortalTarget={sliceInspectorPortalTarget} />
+          <SvrVolume3DViewer
+            volume={result ? result.volume : null}
+            sliceInspectorPortalTarget={sliceInspectorPortalTarget}
+          />
         </div>
       </div>
     </div>

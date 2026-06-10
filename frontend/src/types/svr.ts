@@ -142,15 +142,8 @@ export type SvrLabelVolume = {
   meta: SvrLabelMeta[];
 };
 
-export type SvrPreviewImages = {
-  axial: Blob;
-  coronal: Blob;
-  sagittal: Blob;
-};
-
 export type SvrResult = {
   volume: SvrVolume;
-  previews: SvrPreviewImages;
 };
 
 export type SvrSelectedSeries = {

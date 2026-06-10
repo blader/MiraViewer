@@ -8,7 +8,6 @@ import { getSliceGeometryFromInstance } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
 import { resample2dAreaAverage, resample2dLanczos3 } from './resample2d';
 import { dot } from './vec3';
-import { generateVolumePreviews } from './volumePreview';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
 import type { LoadedSlice } from './rigidRegistration';
 import type {
@@ -560,8 +559,8 @@ export async function reconstructVolumeMultiPlane(params: {
   // pure typed-array compute with no DOM dependency, so we run it in a
   // dedicated Web Worker when possible: even with cooperative yieldToMain()
   // gaps, the solver's hot loops compete with input/rendering on the main
-  // thread. Decoding (above) needs cornerstone/IndexedDB and previews (below)
-  // need canvas, so those bracket the worker boundary on the main thread.
+  // thread. Decoding (above) needs cornerstone/IndexedDB, so it stays on the
+  // main thread ahead of the boundary.
   //
   // Only the clone-safe subset of series metadata crosses the boundary;
   // SvrSelectedSeries itself stays main-side (the compute phase only needs
@@ -582,19 +581,10 @@ export async function reconstructVolumeMultiPlane(params: {
   // array itself once the solver is done, and in the worker path the pixel
   // buffers were transferred away (detached) at postMessage time. Clearing
   // again here is idempotent and drops the (tiny) main-side slice metadata
-  // objects before previews/result assembly allocate.
+  // objects before result assembly.
   allSlices.length = 0;
 
   const { volume, dims, originMm, voxelSizeMm, bounds } = computed;
-
-  // 5) Previews.
-  onProgress?.({ phase: 'finalizing', current: 95, total: 100, message: 'Generating previews…' });
-
-  const previews = await generateVolumePreviews({
-    volume,
-    dims,
-    maxSize: 256,
-  });
 
   onProgress?.({
     phase: 'finalizing',
@@ -614,6 +604,5 @@ export async function reconstructVolumeMultiPlane(params: {
         max: [bounds.max.x, bounds.max.y, bounds.max.z],
       },
     },
-    previews,
   };
 }

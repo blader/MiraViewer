@@ -39,7 +39,7 @@ import {
   type BoundsMm,
   type LoadedSlice,
 } from './rigidRegistration';
-import { assertNotAborted, yieldToMain } from './svrUtils';
+import { assertNotAborted, formatMiB, quantileSorted, yieldToMain } from './svrUtils';
 
 /**
  * The slim, structured-cloneable subset of series metadata the compute phase
@@ -458,19 +458,6 @@ export async function computeSvrFromLoadedSlices(params: {
   // - cross-series fusion and ROI rigid alignment benefit from a shared intensity domain
   const finite = intensitySamples.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
 
-  const quantileSorted = (sorted: number[], q: number): number => {
-    const n = sorted.length;
-    if (n === 0) return 0;
-    const qq = q < 0 ? 0 : q > 1 ? 1 : q;
-    const idx = qq * (n - 1);
-    const i0 = Math.floor(idx);
-    const i1 = Math.min(n - 1, i0 + 1);
-    const t = idx - i0;
-    const a = sorted[i0] ?? 0;
-    const b = sorted[i1] ?? a;
-    return a + (b - a) * t;
-  };
-
   const getHistogramMatchingEnabled = (debug?: boolean): boolean => {
     if (!debug) return false;
     try {
@@ -701,8 +688,6 @@ export async function computeSvrFromLoadedSlices(params: {
     const arrays = iters > 0 ? 3 : 2;
     return arrays * nvox * floatBytes;
   };
-
-  const formatMiB = (bytes: number): string => `${Math.round(bytes / (1024 * 1024))}MiB`;
 
   // Rough safety budget to avoid browser OOM / tab crashes.
   // Note: this is only for the core volume arrays; it does not include slice buffers, JS overhead, or GPU textures.

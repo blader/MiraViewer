@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
@@ -55,35 +55,6 @@ type GlLabelState = {
   /** Dimensions currently allocated on the GPU for texLabels. */
   labelsTexDims: RenderDims;
 };
-
-async function rgbaToPngBlob(params: { rgba: Uint8ClampedArray; width: number; height: number }): Promise<Blob> {
-  const { rgba, width, height } = params;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Failed to create 2D canvas context');
-  }
-
-  const img = ctx.createImageData(width, height);
-  img.data.set(rgba);
-  ctx.putImageData(img, 0, 0);
-
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((b) => {
-      if (!b) {
-        reject(new Error('canvas.toBlob() returned null'));
-        return;
-      }
-      resolve(b);
-    }, 'image/png');
-  });
-
-  return blob;
-}
 
 type Vec3 = { x: number; y: number; z: number };
 // Quaternion [x, y, z, w]
@@ -431,20 +402,13 @@ export type SvrVolume3DViewerProps = {
   sliceInspectorPortalTarget?: Element | null;
 };
 
-export type SvrVolume3DViewerHandle = {
-  /** Capture the current 3D canvas frame as a PNG (best-effort). */
-  capture3dPng: () => Promise<Blob | null>;
-  /** Reset view + controls to a stable preset for reproducible harness captures. */
-  applyHarnessPreset: () => void;
-};
-
-export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3DViewerProps>(function SvrVolume3DViewer(
-  { volume, labels: labelsOverride, sliceInspectorPortalTarget },
-  ref,
-) {
+export function SvrVolume3DViewer({
+  volume,
+  labels: labelsOverride,
+  sliceInspectorPortalTarget,
+}: SvrVolume3DViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const pendingCapture3dRef = useRef<{ resolve: (b: Blob | null) => void } | null>(null);
 
   const glLabelStateRef = useRef<GlLabelState | null>(null);
 
@@ -523,11 +487,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
   const [gamma, setGamma] = useState(1.0);
   const [opacity, setOpacity] = useState(4.0);
   const [zoom, setZoom] = useState(1.0);
-
-  // Render quality (GPU-budgeted LOD) to avoid allocating full-res 3D textures on huge volumes.
-  const [renderQuality, setRenderQuality] = useState<RenderQualityPreset>(DEFAULT_RENDER_QUALITY);
-  const [renderGpuBudgetMiB, setRenderGpuBudgetMiB] = useState(DEFAULT_RENDER_GPU_BUDGET_MIB);
-  const [renderTextureMode, setRenderTextureMode] = useState<RenderTextureMode>(DEFAULT_RENDER_TEXTURE_MODE);
 
   // Optional segmentation overlay (label volume).
   // No UI controls: labels are always shown when available.
@@ -713,11 +672,11 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       srcDims: volDims,
       labelsEnabled,
       hasLabels,
-      budgetMiB: renderGpuBudgetMiB,
-      quality: renderQuality,
-      textureMode: renderTextureMode,
+      budgetMiB: DEFAULT_RENDER_GPU_BUDGET_MIB,
+      quality: DEFAULT_RENDER_QUALITY,
+      textureMode: DEFAULT_RENDER_TEXTURE_MODE,
     });
-  }, [hasLabels, labelsEnabled, renderGpuBudgetMiB, renderQuality, renderTextureMode, volume, volDims]);
+  }, [hasLabels, labelsEnabled, volume, volDims]);
 
   const renderBuildKey = useMemo(() => {
     if (!renderPlan) return null;
@@ -791,52 +750,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     // own explicit frame request.
     requestRenderRef.current?.();
   }, []);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      capture3dPng: () => {
-        if (!volume) return Promise.resolve(null);
-        if (!canvasRef.current) return Promise.resolve(null);
-
-        return new Promise<Blob | null>((resolve) => {
-          // Only allow one pending capture; resolve any previous request.
-          if (pendingCapture3dRef.current) {
-            pendingCapture3dRef.current.resolve(null);
-          }
-
-          pendingCapture3dRef.current = { resolve };
-
-          // The renderer is on-demand now: schedule the frame that will service this
-          // capture (draw() forces full quality when a capture is pending).
-          requestRenderRef.current?.();
-
-          // Safety: don't leave callers hanging if the GL loop isn't running.
-          window.setTimeout(() => {
-            if (pendingCapture3dRef.current?.resolve === resolve) {
-              pendingCapture3dRef.current = null;
-              resolve(null);
-            }
-          }, 1500);
-        });
-      },
-      applyHarnessPreset: () => {
-        // Stable defaults for harness screenshots.
-        setThreshold(0.05);
-        setGamma(1.0);
-        setOpacity(4.0);
-
-        // Keep the 3D render memory bounded for harness runs.
-        setRenderQuality(DEFAULT_RENDER_QUALITY);
-        setRenderGpuBudgetMiB(DEFAULT_RENDER_GPU_BUDGET_MIB);
-        setRenderTextureMode(DEFAULT_RENDER_TEXTURE_MODE);
-
-        setControlsCollapsed(false);
-        resetView();
-      },
-    }),
-    [resetView, volume],
-  );
 
   // Pointer drag rotation (viewport-relative yaw/pitch).
   //
@@ -1946,9 +1859,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       };
 
       const draw = () => {
-        // A pending screenshot capture must never read back a degraded interaction frame,
-        // so it forces full quality regardless of drag state.
-        const interacting = interactingRef.current && !pendingCapture3dRef.current;
+        const interacting = interactingRef.current;
 
         resizeAndViewport(interacting ? INTERACTION_SCALE : 1);
 
@@ -2011,36 +1922,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
           drawAxesOverlay({ axesCanvas, axesCtx, canvas, volume, boxScale, rotMat, zoom });
         }
 
-        // One-shot capture for the harness export: read pixels from the current frame.
-        const pending = pendingCapture3dRef.current;
-        if (pending) {
-          pendingCapture3dRef.current = null;
-
-          try {
-            const w = canvas.width;
-            const h = canvas.height;
-
-            const rgba = new Uint8Array(w * h * 4);
-            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-
-            // Flip Y (WebGL origin is bottom-left; ImageData expects top-left).
-            const flipped = new Uint8ClampedArray(rgba.length);
-            const rowBytes = w * 4;
-            for (let y = 0; y < h; y++) {
-              const srcStart = (h - 1 - y) * rowBytes;
-              const dstStart = y * rowBytes;
-              flipped.set(rgba.subarray(srcStart, srcStart + rowBytes), dstStart);
-            }
-
-            void rgbaToPngBlob({ rgba: flipped, width: w, height: h })
-              .then((b) => pending.resolve(b))
-              .catch(() => pending.resolve(null));
-          } catch (e) {
-            console.warn('[svr3d] Failed to capture screenshot', e);
-            pending.resolve(null);
-          }
-        }
-
         // Reset bindings (avoid leaking WebGL state across frames).
         gl.activeTexture(gl.TEXTURE3);
         gl.bindTexture(gl.TEXTURE_3D, null);
@@ -2055,7 +1936,7 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       };
 
       // Render-on-demand scheduler: draw() no longer self-schedules. Every source of visual
-      // change (rotation, zoom, control params, label uploads, captures, resizes) calls
+      // change (rotation, zoom, control params, label uploads, resizes) calls
       // requestRender, which coalesces into at most one frame per RAF. An idle viewer
       // schedules nothing and costs zero GPU time.
       const requestRender = () => {
@@ -2082,11 +1963,6 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
     }
 
     return () => {
-      if (pendingCapture3dRef.current) {
-        pendingCapture3dRef.current.resolve(null);
-        pendingCapture3dRef.current = null;
-      }
-
       // Detach the on-demand entry points first so late invalidations (settle timers,
       // label effects) can't schedule a frame against torn-down GL state.
       requestRenderRef.current = null;
@@ -2788,4 +2664,4 @@ export const SvrVolume3DViewer = forwardRef<SvrVolume3DViewerHandle, SvrVolume3D
       )}
     </div>
   );
-});
+}
