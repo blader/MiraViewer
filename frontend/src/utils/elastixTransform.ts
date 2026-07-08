@@ -12,7 +12,7 @@ type ElastixParameterMapJson = Record<string, string[]>;
 
 function readNumberList(map: ElastixParameterMapJson, key: string): number[] {
   const raw = map[key];
-  if (!Array.isArray(raw)) {
+  if (!Array.isArray(raw) || raw.some((value) => typeof value !== 'string')) {
     throw new Error(`Elastix transformParameterObject missing ${key}`);
   }
   const out = raw.map((v) => Number(v));
@@ -22,40 +22,44 @@ function readNumberList(map: ElastixParameterMapJson, key: string): number[] {
   return out;
 }
 
-function parseAffineFromParameterMap(map: ElastixParameterMapJson): {
+function parse2DTransformFromParameterMap(map: ElastixParameterMapJson): {
   A: Mat2;
   center: Vec2;
   translation: Vec2;
 } {
   const transform = map.Transform;
   const transformName = Array.isArray(transform) ? transform[0] : undefined;
-  if (transformName !== 'AffineTransform') {
-    throw new Error(`Elastix expected AffineTransform, got ${String(transformName)}`);
-  }
-
   const params = readNumberList(map, 'TransformParameters');
-  if (params.length < 6) {
-    throw new Error(`Elastix AffineTransform expected 6 parameters, got ${params.length}`);
-  }
-
   const center = readNumberList(map, 'CenterOfRotationPoint');
-  if (center.length < 2) {
-    throw new Error(`Elastix AffineTransform expected 2 CenterOfRotationPoint values, got ${center.length}`);
+  if (center.length !== 2) {
+    throw new Error(`Elastix ${String(transformName)} expected 2 CenterOfRotationPoint values, got ${center.length}`);
   }
 
-  // ITK / Elastix ordering for 2D AffineTransform:
-  // matrix (row-major) then translation.
-  const A: Mat2 = {
-    m00: params[0],
-    m01: params[1],
-    m10: params[2],
-    m11: params[3],
-  };
-
-  const translation: Vec2 = {
-    x: params[4],
-    y: params[5],
-  };
+  let A: Mat2;
+  let translation: Vec2;
+  if (transformName === 'AffineTransform') {
+    if (params.length !== 6) {
+      throw new Error(`Elastix AffineTransform expected 6 parameters, got ${params.length}`);
+    }
+    A = {
+      m00: params[0],
+      m01: params[1],
+      m10: params[2],
+      m11: params[3],
+    };
+    translation = { x: params[4], y: params[5] };
+  } else if (transformName === 'EulerTransform') {
+    if (params.length !== 3) {
+      throw new Error(`Elastix EulerTransform expected 3 parameters, got ${params.length}`);
+    }
+    const angle = params[0];
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    A = { m00: cos, m01: -sin, m10: sin, m11: cos };
+    translation = { x: params[1], y: params[2] };
+  } else {
+    throw new Error(`Elastix expected AffineTransform or EulerTransform, got ${String(transformName)}`);
+  }
 
   return {
     A,
@@ -74,12 +78,12 @@ export function parseTransformParameterObjectToStandardAffines(
   const maps: StandardAffine2D[] = [];
 
   for (const entry of transformParameterObject) {
-    if (!entry || typeof entry !== 'object') {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error('Elastix transformParameterObject invalid');
     }
 
     const map = entry as unknown as ElastixParameterMapJson;
-    const { A, center, translation } = parseAffineFromParameterMap(map);
+    const { A, center, translation } = parse2DTransformFromParameterMap(map);
 
     // Elastix / ITK represent transforms about a center:
     //   y = A * (x - C) + C + t
@@ -123,6 +127,7 @@ export function buildElastixTransformCandidatesStd(standardChain: StandardAffine
 
 export type ElastixTransformCandidateScore = {
   label: string;
+  std: StandardAffine2D;
   aboutOrigin: AffineAboutOrigin2D;
   mad: number;
   maxAbs: number;
@@ -158,7 +163,7 @@ export function chooseBestElastixTransformCandidateAboutOrigin(params: {
     }
     mad /= Math.max(1, resampledMovingPixels.length);
 
-    candidates.push({ label: c.label, aboutOrigin, mad, maxAbs });
+    candidates.push({ label: c.label, std: c.std, aboutOrigin, mad, maxAbs });
   }
 
   candidates.sort((a, b) => a.mad - b.mad);

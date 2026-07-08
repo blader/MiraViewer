@@ -51,6 +51,12 @@ function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; in
   return { seriesUid, instanceIndex };
 }
 
+function formatDebugRank(rank: number | undefined, active: boolean | undefined): string {
+  if (active === false) return 'flat';
+  if (active !== true || rank == null) return '—';
+  return rank.toFixed(4);
+}
+
 interface DicomViewerProps {
   studyId: string;
   seriesUid: string;
@@ -530,15 +536,60 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         {debugSliceScores && isZHeld ? (
           <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
             <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-[10px] font-mono tabular-nums leading-snug">
-              <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
-              <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
-              <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
-              <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
-              <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
-              <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
-              <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
-              <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
-              <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+              {sliceScore?.coverage != null ? (
+                <>
+                  <div>
+                    Stage: {sliceScore.stage ?? '—'}
+                    {sliceScore.selected ? ' · selected' : sliceScore.retainedForFine ? ' · shortlisted' : ''}
+                  </div>
+                  <div>Coverage: {sliceScore.coverage.toFixed(4)}</div>
+                  <div>CS: {sliceScore.ssim.toFixed(6)}</div>
+                  <div>LNCC: {sliceScore.lncc.toFixed(6)}</div>
+                  <div>MIND: {sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
+                  <div>MIND rank: {formatDebugRank(sliceScore.mindRank, sliceScore.mindActive)}</div>
+                  <div>NGF: {sliceScore.ngf.toFixed(6)}</div>
+                  <div>Boundary rank: {formatDebugRank(sliceScore.boundaryRank, sliceScore.boundaryActive)}</div>
+                  <div>Structural rank: {formatDebugRank(sliceScore.structuralRank, sliceScore.structuralActive)}</div>
+                  <div>Appearance rank: {formatDebugRank(sliceScore.appearanceRank, sliceScore.appearanceActive)}</div>
+                  <div>Perceptual rank: {sliceScore.perceptualRank?.toFixed(4) ?? '—'}</div>
+                  <div>Phase input: {sliceScore.phaseInput?.replaceAll('-', ' ') ?? '—'}</div>
+                  {sliceScore.finalAffineSelected != null ? (
+                    <div>Final affine: {sliceScore.finalAffineSelected.replaceAll('-', ' ')}</div>
+                  ) : null}
+                  {sliceScore.finalAffineStructuralScore != null &&
+                  sliceScore.finalAffineSeedStructuralScore != null ? (
+                    <div>
+                      Final affine structure: {sliceScore.finalAffineStructuralScore.toFixed(6)} (seed{' '}
+                      {sliceScore.finalAffineSeedStructuralScore.toFixed(6)})
+                    </div>
+                  ) : null}
+                  {sliceScore.coarseStage && sliceScore.fineStage ? (
+                    <div>
+                      Rank coarse→fine: {sliceScore.coarseStage.perceptualRank.toFixed(4)}→
+                      {sliceScore.fineStage.perceptualRank.toFixed(4)}
+                    </div>
+                  ) : null}
+                  <div>
+                    Phase δ: {sliceScore.correctionX?.toFixed(2) ?? '—'}, {sliceScore.correctionY?.toFixed(2) ?? '—'}
+                  </div>
+                  <div>
+                    Peak / PSR: {sliceScore.phase?.toFixed(4) ?? '—'} /{' '}
+                    {sliceScore.phasePeakToSidelobeRatio?.toFixed(2) ?? '—'}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
+                  <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
+                  <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
+                  <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
+                  <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
+                  <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
+                  <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
+                  <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
+                  <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+                </>
+              )}
             </div>
           </div>
         ) : null}

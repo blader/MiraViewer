@@ -1,19 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TumorPolygon, ViewerTransform } from '../db/schema';
 import { getSopInstanceUidForInstanceIndex, getTumorSegmentationForInstance } from '../utils/localApi';
-import { normalizeViewerTransform, remapPolygonBetweenViewerTransforms } from '../utils/viewTransform';
-
-function polygonToSvgPath(p: TumorPolygon): string {
-  const pts = p.points ?? [];
-  if (pts.length === 0) return '';
-
-  const d = [`M ${pts[0]!.x.toFixed(4)} ${pts[0]!.y.toFixed(4)}`];
-  for (let i = 1; i < pts.length; i++) {
-    d.push(`L ${pts[i]!.x.toFixed(4)} ${pts[i]!.y.toFixed(4)}`);
-  }
-  d.push('Z');
-  return d.join(' ');
-}
+import { normalizeViewerTransform, polygonToSvgPath, remapPolygonBetweenViewerTransforms } from '../utils/viewTransform';
 
 export type TumorSavedSegmentationOverlayProps = {
   enabled: boolean;

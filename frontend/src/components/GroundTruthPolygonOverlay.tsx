@@ -11,20 +11,10 @@ import {
   normalizeViewerTransform,
   remapPointBetweenViewerTransforms,
   remapPointsBetweenViewerTransforms,
+  polygonToSvgPath,
   remapPolygonBetweenViewerTransforms,
 } from '../utils/viewTransform';
 import { clamp01 } from '../utils/math';
-
-function polygonToSvgPath(p: TumorPolygon): string {
-  if (!p.points.length) return '';
-
-  const d = [`M ${p.points[0].x.toFixed(4)} ${p.points[0].y.toFixed(4)}`];
-  for (let i = 1; i < p.points.length; i++) {
-    d.push(`L ${p.points[i].x.toFixed(4)} ${p.points[i].y.toFixed(4)}`);
-  }
-  d.push('Z');
-  return d.join(' ');
-}
 
 export type GroundTruthPolygonOverlayProps = {
   enabled: boolean;

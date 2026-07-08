@@ -1,28 +1,82 @@
 import type { Mat2 } from './affine2d';
 import { invert2 } from './affine2d';
 
-function bilinearSample(image: Float32Array, size: number, x: number, y: number): number {
-  if (x < 0 || y < 0 || x > size - 1 || y > size - 1) return 0;
-
+function bilinearSampleInto(
+  image: Float32Array,
+  size: number,
+  x: number,
+  y: number,
+  pixels: Float32Array,
+  validityOut: Float32Array,
+  outIdx: number
+): void {
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
-  const x1 = Math.min(size - 1, x0 + 1);
-  const y1 = Math.min(size - 1, y0 + 1);
+  const x1 = x0 + 1;
+  const y1 = y0 + 1;
 
   const tx = x - x0;
   const ty = y - y0;
 
-  const i00 = image[y0 * size + x0];
-  const i10 = image[y0 * size + x1];
-  const i01 = image[y1 * size + x0];
-  const i11 = image[y1 * size + x1];
+  let value = 0;
+  let validity = 0;
+  const w00 = (1 - tx) * (1 - ty);
+  const w10 = tx * (1 - ty);
+  const w01 = (1 - tx) * ty;
+  const w11 = tx * ty;
 
-  const a = i00 * (1 - tx) + i10 * tx;
-  const b = i01 * (1 - tx) + i11 * tx;
-  return a * (1 - ty) + b * ty;
+  if (w00 !== 0 && x0 >= 0 && y0 >= 0 && x0 < size && y0 < size) {
+    value += (image[y0 * size + x0] ?? 0) * w00;
+    validity += w00;
+  }
+  if (w10 !== 0 && x1 >= 0 && y0 >= 0 && x1 < size && y0 < size) {
+    value += (image[y0 * size + x1] ?? 0) * w10;
+    validity += w10;
+  }
+  if (w01 !== 0 && x0 >= 0 && y1 >= 0 && x0 < size && y1 < size) {
+    value += (image[y1 * size + x0] ?? 0) * w01;
+    validity += w01;
+  }
+  if (w11 !== 0 && x1 >= 0 && y1 >= 0 && x1 < size && y1 < size) {
+    value += (image[y1 * size + x1] ?? 0) * w11;
+    validity += w11;
+  }
+
+  pixels[outIdx] = value;
+  validityOut[outIdx] = validity;
 }
 
-export function warpGrayscaleAffine(
+export type WarpedGrayscale = {
+  pixels: Float32Array;
+  validity: Float32Array;
+};
+
+/**
+ * Replace geometric padding with the mean of valid samples before a registration optimizer sees it.
+ * `pixels` is zero-padding-premultiplied at fractional boundaries, so the missing fraction is filled
+ * additively instead of dividing unstable edge samples by tiny validity values.
+ */
+export function fillInvalidWarpWithValidMean(warped: WarpedGrayscale): Float32Array {
+  if (warped.pixels.length !== warped.validity.length) {
+    throw new Error('fillInvalidWarpWithValidMean: pixels/validity length mismatch');
+  }
+  let weightedValueSum = 0;
+  let validitySum = 0;
+  for (let index = 0; index < warped.pixels.length; index++) {
+    const validity = Math.max(0, Math.min(1, warped.validity[index] ?? 0));
+    weightedValueSum += warped.pixels[index] ?? 0;
+    validitySum += validity;
+  }
+  const validMean = validitySum > 1e-8 ? weightedValueSum / validitySum : 0;
+  const output = new Float32Array(warped.pixels.length);
+  for (let index = 0; index < output.length; index++) {
+    const validity = Math.max(0, Math.min(1, warped.validity[index] ?? 0));
+    output[index] = (warped.pixels[index] ?? 0) + validMean * (1 - validity);
+  }
+  return output;
+}
+
+export function warpGrayscaleAffineWithValidity(
   input: Float32Array,
   size: number,
   transform: {
@@ -32,12 +86,13 @@ export function warpGrayscaleAffine(
     translateX: number;
     translateY: number;
   }
-): Float32Array {
+): WarpedGrayscale {
   if (input.length !== size * size) {
     throw new Error(`warpGrayscaleAffine: expected ${size}x${size} image (got ${input.length} pixels)`);
   }
 
   const out = new Float32Array(size * size);
+  const validity = new Float32Array(size * size);
 
   const cx = (size - 1) / 2;
   const cy = (size - 1) / 2;
@@ -62,9 +117,22 @@ export function warpGrayscaleAffine(
       const u = sx + cx;
       const v = sy + cy;
 
-      out[y * size + x] = bilinearSample(input, size, u, v);
+      const outIdx = y * size + x;
+      bilinearSampleInto(input, size, u, v, out, validity, outIdx);
     }
   }
 
-  return out;
+  return { pixels: out, validity };
+}
+
+export function warpGrayscaleAffine(
+  input: Float32Array,
+  size: number,
+  transform: {
+    A: Mat2;
+    translateX: number;
+    translateY: number;
+  }
+): Float32Array {
+  return warpGrayscaleAffineWithValidity(input, size, transform).pixels;
 }

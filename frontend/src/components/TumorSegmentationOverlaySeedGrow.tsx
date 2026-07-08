@@ -24,6 +24,7 @@ import {
 import { marchingSquaresContour } from '../utils/segmentation/marchingSquares';
 import {
   normalizeViewerTransform,
+  polygonToSvgPath,
   remapPointBetweenViewerTransforms,
   remapPolygonBetweenViewerTransforms,
 } from '../utils/viewTransform';
@@ -110,17 +111,6 @@ function loadGrow2dUiSettings(params: { storageKey: string; maxTargetAreaPx: num
   }
 
   return defaultOut;
-}
-
-function polygonToSvgPath(p: TumorPolygon): string {
-  if (!p.points.length) return '';
-
-  const d = [`M ${p.points[0].x.toFixed(4)} ${p.points[0].y.toFixed(4)}`];
-  for (let i = 1; i < p.points.length; i++) {
-    d.push(`L ${p.points[i].x.toFixed(4)} ${p.points[i].y.toFixed(4)}`);
-  }
-  d.push('Z');
-  return d.join(' ');
 }
 
 export type TumorSegmentationOverlayProps = {

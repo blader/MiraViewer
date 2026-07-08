@@ -5,6 +5,52 @@ import { nowMs } from './math';
 
 type CornerstoneImageRenderedEvent = CustomEvent<{ image?: { imageId?: string } }>;
 
+const IMAGE_ID_LOOKUP_TIMEOUT_MS = 10_000;
+const IMAGE_LOAD_TIMEOUT_MS = 30_000;
+
+function waitForBoundedOperation<T>(
+  promise: Promise<T>,
+  options: { signal?: AbortSignal; timeoutMs: number; label: string },
+): Promise<T> {
+  const { signal, timeoutMs, label } = options;
+  if (signal?.aborted) return Promise.reject(new Error(`${label} cancelled`));
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener('abort', handleAbort);
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const handleAbort = () => rejectOnce(new Error(`${label} cancelled`));
+    const timer = window.setTimeout(
+      () => rejectOnce(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)),
+      timeoutMs,
+    );
+
+    signal?.addEventListener('abort', handleAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 /**
  * Cornerstone may render asynchronously (via requestAnimationFrame).
  *
@@ -14,9 +60,10 @@ type CornerstoneImageRenderedEvent = CustomEvent<{ image?: { imageId?: string } 
 function waitForCornerstoneImageRendered(
   element: HTMLElement,
   expectedImageId: string,
-  timeoutMs = 200
+  timeoutMs = 200,
+  signal?: AbortSignal,
 ): Promise<{ timedOut: boolean; renderedImageId: string | null }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
 
     const cleanup = (timer: number, handler: (evt: Event) => void) => {
@@ -24,6 +71,12 @@ function waitForCornerstoneImageRendered(
       settled = true;
       window.clearTimeout(timer);
       element.removeEventListener('cornerstoneimagerendered', handler);
+      signal?.removeEventListener('abort', handleAbort);
+    };
+
+    const handleAbort = () => {
+      cleanup(timer, handler);
+      reject(new Error('Cornerstone render cancelled'));
     };
 
     const handler = (evt: Event) => {
@@ -43,6 +96,11 @@ function waitForCornerstoneImageRendered(
       resolve({ timedOut: true, renderedImageId: null });
     }, timeoutMs);
 
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    signal?.addEventListener('abort', handleAbort, { once: true });
     element.addEventListener('cornerstoneimagerendered', handler);
   });
 }
@@ -82,6 +140,10 @@ export type RenderedSlice = {
     capture: number;
     total: number;
   };
+};
+
+export type RenderSliceToPixelsOptions = {
+  signal?: AbortSignal;
 };
 
 export function createCornerstoneRenderElement(sizePx: number): HTMLDivElement {
@@ -128,23 +190,32 @@ export async function renderSliceToPixels(
   seriesUid: string,
   sliceIndex: number,
   targetSize: number = ALIGNMENT_IMAGE_SIZE,
-  scratch?: PixelCaptureScratch
+  scratch?: PixelCaptureScratch,
+  options: RenderSliceToPixelsOptions = {},
 ): Promise<RenderedSlice> {
   const tStart = nowMs();
 
   const tGetId0 = nowMs();
-  const imageId = await getImageIdForInstance(seriesUid, sliceIndex);
+  const imageId = await waitForBoundedOperation(getImageIdForInstance(seriesUid, sliceIndex), {
+    signal: options.signal,
+    timeoutMs: IMAGE_ID_LOOKUP_TIMEOUT_MS,
+    label: `DICOM image lookup for ${seriesUid} slice ${sliceIndex}`,
+  });
   const tGetId1 = nowMs();
 
   const tLoad0 = nowMs();
-  const image = await cornerstone.loadImage(imageId);
+  const image = await waitForBoundedOperation(cornerstone.loadImage(imageId), {
+    signal: options.signal,
+    timeoutMs: IMAGE_LOAD_TIMEOUT_MS,
+    label: `DICOM image load for ${imageId}`,
+  });
   const tLoad1 = nowMs();
 
   const viewport = cornerstone.getDefaultViewportForImage(renderElement, image);
 
   // Wait for Cornerstone to actually draw this image before reading from its canvas.
   const expectedImageId = (image as unknown as { imageId?: string }).imageId || imageId;
-  const renderPromise = waitForCornerstoneImageRendered(renderElement, expectedImageId);
+  const renderPromise = waitForCornerstoneImageRendered(renderElement, expectedImageId, 200, options.signal);
 
   const tRender0 = nowMs();
   cornerstone.displayImage(renderElement, image, viewport);

@@ -17,6 +17,7 @@ frontend/.logs/
 
 # Local MRI/DICOM sample images (not for source control)
 Critical MRI Source Images (LLM Agent - do not delete)/
+DCS-volume-copy-*/
 
 # Local test artifacts (downloaded DICOMs, zips, etc.)
 frontend/tmp/

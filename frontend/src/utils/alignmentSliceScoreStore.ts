@@ -1,13 +1,94 @@
+import type { FinalAffineProposalKind } from './structuralAffineSelection';
+
+export type AlignmentFinalAffineProposalMetrics = {
+  kind: FinalAffineProposalKind;
+  status: 'failed' | 'rejected' | 'eligible' | 'selected';
+  rejectionReason?: string;
+  failureMessage?: string;
+  mindScore?: number;
+  ngfScore?: number;
+  structuralScore?: number;
+  deformationMagnitude?: number;
+  bidirectionalCoverage?: number;
+};
+
+export type AlignmentPerceptualStageMetrics = {
+  universeId: string;
+  distanceFromSeed: number;
+  rigidSeed: {
+    A: { m00: number; m01: number; m10: number; m11: number };
+    translatePx: { x: number; y: number };
+    gridSize: number;
+  };
+  coverage: number;
+  mindRank: number;
+  appearanceRank: number;
+  boundaryRank: number;
+  structuralRank: number;
+  perceptualRank: number;
+  mindActive: boolean;
+  appearanceActive: boolean;
+  boundaryActive: boolean;
+  structuralActive: boolean;
+  phaseInput: 'structural-edge-energy';
+  correctionX: number;
+  correctionY: number;
+  phasePeak: number;
+  phasePeakToSidelobeRatio: number;
+  retentionReason: 'local-peak' | 'fallback-fill' | 'peak-neighbor' | 'not-retained';
+  perScale: Array<{
+    size: number;
+    mind: number;
+    rawMindDistance?: number;
+    contrastStructure: number;
+    rawContrastStructure?: number;
+    lncc: number;
+    rawLncc?: number;
+    ngf: number;
+    rawNgf?: number;
+    lowerQuartile: number;
+  }>;
+};
+
 export type AlignmentSliceScoreMetrics = {
   ssim: number;
   lncc: number;
   zncc: number;
   ngf: number;
+  mind?: number;
+  rawMindDistance?: number;
   census: number;
   phase: number | null;
   mi: number;
   nmi: number;
   score: number;
+  /** Production perceptual-search diagnostics. Legacy fields above remain for old debug runs. */
+  stage?: 'coarse' | 'fine';
+  distanceFromSeed?: number;
+  rigidSeed?: AlignmentPerceptualStageMetrics['rigidSeed'];
+  coverage?: number;
+  mindRank?: number;
+  appearanceRank?: number;
+  boundaryRank?: number;
+  structuralRank?: number;
+  perceptualRank?: number;
+  mindActive?: boolean;
+  appearanceActive?: boolean;
+  boundaryActive?: boolean;
+  structuralActive?: boolean;
+  phaseInput?: 'structural-edge-energy';
+  correctionX?: number;
+  correctionY?: number;
+  phasePeakToSidelobeRatio?: number;
+  retainedForFine?: boolean;
+  selected?: boolean;
+  coarseStage?: AlignmentPerceptualStageMetrics;
+  fineStage?: AlignmentPerceptualStageMetrics;
+  perScale?: AlignmentPerceptualStageMetrics['perScale'];
+  finalAffineSelected?: FinalAffineProposalKind;
+  finalAffineStructuralScore?: number;
+  finalAffineSeedStructuralScore?: number;
+  finalAffineProposals?: AlignmentFinalAffineProposalMetrics[];
 };
 
 export type AlignmentSliceScoreContext = {
@@ -40,7 +121,7 @@ export function getAlignmentSliceScoreContext(): AlignmentSliceScoreContext | nu
 export function recordAlignmentSliceScore(
   seriesUid: string,
   instanceIndex: number,
-  metrics: Omit<AlignmentSliceScoreMetrics, 'phase'> & { phase?: number | null }
+  metrics: Omit<AlignmentSliceScoreMetrics, 'phase'> & { phase?: number | null },
 ): void {
   if (!seriesUid) return;
   if (!Number.isFinite(instanceIndex) || instanceIndex < 0) return;
@@ -51,13 +132,11 @@ export function recordAlignmentSliceScore(
     scoresBySeries.set(seriesUid, perSeries);
   }
 
-  perSeries.set(instanceIndex, { ...metrics, phase: metrics.phase ?? null });
+  const existing = perSeries.get(instanceIndex);
+  perSeries.set(instanceIndex, { ...existing, ...metrics, phase: metrics.phase ?? null });
 }
 
-export function getAlignmentSliceScore(
-  seriesUid: string,
-  instanceIndex: number
-): AlignmentSliceScoreMetrics | null {
+export function getAlignmentSliceScore(seriesUid: string, instanceIndex: number): AlignmentSliceScoreMetrics | null {
   const perSeries = scoresBySeries.get(seriesUid);
   if (!perSeries) return null;
   return perSeries.get(instanceIndex) ?? null;

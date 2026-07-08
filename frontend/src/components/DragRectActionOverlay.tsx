@@ -322,6 +322,13 @@ export function DragRectActionOverlay({
   // Suppress viewer clicks when the user just drew a rectangle.
   const onClickCapture = useCallback((e: React.MouseEvent) => {
     if (!didDragRef.current) return;
+
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('[data-drag-rect-action-button="true"]')) {
+      didDragRef.current = false;
+      return;
+    }
+
     didDragRef.current = false;
     e.preventDefault();
     e.stopPropagation();

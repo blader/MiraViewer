@@ -137,6 +137,22 @@ export function remapPointsBetweenViewerTransforms(
   return points.map((p) => remapPointBetweenViewerTransforms(p, size, from, to));
 }
 
+/**
+ * Serialize a normalized polygon to an SVG path string (4-decimal precision keeps the
+ * attribute compact while staying sub-pixel at typical viewer sizes).
+ */
+export function polygonToSvgPath(p: TumorPolygon): string {
+  const pts = p.points ?? [];
+  if (pts.length === 0) return '';
+
+  const d = [`M ${pts[0]!.x.toFixed(4)} ${pts[0]!.y.toFixed(4)}`];
+  for (let i = 1; i < pts.length; i++) {
+    d.push(`L ${pts[i]!.x.toFixed(4)} ${pts[i]!.y.toFixed(4)}`);
+  }
+  d.push('Z');
+  return d.join(' ');
+}
+
 export function remapPolygonBetweenViewerTransforms(
   polygon: TumorPolygon,
   size: ViewportSize,
