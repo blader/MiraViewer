@@ -13,6 +13,7 @@ import { resample2dAreaAverage } from '../utils/svr/resample2d';
 import { formatMiB } from '../utils/svr/svrUtils';
 import {
   buildRenderVolumeTexData,
+  computePhysicalBoxScale,
   computeRenderPlan,
   downsampleLabelsNearest,
   toUint8Volume,
@@ -29,9 +30,13 @@ import {
   SVR3D_FOCAL_Z,
   SVR3D_OCC_BLOCK,
   buildOccupancyMaxGrid,
+  buildOccupancyMaxGridAsync,
   chooseVolumeTextureFormat,
+  createObservedSupportTexture,
   createProgram,
   float32ToFloat16Bits,
+  float32ToFloat16BitsAsync,
+  type OccupancyMaxGrid,
   type VolumeTextureFormat,
 } from '../utils/svr/glRaymarch';
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
@@ -42,6 +47,11 @@ import { clamp } from '../utils/math';
 const DEFAULT_RENDER_QUALITY: RenderQualityPreset = 'auto';
 const DEFAULT_RENDER_GPU_BUDGET_MIB = 256;
 const DEFAULT_RENDER_TEXTURE_MODE: RenderTextureMode = 'auto';
+
+const COARSE_POINTER_CONTROL_TARGETS =
+  '[@media(pointer:coarse)]:[&_button]:min-h-11 [@media(pointer:coarse)]:[&_button]:min-w-11 ' +
+  '[@media(pointer:coarse)]:[&_input]:min-h-11 [@media(pointer:coarse)]:[&_select]:min-h-11 ' +
+  '[@media(pointer:coarse)]:[&_summary]:min-h-11';
 
 const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
 const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
@@ -389,6 +399,43 @@ type RenderBuildState = {
   error?: string;
 };
 
+function maskUnsupportedLabels(labels: SvrLabelVolume, observedSupport?: Uint8Array): SvrLabelVolume {
+  if (!observedSupport || labels.data.length !== observedSupport.length) return labels;
+
+  let data = labels.data;
+  for (let index = 0; index < observedSupport.length; index++) {
+    if (!observedSupport[index] && data[index]) {
+      if (data === labels.data) data = new Uint8Array(labels.data);
+      data[index] = 0;
+    }
+  }
+
+  return data === labels.data ? labels : { ...labels, data };
+}
+
+function touchesUnsupportedAnatomy(
+  index: number,
+  dims: readonly [number, number, number],
+  observedSupport?: Uint8Array,
+): boolean {
+  if (!observedSupport) return false;
+  const [nx, ny, nz] = dims;
+  const strideZ = nx * ny;
+  const z = Math.floor(index / strideZ);
+  const inPlane = index - z * strideZ;
+  const y = Math.floor(inPlane / nx);
+  const x = inPlane - y * nx;
+
+  return (
+    (x > 0 && !observedSupport[index - 1]) ||
+    (x + 1 < nx && !observedSupport[index + 1]) ||
+    (y > 0 && !observedSupport[index - nx]) ||
+    (y + 1 < ny && !observedSupport[index + nx]) ||
+    (z > 0 && !observedSupport[index - strideZ]) ||
+    (z + 1 < nz && !observedSupport[index + strideZ])
+  );
+}
+
 export type SvrVolume3DViewerProps = {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
@@ -421,8 +468,16 @@ export function SvrVolume3DViewer({
 
   const [initError, setInitError] = useState<string | null>(null);
   const [glEpoch, setGlEpoch] = useState(0);
+  const [contextEpoch, setContextEpoch] = useState(0);
+  const [actualTextureFormat, setActualTextureFormat] = useState<'f16' | 'u8' | null>(null);
+  const contextLostRef = useRef(false);
 
   const renderBuildIdRef = useRef(0);
+  const preparedRenderRef = useRef<{
+    data: RenderVolumeTexData;
+    halfFloatBits?: Uint16Array;
+    occupancy: OccupancyMaxGrid;
+  } | null>(null);
   const [renderBuild, setRenderBuild] = useState<RenderBuildState>(() => ({
     status: 'idle',
     key: null,
@@ -433,8 +488,39 @@ export function SvrVolume3DViewer({
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
   const [hydratedVolumeKey, setHydratedVolumeKey] = useState<string | null>(null);
   const labelSourceRef = useRef<string | undefined>(undefined);
-  const labelCountsRef = useRef<{ data: Uint8Array; counts: Map<number, number> } | null>(null);
-  const labels = labelsOverride ?? generatedLabels;
+  const labelCountsRef = useRef<{
+    data: Uint8Array;
+    counts: Map<number, number>;
+    unsupportedBoundaryCount: number;
+  } | null>(null);
+  const labels = useMemo(() => {
+    // Persisted, ONNX, and grown labels are sanitized at their publication
+    // boundary. Rechecking their full voxel buffer on each interactive grow
+    // tick would turn a sparse edit back into an O(volume) main-thread stall.
+    return labelsOverride ? maskUnsupportedLabels(labelsOverride, volume?.observedSupport) : generatedLabels;
+  }, [generatedLabels, labelsOverride, volume]);
+
+  const observedSupportSummary = useMemo(() => {
+    const observedSupport = volume?.observedSupport;
+    if (!observedSupport || !volume) return null;
+    if (observedSupport.length !== volume.data.length) return { valid: false, count: 0, total: volume.data.length };
+
+    const knownCount = volume.supportedVoxelCount;
+    if (
+      typeof knownCount === 'number' &&
+      Number.isInteger(knownCount) &&
+      knownCount >= 0 &&
+      knownCount <= observedSupport.length
+    ) {
+      return { valid: true, count: knownCount, total: observedSupport.length };
+    }
+
+    let count = 0;
+    for (let index = 0; index < observedSupport.length; index++) {
+      if (observedSupport[index]) count++;
+    }
+    return { valid: true, count, total: observedSupport.length };
+  }, [volume]);
 
   const volumeKey = useMemo(() => {
     if (!volume || !volumeIdentity?.studyUid || volumeIdentity.seriesUids.length === 0) return null;
@@ -447,6 +533,7 @@ export function SvrVolume3DViewer({
       spacing: volume.voxelSizeMm,
       origin: volume.originMm,
       revision: volumeIdentity.datasetRevision ?? null,
+      ...(volume.reconstructionFingerprint ? { reconstruction: volume.reconstructionFingerprint } : {}),
     });
   }, [volume, volumeIdentity]);
 
@@ -461,7 +548,9 @@ export function SvrVolume3DViewer({
             ? (saved.classMetadata as SvrLabelVolume['meta'])
             : BRATS_BASE_LABEL_META;
           labelSourceRef.current = saved.modelKey;
-          setGeneratedLabels({ data: saved.labels, dims: saved.dims, meta: metadata });
+          setGeneratedLabels(
+            maskUnsupportedLabels({ data: saved.labels, dims: saved.dims, meta: metadata }, volume.observedSupport),
+          );
         }
         setHydratedVolumeKey(volumeKey);
       })
@@ -539,17 +628,18 @@ export function SvrVolume3DViewer({
   }, []);
 
   // ONNX model execution (offline; model cached in IndexedDB).
-  const onOnnxLabels = useCallback((nextLabels: SvrLabelVolume) => {
-    labelSourceRef.current = 'brats-tumor-v1';
-    setGeneratedLabels(nextLabels);
-  }, []);
+  const onOnnxLabels = useCallback(
+    (nextLabels: SvrLabelVolume) => {
+      labelSourceRef.current = 'brats-tumor-v1';
+      setGeneratedLabels(maskUnsupportedLabels(nextLabels, volume?.observedSupport));
+    },
+    [volume],
+  );
   const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels);
   const {
     status: onnxStatus,
     preflight: onnxPreflight,
     segRunning: onnxSegRunning,
-    allowUnsafeFullRes: allowUnsafeOnnxFullRes,
-    setAllowUnsafeFullRes: setAllowUnsafeOnnxFullRes,
     fileInputRef: onnxFileInputRef,
     uploadClick: onnxUploadClick,
     handleSelectedFiles: onnxHandleSelectedFiles,
@@ -561,10 +651,9 @@ export function SvrVolume3DViewer({
 
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
-  // Radial threshold is applied as a center->edge ramp in the shader.
-  // Keep the UI range small so the slider isn't overly sensitive.
+  // One spatially neutral threshold preserves equal peripheral and central tissue.
   const [threshold, setThreshold] = useState(0.05);
-  const THRESHOLD_EDGE_MAX = 0.12;
+  const THRESHOLD_MAX = 0.3;
   // Always use max raymarch samples for quality; no UI control.
   const steps = 256;
   const [gamma, setGamma] = useState(1.0);
@@ -576,7 +665,7 @@ export function SvrVolume3DViewer({
   const labelsEnabled = true;
   const labelMix = 0.65;
 
-  const [segmentationCollapsed, setSegmentationCollapsed] = useState(false);
+  const [segmentationCollapsed, setSegmentationCollapsed] = useState(true);
 
   // Baseline interactive segmentation (Phase 2): seeded 3D region-growing.
   const [seedVoxel, setSeedVoxel] = useState<Vec3i | null>(null);
@@ -668,17 +757,23 @@ export function SvrVolume3DViewer({
     if (!hasLabels) return null;
 
     const data = labels.data;
-    let counts = labelCountsRef.current?.data === data ? labelCountsRef.current.counts : null;
+    let cached = labelCountsRef.current?.data === data ? labelCountsRef.current : null;
 
-    if (!counts) {
-      counts = new Map<number, number>();
+    if (!cached) {
+      const counts = new Map<number, number>();
+      let unsupportedBoundaryCount = 0;
       for (let i = 0; i < data.length; i++) {
+        if (volume.observedSupport && !volume.observedSupport[i]) continue;
         const id = data[i] ?? 0;
         if (id === 0) continue;
         counts.set(id, (counts.get(id) ?? 0) + 1);
+        if (touchesUnsupportedAnatomy(i, volume.dims, volume.observedSupport)) unsupportedBoundaryCount++;
       }
-      labelCountsRef.current = { data, counts };
+      cached = { data, counts, unsupportedBoundaryCount };
+      labelCountsRef.current = cached;
     }
+
+    const { counts, unsupportedBoundaryCount } = cached;
 
     const voxelVolMm3 = segmentationVolumeMm3(1, volume.voxelSizeMm) ?? 0;
 
@@ -690,7 +785,7 @@ export function SvrVolume3DViewer({
     const totalMm3 = totalCount * voxelVolMm3;
     const totalMl = totalMm3 / 1000;
 
-    return { counts, voxelVolMm3, totalCount, totalMm3, totalMl };
+    return { counts, voxelVolMm3, totalCount, totalMm3, totalMl, unsupportedBoundaryCount };
   }, [hasLabels, labels, volume]);
 
   // Slice inspector (orthogonal slices).
@@ -750,10 +845,10 @@ export function SvrVolume3DViewer({
     }
 
     const [nx, ny, nz] = volume.dims;
-    const maxDim = Math.max(1, nx, ny, nz);
+    const dims = { nx, ny, nz };
     return {
-      volDims: { nx, ny, nz },
-      boxScale: [nx / maxDim, ny / maxDim, nz / maxDim] as const,
+      volDims: dims,
+      boxScale: computePhysicalBoxScale(dims, volume.voxelSizeMm),
     };
   }, [volume]);
 
@@ -763,12 +858,14 @@ export function SvrVolume3DViewer({
     return computeRenderPlan({
       srcDims: volDims,
       labelsEnabled,
-      hasLabels,
+      hasLabels: false,
       budgetMiB: DEFAULT_RENDER_GPU_BUDGET_MIB,
       quality: DEFAULT_RENDER_QUALITY,
       textureMode: DEFAULT_RENDER_TEXTURE_MODE,
+      reserveLabelTexture: true,
+      hasObservedSupport: Boolean(volume.observedSupport),
     });
-  }, [hasLabels, labelsEnabled, volume, volDims]);
+  }, [labelsEnabled, volume, volDims]);
 
   const renderBuildKey = useMemo(() => {
     if (!renderPlan) return null;
@@ -777,6 +874,8 @@ export function SvrVolume3DViewer({
   }, [renderPlan]);
 
   useEffect(() => {
+    const buildId = ++renderBuildIdRef.current;
+    preparedRenderRef.current = null;
     if (!volume || !renderPlan || !renderBuildKey) {
       setRenderBuild({ status: 'idle', key: null, data: null });
       return;
@@ -789,20 +888,16 @@ export function SvrVolume3DViewer({
     const srcDims: RenderDims = volDims;
     const dstDims: RenderDims = renderPlan.dims;
 
-    const isSameDims = srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz;
-
-    // Preserve the fast-path: full-res float uses the SVR volume buffer directly (no extra allocations).
-    if (isSameDims && renderPlan.kind === 'f32') {
+    if (volume.observedSupport && volume.observedSupport.length !== volume.data.length) {
       setRenderBuild({
-        status: 'ready',
+        status: 'error',
         key,
-        data: { kind: 'f32', dims: dstDims, data: volume.data },
-        buildMs: 0,
+        data: null,
+        error: 'Acquired-support evidence does not match this reconstructed volume.',
       });
       return;
     }
 
-    const buildId = ++renderBuildIdRef.current;
     const started = performance.now();
 
     setRenderBuild({ status: 'building', key, data: null });
@@ -813,12 +908,22 @@ export function SvrVolume3DViewer({
 
         const tex = await buildRenderVolumeTexData({
           src: volume.data,
+          srcObservedSupport: volume.observedSupport,
           srcDims,
           plan: { kind: renderPlan.kind, dims: dstDims },
           isCancelled,
         });
 
         if (renderBuildIdRef.current !== buildId) return;
+
+        const halfFloatBits =
+          tex.kind === 'f32' ? await float32ToFloat16BitsAsync(tex.data as Float32Array, isCancelled) : undefined;
+        if (renderBuildIdRef.current !== buildId) return;
+
+        const occupancy = await buildOccupancyMaxGridAsync({ data: tex.data, dims: tex.dims }, isCancelled);
+        if (renderBuildIdRef.current !== buildId) return;
+
+        preparedRenderRef.current = { data: tex, halfFloatBits, occupancy };
 
         const ms = Math.round(performance.now() - started);
         setRenderBuild({
@@ -938,6 +1043,31 @@ export function SvrVolume3DViewer({
     return () => canvas.removeEventListener('wheel', onWheel);
   }, [markInteraction]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      contextLostRef.current = true;
+      requestRenderRef.current = null;
+      setActualTextureFormat(null);
+      setInitError('Graphics context was lost. Waiting for the browser to restore the 3D volume.');
+    };
+    const handleContextRestored = () => {
+      contextLostRef.current = false;
+      setInitError(null);
+      setContextEpoch((epoch) => epoch + 1);
+    };
+
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+    return () => {
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
+    };
+  }, []);
+
   const inspectorInfo = useMemo(() => {
     if (!volume) {
       return {
@@ -972,6 +1102,33 @@ export function SvrVolume3DViewer({
       srcCols: ny,
     };
   }, [inspectPlane, volume]);
+
+  // The selected slice and existing ROI seed already own inspection position. Derive
+  // its patient-space coordinate instead of introducing a competing cursor authority.
+  const inspectedCoordinate = useMemo(() => {
+    if (!volume) return null;
+
+    const [nx, ny, nz] = volume.dims;
+    const voxel: Vec3i = {
+      x: clamp(seedVoxel?.x ?? Math.floor(nx / 2), 0, nx - 1),
+      y: clamp(seedVoxel?.y ?? Math.floor(ny / 2), 0, ny - 1),
+      z: clamp(seedVoxel?.z ?? Math.floor(nz / 2), 0, nz - 1),
+    };
+    const slice = Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex));
+    if (inspectPlane === 'axial') voxel.z = slice;
+    else if (inspectPlane === 'coronal') voxel.y = slice;
+    else voxel.x = slice;
+
+    const index = voxel.z * nx * ny + voxel.y * nx + voxel.x;
+    return {
+      supported: volume.observedSupport ? Boolean(volume.observedSupport[index]) : null,
+      positionMm: [
+        volume.originMm[0] + voxel.x * volume.voxelSizeMm[0],
+        volume.originMm[1] + voxel.y * volume.voxelSizeMm[1],
+        volume.originMm[2] + voxel.z * volume.voxelSizeMm[2],
+      ] as const,
+    };
+  }, [inspectIndex, inspectPlane, inspectorInfo.maxIndex, seedVoxel, volume]);
 
   // Default the inspector to the mid-slice when the volume or plane changes.
   useEffect(() => {
@@ -1071,6 +1228,15 @@ export function SvrVolume3DViewer({
         y: Math.floor((roiBounds.min.y + roiBounds.max.y) * 0.5),
         z: Math.floor((roiBounds.min.z + roiBounds.max.z) * 0.5),
       };
+      const [nx, ny, nz] = volume.dims;
+      const seedIdx = seed.z * nx * ny + seed.y * nx + seed.x;
+      if (volume.observedSupport && !volume.observedSupport[seedIdx]) {
+        setGrowStatus({
+          running: false,
+          error: 'The ROI center has no acquired MRI support. Draw the box around observed anatomy.',
+        });
+        return;
+      }
 
       const tolerance = params?.tolerance ?? growTolerance;
       const targetLabel = params?.targetLabel ?? growTargetLabel;
@@ -1093,9 +1259,6 @@ export function SvrVolume3DViewer({
 
       setGrowStatus({ running: true, message: isAuto ? 'Previewing…' : 'Growing…' });
 
-      const [nx, ny, nz] = volume.dims;
-      const strideZ = nx * ny;
-      const seedIdx = seed.z * strideZ + seed.y * nx + seed.x;
       const seedValue = volume.data[seedIdx] ?? 0;
 
       const boundedTolerance = Math.max(0, tolerance);
@@ -1145,6 +1308,7 @@ export function SvrVolume3DViewer({
       growWorkerRef.current = worker;
       const growPromise = worker.run({
         volume: volume.data,
+        observedSupport: volume.observedSupport,
         dims: volume.dims,
         seed,
         min,
@@ -1179,10 +1343,15 @@ export function SvrVolume3DViewer({
           let mxX = -Infinity;
           let mxY = -Infinity;
           let mxZ = -Infinity;
-          const trackedCounts = labelCountsRef.current?.data === o.workLabels ? labelCountsRef.current.counts : null;
+          const trackedLabels = labelCountsRef.current?.data === o.workLabels ? labelCountsRef.current : null;
+          const trackedCounts = trackedLabels?.counts ?? null;
           const replaceLabel = (index: number, next: number) => {
             const previous = o.workLabels[index] ?? 0;
             if (previous === next) return;
+            if (trackedLabels && touchesUnsupportedAnatomy(index, volume.dims, volume.observedSupport)) {
+              if (previous === 0 && next !== 0) trackedLabels.unsupportedBoundaryCount++;
+              else if (previous !== 0 && next === 0) trackedLabels.unsupportedBoundaryCount--;
+            }
             if (trackedCounts && previous !== 0) {
               const remaining = (trackedCounts.get(previous) ?? 0) - 1;
               if (remaining > 0) trackedCounts.set(previous, remaining);
@@ -1222,6 +1391,7 @@ export function SvrVolume3DViewer({
           const nextPrevValues = new Uint8Array(idx.length);
           for (let i = 0; i < idx.length; i++) {
             const vi = idx[i]!;
+            if (volume.observedSupport && !volume.observedSupport[vi]) continue;
             nextPrevValues[i] = o.workLabels[vi] ?? 0;
             replaceLabel(vi, targetLabel);
             trackIndex(vi);
@@ -1405,6 +1575,7 @@ export function SvrVolume3DViewer({
 
     const [nx, ny, nz] = volume.dims;
     const data = volume.data;
+    const observedSupport = volume.observedSupport;
 
     const idx = Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex));
 
@@ -1423,7 +1594,8 @@ export function SvrVolume3DViewer({
         const inBase = zBase + y * strideY;
         const outBase = y * nx;
         for (let x = 0; x < nx; x++) {
-          src[outBase + x] = data[inBase + x] ?? 0;
+          const sourceIndex = inBase + x;
+          src[outBase + x] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
         }
       }
     } else if (inspectPlane === 'coronal') {
@@ -1432,7 +1604,8 @@ export function SvrVolume3DViewer({
         const inBase = z * strideZ + y * strideY;
         const outBase = z * nx;
         for (let x = 0; x < nx; x++) {
-          src[outBase + x] = data[inBase + x] ?? 0;
+          const sourceIndex = inBase + x;
+          src[outBase + x] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
         }
       }
     } else {
@@ -1442,13 +1615,14 @@ export function SvrVolume3DViewer({
         const zBase = z * strideZ;
         const outBase = z * ny;
         for (let y = 0; y < ny; y++) {
-          src[outBase + y] = data[zBase + y * strideY + x] ?? 0;
+          const sourceIndex = zBase + y * strideY + x;
+          src[outBase + y] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
         }
       }
     }
 
     // Downsample for interactive rendering (avoid huge canvases).
-    const MAX_SIZE = 256;
+    const MAX_SIZE = 512;
     const maxDim = Math.max(srcRows, srcCols);
     const scale = maxDim > MAX_SIZE ? MAX_SIZE / maxDim : 1;
     const dsRows = Math.max(1, Math.round(srcRows * scale));
@@ -1492,7 +1666,7 @@ export function SvrVolume3DViewer({
       let g = b0;
       let b = b0;
 
-      if (palette && overlayAlpha > 0 && labels) {
+      if (volume.observedSupport || (palette && overlayAlpha > 0 && labels)) {
         const px = i % dsCols;
         const py = Math.floor(i / dsCols);
 
@@ -1518,8 +1692,17 @@ export function SvrVolume3DViewer({
           vz = srcY;
         }
 
-        const labelId = labels.data[vz * strideZ + vy * strideY + vx] ?? 0;
-        if (labelId !== 0) {
+        const sourceIndex = vz * strideZ + vy * strideY + vx;
+        if (volume.observedSupport && !volume.observedSupport[sourceIndex]) {
+          // Amber cross-hatching is evidence provenance, not invented dark tissue.
+          const stripe = ((px + py) & 7) < 2;
+          r = stripe ? 108 : 46;
+          g = stripe ? 71 : 34;
+          b = stripe ? 27 : 20;
+        }
+
+        const labelId = labels?.data[sourceIndex] ?? 0;
+        if (labelId !== 0 && palette && !(volume.observedSupport && !volume.observedSupport[sourceIndex])) {
           const o = labelId * 4;
           const lr = palette[o] ?? 0;
           const lg = palette[o + 1] ?? 0;
@@ -1666,6 +1849,7 @@ export function SvrVolume3DViewer({
   ]);
 
   useEffect(() => {
+    if (contextLostRef.current) return;
     setInitError(null);
 
     const canvas = canvasRef.current;
@@ -1683,6 +1867,7 @@ export function SvrVolume3DViewer({
 
     const renderTex = renderBuild.data;
     const texDims = renderTex.dims;
+    const preparedRender = preparedRenderRef.current?.data === renderTex ? preparedRenderRef.current : null;
 
     const gl = canvas.getContext('webgl2', {
       // MSAA is pure overhead for a fullscreen-quad raymarcher: there are no geometry edges
@@ -1716,6 +1901,8 @@ export function SvrVolume3DViewer({
     let texLabels: WebGLTexture | null = null;
     let texPalette: WebGLTexture | null = null;
     let texOcc: WebGLTexture | null = null;
+    let texSupport: WebGLTexture | null = null;
+    let supportEnabled = false;
     let occMaxCell: [number, number, number] = [0, 0, 0];
     let raf = 0;
     let resizeObserverRef: ResizeObserver | null = null;
@@ -1782,13 +1969,15 @@ export function SvrVolume3DViewer({
       if (renderTex.kind === 'u8') {
         fmt = fallback;
         uploadedData = renderTex.data;
-        tryUpload(fallback, uploadedData);
+        if (!tryUpload(fallback, uploadedData)) {
+          throw new Error('The GPU could not upload the 8-bit reconstructed volume.');
+        }
       } else {
         fmt = primary;
         // The float render volume uploads as R16F (half bandwidth/memory of R32F, and
         // linearly filterable in core WebGL2). The Uint16Array of half bits is transient:
         // nothing retains it after texImage3D copies it to the GPU.
-        uploadedData = float32ToFloat16Bits(renderTex.data as Float32Array);
+        uploadedData = preparedRender?.halfFloatBits ?? float32ToFloat16Bits(renderTex.data as Float32Array);
 
         try {
           const ok = tryUpload(primary, uploadedData);
@@ -1797,15 +1986,21 @@ export function SvrVolume3DViewer({
             const u8 = toUint8Volume(renderTex.data as Float32Array);
             fmt = fallback;
             uploadedData = u8;
-            tryUpload(fallback, uploadedData);
+            if (!tryUpload(fallback, uploadedData)) {
+              throw new Error('The GPU could not upload either half-float or 8-bit volume textures.');
+            }
           }
         } catch {
           const u8 = toUint8Volume(renderTex.data as Float32Array);
           fmt = fallback;
           uploadedData = u8;
-          tryUpload(fallback, uploadedData);
+          if (!tryUpload(fallback, uploadedData)) {
+            throw new Error('The GPU could not upload either half-float or 8-bit volume textures.');
+          }
         }
       }
+
+      setActualTextureFormat(fmt.kind);
 
       console.info('[svr3d] Volume texture format', {
         kind: fmt.kind,
@@ -1815,11 +2010,20 @@ export function SvrVolume3DViewer({
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
+      // Keep acquired evidence independent from linearly filtered intensity: dark
+      // acquired tissue remains valid, while unsupported gaps cannot invent anatomy.
+      const supportTexture = createObservedSupportTexture(gl, {
+        data: renderTex.observedSupport,
+        dims: texDims,
+      });
+      texSupport = supportTexture.texture;
+      supportEnabled = supportTexture.enabled;
+
       // Occupancy max-grid for empty-space skipping: one R8 texel per 8^3 block of the
       // render volume, built once per upload from the same data the volume texture holds.
       // Rays leap blocks whose conservative max can't pass the threshold test (the bulk of
       // the box on a typical brain scan), trading a full-res tap for a tiny-texture tap.
-      const occGrid = buildOccupancyMaxGrid({ data: renderTex.data, dims: texDims });
+      const occGrid = preparedRender?.occupancy ?? buildOccupancyMaxGrid({ data: renderTex.data, dims: texDims });
       occMaxCell = [occGrid.dims.nx - 1, occGrid.dims.ny - 1, occGrid.dims.nz - 1];
 
       texOcc = gl.createTexture();
@@ -1910,6 +2114,8 @@ export function SvrVolume3DViewer({
 
       const u = {
         vol: gl.getUniformLocation(program, 'u_vol'),
+        support: gl.getUniformLocation(program, 'u_support'),
+        supportEnabled: gl.getUniformLocation(program, 'u_supportEnabled'),
         labels: gl.getUniformLocation(program, 'u_labels'),
         palette: gl.getUniformLocation(program, 'u_palette'),
         labelsEnabled: gl.getUniformLocation(program, 'u_labelsEnabled'),
@@ -1968,6 +2174,7 @@ export function SvrVolume3DViewer({
       };
 
       const draw = () => {
+        if (contextLostRef.current || gl.isContextLost()) return;
         const interacting = interactingRef.current;
 
         resizeAndViewport(interacting ? INTERACTION_SCALE : 1);
@@ -2000,6 +2207,11 @@ export function SvrVolume3DViewer({
         gl.uniform1i(u.occBlock, SVR3D_OCC_BLOCK);
         gl.uniform3i(u.occMaxCell, occMaxCell[0], occMaxCell[1], occMaxCell[2]);
 
+        gl.activeTexture(gl.TEXTURE4);
+        gl.bindTexture(gl.TEXTURE_3D, texSupport);
+        gl.uniform1i(u.support, 4);
+        gl.uniform1i(u.supportEnabled, supportEnabled ? 1 : 0);
+
         const labelsOn = labelsEnabled && hasLabels ? 1 : 0;
         gl.uniform1i(u.labelsEnabled, labelsOn);
         gl.uniform1f(u.labelMix, clamp(labelMix, 0, 1));
@@ -2021,8 +2233,7 @@ export function SvrVolume3DViewer({
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
         gl.uniform1f(u.zoom, zoom);
-        // Threshold is the *edge* threshold (center is always ~0); shader applies a linear center→edge ramp.
-        gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_EDGE_MAX));
+        gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_MAX));
         // Fewer steps while interacting (banding hidden by the jittered ray start); the
         // settled frame always marches the full configured step count.
         gl.uniform1i(u.steps, Math.round(clamp(interacting ? Math.min(INTERACTION_STEPS, steps) : steps, 8, 256)));
@@ -2039,6 +2250,8 @@ export function SvrVolume3DViewer({
         }
 
         // Reset bindings (avoid leaking WebGL state across frames).
+        gl.activeTexture(gl.TEXTURE4);
+        gl.bindTexture(gl.TEXTURE_3D, null);
         gl.activeTexture(gl.TEXTURE3);
         gl.bindTexture(gl.TEXTURE_3D, null);
         gl.activeTexture(gl.TEXTURE2);
@@ -2072,6 +2285,9 @@ export function SvrVolume3DViewer({
       resizeObserverRef = resizeObserver;
 
       requestRender();
+      // GPU uploads own their data after texImage; release the transient
+      // cooperative half-float and occupancy staging buffers immediately.
+      if (preparedRenderRef.current === preparedRender) preparedRenderRef.current = null;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error('[SVR3D] Failed to initialize:', e);
@@ -2093,12 +2309,13 @@ export function SvrVolume3DViewer({
         if (texLabels) gl.deleteTexture(texLabels);
         if (texPalette) gl.deleteTexture(texPalette);
         if (texOcc) gl.deleteTexture(texOcc);
+        if (texSupport) gl.deleteTexture(texSupport);
         if (vbo) gl.deleteBuffer(vbo);
         if (vao) gl.deleteVertexArray(vao);
         if (program) gl.deleteProgram(program);
       }
     };
-  }, [boxScale, renderBuild.key, renderBuild.status, renderBuild.data, volume]);
+  }, [boxScale, contextEpoch, renderBuild.key, renderBuild.status, renderBuild.data, volume]);
 
   // Incrementally upload label data + palette without re-initializing the whole GL program.
   // IMPORTANT: allocate the full 3D label texture only when labels are enabled + present.
@@ -2297,8 +2514,84 @@ export function SvrVolume3DViewer({
     }
   }, [glEpoch, hasLabels, labelPalette, labels, labelsEnabled, volume]);
 
+  const onViewerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+      let handled = true;
+      switch (event.key) {
+        case 'ArrowLeft':
+        case 'ArrowRight': {
+          const angle = event.key === 'ArrowLeft' ? -Math.PI / 36 : Math.PI / 36;
+          rotationRef.current = quatNormalize(
+            quatMultiply(quatFromAxisAngle({ x: 0, y: 1, z: 0 }, angle), rotationRef.current),
+          );
+          markInteraction();
+          break;
+        }
+        case 'ArrowUp':
+        case 'ArrowDown': {
+          const angle = event.key === 'ArrowUp' ? -Math.PI / 36 : Math.PI / 36;
+          rotationRef.current = quatNormalize(
+            quatMultiply(quatFromAxisAngle({ x: 1, y: 0, z: 0 }, angle), rotationRef.current),
+          );
+          markInteraction();
+          break;
+        }
+        case '+':
+        case '=':
+          setZoom((current) => clamp(current * 1.15, 0.6, 10));
+          markInteraction();
+          break;
+        case '-':
+          setZoom((current) => clamp(current / 1.15, 0.6, 10));
+          markInteraction();
+          break;
+        case '0':
+          resetView();
+          break;
+        case '1':
+          setInspectPlane('axial');
+          break;
+        case '2':
+          setInspectPlane('coronal');
+          break;
+        case '3':
+          setInspectPlane('sagittal');
+          break;
+        case '[':
+          setInspectIndex((current) => Math.max(0, current - 1));
+          break;
+        case ']':
+          setInspectIndex((current) => Math.min(inspectorInfo.maxIndex, current + 1));
+          break;
+        case 'Escape':
+          dragRef.current = null;
+          if (growStatus.running) cancelSeedGrow();
+          break;
+        default:
+          handled = false;
+      }
+
+      if (handled) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView],
+  );
+
+  const inspectorPhysicalAspectRatio = useMemo(() => {
+    if (!volume) return undefined;
+    const [nx, ny, nz] = volume.dims;
+    const [vx, vy, vz] = volume.voxelSizeMm;
+    if (inspectPlane === 'axial') return `${nx * vx} / ${ny * vy}`;
+    if (inspectPlane === 'coronal') return `${nx * vx} / ${nz * vz}`;
+    return `${ny * vy} / ${nz * vz}`;
+  }, [inspectPlane, volume]);
+
   const sliceInspectorCard = (
-    <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+    <div
+      className={`border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)] ${COARSE_POINTER_CONTROL_TARGETS}`}
+    >
       <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
         Slice Inspector
       </div>
@@ -2330,22 +2623,48 @@ export function SvrVolume3DViewer({
               className="mt-1 w-full"
               disabled={!volume}
             />
-            <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+            <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
               {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
             </div>
           </label>
         </div>
 
-        <div className="text-[10px] text-[var(--text-tertiary)]">
-          Drag to draw ROI box (required) · Intensities are shown with a fixed 0 to 1 mapping.
+        <div className="text-xs text-[var(--text-tertiary)]">
+          Drag to draw an inspection region. Amber indicates anatomy without acquired-pixel support.
         </div>
+
+        {inspectedCoordinate ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className={`text-xs tabular-nums ${
+              inspectedCoordinate.supported === false
+                ? 'text-amber-200'
+                : inspectedCoordinate.supported === true
+                  ? 'text-cyan-200/90'
+                  : 'text-[var(--text-tertiary)]'
+            }`}
+          >
+            {inspectedCoordinate.supported === false
+              ? 'No acquired support'
+              : inspectedCoordinate.supported === true
+                ? 'Acquired support'
+                : 'Support not recorded'}
+            {' · Patient position: ('}
+            {inspectedCoordinate.positionMm.map((value) => value.toFixed(2)).join(', ')}
+            {') mm'}
+          </div>
+        ) : null}
 
         <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
           <canvas
             ref={sliceCanvasRef}
             className="w-full h-auto"
+            role="img"
+            aria-label={`${inspectPlane} reconstructed slice ${Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}`}
+            tabIndex={volume ? 0 : -1}
             style={{
-              imageRendering: 'pixelated',
+              aspectRatio: inspectorPhysicalAspectRatio,
               cursor: volume ? 'crosshair' : 'default',
             }}
             onPointerDown={onSliceInspectorPointerDown}
@@ -2357,7 +2676,7 @@ export function SvrVolume3DViewer({
         </div>
 
         {volume ? (
-          <div className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
+          <div className="text-xs text-[var(--text-tertiary)] tabular-nums">
             Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
           </div>
         ) : null}
@@ -2365,16 +2684,16 @@ export function SvrVolume3DViewer({
     </div>
   );
 
-  const wantsSliceInspectorPortal = sliceInspectorPortalTarget !== undefined;
-  const sliceInspectorPortal = sliceInspectorPortalTarget
-    ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget)
-    : null;
+  const wantsSliceInspectorPortal = Boolean(sliceInspectorPortalTarget);
+  const sliceInspectorPortal =
+    volume && sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;
+  const controlsVisible = Boolean(volume) && !controlsCollapsed;
 
   return (
     <div
-      data-controls-open={!controlsCollapsed}
-      className={`svr-volume-layout h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
-        controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(320px,420px)]'
+      data-controls-open={controlsVisible}
+      className={`svr-volume-layout h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${COARSE_POINTER_CONTROL_TARGETS} ${
+        controlsVisible ? 'grid-cols-[minmax(0,1fr)_minmax(280px,380px)]' : 'grid-cols-1'
       }`}
     >
       {sliceInspectorPortal}
@@ -2382,34 +2701,55 @@ export function SvrVolume3DViewer({
       <div className="min-h-0">
         <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-black h-full min-h-0">
           <div className="relative w-full h-full min-h-0">
-            <button
-              type="button"
-              onClick={() => setControlsCollapsed((v) => !v)}
-              aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
-              aria-expanded={!controlsCollapsed}
-              className="absolute right-2 top-2 z-20 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
-              title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
-            >
-              {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-            </button>
+            {volume ? (
+              <button
+                type="button"
+                onClick={() => setControlsCollapsed((v) => !v)}
+                aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
+                aria-expanded={!controlsCollapsed}
+                className="absolute right-2 top-2 z-20 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
+                title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
+              >
+                {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+            ) : null}
 
             <canvas
               ref={canvasRef}
               className="absolute inset-0 w-full h-full"
+              role="application"
+              aria-label="Three-dimensional reconstructed MRI volume"
+              aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight + - 0 1 2 3 [ ] Escape"
+              tabIndex={volume ? 0 : -1}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
               onPointerCancel={onPointerUp}
+              onKeyDown={onViewerKeyDown}
             />
 
-            <canvas ref={axesCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+            <canvas
+              ref={axesCanvasRef}
+              aria-hidden="true"
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
 
             {!volume ? (
               <div className="absolute inset-0 flex items-center justify-center text-xs text-white/70 bg-black/40 p-4 text-center">
                 Run SVR to generate a volume for 3D viewing.
               </div>
+            ) : initError ? (
+              <div
+                role="alert"
+                className="absolute inset-0 flex items-center justify-center text-sm text-amber-200 bg-black/60 p-4 text-center"
+              >
+                {initError}
+              </div>
             ) : renderBuild.status === 'error' ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-red-300 bg-black/60 p-4 text-center">
+              <div
+                role="alert"
+                className="absolute inset-0 flex items-center justify-center text-sm text-red-300 bg-black/60 p-4 text-center"
+              >
                 {renderBuild.error ?? 'Failed to prepare 3D render volume.'}
               </div>
             ) : renderBuild.status !== 'ready' ? (
@@ -2417,27 +2757,65 @@ export function SvrVolume3DViewer({
                 <div className="space-y-2">
                   <div>Preparing 3D render…</div>
                   {renderPlan ? (
-                    <div className="text-[10px] text-white/60 tabular-nums">
+                    <div className="text-xs text-white/60 tabular-nums">
                       {renderPlan.dims.nx}×{renderPlan.dims.ny}×{renderPlan.dims.nz} ·{' '}
                       {renderPlan.kind === 'f32' ? 'float' : 'u8'} · {renderPlan.note}
                     </div>
                   ) : null}
                 </div>
               </div>
-            ) : initError ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-red-300 bg-black/60 p-4 text-center">
-                {initError}
-              </div>
             ) : (
-              <div className="absolute left-2 bottom-2 text-[10px] text-white/70 bg-black/50 px-2 py-1 rounded">
-                Drag to rotate · Wheel to zoom
+              <div className="absolute left-3 bottom-3 text-xs text-white/75 bg-black/60 px-3 py-2 rounded-md">
+                Drag or use arrow keys to rotate · Wheel or +/− to zoom
               </div>
             )}
+
+            {volume && renderPlan ? (
+              <div className="absolute left-3 top-3 z-10 max-w-[calc(100%-4rem)] rounded-md border border-white/10 bg-black/70 px-3 py-2 text-xs text-white/80">
+                <div className="tabular-nums">
+                  Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
+                  {' · '}
+                  {actualTextureFormat === 'f16'
+                    ? '16-bit float'
+                    : actualTextureFormat === 'u8'
+                      ? '8-bit'
+                      : 'preparing'}
+                </div>
+                {volume.acquiredOrientationCount !== undefined ? (
+                  <div className="mt-1 text-white/70">
+                    {volume.acquiredOrientationCount} source orientation
+                    {volume.acquiredOrientationCount === 1 ? '' : 's'}
+                  </div>
+                ) : null}
+                {volume.effectiveResolutionMm ? (
+                  <div className="mt-1 text-white/70 tabular-nums">
+                    Acquired resolution: {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')} mm
+                  </div>
+                ) : null}
+                {volume.sliceProfileSource ? (
+                  <div
+                    className={
+                      volume.sliceProfileSource === 'declared' ? 'mt-1 text-white/70' : 'mt-1 text-amber-200/90'
+                    }
+                  >
+                    Slice profile: {volume.sliceProfileSource}
+                    {volume.sliceProfileSource === 'unknown' ? ' (thickness was not declared)' : ''}
+                  </div>
+                ) : null}
+                {observedSupportSummary ? (
+                  <div className={observedSupportSummary.valid ? 'mt-1 text-cyan-200/90' : 'mt-1 text-amber-200'}>
+                    {observedSupportSummary.valid
+                      ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
+                      : 'Acquired support does not match the reconstruction.'}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
 
-      {controlsCollapsed ? null : (
+      {!controlsVisible ? null : (
         <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
           <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
 
@@ -2454,7 +2832,7 @@ export function SvrVolume3DViewer({
                 className="mt-1 w-full"
                 disabled={!volume}
               />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
+              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
             </label>
 
             <label className="block text-xs text-[var(--text-secondary)]">
@@ -2469,23 +2847,23 @@ export function SvrVolume3DViewer({
                 className="mt-1 w-full"
                 disabled={!volume}
               />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
+              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
             </label>
 
             <label className="col-span-2 block text-xs text-[var(--text-secondary)]">
-              Threshold (radial)
+              Visibility threshold
               <input
                 type="range"
                 min={0}
-                max={THRESHOLD_EDGE_MAX}
+                max={THRESHOLD_MAX}
                 step={0.001}
                 value={threshold}
                 onChange={(e) => setThreshold(Number(e.target.value))}
                 className="mt-1 w-full"
                 disabled={!volume}
               />
-              <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
-                Center 0.000 · Edge {threshold.toFixed(3)}
+              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+                Uniform intensity cutoff {threshold.toFixed(3)}
               </div>
             </label>
           </div>
@@ -2501,9 +2879,9 @@ export function SvrVolume3DViewer({
             </button>
           </div>
 
-          <div className="text-[10px] text-[var(--text-tertiary)]">
-            Composite rendering with edge shading: tune opacity/threshold, and increase edge strength to make boundaries
-            pop (stronger near the box center).
+          <div className="text-xs text-[var(--text-tertiary)]">
+            Opacity and edge shading are applied evenly across the acquired volume; unsupported regions never become
+            tissue.
           </div>
 
           <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
@@ -2536,7 +2914,7 @@ export function SvrVolume3DViewer({
                       className="mt-1 w-full"
                       disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                    <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
                       ×{growRoiOutsideScale.toFixed(2)}
                     </div>
                   </label>
@@ -2551,13 +2929,13 @@ export function SvrVolume3DViewer({
                       scheduleSeedGrow({ roiBounds: null });
                     }}
                     disabled={!growRoiBounds || onnxSegRunning}
-                    className="px-2 py-1 text-[10px] rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    className="min-h-9 px-2 py-1 text-xs rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                   >
                     Clear ROI
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2 text-[10px] text-[var(--text-tertiary)]">
+                <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
                   <span className="truncate">
                     Seed (ROI center):{' '}
                     {seedVoxel ? (
@@ -2605,7 +2983,7 @@ export function SvrVolume3DViewer({
                       className="mt-1 w-full"
                       disabled={!volume || onnxSegRunning || !growRoiBounds}
                     />
-                    <div className="mt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                    <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
                       ±{growTolerance.toFixed(3)}
                     </div>
                   </label>
@@ -2637,123 +3015,124 @@ export function SvrVolume3DViewer({
                 </div>
 
                 {growStatus.error ? (
-                  <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{growStatus.error}</div>
+                  <div role="alert" className="text-xs text-red-300 bg-red-400/10 px-2 py-1 rounded">
+                    {growStatus.error}
+                  </div>
                 ) : growStatus.message ? (
-                  <div className="text-[10px] text-[var(--text-tertiary)]">{growStatus.message}</div>
+                  <div role="status" className="text-xs text-[var(--text-tertiary)]">
+                    {growStatus.message}
+                  </div>
                 ) : null}
 
-                <div className="pt-2 mt-2 border-t border-[var(--border-color)] space-y-2">
-                  <div className="text-xs font-medium text-[var(--text-secondary)]">ONNX tumor model</div>
+                <details className="pt-2 mt-2 border-t border-[var(--border-color)] text-xs text-[var(--text-secondary)]">
+                  <summary className="min-h-9 cursor-pointer py-2 font-medium hover:text-[var(--text-primary)]">
+                    Optional verified ONNX model
+                  </summary>
+                  <div className="space-y-2">
+                    <input
+                      ref={onnxFileInputRef}
+                      type="file"
+                      accept=".onnx,.json"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => {
+                        if (e.target.files?.length) {
+                          onnxHandleSelectedFiles(Array.from(e.target.files));
+                        }
+                        // Allow re-uploading the same file.
+                        e.target.value = '';
+                      }}
+                    />
 
-                  <input
-                    ref={onnxFileInputRef}
-                    type="file"
-                    accept=".onnx,.json"
-                    multiple
-                    className="hidden"
-                    onChange={(e) => {
-                      if (e.target.files?.length) {
-                        onnxHandleSelectedFiles(Array.from(e.target.files));
-                      }
-                      // Allow re-uploading the same file.
-                      e.target.value = '';
-                    }}
-                  />
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={onnxUploadClick}
-                      disabled={onnxStatus.loading}
-                      className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                    >
-                      Upload model + manifest
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={initOnnxSession}
-                      disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
-                      className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-                    >
-                      Init
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={runOnnxSegmentation}
-                      disabled={
-                        !volume ||
-                        !onnxStatus.cached ||
-                        !onnxStatus.verified ||
-                        onnxStatus.loading ||
-                        !!(onnxPreflight?.blockedByDefault && !allowUnsafeOnnxFullRes)
-                      }
-                      className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
-                    >
-                      Run ML
-                    </button>
-
-                    {onnxSegRunning ? (
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={cancelOnnxSegmentation}
-                        className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                        onClick={onnxUploadClick}
+                        disabled={onnxStatus.loading}
+                        className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                       >
-                        Cancel
+                        Upload model + manifest
                       </button>
+
+                      <button
+                        type="button"
+                        onClick={initOnnxSession}
+                        disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
+                        className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                      >
+                        Init
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={runOnnxSegmentation}
+                        disabled={
+                          !volume ||
+                          !onnxStatus.cached ||
+                          !onnxStatus.verified ||
+                          onnxStatus.loading ||
+                          !!onnxPreflight?.blockedByDefault
+                        }
+                        className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                      >
+                        Run ML
+                      </button>
+
+                      {onnxSegRunning ? (
+                        <button
+                          type="button"
+                          onClick={cancelOnnxSegmentation}
+                          className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        onClick={onnxClearModel}
+                        disabled={!onnxStatus.cached || onnxStatus.loading}
+                        className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                      >
+                        Clear model
+                      </button>
+                    </div>
+
+                    <details className="text-xs text-[var(--text-secondary)]">
+                      <summary className="cursor-pointer py-1 text-[var(--text-primary)]">
+                        Required verified model manifest (.json)
+                      </summary>
+                      <p className="mt-1">
+                        Select the ONNX model and its JSON sidecar together. The manifest must declare the model's exact
+                        SHA-256 hash, MR input, preprocessing, axes, and tumor class meanings.
+                      </p>
+                      <pre className="mt-2 max-h-48 overflow-auto rounded bg-[var(--bg-primary)] p-2 text-xs">
+                        {JSON.stringify(TUMOR_MODEL_MANIFEST_EXAMPLE, null, 2)}
+                      </pre>
+                    </details>
+
+                    {onnxPreflight?.blockedByDefault ? (
+                      <div className="text-xs text-yellow-200 bg-yellow-400/10 px-2 py-1 rounded">
+                        Model inference would require approximately {formatMiB(onnxPreflight.estimatedPeakBytes)} of
+                        resident memory, exceeding the shared {formatMiB(onnxPreflight.budgetBytes)} SVR budget.
+                        Reconstruct a smaller focus region or use a lower resolution.
+                      </div>
                     ) : null}
 
-                    <button
-                      type="button"
-                      onClick={onnxClearModel}
-                      disabled={!onnxStatus.cached || onnxStatus.loading}
-                      className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                    >
-                      Clear model
-                    </button>
-                  </div>
-
-                  <details className="text-xs text-[var(--text-secondary)]">
-                    <summary className="cursor-pointer py-1 text-[var(--text-primary)]">
-                      Required verified model manifest (.json)
-                    </summary>
-                    <p className="mt-1">
-                      Select the ONNX model and its JSON sidecar together. The manifest must declare the model's exact
-                      SHA-256 hash, MR input, preprocessing, axes, and tumor class meanings.
-                    </p>
-                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-[var(--bg-primary)] p-2 text-xs">
-                      {JSON.stringify(TUMOR_MODEL_MANIFEST_EXAMPLE, null, 2)}
-                    </pre>
-                  </details>
-
-                  {onnxPreflight?.blockedByDefault ? (
-                    <div className="space-y-2">
-                      <div className="text-[10px] text-yellow-200 bg-yellow-400/10 px-2 py-1 rounded">
-                        Full-res ONNX is disabled by default for this volume ({onnxPreflight.nx}×{onnxPreflight.ny}×
-                        {onnxPreflight.nz}; est logits {formatMiB(onnxPreflight.logitsBytes)}). This may crash the tab.
+                    {onnxStatus.error ? (
+                      <div role="alert" className="text-xs text-red-300 bg-red-400/10 px-2 py-1 rounded">
+                        {onnxStatus.error}
                       </div>
-
-                      <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                        <input
-                          type="checkbox"
-                          checked={allowUnsafeOnnxFullRes}
-                          onChange={(e) => setAllowUnsafeOnnxFullRes(e.target.checked)}
-                        />
-                        <span>Allow unsafe full-res ONNX</span>
-                      </label>
-                    </div>
-                  ) : null}
-
-                  {onnxStatus.error ? (
-                    <div className="text-[10px] text-red-300 bg-red-400/10 px-2 py-1 rounded">{onnxStatus.error}</div>
-                  ) : onnxStatus.message ? (
-                    <div className="text-[10px] text-[var(--text-tertiary)]">{onnxStatus.message}</div>
-                  ) : null}
-                </div>
+                    ) : onnxStatus.message ? (
+                      <div role="status" className="text-xs text-[var(--text-tertiary)]">
+                        {onnxStatus.message}
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
 
                 {!hasLabels || !labels ? (
-                  <div className="text-[10px] text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
+                  <div className="text-xs text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
                 ) : (
                   <div className="space-y-1">
                     {labels.meta
@@ -2782,10 +3161,19 @@ export function SvrVolume3DViewer({
                       })}
 
                     {labelMetrics ? (
-                      <div className="pt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
-                        Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
-                        {labelMetrics.totalMm3.toFixed(1)} mm³ · {labelMetrics.totalMl.toFixed(2)} mL
-                      </div>
+                      <>
+                        <div className="pt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+                          Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
+                          {labelMetrics.totalMm3.toFixed(1)} mm³ · {labelMetrics.totalMl.toFixed(2)} mL
+                        </div>
+                        {labelMetrics.unsupportedBoundaryCount > 0 ? (
+                          <div className="rounded bg-amber-400/10 px-2 py-1 text-xs text-amber-200">
+                            Incomplete acquired coverage: {labelMetrics.unsupportedBoundaryCount.toLocaleString()}{' '}
+                            labeled boundary voxels touch unsupported anatomy. Reported volume includes observed voxels
+                            only.
+                          </div>
+                        ) : null}
+                      </>
                     ) : null}
                   </div>
                 )}

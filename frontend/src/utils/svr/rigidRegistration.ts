@@ -17,7 +17,7 @@ import { sampleTrilinear } from './trilinear';
 import type { Vec3 } from './vec3';
 import { cross, normalize, v3 } from './vec3';
 import { assertNotAborted, clampAbs, withinTrilinearSupport, yieldToMain } from './svrUtils';
-import type { SvrReconstructionSlice } from './reconstructionCore';
+import { acquiredObservationWeight, type SvrReconstructionSlice } from './reconstructionCore';
 
 // ============================================================================
 // Types
@@ -56,6 +56,8 @@ export type SeriesSamples = {
   pos: Float32Array;
   /** Number of samples */
   count: number;
+  /** Fractional acquired-footprint evidence for each observation, when available. */
+  weights?: Float32Array;
 };
 
 /** Axis-aligned bounding box in world/patient mm coordinates */
@@ -188,13 +190,6 @@ export function boundsCenterMm(b: BoundsMm): Vec3 {
   return v3((b.min.x + b.max.x) * 0.5, (b.min.y + b.max.y) * 0.5, (b.min.z + b.max.z) * 0.5);
 }
 
-/**
- * Checks if a point is within a bounding box (inclusive).
- */
-function isWithinBoundsMm(p: Vec3, b: BoundsMm): boolean {
-  return p.x >= b.min.x && p.x <= b.max.x && p.y >= b.min.y && p.y <= b.max.y && p.z >= b.min.z && p.z <= b.max.z;
-}
-
 // ============================================================================
 // Slice transform application
 // ============================================================================
@@ -264,6 +259,9 @@ export function buildSeriesSamples(params: {
   // for buffers whose maximum size (maxN) is known up front.
   const obs = new Float32Array(maxN);
   const pos = new Float32Array(maxN * 3);
+  const weights = slices.some((slice) => slice.valid && typeof slice.validScale === 'number' && slice.validScale !== 1)
+    ? new Float32Array(maxN)
+    : undefined;
   let count = 0;
 
   for (let sIdx = 0; sIdx < slices.length; sIdx++) {
@@ -286,19 +284,29 @@ export function buildSeriesSamples(params: {
       for (let c = 0; c < s.dsCols; c += sliceStride) {
         const index = rowBase + c;
         const v = s.pixels[index];
-        if ((s.valid && !s.valid[index]) || v === undefined || !Number.isFinite(v)) continue;
+        const acquiredWeight = acquiredObservationWeight(s, index);
+        if (!(acquiredWeight > 0) || v === undefined || !Number.isFinite(v)) continue;
 
         const wx = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
         const wy = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
         const wz = baseZ + s.rowDir.z * (c * s.colSpacingDsMm);
 
-        const p = v3(wx, wy, wz);
-        if (!isWithinBoundsMm(p, roiBounds)) continue;
+        if (
+          wx < roiBounds.min.x ||
+          wx > roiBounds.max.x ||
+          wy < roiBounds.min.y ||
+          wy > roiBounds.max.y ||
+          wz < roiBounds.min.z ||
+          wz > roiBounds.max.z
+        ) {
+          continue;
+        }
 
         obs[count] = v;
         pos[count * 3] = wx;
         pos[count * 3 + 1] = wy;
         pos[count * 3 + 2] = wz;
+        if (weights) weights[count] = acquiredWeight;
         count++;
         usedThisSlice++;
 
@@ -318,6 +326,7 @@ export function buildSeriesSamples(params: {
     obs: obs.subarray(0, count),
     pos: pos.subarray(0, count * 3),
     count,
+    ...(weights ? { weights: weights.subarray(0, count) } : {}),
   };
 }
 
@@ -354,11 +363,18 @@ export function scoreNcc(params: {
     return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used: 0, coverage: 0 };
   if (occupancy && occupancy.length !== refVolume.length)
     throw new Error('Registration occupancy does not match reference volume');
+  if (samples.weights && samples.weights.length < samples.count) {
+    throw new Error('Registration acquired weights do not match its sample domain');
+  }
 
   const rot = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
-  const tMm = v3(rigid.tx, rigid.ty, rigid.tz);
-
   const invVox = 1 / voxelSizeMm;
+  const originX = originMm.x;
+  const originY = originMm.y;
+  const originZ = originMm.z;
+  const centerX = centerMm.x;
+  const centerY = centerMm.y;
+  const centerZ = centerMm.z;
 
   let sumA = 0;
   let sumB = 0;
@@ -366,45 +382,54 @@ export function scoreNcc(params: {
   let sumBB = 0;
   let sumAB = 0;
   let used = 0;
+  let usedWeight = 0;
+  let totalWeight = 0;
 
   const obs = samples.obs;
   const pos = samples.pos;
 
   for (let i = 0; i < samples.count; i++) {
+    const acquiredWeight = samples.weights?.[i] ?? 1;
+    if (!(acquiredWeight > 0) || !Number.isFinite(acquiredWeight)) continue;
+    totalWeight += acquiredWeight;
     const a = obs[i] ?? 0;
     const x = pos[i * 3] ?? 0;
     const y = pos[i * 3 + 1] ?? 0;
     const z = pos[i * 3 + 2] ?? 0;
 
-    // Apply candidate rigid transform about ROI center.
-    const p = applyRigidToPoint(v3(x, y, z), centerMm, rot, tMm);
-
-    const vx = (p.x - originMm.x) * invVox;
-    const vy = (p.y - originMm.y) * invVox;
-    const vz = (p.z - originMm.z) * invVox;
+    // Keep the candidate transform scalar: a representative optimizer scores
+    // millions of points, and allocating three Vec3 objects per point creates
+    // garbage-collection stalls without changing the physical transform.
+    const dx = x - centerX;
+    const dy = y - centerY;
+    const dz = z - centerZ;
+    const vx = (centerX + rot[0] * dx + rot[1] * dy + rot[2] * dz + rigid.tx - originX) * invVox;
+    const vy = (centerY + rot[3] * dx + rot[4] * dy + rot[5] * dz + rigid.ty - originY) * invVox;
+    const vz = (centerZ + rot[6] * dx + rot[7] * dy + rot[8] * dz + rigid.tz - originZ) * invVox;
 
     if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
     if (occupancy && sampleTrilinear(occupancy, dims, vx, vy, vz) < 0.5) continue;
 
     const b = sampleTrilinear(refVolume, dims, vx, vy, vz);
 
-    sumA += a;
-    sumB += b;
-    sumAA += a * a;
-    sumBB += b * b;
-    sumAB += a * b;
+    sumA += acquiredWeight * a;
+    sumB += acquiredWeight * b;
+    sumAA += acquiredWeight * a * a;
+    sumBB += acquiredWeight * b * b;
+    sumAB += acquiredWeight * a * b;
+    usedWeight += acquiredWeight;
     used++;
   }
 
   // Require minimum samples for reliable optimization
-  const coverage = used / samples.count;
+  const coverage = totalWeight > 0 ? usedWeight / totalWeight : 0;
   const minimumSamples = Math.max(1, Math.round(params.minimumSamples ?? 512));
   const minimumCoverage = Math.max(0, Math.min(1, params.minimumCoverage ?? 0.6));
   if (used < minimumSamples || coverage < minimumCoverage) {
     return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used, coverage };
   }
 
-  const invN = 1 / used;
+  const invN = 1 / usedWeight;
   const cov = sumAB - sumA * sumB * invN;
   const varA = sumAA - sumA * sumA * invN;
   const varB = sumBB - sumB * sumB * invN;

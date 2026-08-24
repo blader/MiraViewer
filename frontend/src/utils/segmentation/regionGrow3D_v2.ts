@@ -149,6 +149,8 @@ export type RegionGrow3DV2Tuning = {
 
 export async function regionGrow3D_v2(params: {
   volume: Float32Array;
+  /** Zero-valued entries are unobserved and must never seed or connect a lesion. */
+  observedSupport?: Uint8Array;
   dims: [number, number, number];
   seed: Vec3i;
   seedIndices?: Uint32Array;
@@ -163,7 +165,7 @@ export async function regionGrow3D_v2(params: {
     debug?: boolean;
   };
 }): Promise<RegionGrow3DResult> {
-  const { volume, dims, seed } = params;
+  const { volume, observedSupport, dims, seed } = params;
   const nx = dims[0];
   const ny = dims[1];
   const nz = dims[2];
@@ -171,6 +173,9 @@ export async function regionGrow3D_v2(params: {
   const n = nx * ny * nz;
   if (volume.length !== n) {
     throw new Error(`regionGrow3D_v2: volume length mismatch (expected ${n}, got ${volume.length})`);
+  }
+  if (observedSupport && observedSupport.length !== n) {
+    throw new Error(`regionGrow3D_v2: acquired-support length mismatch (expected ${n}, got ${observedSupport.length})`);
   }
 
   if (!inBounds(seed.x, seed.y, seed.z, nx, ny, nz)) {
@@ -181,6 +186,9 @@ export async function regionGrow3D_v2(params: {
   let maxV = Math.max(params.min, params.max);
 
   const seedIdx = idx3(seed.x, seed.y, seed.z, nx, ny);
+  if (observedSupport && !observedSupport[seedIdx]) {
+    throw new Error('regionGrow3D_v2: segmentation seed is not supported by observed MRI data');
+  }
   const seedValue = volume[seedIdx] ?? 0;
 
   const opts = params.opts;
@@ -244,6 +252,7 @@ export async function regionGrow3D_v2(params: {
       for (let y = r.minY; y <= r.maxY; y += stride) {
         for (let x = r.minX; x <= r.maxX; x += stride) {
           const i = idx3(x, y, z, nx, ny);
+          if (observedSupport && !observedSupport[i]) continue;
           samples.push(volume[i] ?? 0);
           if (samples.length >= maxSamples) return samples;
         }
@@ -319,7 +328,16 @@ export async function regionGrow3D_v2(params: {
     }
 
     if (roiParsed.mode === 'hard' || roiMarginVoxels <= 0) {
-      return { ...roiParsed, roi: roiParsed, minX: roiParsed.minX, maxX: roiParsed.maxX, minY: roiParsed.minY, maxY: roiParsed.maxY, minZ: roiParsed.minZ, maxZ: roiParsed.maxZ };
+      return {
+        ...roiParsed,
+        roi: roiParsed,
+        minX: roiParsed.minX,
+        maxX: roiParsed.maxX,
+        minY: roiParsed.minY,
+        maxY: roiParsed.maxY,
+        minZ: roiParsed.minZ,
+        maxZ: roiParsed.maxZ,
+      };
     }
 
     return {
@@ -399,7 +417,9 @@ export async function regionGrow3D_v2(params: {
   const bgLikeWeight = typeof tuning?.bgLikeWeight === 'number' ? clamp(tuning.bgLikeWeight, 0, 20) : 1.25;
 
   const bgRejectMarginZ =
-    typeof tuning?.bgRejectMarginZ === 'number' && Number.isFinite(tuning.bgRejectMarginZ) ? tuning.bgRejectMarginZ : 0.5;
+    typeof tuning?.bgRejectMarginZ === 'number' && Number.isFinite(tuning.bgRejectMarginZ)
+      ? tuning.bgRejectMarginZ
+      : 0.5;
 
   const seedStatsRadiusVox =
     typeof tuning?.seedStatsRadiusVox === 'number' && Number.isFinite(tuning.seedStatsRadiusVox)
@@ -407,7 +427,9 @@ export async function regionGrow3D_v2(params: {
       : 2;
 
   const bgMaxSamples =
-    typeof tuning?.bgMaxSamples === 'number' && Number.isFinite(tuning.bgMaxSamples) ? clampInt(tuning.bgMaxSamples, 64, 32_768) : 4096;
+    typeof tuning?.bgMaxSamples === 'number' && Number.isFinite(tuning.bgMaxSamples)
+      ? clampInt(tuning.bgMaxSamples, 64, 32_768)
+      : 4096;
 
   const bgShellThicknessVox =
     typeof tuning?.bgShellThicknessVox === 'number' && Number.isFinite(tuning.bgShellThicknessVox)
@@ -439,6 +461,7 @@ export async function regionGrow3D_v2(params: {
           if (x < dom.minX || x > dom.maxX) continue;
 
           const i = idx3(x, y, z, nx, ny);
+          if (observedSupport && !observedSupport[i]) continue;
           samples.push(volume[i] ?? 0);
         }
       }
@@ -465,8 +488,7 @@ export async function regionGrow3D_v2(params: {
     const samples: number[] = [];
     let stride = 1;
 
-    const outerN =
-      (outer.maxX - outer.minX + 1) * (outer.maxY - outer.minY + 1) * (outer.maxZ - outer.minZ + 1);
+    const outerN = (outer.maxX - outer.minX + 1) * (outer.maxY - outer.minY + 1) * (outer.maxZ - outer.minZ + 1);
 
     if (outerN > bgMaxSamples) {
       stride = Math.max(1, Math.floor(outerN / bgMaxSamples));
@@ -481,6 +503,7 @@ export async function regionGrow3D_v2(params: {
 
           if (seen % stride === 0) {
             const i = idx3(x, y, z, nx, ny);
+            if (observedSupport && !observedSupport[i]) continue;
             samples.push(volume[i] ?? 0);
             if (samples.length >= bgMaxSamples) break;
           }
@@ -494,8 +517,8 @@ export async function regionGrow3D_v2(params: {
     return robustStats(samples, 0.02);
   })();
 
-  const roiLoGate = clamp(roiQuantiles?.qLo ?? (tumorStats.mu - 2.0 * tumorStats.sigma), 0, 1);
-  const roiHiGate = clamp(roiQuantiles?.qHi ?? (tumorStats.mu + 2.0 * tumorStats.sigma), 0, 1);
+  const roiLoGate = clamp(roiQuantiles?.qLo ?? tumorStats.mu - 2.0 * tumorStats.sigma, 0, 1);
+  const roiHiGate = clamp(roiQuantiles?.qHi ?? tumorStats.mu + 2.0 * tumorStats.sigma, 0, 1);
 
   // Directionality gates.
   // The extreme quantiles (especially qLo) can be too permissive if the ROI contains some background.
@@ -567,7 +590,7 @@ export async function regionGrow3D_v2(params: {
 
     if (v >= minR && v <= maxR) return 0;
 
-    const denom = (maxR - minR) + tumorStats.sigma;
+    const denom = maxR - minR + tumorStats.sigma;
     const invDenom = 1 / Math.max(1e-6, denom);
 
     if (v > maxR) {
@@ -694,7 +717,7 @@ export async function regionGrow3D_v2(params: {
         return 0.85 - 0.55 * toCore01;
       }
 
-      if (toHigh) return 0.20;
+      if (toHigh) return 0.2;
 
       if (toLow || isBgLike) {
         return fromHigh ? 16.0 : 12.0;
@@ -712,7 +735,7 @@ export async function regionGrow3D_v2(params: {
       if (dI >= 0) {
         if (toHigh) return 0.004;
         if (toLow || isBgLike) return 3.0;
-        return 0.30 - 0.22 * toCore01;
+        return 0.3 - 0.22 * toCore01;
       }
 
       if (toHigh) return 0.06;
@@ -758,6 +781,7 @@ export async function regionGrow3D_v2(params: {
   const pushSeed = (x: number, y: number, z: number) => {
     if (!inBounds(x, y, z, nx, ny, nz)) return;
     if (x < dom.minX || x > dom.maxX || y < dom.minY || y > dom.maxY || z < dom.minZ || z > dom.maxZ) return;
+    if (observedSupport && !observedSupport[idx3(x, y, z, nx, ny)]) return;
 
     if (roiParsed?.mode === 'hard' && !insideRoiAt(x, y, z)) return;
 
@@ -843,6 +867,7 @@ export async function regionGrow3D_v2(params: {
     const tryNeighbor = (xn: number, yn: number, zn: number) => {
       if (!inBounds(xn, yn, zn, nx, ny, nz)) return;
       if (xn < dom.minX || xn > dom.maxX || yn < dom.minY || yn > dom.maxY || zn < dom.minZ || zn > dom.maxZ) return;
+      if (observedSupport && !observedSupport[idx3(xn, yn, zn, nx, ny)]) return;
 
       const li2 = toLocal(xn, yn, zn);
       if (finalized[li2]) return;

@@ -31,6 +31,8 @@ vi.mock('../src/utils/segmentation/onnx/tumorSegmentation', () => ({
 }));
 
 import { useOnnxTumorSession } from '../src/hooks/useOnnxTumorSession';
+import { runTumorSegmentationOnnx } from '../src/utils/segmentation/onnx/tumorSegmentation';
+import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 
 const MODEL_KEY = 'brats-tumor-v1';
 const MANIFEST_KEY = `${MODEL_KEY}:manifest`;
@@ -125,5 +127,115 @@ describe('useOnnxTumorSession verified model ownership', () => {
     act(() => result.current.initSession());
     await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
     expect(createSession).toHaveBeenCalledOnce();
+  });
+
+  it('removes model-generated lesion labels from every unsupported reconstruction voxel', async () => {
+    const selected = await files();
+    const supportedVolume = {
+      ...syntheticVolume,
+      data: new Float32Array([0.5, 0.7, 0.6]),
+      observedSupport: new Uint8Array([1, 0, 1]),
+      dims: [3, 1, 1] as [number, number, number],
+    };
+    vi.mocked(runTumorSegmentationOnnx).mockResolvedValueOnce({
+      labels: new Uint8Array([1, 2, 4]),
+      logitsDims: [1, 4, 1, 1, 3],
+    });
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(supportedVolume, onLabels));
+
+    act(() => result.current.handleSelectedFiles(selected));
+    await waitFor(() => expect(result.current.status.verified).toBe(true));
+
+    act(() => result.current.runSegmentation());
+    await waitFor(() => expect(onLabels).toHaveBeenCalledOnce());
+    const labels = onLabels.mock.calls[0]?.[0];
+    expect(Array.from(labels.data)).toEqual([1, 0, 4]);
+    const modelInput = vi.mocked(runTumorSegmentationOnnx).mock.calls[0]?.[0].volume;
+    expect(Array.from(modelInput ?? [])).toEqual([expect.closeTo(0.5, 6), 0, expect.closeTo(0.6, 6)]);
+    expect(supportedVolume.data[1]).toBeCloseTo(0.7, 6);
+  });
+
+  it('refuses inference when acquired-support evidence is incompatible with the volume', async () => {
+    const invalidVolume = { ...syntheticVolume, observedSupport: new Uint8Array([1, 0]) };
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(invalidVolume, onLabels));
+
+    act(() => result.current.runSegmentation());
+    await waitFor(() => expect(result.current.status.error).toMatch(/acquired-support.*dimensions/i));
+    expect(createSession).not.toHaveBeenCalled();
+    expect(onLabels).not.toHaveBeenCalled();
+  });
+
+  it('never overlaps a canceled but still-running model operation with its replacement', async () => {
+    const selected = await files();
+    let finishFirstRun!: (result: { labels: Uint8Array; logitsDims: number[] }) => void;
+    vi.mocked(runTumorSegmentationOnnx).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishFirstRun = resolve;
+        }),
+    );
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, onLabels));
+
+    act(() => result.current.handleSelectedFiles(selected));
+    await waitFor(() => expect(result.current.status.verified).toBe(true));
+
+    act(() => result.current.runSegmentation());
+    await waitFor(() => expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce());
+
+    act(() => result.current.cancelSegmentation());
+    expect(result.current.segRunning).toBe(true);
+    expect(result.current.status.message).toMatch(/waiting.*release its memory/i);
+
+    act(() => result.current.runSegmentation());
+    expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      finishFirstRun({ labels: new Uint8Array([1]), logitsDims: [1, 4, 1, 1, 1] });
+    });
+    await waitFor(() => expect(result.current.segRunning).toBe(false));
+    expect(onLabels).not.toHaveBeenCalled();
+
+    vi.mocked(runTumorSegmentationOnnx).mockResolvedValueOnce({
+      labels: new Uint8Array([2]),
+      logitsDims: [1, 4, 1, 1, 1],
+    });
+    act(() => result.current.runSegmentation());
+    await waitFor(() => expect(onLabels).toHaveBeenCalledOnce());
+    expect(runTumorSegmentationOnnx).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts old and replacement labels when model tensors otherwise appear to fit', async () => {
+    // 257³ at the former 31 bytes/voxel was falsely admitted at 501.84 MiB;
+    // the overlapping replacement label raises the real peak to 518.02 MiB.
+    const borderlineVolume = { ...syntheticVolume, dims: [257, 257, 257] as [number, number, number] };
+    const { result } = renderHook(() => useOnnxTumorSession(borderlineVolume, vi.fn()));
+
+    expect(result.current.preflight?.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(result.current.preflight?.blockedByDefault).toBe(true);
+    await act(async () => undefined);
+  });
+
+  it('blocks inference when total ready-volume and tensor residency exceeds the shared SVR budget', async () => {
+    // A 260³ volume has only ~268 MiB of four-class logits, so the obsolete
+    // logits-only 384 MiB limit admitted it despite exceeding 512 MiB overall.
+    const largeVolume = { ...syntheticVolume, dims: [260, 260, 260] as [number, number, number] };
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(largeVolume, onLabels));
+
+    expect(result.current.preflight?.logitsBytes).toBeLessThan(384 * 1024 * 1024);
+    expect(result.current.preflight?.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(result.current.preflight?.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
+    expect(result.current.preflight?.blockedByDefault).toBe(true);
+
+    act(() => result.current.setAllowUnsafeFullRes(true));
+    act(() => result.current.runSegmentation());
+    await waitFor(() =>
+      expect(result.current.status.error).toMatch(/memory budget.*smaller focus|memory budget.*lower resolution/i),
+    );
+    expect(createSession).not.toHaveBeenCalled();
+    expect(onLabels).not.toHaveBeenCalled();
   });
 });

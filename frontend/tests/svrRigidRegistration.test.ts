@@ -468,6 +468,37 @@ describe('svr/rigidRegistration', () => {
     expect(Array.from(samples.obs)).toEqual([-2, 0, 5]);
   });
 
+  it('retains quantized acquired-footprint weights in supported registration samples', () => {
+    const samples = buildSeriesSamples({
+      slices: [
+        {
+          pixels: new Float32Array([10, 20, 30, 40]),
+          valid: new Uint8Array([255, 64, 0, 128]),
+          validScale: 255,
+          dsRows: 2,
+          dsCols: 2,
+          ippMm: v3(0, 0, 0),
+          rowDir: v3(1, 0, 0),
+          colDir: v3(0, 1, 0),
+          normalDir: v3(0, 0, 1),
+          rowSpacingDsMm: 1,
+          colSpacingDsMm: 1,
+          sliceThicknessMm: 1,
+          spacingBetweenSlicesMm: 1,
+        },
+      ],
+      roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
+      maxSamples: 10,
+    });
+
+    expect(samples.count).toBe(3);
+    expect(Array.from(samples.obs)).toEqual([10, 20, 40]);
+    expect(samples.weights).toBeDefined();
+    expect(samples.weights![0]).toBeCloseTo(1, 6);
+    expect(samples.weights![1]).toBeCloseTo(64 / 255, 6);
+    expect(samples.weights![2]).toBeCloseTo(128 / 255, 6);
+  });
+
   it('refines physically supported rigid translations below the former half-millimeter floor', async () => {
     const dims = { nx: 24, ny: 24, nz: 24 };
     const volume = new Float32Array(dims.nx * dims.ny * dims.nz);

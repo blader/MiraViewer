@@ -1,5 +1,4 @@
-import { sampleTrilinear, type VolumeDims as TrilinearDims } from './trilinear';
-import { formatMiB } from './svrUtils';
+import { formatMiB, yieldToMain } from './svrUtils';
 import { clamp } from '../math';
 
 export type RenderTextureMode = 'auto' | 'u8';
@@ -13,6 +12,7 @@ export type RenderPlan = {
   scale: number;
   estGpuVolBytes: number;
   estGpuLabelBytes: number;
+  estGpuSupportBytes: number;
   estGpuTotalBytes: number;
   note: string;
 };
@@ -21,16 +21,31 @@ export type RenderVolumeTexData = {
   kind: 'f32' | 'u8';
   dims: RenderDims;
   data: Float32Array | Uint8Array;
+  /** A render voxel is observable only when its footprint contains acquired support. */
+  observedSupport?: Uint8Array;
 };
+
+/** Normalize physical extents, never raw voxel counts, into the raymarch box. */
+export function computePhysicalBoxScale(
+  dims: RenderDims,
+  voxelSizeMm: readonly [number, number, number],
+): readonly [number, number, number] {
+  const sizeX = dims.nx * Math.max(Number.EPSILON, Math.abs(voxelSizeMm[0]));
+  const sizeY = dims.ny * Math.max(Number.EPSILON, Math.abs(voxelSizeMm[1]));
+  const sizeZ = dims.nz * Math.max(Number.EPSILON, Math.abs(voxelSizeMm[2]));
+  const maxExtent = Math.max(sizeX, sizeY, sizeZ);
+  return [sizeX / maxExtent, sizeY / maxExtent, sizeZ / maxExtent];
+}
 
 /**
  * Map a normalized [0,1] float volume into uint8 [0,255].
  *
  * NOTE: This matches the shader's expectation that intensities are in 0..1.
  */
-export function toUint8Volume(data: Float32Array): Uint8Array {
+export function toUint8Volume(data: Float32Array, observedSupport?: Uint8Array): Uint8Array {
   const out = new Uint8Array(data.length);
   for (let i = 0; i < data.length; i++) {
+    if (observedSupport && !observedSupport[i]) continue;
     const v = data[i] ?? 0;
     out[i] = Math.round(clamp(v, 0, 1) * 255);
   }
@@ -41,12 +56,12 @@ function computeScaledDims(params: { src: RenderDims; maxDim: number }): { dims:
   const { src } = params;
   const srcMax = Math.max(1, src.nx, src.ny, src.nz);
 
-  const targetMax = Math.max(2, Math.round(params.maxDim));
+  const targetMax = Math.max(1, Math.round(params.maxDim));
   const scale = srcMax > targetMax ? targetMax / srcMax : 1;
 
-  const nx = Math.max(2, Math.round(src.nx * scale));
-  const ny = Math.max(2, Math.round(src.ny * scale));
-  const nz = Math.max(2, Math.round(src.nz * scale));
+  const nx = Math.max(1, Math.round(src.nx * scale));
+  const ny = Math.max(1, Math.round(src.ny * scale));
+  const nz = Math.max(1, Math.round(src.nz * scale));
 
   return { dims: { nx, ny, nz }, scale };
 }
@@ -58,6 +73,10 @@ export function computeRenderPlan(params: {
   budgetMiB: number;
   quality: RenderQualityPreset;
   textureMode: RenderTextureMode;
+  /** Reserve the eventual label texture so adding a label cannot rebuild the volume. */
+  reserveLabelTexture?: boolean;
+  /** Acquired support is an independent nearest-filtered R8 texture. */
+  hasObservedSupport?: boolean;
 }): RenderPlan {
   const { srcDims, labelsEnabled, hasLabels, quality, textureMode } = params;
 
@@ -80,12 +99,13 @@ export function computeRenderPlan(params: {
     (a, b) => b - a,
   );
 
-  const wantsLabelsTex = labelsEnabled && hasLabels;
+  const wantsLabelsTex = labelsEnabled && (hasLabels || params.reserveLabelTexture === true);
 
   const estimate = (maxDim: number) => {
     const { dims, scale } = computeScaledDims({ src: srcDims, maxDim });
     const nvox = dims.nx * dims.ny * dims.nz;
     const labelBytes = wantsLabelsTex ? nvox : 0;
+    const supportBytes = params.hasObservedSupport ? nvox : 0;
 
     // WebGL2 texture byte accounting:
     // - the 'f32' plan (Float32Array on the CPU side) uploads as R16F -> 2 bytes/voxel
@@ -93,6 +113,7 @@ export function computeRenderPlan(params: {
     //   in core WebGL2, so the GPU never holds 4-byte voxels)
     // - u8 volume uses R8 -> 1 byte/voxel
     // - labels use R8UI -> 1 byte/voxel
+    // - acquired support uses independent nearest-filtered R8 -> 1 byte/voxel
     const f32Bytes = 2 * nvox;
     const u8Bytes = 1 * nvox;
 
@@ -102,8 +123,9 @@ export function computeRenderPlan(params: {
       estGpuVolBytesF32: f32Bytes,
       estGpuVolBytesU8: u8Bytes,
       estGpuLabelBytes: labelBytes,
-      f32Total: f32Bytes + labelBytes,
-      u8Total: u8Bytes + labelBytes,
+      estGpuSupportBytes: supportBytes,
+      f32Total: f32Bytes + labelBytes + supportBytes,
+      u8Total: u8Bytes + labelBytes + supportBytes,
     };
   };
 
@@ -145,7 +167,8 @@ export function computeRenderPlan(params: {
 
   const estGpuVolBytes = chosenKind === 'f32' ? chosen.estGpuVolBytesF32 : chosen.estGpuVolBytesU8;
   const estGpuLabelBytes = wantsLabelsTex ? chosen.estGpuLabelBytes : 0;
-  const estGpuTotalBytes = estGpuVolBytes + estGpuLabelBytes;
+  const estGpuSupportBytes = chosen.estGpuSupportBytes;
+  const estGpuTotalBytes = estGpuVolBytes + estGpuLabelBytes + estGpuSupportBytes;
 
   const fullRes = chosen.dims.nx === srcDims.nx && chosen.dims.ny === srcDims.ny && chosen.dims.nz === srcDims.nz;
 
@@ -164,148 +187,203 @@ export function computeRenderPlan(params: {
     scale: chosen.scale,
     estGpuVolBytes,
     estGpuLabelBytes,
+    estGpuSupportBytes,
     estGpuTotalBytes,
     note,
   };
 }
 
-/**
- * Resample a source Float32 volume (0..1) into a smaller grid for GPU upload.
- *
- * This uses our trilinear sampler (same convention as SVR): the last voxel layer is treated as padding,
- * so we only sample < (dim - 1) to stay within support.
- */
-async function resampleVolumeTrilinearF32(params: {
-  src: Float32Array;
-  srcDims: TrilinearDims;
-  dstDims: TrilinearDims;
-  /** Returns true if the caller has requested cancellation. Checked per Z-slice. */
-  isCancelled: () => boolean;
-}): Promise<Float32Array> {
-  const { src, srcDims, dstDims, isCancelled } = params;
-  const out = new Float32Array(dstDims.nx * dstDims.ny * dstDims.nz);
+type AxisFootprint = { start: number; weights: Float32Array };
 
-  // Trilinear support requires x < (dim - 1). Use a small epsilon so our dst max maps inside support.
-  const EPS = 1e-6;
-  const srcMaxX = Math.max(0, srcDims.nx - 1 - EPS);
-  const srcMaxY = Math.max(0, srcDims.ny - 1 - EPS);
-  const srcMaxZ = Math.max(0, srcDims.nz - 1 - EPS);
+function buildAxisFootprints(srcSize: number, dstSize: number): AxisFootprint[] {
+  const footprints: AxisFootprint[] = [];
+  const scale = srcSize / dstSize;
 
-  const scaleX = dstDims.nx > 1 ? srcMaxX / (dstDims.nx - 1) : 0;
-  const scaleY = dstDims.ny > 1 ? srcMaxY / (dstDims.ny - 1) : 0;
-  const scaleZ = dstDims.nz > 1 ? srcMaxZ / (dstDims.nz - 1) : 0;
+  for (let index = 0; index < dstSize; index++) {
+    const from = index * scale;
+    const to = Math.min(srcSize, (index + 1) * scale);
+    const start = Math.max(0, Math.floor(from));
+    const end = Math.min(srcSize - 1, Math.ceil(to) - 1);
+    const weights = new Float32Array(end - start + 1);
 
-  const strideY = dstDims.nx;
-  const strideZ = dstDims.nx * dstDims.ny;
-
-  for (let z = 0; z < dstDims.nz; z++) {
-    if (isCancelled()) {
-      throw new Error('Render volume build cancelled');
+    for (let source = start; source <= end; source++) {
+      weights[source - start] = Math.max(0, Math.min(to, source + 1) - Math.max(from, source));
     }
 
-    const sz = z * scaleZ;
-
-    for (let y = 0; y < dstDims.ny; y++) {
-      const sy = y * scaleY;
-      const base = z * strideZ + y * strideY;
-
-      for (let x = 0; x < dstDims.nx; x++) {
-        const sx = x * scaleX;
-        out[base + x] = clamp(sampleTrilinear(src, srcDims, sx, sy, sz), 0, 1);
-      }
-    }
-
-    if (z % 4 === 0) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    footprints.push({ start, weights });
   }
 
-  return out;
+  return footprints;
 }
 
-async function resampleVolumeTrilinearU8(params: {
+/** Integrate each destination footprint instead of point-sampling aliased anatomy. */
+async function resampleVolumeAreaAverage(params: {
   src: Float32Array;
-  srcDims: TrilinearDims;
-  dstDims: TrilinearDims;
+  srcObservedSupport?: Uint8Array;
+  srcDims: RenderDims;
+  dstDims: RenderDims;
+  kind: 'f32' | 'u8';
   isCancelled: () => boolean;
-}): Promise<Uint8Array> {
-  const { src, srcDims, dstDims, isCancelled } = params;
-  const out = new Uint8Array(dstDims.nx * dstDims.ny * dstDims.nz);
-
-  const EPS = 1e-6;
-  const srcMaxX = Math.max(0, srcDims.nx - 1 - EPS);
-  const srcMaxY = Math.max(0, srcDims.ny - 1 - EPS);
-  const srcMaxZ = Math.max(0, srcDims.nz - 1 - EPS);
-
-  const scaleX = dstDims.nx > 1 ? srcMaxX / (dstDims.nx - 1) : 0;
-  const scaleY = dstDims.ny > 1 ? srcMaxY / (dstDims.ny - 1) : 0;
-  const scaleZ = dstDims.nz > 1 ? srcMaxZ / (dstDims.nz - 1) : 0;
-
-  const strideY = dstDims.nx;
-  const strideZ = dstDims.nx * dstDims.ny;
+}): Promise<RenderVolumeTexData> {
+  const { src, srcObservedSupport, srcDims, dstDims, kind, isCancelled } = params;
+  const length = dstDims.nx * dstDims.ny * dstDims.nz;
+  const out = kind === 'f32' ? new Float32Array(length) : new Uint8Array(length);
+  const observedSupport = srcObservedSupport ? new Uint8Array(length) : undefined;
+  const footprintsX = buildAxisFootprints(srcDims.nx, dstDims.nx);
+  const footprintsY = buildAxisFootprints(srcDims.ny, dstDims.ny);
+  const footprintsZ = buildAxisFootprints(srcDims.nz, dstDims.nz);
+  const srcStrideZ = srcDims.nx * srcDims.ny;
+  const dstStrideZ = dstDims.nx * dstDims.ny;
+  // Separable X/Y/Z integration preserves the exact rectangular footprint
+  // while replacing O(dst * footprintX * footprintY * footprintZ) work with
+  // three linear passes over each source slab. The two optional support
+  // accumulators keep invalid anatomy out of both numerator and denominator.
+  const xValues = new Float32Array(dstDims.nx * srcDims.ny);
+  const xSupport = srcObservedSupport ? new Float32Array(xValues.length) : undefined;
+  const planeValues = kind === 'u8' ? new Float32Array(dstStrideZ) : undefined;
+  const planeSupport = srcObservedSupport ? new Float32Array(dstStrideZ) : undefined;
+  const fullFootprintWeight = (srcDims.nx / dstDims.nx) * (srcDims.ny / dstDims.ny) * (srcDims.nz / dstDims.nz);
+  let cachedSourceZ = -1;
+  let lastYield = performance.now();
 
   for (let z = 0; z < dstDims.nz; z++) {
-    if (isCancelled()) {
-      throw new Error('Render volume build cancelled');
-    }
+    if (isCancelled()) throw new Error('Render volume build cancelled');
+    const footprintZ = footprintsZ[z]!;
+    const destination = planeValues ?? (out as Float32Array).subarray(z * dstStrideZ, (z + 1) * dstStrideZ);
+    destination.fill(0);
+    planeSupport?.fill(0);
 
-    const sz = z * scaleZ;
+    for (let iz = 0; iz < footprintZ.weights.length; iz++) {
+      const sourceZ = footprintZ.start + iz;
+      const zWeight = footprintZ.weights[iz]!;
 
-    for (let y = 0; y < dstDims.ny; y++) {
-      const sy = y * scaleY;
-      const base = z * strideZ + y * strideY;
+      if (sourceZ !== cachedSourceZ) {
+        if (srcDims.nx === dstDims.nx && !srcObservedSupport) {
+          xValues.set(src.subarray(sourceZ * srcStrideZ, (sourceZ + 1) * srcStrideZ));
+        } else {
+          for (let sourceY = 0; sourceY < srcDims.ny; sourceY++) {
+            const sourceBase = sourceZ * srcStrideZ + sourceY * srcDims.nx;
+            const xBase = sourceY * dstDims.nx;
 
-      for (let x = 0; x < dstDims.nx; x++) {
-        const sx = x * scaleX;
-        const v = clamp(sampleTrilinear(src, srcDims, sx, sy, sz), 0, 1);
-        out[base + x] = Math.round(v * 255);
+            for (let x = 0; x < dstDims.nx; x++) {
+              const footprintX = footprintsX[x]!;
+              let weightedValue = 0;
+              let acquiredWeight = 0;
+
+              for (let ix = 0; ix < footprintX.weights.length; ix++) {
+                const sourceIndex = sourceBase + footprintX.start + ix;
+                if (srcObservedSupport && !srcObservedSupport[sourceIndex]) continue;
+                const weight = footprintX.weights[ix]!;
+                weightedValue += (src[sourceIndex] ?? 0) * weight;
+                acquiredWeight += weight;
+              }
+
+              const xIndex = xBase + x;
+              xValues[xIndex] = weightedValue;
+              if (xSupport) xSupport[xIndex] = acquiredWeight;
+            }
+          }
+        }
+        cachedSourceZ = sourceZ;
+      }
+
+      for (let y = 0; y < dstDims.ny; y++) {
+        const footprintY = footprintsY[y]!;
+        const destinationBase = y * dstDims.nx;
+
+        for (let iy = 0; iy < footprintY.weights.length; iy++) {
+          const yzWeight = zWeight * footprintY.weights[iy]!;
+          const xBase = (footprintY.start + iy) * dstDims.nx;
+
+          for (let x = 0; x < dstDims.nx; x++) {
+            const destinationIndex = destinationBase + x;
+            const xIndex = xBase + x;
+            destination[destinationIndex] = destination[destinationIndex]! + xValues[xIndex]! * yzWeight;
+            if (planeSupport && xSupport) {
+              planeSupport[destinationIndex] = planeSupport[destinationIndex]! + xSupport[xIndex]! * yzWeight;
+            }
+          }
+        }
       }
     }
 
-    if (z % 4 === 0) {
-      await new Promise((r) => setTimeout(r, 0));
+    const destinationOffset = z * dstStrideZ;
+    for (let index = 0; index < dstStrideZ; index++) {
+      const acquiredWeight = planeSupport ? planeSupport[index]! : fullFootprintWeight;
+      if (!(acquiredWeight > 0)) continue;
+      const value = clamp(destination[index]! / acquiredWeight, 0, 1);
+      const destinationIndex = destinationOffset + index;
+      out[destinationIndex] = kind === 'u8' ? Math.round(value * 255) : value;
+      if (observedSupport) {
+        observedSupport[destinationIndex] = 1;
+      }
+    }
+
+    // Yield to real interaction work on a time budget, not once for every fourth
+    // slice: the previous fixed schedule inserted dozens of needless timers.
+    const now = performance.now();
+    if (now - lastYield >= 8 && z + 1 < dstDims.nz) {
+      await yieldToMain();
+      lastYield = performance.now();
     }
   }
 
-  return out;
+  return { kind, dims: dstDims, data: out, ...(observedSupport ? { observedSupport } : {}) };
 }
 
 export async function buildRenderVolumeTexData(params: {
   src: Float32Array;
+  srcObservedSupport?: Uint8Array;
   srcDims: RenderDims;
   plan: Pick<RenderPlan, 'dims' | 'kind'>;
   isCancelled: () => boolean;
 }): Promise<RenderVolumeTexData> {
-  const { src, srcDims, plan, isCancelled } = params;
+  const { src, srcObservedSupport, srcDims, plan, isCancelled } = params;
+
+  const sourceLength = srcDims.nx * srcDims.ny * srcDims.nz;
+  if (src.length !== sourceLength) {
+    throw new Error(`Render volume length mismatch: expected ${sourceLength}, got ${src.length}.`);
+  }
+  if (srcObservedSupport && srcObservedSupport.length !== sourceLength) {
+    throw new Error(
+      `Render volume acquired-support length mismatch: expected ${sourceLength}, got ${srcObservedSupport.length}.`,
+    );
+  }
 
   const dstDims = plan.dims;
 
   const isSameDims = srcDims.nx === dstDims.nx && srcDims.ny === dstDims.ny && srcDims.nz === dstDims.nz;
 
-  if (plan.kind === 'f32') {
-    const data = isSameDims
-      ? src
-      : await resampleVolumeTrilinearF32({
-          src,
-          srcDims,
-          dstDims,
-          isCancelled,
-        });
-
-    return { kind: 'f32', dims: dstDims, data };
+  if (!isSameDims) {
+    return resampleVolumeAreaAverage({
+      src,
+      srcObservedSupport,
+      srcDims,
+      dstDims,
+      kind: plan.kind,
+      isCancelled,
+    });
   }
 
-  // u8
-  const data = isSameDims
-    ? toUint8Volume(src)
-    : await resampleVolumeTrilinearU8({
-        src,
-        srcDims,
-        dstDims,
-        isCancelled,
-      });
+  if (plan.kind === 'u8') {
+    const data = toUint8Volume(src, srcObservedSupport);
+    return { kind: 'u8', dims: dstDims, data, ...(srcObservedSupport ? { observedSupport: srcObservedSupport } : {}) };
+  }
 
-  return { kind: 'u8', dims: dstDims, data };
+  let data = src;
+  if (srcObservedSupport) {
+    for (let index = 0; index < src.length; index++) {
+      if (!srcObservedSupport[index] && src[index] !== 0) {
+        data = new Float32Array(src);
+        for (let masked = index; masked < data.length; masked++) {
+          if (!srcObservedSupport[masked]) data[masked] = 0;
+        }
+        break;
+      }
+    }
+  }
+
+  return { kind: 'f32', dims: dstDims, data, ...(srcObservedSupport ? { observedSupport: srcObservedSupport } : {}) };
 }
 
 export type RegionBox = { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };

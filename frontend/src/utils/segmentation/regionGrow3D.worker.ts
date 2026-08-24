@@ -7,6 +7,7 @@ const workerScope = globalThis as unknown as {
 };
 
 let volume: Float32Array | null = null;
+let observedSupport: Uint8Array | undefined;
 let dims: [number, number, number] | null = null;
 let activeRun: { runId: number; controller: AbortController } | null = null;
 
@@ -15,6 +16,7 @@ workerScope.onmessage = ({ data }) => {
     activeRun?.controller.abort();
     activeRun = null;
     volume = data.volume;
+    observedSupport = data.observedSupport;
     dims = data.dims;
     return;
   }
@@ -36,6 +38,7 @@ workerScope.onmessage = ({ data }) => {
 
   void regionGrow3D_v2({
     volume,
+    observedSupport,
     dims,
     seed: data.seed,
     min: data.min,

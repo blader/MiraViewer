@@ -55,12 +55,18 @@ async function run(payload: Extract<SvrComputeWorkerRequest, { type: 'run' }>['p
       {
         type: 'done',
         volume: result.volume,
+        observedSupport: result.observedSupport,
+        supportedVoxelCount: result.supportedVoxelCount,
+        acquiredOrientationCount: result.acquiredOrientationCount,
+        ...(result.effectiveResolutionMm ? { effectiveResolutionMm: result.effectiveResolutionMm } : {}),
+        sliceProfileSource: result.sliceProfileSource,
+        reconstructionFingerprint: result.reconstructionFingerprint,
         dims: result.dims,
         originMm: result.originMm,
         voxelSizeMm: result.voxelSizeMm,
         bounds: result.bounds,
       },
-      [result.volume.buffer as ArrayBuffer],
+      [result.volume.buffer as ArrayBuffer, result.observedSupport.buffer as ArrayBuffer],
     );
   } catch (err) {
     // Errors don't propagate across the worker boundary on their own; report

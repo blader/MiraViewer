@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { float32ToFloat16Bits } from '../src/utils/svr/glRaymarch';
+import { float32ToFloat16Bits, float32ToFloat16BitsAsync } from '../src/utils/svr/glRaymarch';
 import { computeRenderPlan } from '../src/utils/svr/renderLod';
 
 // The 3D viewer uploads its float render volume as R16F (HALF_FLOAT), which requires raw
@@ -47,6 +47,18 @@ describe('svr/float16 upload path', () => {
 
       expect(Math.abs(decoded - values[i]!) / values[i]!).toBeLessThan(2 ** -11);
     }
+  });
+
+  it('cooperative half-float staging is byte-identical to the synchronous upload representation', async () => {
+    const values = new Float32Array(140_000);
+    for (let index = 0; index < values.length; index++) values[index] = (index % 1024) / 1023;
+
+    const staged = await float32ToFloat16BitsAsync(values, () => false);
+    expect(staged).toEqual(float32ToFloat16Bits(values));
+  });
+
+  it('cooperative half-float staging stops before touching cancelled work', async () => {
+    await expect(float32ToFloat16BitsAsync(new Float32Array(16), () => true)).rejects.toThrow(/cancel/i);
   });
 
   it('computeRenderPlan budgets the float plan at 2 bytes/voxel (R16F, not R32F)', () => {

@@ -31,6 +31,8 @@ export type SvrReconstructionSlice = {
   pixels: Float32Array;
   /** Acquired-pixel support; when absent, every finite pixel is valid. */
   valid?: Uint8Array;
+  /** Maximum encoded validity value; omitted legacy masks use binary 0/1 support. */
+  validScale?: number;
   dsRows: number;
   dsCols: number;
 
@@ -58,46 +60,76 @@ export type SvrCoreHooks = {
   onProgress?: (p: { current: number; total: number; message: string }) => void;
 };
 
-type SlicePsf = { offsetsMm: Float32Array; weights: Float32Array; count: number; effectiveThicknessMm: number };
+/** Decode compact fractional support while preserving legacy binary 0/1 masks. */
+export function acquiredObservationWeight(
+  slice: Pick<SvrReconstructionSlice, 'valid' | 'validScale'>,
+  index: number,
+): number {
+  if (!slice.valid) return 1;
+  const encoded = slice.valid[index] ?? 0;
+  if (encoded === 0) return 0;
+  const scale = slice.validScale;
+  return typeof scale === 'number' && scale > 0 ? Math.min(1, encoded / scale) : 1;
+}
+
+type SlicePsf = {
+  offsetsXMm: Float32Array;
+  offsetsYMm: Float32Array;
+  offsetsZMm: Float32Array;
+  weights: Float32Array;
+  count: number;
+};
 
 function buildSlicePsf(params: { slice: SvrReconstructionSlice; voxelSizeMm: number; mode: SvrPsfMode }): SlicePsf {
   const { slice, voxelSizeMm, mode } = params;
 
   if (mode === 'none') {
     return {
-      offsetsMm: new Float32Array([0]),
+      offsetsXMm: new Float32Array([0]),
+      offsetsYMm: new Float32Array([0]),
+      offsetsZMm: new Float32Array([0]),
       weights: new Float32Array([1]),
       count: 1,
-      effectiveThicknessMm: 0,
     };
   }
 
-  const hint = slice.sliceThicknessMm ?? slice.spacingBetweenSlicesMm;
+  // Inter-slice center spacing describes sampling cadence, not the excitation
+  // profile: using it as thickness would turn an unobserved slab into anatomy.
+  const hint = slice.sliceThicknessMm;
   const thicknessMm = typeof hint === 'number' && Number.isFinite(hint) && hint > 0 ? hint : voxelSizeMm;
 
   const ratio = thicknessMm / Math.max(1e-6, voxelSizeMm);
 
-  // Keep the forward model cheap: a handful of samples along the slice normal.
-  // Use an odd count so the kernel is symmetric around offset=0.
-  let n = Math.round(ratio);
-  if (n < 1) n = 1;
-  if (n > 7) n = 7;
-  if (n % 2 === 0) n += 1;
+  // Preserve the cheap one-sample path for source pixels no larger than the
+  // destination grid. Coarser pixels receive bounded separable box quadrature
+  // so their physically acquired footprint is not collapsed into a point.
+  const inPlaneSamples = (spacingMm: number): number => {
+    if (!(spacingMm > voxelSizeMm * 1.25)) return 1;
+    return Math.min(5, Math.max(2, Math.ceil(spacingMm / voxelSizeMm)));
+  };
+  const rowCount = inPlaneSamples(slice.rowSpacingDsMm);
+  const colCount = inPlaneSamples(slice.colSpacingDsMm);
 
-  const offsetsMm = new Float32Array(n);
-  const weights = new Float32Array(n);
+  // Use an odd count so the through-plane kernel stays centered and symmetric.
+  let normalCount = Math.round(ratio);
+  if (normalCount < 1) normalCount = 1;
+  if (normalCount > 15) normalCount = 15;
+  if (normalCount % 2 === 0) normalCount += 1;
+
+  const normalOffsetsMm = new Float32Array(normalCount);
+  const normalWeights = new Float32Array(normalCount);
 
   const half = 0.5 * thicknessMm;
-  const step = thicknessMm / n;
+  const step = thicknessMm / normalCount;
 
   // Gaussian: distance-to-plane weighting within the thickness support.
   // We pick sigma so that the tails are non-trivial within [-half, +half].
   const sigma = Math.max(1e-6, half * 0.5);
 
   let wSum = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < normalCount; i++) {
     const off = -half + (i + 0.5) * step;
-    offsetsMm[i] = off;
+    normalOffsetsMm[i] = off;
 
     let w = 1;
     if (mode === 'gaussian') {
@@ -105,18 +137,44 @@ function buildSlicePsf(params: { slice: SvrReconstructionSlice; voxelSizeMm: num
       w = Math.exp(-0.5 * u * u);
     }
 
-    weights[i] = w;
+    normalWeights[i] = w;
     wSum += w;
   }
 
   if (wSum > 1e-12) {
     const inv = 1 / wSum;
-    for (let i = 0; i < n; i++) {
-      weights[i] *= inv;
+    for (let i = 0; i < normalCount; i++) {
+      normalWeights[i] *= inv;
     }
   }
 
-  return { offsetsMm, weights, count: n, effectiveThicknessMm: thicknessMm };
+  const count = rowCount * colCount * normalCount;
+  const offsetsXMm = new Float32Array(count);
+  const offsetsYMm = new Float32Array(count);
+  const offsetsZMm = new Float32Array(count);
+  const weights = new Float32Array(count);
+  const inPlaneWeight = 1 / (rowCount * colCount);
+  let cursor = 0;
+
+  for (let row = 0; row < rowCount; row++) {
+    const rowOffsetMm = rowCount === 1 ? 0 : ((row + 0.5) / rowCount - 0.5) * slice.rowSpacingDsMm;
+    for (let column = 0; column < colCount; column++) {
+      const colOffsetMm = colCount === 1 ? 0 : ((column + 0.5) / colCount - 0.5) * slice.colSpacingDsMm;
+      for (let normal = 0; normal < normalCount; normal++) {
+        const normalOffsetMm = normalOffsetsMm[normal] ?? 0;
+        offsetsXMm[cursor] =
+          slice.colDir.x * rowOffsetMm + slice.rowDir.x * colOffsetMm + slice.normalDir.x * normalOffsetMm;
+        offsetsYMm[cursor] =
+          slice.colDir.y * rowOffsetMm + slice.rowDir.y * colOffsetMm + slice.normalDir.y * normalOffsetMm;
+        offsetsZMm[cursor] =
+          slice.colDir.z * rowOffsetMm + slice.rowDir.z * colOffsetMm + slice.normalDir.z * normalOffsetMm;
+        weights[cursor] = (normalWeights[normal] ?? 0) * inPlaneWeight;
+        cursor++;
+      }
+    }
+  }
+
+  return { offsetsXMm, offsetsYMm, offsetsZMm, weights, count };
 }
 
 function robustResidualWeight(residual: number, mode: SvrRobustLoss, delta: number): number {
@@ -143,7 +201,150 @@ function normalizeVolumeInPlace(volume: Float32Array, weight: Float32Array): voi
   }
 }
 
-function laplacianSmoothInPlace(volume: Float32Array, dims: VolumeDims, lambda: number, scratch: Float32Array): void {
+function markTrilinearObservedSupport(
+  support: Uint8Array,
+  dims: VolumeDims,
+  x: number,
+  y: number,
+  z: number,
+  weightScale: number,
+): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const z0 = Math.floor(z);
+  const fx = x - x0;
+  const fy = y - y0;
+  const fz = z - z0;
+  const strideY = dims.nx;
+  const strideZ = dims.nx * dims.ny;
+  const base = x0 + y0 * strideY + z0 * strideZ;
+  const xStep = x0 + 1 < dims.nx ? 1 : 0;
+  const yStep = y0 + 1 < dims.ny ? strideY : 0;
+  const zStep = z0 + 1 < dims.nz ? strideZ : 0;
+  const wx0 = 1 - fx;
+  const wy0 = 1 - fy;
+  const wz0 = 1 - fz;
+
+  let added = 0;
+  let index = base;
+  if (wx0 * wy0 * wz0 * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + xStep;
+  if (fx * wy0 * wz0 * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + yStep;
+  if (wx0 * fy * wz0 * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + yStep + xStep;
+  if (fx * fy * wz0 * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + zStep;
+  if (wx0 * wy0 * fz * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + zStep + xStep;
+  if (fx * wy0 * fz * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + zStep + yStep;
+  if (wx0 * fy * fz * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  index = base + zStep + yStep + xStep;
+  if (fx * fy * fz * weightScale > 1e-12 && !support[index]) {
+    support[index] = 1;
+    added++;
+  }
+  return added;
+}
+
+/** Builds fine-grid acquired support without allocating a pair of full Float32 volumes. */
+export async function buildObservedSupportFromSlices(params: {
+  slices: readonly SvrReconstructionSlice[];
+  grid: SvrReconstructionGrid;
+  psfMode: SvrPsfMode;
+  hooks?: SvrCoreHooks;
+  onObservedSupport?: (supportedVoxelCount: number) => void;
+}): Promise<Uint8Array> {
+  const { slices, grid, psfMode, hooks } = params;
+  const { dims, originMm, voxelSizeMm } = grid;
+  const observedSupport = new Uint8Array(dims.nx * dims.ny * dims.nz);
+  let supportedVoxelCount = 0;
+  const invVox = 1 / voxelSizeMm;
+
+  for (let sliceIndex = 0; sliceIndex < slices.length; sliceIndex++) {
+    assertNotAborted(hooks?.signal);
+    const slice = slices[sliceIndex];
+    if (!slice) continue;
+    if (slice.valid && slice.valid.length !== slice.pixels.length) {
+      throw new Error('SVR acquired-pixel support does not match its image dimensions');
+    }
+
+    const psf = buildSlicePsf({ slice, voxelSizeMm, mode: psfMode });
+    for (let row = 0; row < slice.dsRows; row++) {
+      const baseX = slice.ippMm.x + slice.colDir.x * row * slice.rowSpacingDsMm;
+      const baseY = slice.ippMm.y + slice.colDir.y * row * slice.rowSpacingDsMm;
+      const baseZ = slice.ippMm.z + slice.colDir.z * row * slice.rowSpacingDsMm;
+      const rowBase = row * slice.dsCols;
+
+      for (let column = 0; column < slice.dsCols; column++) {
+        const index = rowBase + column;
+        const observation = slice.pixels[index];
+        const observationWeight = acquiredObservationWeight(slice, index);
+        if (!(observationWeight > 0) || observation === undefined || !Number.isFinite(observation)) {
+          continue;
+        }
+
+        const worldX = baseX + slice.rowDir.x * column * slice.colSpacingDsMm;
+        const worldY = baseY + slice.rowDir.y * column * slice.colSpacingDsMm;
+        const worldZ = baseZ + slice.rowDir.z * column * slice.colSpacingDsMm;
+
+        for (let sampleIndex = 0; sampleIndex < psf.count; sampleIndex++) {
+          const weight = psf.weights[sampleIndex] ?? 0;
+          if (!(weight > 0)) continue;
+
+          const x = (worldX + (psf.offsetsXMm[sampleIndex] ?? 0) - originMm.x) * invVox;
+          const y = (worldY + (psf.offsetsYMm[sampleIndex] ?? 0) - originMm.y) * invVox;
+          const z = (worldZ + (psf.offsetsZMm[sampleIndex] ?? 0) - originMm.z) * invVox;
+          if (withinTrilinearSupport(dims, x, y, z)) {
+            supportedVoxelCount += markTrilinearObservedSupport(
+              observedSupport,
+              dims,
+              x,
+              y,
+              z,
+              weight * observationWeight,
+            );
+          }
+        }
+      }
+    }
+
+    if (sliceIndex % 4 === 0) await hooks?.yieldToMain?.();
+  }
+
+  params.onObservedSupport?.(supportedVoxelCount);
+  return observedSupport;
+}
+
+function laplacianSmoothInPlace(
+  volume: Float32Array,
+  dims: VolumeDims,
+  lambda: number,
+  scratch: Float32Array,
+  occupancy?: Uint8Array,
+): void {
   if (!(lambda > 0)) return;
   const { nx, ny, nz } = dims;
   if (nx < 3 || ny < 3 || nz < 3) return;
@@ -158,17 +359,17 @@ function laplacianSmoothInPlace(volume: Float32Array, dims: VolumeDims, lambda: 
       const base = zBase + y * strideY;
       for (let x = 1; x < nx - 1; x++) {
         const idx = base + x;
+        if (occupancy && !occupancy[idx]) continue;
         const c = volume[idx] ?? 0;
+        let laplacian = 0;
+        if (!occupancy || occupancy[idx - 1]) laplacian += (volume[idx - 1] ?? 0) - c;
+        if (!occupancy || occupancy[idx + 1]) laplacian += (volume[idx + 1] ?? 0) - c;
+        if (!occupancy || occupancy[idx - strideY]) laplacian += (volume[idx - strideY] ?? 0) - c;
+        if (!occupancy || occupancy[idx + strideY]) laplacian += (volume[idx + strideY] ?? 0) - c;
+        if (!occupancy || occupancy[idx - strideZ]) laplacian += (volume[idx - strideZ] ?? 0) - c;
+        if (!occupancy || occupancy[idx + strideZ]) laplacian += (volume[idx + strideZ] ?? 0) - c;
 
-        const sum =
-          (volume[idx - 1] ?? 0) +
-          (volume[idx + 1] ?? 0) +
-          (volume[idx - strideY] ?? 0) +
-          (volume[idx + strideY] ?? 0) +
-          (volume[idx - strideZ] ?? 0) +
-          (volume[idx + strideZ] ?? 0);
-
-        scratch[idx] = sum - 6 * c;
+        scratch[idx] = laplacian;
       }
     }
   }
@@ -180,6 +381,7 @@ function laplacianSmoothInPlace(volume: Float32Array, dims: VolumeDims, lambda: 
       const base = zBase + y * strideY;
       for (let x = 1; x < nx - 1; x++) {
         const idx = base + x;
+        if (occupancy && !occupancy[idx]) continue;
         const lap = scratch[idx] ?? 0;
         volume[idx] = (volume[idx] ?? 0) + lambda * lap;
       }
@@ -194,6 +396,7 @@ export async function reconstructVolumeFromSlices(params: {
   hooks?: SvrCoreHooks;
   /** Optional caller-owned support map: 1 iff the voxel received an observation. */
   occupancy?: Uint8Array;
+  onObservedSupport?: (supportedVoxelCount: number) => void;
 }): Promise<Float32Array> {
   const { slices, grid, options, hooks } = params;
   const { dims, originMm, voxelSizeMm } = grid;
@@ -201,6 +404,9 @@ export async function reconstructVolumeFromSlices(params: {
   const yieldToMain = hooks?.yieldToMain ?? (async () => {});
 
   const nvox = dims.nx * dims.ny * dims.nz;
+  if (params.occupancy && params.occupancy.length !== nvox) {
+    throw new Error('SVR occupancy map does not match reconstruction grid');
+  }
   const volume = new Float32Array(nvox);
   const weight = new Float32Array(nvox);
 
@@ -229,20 +435,20 @@ export async function reconstructVolumeFromSlices(params: {
       for (let c = 0; c < s.dsCols; c++) {
         const index = rowBase + c;
         const obs = s.pixels[index];
-        if ((s.valid && !s.valid[index]) || obs === undefined || !Number.isFinite(obs)) continue;
+        const observationWeight = acquiredObservationWeight(s, index);
+        if (!(observationWeight > 0) || obs === undefined || !Number.isFinite(obs)) continue;
 
         const wx0 = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
         const wy0 = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
         const wz0 = baseZ + s.rowDir.z * (c * s.colSpacingDsMm);
 
         for (let k = 0; k < psf.count; k++) {
-          const off = psf.offsetsMm[k] ?? 0;
           const w = psf.weights[k] ?? 0;
           if (!(w > 0)) continue;
 
-          const wx = wx0 + s.normalDir.x * off;
-          const wy = wy0 + s.normalDir.y * off;
-          const wz = wz0 + s.normalDir.z * off;
+          const wx = wx0 + (psf.offsetsXMm[k] ?? 0);
+          const wy = wy0 + (psf.offsetsYMm[k] ?? 0);
+          const wz = wz0 + (psf.offsetsZMm[k] ?? 0);
 
           const vx = (wx - originMm.x) * invVox;
           const vy = (wy - originMm.y) * invVox;
@@ -250,7 +456,7 @@ export async function reconstructVolumeFromSlices(params: {
 
           if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
 
-          splatTrilinearScaled(volume, weight, dims, vx, vy, vz, obs, w);
+          splatTrilinearScaled(volume, weight, dims, vx, vy, vz, obs, w * observationWeight);
         }
       }
     }
@@ -265,16 +471,31 @@ export async function reconstructVolumeFromSlices(params: {
     }
   }
 
-  if (params.occupancy) {
-    if (params.occupancy.length !== nvox) throw new Error('SVR occupancy map does not match reconstruction grid');
-    for (let i = 0; i < nvox; i++) params.occupancy[i] = weight[i] > 1e-12 ? 1 : 0;
+  const observedSupport = params.occupancy ?? (options.iterations > 0 ? new Uint8Array(nvox) : undefined);
+  if (observedSupport) {
+    let supportedVoxelCount = 0;
+    for (let i = 0; i < nvox; i++) {
+      const supported = weight[i] > 1e-12 ? 1 : 0;
+      observedSupport[i] = supported;
+      supportedVoxelCount += supported;
+    }
+    params.onObservedSupport?.(supportedVoxelCount);
   }
   normalizeVolumeInPlace(volume, weight);
 
   // Memory optimization: the `weight` buffer is only needed for the initial splat normalization.
   // After that, we can reuse it as the per-iteration `updateW` accumulator to avoid allocating
   // an additional full-size Float32Array.
-  await refineVolumeInPlace({ volume, slices, grid, options, hooks, psfBySlice, scratch: { updateW: weight } });
+  await refineVolumeInPlace({
+    volume,
+    slices,
+    grid,
+    options,
+    hooks,
+    occupancy: observedSupport,
+    psfBySlice,
+    scratch: { updateW: weight },
+  });
 
   return volume;
 }
@@ -285,6 +506,8 @@ export async function refineVolumeInPlace(params: {
   grid: SvrReconstructionGrid;
   options: SvrReconstructionOptions;
   hooks?: SvrCoreHooks;
+  /** Stable acquired-observation domain; unsupported voxels must remain exactly zero. */
+  occupancy?: Uint8Array;
   psfBySlice?: SlicePsf[];
   /** Optional scratch buffers to reduce allocations / peak memory. */
   scratch?: {
@@ -292,7 +515,7 @@ export async function refineVolumeInPlace(params: {
     updateW?: Float32Array;
   };
 }): Promise<void> {
-  const { volume, slices, grid, options, hooks } = params;
+  const { volume, slices, grid, options, hooks, occupancy } = params;
   const { dims, originMm, voxelSizeMm } = grid;
 
   const yieldToMain = hooks?.yieldToMain ?? (async () => {});
@@ -310,6 +533,15 @@ export async function refineVolumeInPlace(params: {
     params.psfBySlice ?? slices.map((s) => buildSlicePsf({ slice: s, voxelSizeMm, mode: options.psfMode }));
 
   const nvox = dims.nx * dims.ny * dims.nz;
+  if (occupancy && occupancy.length !== nvox) {
+    throw new Error('SVR occupancy map does not match reconstruction grid');
+  }
+
+  if (occupancy) {
+    for (let i = 0; i < nvox; i++) {
+      if (!occupancy[i]) volume[i] = 0;
+    }
+  }
 
   const stepSize = options.stepSize;
 
@@ -354,7 +586,8 @@ export async function refineVolumeInPlace(params: {
         for (let c = 0; c < s.dsCols; c++) {
           const index = rowBase + c;
           const obs = s.pixels[index];
-          if ((s.valid && !s.valid[index]) || obs === undefined || !Number.isFinite(obs)) continue;
+          const observationWeight = acquiredObservationWeight(s, index);
+          if (!(observationWeight > 0) || obs === undefined || !Number.isFinite(obs)) continue;
 
           const wx0 = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
           const wy0 = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
@@ -365,13 +598,12 @@ export async function refineVolumeInPlace(params: {
           let wUsed = 0;
 
           for (let k = 0; k < psf.count; k++) {
-            const off = psf.offsetsMm[k] ?? 0;
             const w = psf.weights[k] ?? 0;
             if (!(w > 0)) continue;
 
-            const wx = wx0 + s.normalDir.x * off;
-            const wy = wy0 + s.normalDir.y * off;
-            const wz = wz0 + s.normalDir.z * off;
+            const wx = wx0 + (psf.offsetsXMm[k] ?? 0);
+            const wy = wy0 + (psf.offsetsYMm[k] ?? 0);
+            const wz = wz0 + (psf.offsetsZMm[k] ?? 0);
 
             const vx = (wx - originMm.x) * invVox;
             const vy = (wy - originMm.y) * invVox;
@@ -379,8 +611,13 @@ export async function refineVolumeInPlace(params: {
 
             if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
 
-            pred += sampleTrilinear(volume, dims, vx, vy, vz) * w;
-            wUsed += w;
+            const sampleSupport = occupancy ? sampleTrilinear(occupancy, dims, vx, vy, vz) : 1;
+            if (!(sampleSupport > 1e-12)) continue;
+
+            // Unsupported interpolation corners represent missing evidence,
+            // never zero-intensity tissue. Renormalize the matched observation.
+            pred += (sampleTrilinear(volume, dims, vx, vy, vz) / sampleSupport) * w * sampleSupport;
+            wUsed += w * sampleSupport;
           }
 
           if (!(wUsed > 1e-12)) continue;
@@ -391,16 +628,15 @@ export async function refineVolumeInPlace(params: {
           if (!(rW > 0)) continue;
 
           // Backproject residual into volume using the same PSF weights.
-          const scaleBase = rW / wUsed;
+          const scaleBase = (rW * observationWeight) / wUsed;
 
           for (let k = 0; k < psf.count; k++) {
-            const off = psf.offsetsMm[k] ?? 0;
             const w = psf.weights[k] ?? 0;
             if (!(w > 0)) continue;
 
-            const wx = wx0 + s.normalDir.x * off;
-            const wy = wy0 + s.normalDir.y * off;
-            const wz = wz0 + s.normalDir.z * off;
+            const wx = wx0 + (psf.offsetsXMm[k] ?? 0);
+            const wy = wy0 + (psf.offsetsYMm[k] ?? 0);
+            const wz = wz0 + (psf.offsetsZMm[k] ?? 0);
 
             const vx = (wx - originMm.x) * invVox;
             const vy = (wy - originMm.y) * invVox;
@@ -421,6 +657,10 @@ export async function refineVolumeInPlace(params: {
     }
 
     for (let i = 0; i < nvox; i++) {
+      if (occupancy && !occupancy[i]) {
+        volume[i] = 0;
+        continue;
+      }
       const w = updateW[i];
       if (w > 1e-12) {
         volume[i] = (volume[i] ?? 0) + ((update[i] ?? 0) / w) * stepSize;
@@ -434,7 +674,7 @@ export async function refineVolumeInPlace(params: {
     // Light regularization to suppress noise without erasing edges.
     if (options.laplacianWeight > 0) {
       update.fill(0);
-      laplacianSmoothInPlace(volume, dims, options.laplacianWeight, update);
+      laplacianSmoothInPlace(volume, dims, options.laplacianWeight, update, occupancy);
       if (options.clampOutput) {
         for (let i = 0; i < nvox; i++) {
           volume[i] = clamp01(volume[i] ?? 0);

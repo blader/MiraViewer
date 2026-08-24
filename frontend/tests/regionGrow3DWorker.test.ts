@@ -82,6 +82,27 @@ describe('RegionGrow3DWorkerController', () => {
     expect(worker.terminate).toHaveBeenCalledOnce();
   });
 
+  it('sends acquired support with the volume and replaces the worker when support ownership changes', async () => {
+    const runner = new RegionGrow3DWorkerController();
+    const firstSupport = new Uint8Array([1, 0, 1, 1]);
+    const first = runner.run({ ...baseOptions, observedSupport: firstSupport });
+    const firstWorker = MockWorker.instances[0]!;
+    expect(firstWorker.messages[0]).toMatchObject({ type: 'init', volume, observedSupport: firstSupport });
+
+    firstWorker.respond({ type: 'done', runId: 1, result: result([0]) });
+    await expect(first).resolves.toMatchObject({ count: 1 });
+
+    const secondSupport = new Uint8Array([1, 1, 0, 1]);
+    const second = runner.run({ ...baseOptions, observedSupport: secondSupport });
+    expect(firstWorker.terminate).toHaveBeenCalledOnce();
+    expect(MockWorker.instances).toHaveLength(2);
+    const replacement = MockWorker.instances[1]!;
+    expect(replacement.messages[0]).toMatchObject({ observedSupport: secondSupport });
+    replacement.respond({ type: 'done', runId: 2, result: result([0, 1]) });
+    await expect(second).resolves.toMatchObject({ count: 2 });
+    runner.dispose();
+  });
+
   it('cancels stale runs and ignores their late results while forwarding current progress', async () => {
     const runner = new RegionGrow3DWorkerController();
     const signal = new AbortController();

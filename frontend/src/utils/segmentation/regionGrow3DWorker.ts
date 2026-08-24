@@ -3,7 +3,7 @@ import type { RegionGrow3DResult, RegionGrow3DRoi, Vec3i } from './regionGrow3D_
 type Progress = { processed: number; queued: number };
 
 export type RegionGrow3DWorkerRequest =
-  | { type: 'init'; volume: Float32Array; dims: [number, number, number] }
+  | { type: 'init'; volume: Float32Array; observedSupport?: Uint8Array; dims: [number, number, number] }
   | {
       type: 'run';
       runId: number;
@@ -24,6 +24,7 @@ export type RegionGrow3DWorkerResponse =
 
 type RunOptions = {
   volume: Float32Array;
+  observedSupport?: Uint8Array;
   dims: [number, number, number];
   seed: Vec3i;
   min: number;
@@ -53,13 +54,14 @@ function abortError(): Error {
 export class RegionGrow3DWorkerController {
   private worker: Worker | null = null;
   private volume: Float32Array | null = null;
+  private observedSupport: Uint8Array | undefined;
   private pending: PendingRun | null = null;
   private nextRunId = 0;
 
   run(options: RunOptions): Promise<RegionGrow3DResult> {
     if (options.signal?.aborted) return Promise.reject(abortError());
 
-    if (this.volume !== options.volume) {
+    if (this.volume !== options.volume || this.observedSupport !== options.observedSupport) {
       this.dispose();
       try {
         if (typeof Worker === 'undefined') {
@@ -76,14 +78,17 @@ export class RegionGrow3DWorkerController {
           this.worker?.terminate();
           this.worker = null;
           this.volume = null;
+          this.observedSupport = undefined;
         };
         // Do not transfer: the renderer still owns and reads its original volume.
         this.worker.postMessage({
           type: 'init',
           volume: options.volume,
+          observedSupport: options.observedSupport,
           dims: options.dims,
         } satisfies RegionGrow3DWorkerRequest);
         this.volume = options.volume;
+        this.observedSupport = options.observedSupport;
       } catch (error) {
         this.dispose();
         return Promise.reject(error instanceof Error ? error : new Error(String(error)));
@@ -133,6 +138,7 @@ export class RegionGrow3DWorkerController {
     this.worker?.terminate();
     this.worker = null;
     this.volume = null;
+    this.observedSupport = undefined;
   }
 
   private handleMessage(message: RegionGrow3DWorkerResponse): void {

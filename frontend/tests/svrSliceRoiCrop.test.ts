@@ -102,4 +102,60 @@ describe('svr/sliceRoiCrop', () => {
       cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2, z: 1 } })),
     ).toBe(true);
   });
+
+  it('crops acquired-pixel support in lockstep with pixels and physical origin', () => {
+    const valid = new Uint8Array(8 * 8);
+    valid[3 * 8 + 4] = 1;
+    valid[5 * 8 + 6] = 1;
+
+    const slice = {
+      pixels: makeGridPixels(8, 8),
+      valid,
+      dsRows: 8,
+      dsCols: 8,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      normalDir: { x: 0, y: 0, z: 1 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+    };
+
+    expect(
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 4, y: 3, z: -1 }, max: { x: 5, y: 4, z: 1 } })),
+    ).toBe(true);
+
+    expect(slice.dsRows).toBe(4);
+    expect(slice.dsCols).toBe(4);
+    expect(slice.valid).toHaveLength(slice.pixels.length);
+    expect(slice.ippMm).toEqual({ x: 3, y: 2, z: 0 });
+    expect(slice.pixels[1 * slice.dsCols + 1]).toBe(304);
+    expect(slice.valid[1 * slice.dsCols + 1]).toBe(1);
+    expect(slice.pixels[3 * slice.dsCols + 3]).toBe(506);
+    expect(slice.valid[3 * slice.dsCols + 3]).toBe(1);
+    expect(Array.from(slice.valid).reduce((sum, value) => sum + value, 0)).toBe(2);
+  });
+
+  it('rejects malformed acquired support before mutating a source slice', () => {
+    const pixels = makeGridPixels(4, 4);
+    const slice = {
+      pixels,
+      valid: new Uint8Array(3),
+      dsRows: 4,
+      dsCols: 4,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      normalDir: { x: 0, y: 0, z: 1 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+    };
+
+    expect(() =>
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 1, y: 1, z: -1 }, max: { x: 2, y: 2, z: 1 } })),
+    ).toThrow(/support.*dimensions/i);
+    expect(slice.pixels).toBe(pixels);
+    expect(slice.dsRows).toBe(4);
+    expect(slice.dsCols).toBe(4);
+  });
 });

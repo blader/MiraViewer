@@ -23,12 +23,18 @@ import type { SvrParams, SvrProgress, SvrRoi, SvrSelectedSeries } from '../../ty
 import { sliceCornersMm } from './dicomGeometry';
 import type { VolumeDims } from './trilinear';
 import type { SvrReconstructionGrid, SvrReconstructionOptions } from './reconstructionCore';
-import { reconstructVolumeFromSlices, refineVolumeInPlace, resampleVolumeToGridTrilinear } from './reconstructionCore';
+import {
+  buildObservedSupportFromSlices,
+  reconstructVolumeFromSlices,
+  refineVolumeInPlace,
+  resampleVolumeToGridTrilinear,
+} from './reconstructionCore';
 import type { Vec3 } from './vec3';
 import { dot, v3 } from './vec3';
 import { boundsCornersMm, cropSliceToRoiInPlace } from './sliceRoiCrop';
 import { debugSvrLog } from '../debugSvr';
 import { clamp01 } from '../math';
+import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes, SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
 import {
   applyRigidToSeriesSlices,
   boundsCenterMm,
@@ -52,6 +58,13 @@ export type SvrSeriesMeta = Pick<SvrSelectedSeries, 'seriesUid' | 'label' | 'ins
 /** Compute-phase output. The caller (main thread) turns this into an SvrResult. */
 export type SvrComputeResult = {
   volume: Float32Array;
+  /** Canonical acquired-observation domain, transferred alongside the intensity volume. */
+  observedSupport: Uint8Array;
+  supportedVoxelCount: number;
+  acquiredOrientationCount: number;
+  effectiveResolutionMm?: [number, number, number];
+  sliceProfileSource: 'declared' | 'mixed' | 'unknown';
+  reconstructionFingerprint: string;
   dims: VolumeDims;
   originMm: Vec3;
   voxelSizeMm: number;
@@ -70,6 +83,8 @@ export type SvrComputePayload = {
   seriesMeta: SvrSeriesMeta[];
   svrParams: SvrParams;
   debug: boolean;
+  /** Decoded-frame cache retained on the main thread while this worker owns its source copies. */
+  residentCacheBytes?: number;
 };
 
 export type SvrComputeWorkerRequest =
@@ -83,6 +98,12 @@ export type SvrComputeWorkerResponse =
   | {
       type: 'done';
       volume: Float32Array;
+      observedSupport: Uint8Array;
+      supportedVoxelCount: number;
+      acquiredOrientationCount: number;
+      effectiveResolutionMm?: [number, number, number];
+      sliceProfileSource: 'declared' | 'mixed' | 'unknown';
+      reconstructionFingerprint: string;
       dims: VolumeDims;
       originMm: Vec3;
       voxelSizeMm: number;
@@ -110,9 +131,173 @@ function assertNonEmptyBounds(bounds: BoundsMm, label: string): void {
   }
 }
 
+function deriveAcquisitionEvidence(
+  slices: readonly LoadedSlice[],
+  outputVoxelSizeMm: number,
+): Pick<SvrComputeResult, 'acquiredOrientationCount' | 'effectiveResolutionMm' | 'sliceProfileSource'> {
+  const normals: Vec3[] = [];
+  const positionsBySeries = new Map<string, number[]>();
+  const orientationThreshold = Math.cos((10 * Math.PI) / 180);
+  let declaredProfiles = 0;
+  let unknownProfiles = 0;
+
+  for (const slice of slices) {
+    if (!normals.some((normal) => Math.abs(dot(normal, slice.normalDir)) >= orientationThreshold)) {
+      normals.push(slice.normalDir);
+    }
+
+    const thickness = slice.sliceThicknessMm;
+    if (typeof thickness === 'number' && Number.isFinite(thickness) && thickness > 0) declaredProfiles++;
+    else unknownProfiles++;
+
+    const positions = positionsBySeries.get(slice.seriesUid);
+    const position = dot(slice.ippMm, slice.normalDir);
+    if (positions) positions.push(position);
+    else positionsBySeries.set(slice.seriesUid, [position]);
+  }
+
+  const geometricSpacingBySeries = new Map<string, number>();
+  for (const [seriesUid, positions] of positionsBySeries) {
+    if (positions.length < 2) continue;
+    positions.sort((left, right) => left - right);
+    const positiveDeltas: number[] = [];
+    for (let index = 1; index < positions.length; index++) {
+      const delta = positions[index]! - positions[index - 1]!;
+      if (delta > 1e-6) positiveDeltas.push(delta);
+    }
+    if (positiveDeltas.length === 0) continue;
+    positiveDeltas.sort((left, right) => left - right);
+    geometricSpacingBySeries.set(seriesUid, quantileSorted(positiveDeltas, 0.5));
+  }
+
+  const resolution = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  for (const slice of slices) {
+    const thickness = slice.sliceThicknessMm;
+    const declaredThickness =
+      typeof thickness === 'number' && Number.isFinite(thickness) && thickness > 0 ? thickness : null;
+    const declaredSpacing = slice.spacingBetweenSlicesMm;
+    const centerSpacing =
+      typeof declaredSpacing === 'number' && Number.isFinite(declaredSpacing) && declaredSpacing > 0
+        ? declaredSpacing
+        : geometricSpacingBySeries.get(slice.seriesUid);
+    // Sampling cadence can make a known profile less informative, but it must
+    // never masquerade as a measured excitation width when thickness is absent.
+    const throughPlaneResolution = declaredThickness
+      ? Math.max(declaredThickness, centerSpacing ?? declaredThickness)
+      : null;
+
+    const components = [
+      [slice.rowDir.x, slice.colDir.x, slice.normalDir.x],
+      [slice.rowDir.y, slice.colDir.y, slice.normalDir.y],
+      [slice.rowDir.z, slice.colDir.z, slice.normalDir.z],
+    ];
+
+    for (let axis = 0; axis < 3; axis++) {
+      const [rowComponent, colComponent, normalComponent] = components[axis]!;
+      let directionalInformation =
+        (rowComponent! * rowComponent!) / (slice.colSpacingDsMm * slice.colSpacingDsMm) +
+        (colComponent! * colComponent!) / (slice.rowSpacingDsMm * slice.rowSpacingDsMm);
+      if (throughPlaneResolution) {
+        directionalInformation +=
+          (normalComponent! * normalComponent!) / (throughPlaneResolution * throughPlaneResolution);
+      }
+      if (!(directionalInformation > 1e-12)) continue;
+      resolution[axis] = Math.min(resolution[axis]!, 1 / Math.sqrt(directionalInformation));
+    }
+  }
+
+  const effectiveResolutionMm = resolution.every(Number.isFinite)
+    ? ([
+        Math.max(outputVoxelSizeMm, resolution[0]!),
+        Math.max(outputVoxelSizeMm, resolution[1]!),
+        Math.max(outputVoxelSizeMm, resolution[2]!),
+      ] as [number, number, number])
+    : undefined;
+
+  return {
+    acquiredOrientationCount: normals.length,
+    ...(effectiveResolutionMm ? { effectiveResolutionMm } : {}),
+    sliceProfileSource: declaredProfiles === 0 ? 'unknown' : unknownProfiles > 0 ? 'mixed' : 'declared',
+  };
+}
+
+function fingerprintReconstruction(params: {
+  slices: readonly LoadedSlice[];
+  svrParams: SvrParams;
+  grid: SvrReconstructionGrid;
+  supportedVoxelCount: number;
+}): string {
+  // Two independent FNV-1a lanes keep accepted identities local and opaque
+  // while avoiding a full-volume scan or asynchronous WebCrypto dependency.
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  const update = (value: string | number | null | undefined): void => {
+    const text = typeof value === 'number' && Number.isFinite(value) ? value.toPrecision(12) : String(value);
+    for (let index = 0; index <= text.length; index++) {
+      const code = index === text.length ? 0xff : text.charCodeAt(index);
+      first = Math.imul(first ^ code, 0x01000193) >>> 0;
+      second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+    }
+  };
+
+  update(params.slices.length);
+  for (const slice of params.slices) {
+    update(slice.seriesUid);
+    update(slice.sopInstanceUid);
+    update(slice.frameOfReferenceUid);
+    update(slice.dsRows);
+    update(slice.dsCols);
+    update(slice.ippMm.x);
+    update(slice.ippMm.y);
+    update(slice.ippMm.z);
+    update(slice.rowDir.x);
+    update(slice.rowDir.y);
+    update(slice.rowDir.z);
+    update(slice.colDir.x);
+    update(slice.colDir.y);
+    update(slice.colDir.z);
+    update(slice.normalDir.x);
+    update(slice.normalDir.y);
+    update(slice.normalDir.z);
+    update(slice.rowSpacingDsMm);
+    update(slice.colSpacingDsMm);
+    update(slice.sliceThicknessMm);
+    update(slice.spacingBetweenSlicesMm);
+    update(slice.validScale);
+  }
+
+  update(params.grid.dims.nx);
+  update(params.grid.dims.ny);
+  update(params.grid.dims.nz);
+  update(params.grid.originMm.x);
+  update(params.grid.originMm.y);
+  update(params.grid.originMm.z);
+  update(params.grid.voxelSizeMm);
+  update(params.supportedVoxelCount);
+  update(params.svrParams.targetVoxelSizeMm);
+  update(params.svrParams.maxVolumeDim);
+  update(params.svrParams.sliceDownsampleMode);
+  update(params.svrParams.sliceDownsampleMaxSize);
+  update(params.svrParams.seriesRegistrationMode);
+  update(params.svrParams.iterations);
+  update(params.svrParams.stepSize);
+  update(String(params.svrParams.clampOutput));
+  update(params.svrParams.psfMode);
+  update(params.svrParams.robustLoss);
+  update(params.svrParams.robustDelta);
+  update(params.svrParams.laplacianWeight);
+  update(String(params.svrParams.multiResolution));
+  update(params.svrParams.multiResolutionFactor);
+  update(params.svrParams.multiResolutionCoarseIterations);
+  update(params.svrParams.roi?.sourceSeriesUid);
+  for (const coordinate of params.svrParams.roi?.boundsMm.min ?? []) update(coordinate);
+  for (const coordinate of params.svrParams.roi?.boundsMm.max ?? []) update(coordinate);
+
+  return `${first.toString(16).padStart(8, '0')}${second.toString(16).padStart(8, '0')}`;
+}
+
 async function rigidAlignSeriesInRoi(params: {
   allSlices: LoadedSlice[];
-  selectedSeries: SvrSeriesMeta[];
   roiBounds: BoundsMm;
   dims: VolumeDims;
   originMm: Vec3;
@@ -122,7 +307,7 @@ async function rigidAlignSeriesInRoi(params: {
   onProgress?: (p: SvrProgress) => void;
   debug: boolean;
 }): Promise<void> {
-  const { allSlices, selectedSeries, roiBounds, dims, voxelSizeMm, roi, signal, onProgress, debug } = params;
+  const { allSlices, roiBounds, dims, voxelSizeMm, roi, signal, onProgress, debug } = params;
 
   // This stage exists because multi-plane fusion is extremely sensitive to even small spatial-tag mismatches.
   // If series are misregistered, SVR will smear details rather than sharpen them.
@@ -133,9 +318,6 @@ async function rigidAlignSeriesInRoi(params: {
     if (arr) arr.push(s);
     else bySeries.set(s.seriesUid, [s]);
   }
-
-  const labelByUid = new Map<string, string>();
-  for (const s of selectedSeries) labelByUid.set(s.seriesUid, s.label);
 
   const roiReferenceUid = roi.sourceSeriesUid ?? null;
   let referenceUid: string | null = null;
@@ -174,11 +356,14 @@ async function rigidAlignSeriesInRoi(params: {
     originMm: scoreGridSelected.originMm,
     voxelSizeMm: scoreGridSelected.voxelSizeMm,
   };
+  const seriesUids = Array.from(bySeries.keys());
+  const referenceSource = referenceUid ? seriesUids.indexOf(referenceUid) + 1 : null;
 
   debugSvrLog(
     'registration.roi-rigid.plan',
     {
-      referenceUid,
+      referenceSource,
+      sourceCount: seriesUids.length,
       centerMm: {
         x: Number(centerMm.x.toFixed(3)),
         y: Number(centerMm.y.toFixed(3)),
@@ -191,7 +376,6 @@ async function rigidAlignSeriesInRoi(params: {
   );
 
   // Align each non-reference series to the reconstruction of the other series.
-  const seriesUids = Array.from(bySeries.keys());
   for (let idx = 0; idx < seriesUids.length; idx++) {
     assertNotAborted(signal);
 
@@ -206,7 +390,7 @@ async function rigidAlignSeriesInRoi(params: {
       phase: 'initializing',
       current: 57,
       total: 100,
-      message: `ROI rigid align… (${labelByUid.get(uid) ?? uid})`,
+      message: `ROI rigid alignment… (source ${idx + 1} of ${seriesUids.length})`,
     });
 
     // Build a reference volume from all other series (used only for scoring).
@@ -248,8 +432,8 @@ async function rigidAlignSeriesInRoi(params: {
 
     if (samples.count < 1024 || referenceSamples.count < 1024) {
       console.warn('[svr] ROI rigid alignment: too few samples inside ROI; skipping series', {
-        seriesUid: uid,
-        label: labelByUid.get(uid) ?? uid,
+        source: idx + 1,
+        sourceCount: seriesUids.length,
         samples: samples.count,
         referenceSamples: referenceSamples.count,
       });
@@ -295,8 +479,8 @@ async function rigidAlignSeriesInRoi(params: {
       debugSvrLog(
         'registration.roi-rigid.skip',
         {
-          seriesUid: uid,
-          label: labelByUid.get(uid) ?? uid,
+          source: idx + 1,
+          sourceCount: seriesUids.length,
           nccBefore: before.ncc,
           nccAfter: after.ncc,
           used: after.used,
@@ -312,8 +496,8 @@ async function rigidAlignSeriesInRoi(params: {
     applyRigidToSeriesSlices({ slices: movingSlices, centerMm, rot, tMm });
 
     console.info('[svr] ROI rigid series alignment applied', {
-      seriesUid: uid,
-      label: labelByUid.get(uid) ?? uid,
+      source: idx + 1,
+      sourceCount: seriesUids.length,
       nccBefore: Number(before.ncc.toFixed(4)),
       nccAfter: Number(after.ncc.toFixed(4)),
       usedSamples: after.used,
@@ -333,8 +517,8 @@ async function rigidAlignSeriesInRoi(params: {
     debugSvrLog(
       'registration.roi-rigid',
       {
-        seriesUid: uid,
-        label: labelByUid.get(uid) ?? uid,
+        source: idx + 1,
+        sourceCount: seriesUids.length,
         samples: samples.count,
         usedSamples: after.used,
         nccBefore: before.ncc,
@@ -359,6 +543,25 @@ function computeBoundsMm(slices: LoadedSlice[]): { min: Vec3; max: Vec3 } {
   let maxZ = Number.NEGATIVE_INFINITY;
 
   for (const s of slices) {
+    const thickness = s.sliceThicknessMm;
+    // Center spacing is not slice thickness: missing slabs remain unobserved.
+    const halfThickness =
+      typeof thickness === 'number' && Number.isFinite(thickness) && thickness > 0 ? thickness / 2 : 0;
+    const halfRowSpacing = s.rowSpacingDsMm / 2;
+    const halfColSpacing = s.colSpacingDsMm / 2;
+    const halfExtentX =
+      Math.abs(s.colDir.x) * halfRowSpacing +
+      Math.abs(s.rowDir.x) * halfColSpacing +
+      Math.abs(s.normalDir.x) * halfThickness;
+    const halfExtentY =
+      Math.abs(s.colDir.y) * halfRowSpacing +
+      Math.abs(s.rowDir.y) * halfColSpacing +
+      Math.abs(s.normalDir.y) * halfThickness;
+    const halfExtentZ =
+      Math.abs(s.colDir.z) * halfRowSpacing +
+      Math.abs(s.rowDir.z) * halfColSpacing +
+      Math.abs(s.normalDir.z) * halfThickness;
+
     const corners = sliceCornersMm({
       ippMm: s.ippMm,
       rowDir: s.rowDir,
@@ -370,12 +573,12 @@ function computeBoundsMm(slices: LoadedSlice[]): { min: Vec3; max: Vec3 } {
     });
 
     for (const p of corners) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.z < minZ) minZ = p.z;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-      if (p.z > maxZ) maxZ = p.z;
+      if (p.x - halfExtentX < minX) minX = p.x - halfExtentX;
+      if (p.y - halfExtentY < minY) minY = p.y - halfExtentY;
+      if (p.z - halfExtentZ < minZ) minZ = p.z - halfExtentZ;
+      if (p.x + halfExtentX > maxX) maxX = p.x + halfExtentX;
+      if (p.y + halfExtentY > maxY) maxY = p.y + halfExtentY;
+      if (p.z + halfExtentZ > maxZ) maxZ = p.z + halfExtentZ;
     }
   }
 
@@ -383,11 +586,9 @@ function computeBoundsMm(slices: LoadedSlice[]): { min: Vec3; max: Vec3 } {
     throw new Error('Failed to compute bounds for SVR');
   }
 
-  // Small padding to avoid clipping due to rounding.
-  const pad = 1;
   return {
-    min: v3(minX - pad, minY - pad, minZ - pad),
-    max: v3(maxX + pad, maxY + pad, maxZ + pad),
+    min: v3(minX, minY, minZ),
+    max: v3(maxX, maxY, maxZ),
   };
 }
 
@@ -456,9 +657,32 @@ export async function computeSvrFromLoadedSlices(params: {
   signal?: AbortSignal;
   onProgress?: (p: SvrProgress) => void;
   debug: boolean;
+  residentCacheBytes?: number;
 }): Promise<SvrComputeResult> {
-  const { allSlices, intensitySamples, intensitySamplesBySeries, seriesMeta, svrParams, signal, onProgress, debug } =
-    params;
+  const { allSlices, intensitySamples, intensitySamplesBySeries, svrParams, signal, onProgress, debug } = params;
+
+  assertNotAborted(signal);
+  if (allSlices.length === 0) throw new Error('SVR requires at least one physically located source slice');
+
+  let acceptedFrameOfReferenceUid: string | undefined;
+  for (const slice of allSlices) {
+    if (slice.pixels.length !== slice.dsRows * slice.dsCols) {
+      throw new Error('SVR source pixels do not match their image dimensions');
+    }
+    if (slice.valid && slice.valid.length !== slice.pixels.length) {
+      throw new Error('SVR acquired-pixel support does not match its image dimensions');
+    }
+    if (slice.validScale !== undefined && (!Number.isFinite(slice.validScale) || slice.validScale <= 0)) {
+      throw new Error('SVR acquired-pixel support has an invalid quantitative scale');
+    }
+
+    const frameOfReferenceUid = slice.frameOfReferenceUid?.trim();
+    if (!frameOfReferenceUid) continue;
+    if (acceptedFrameOfReferenceUid && acceptedFrameOfReferenceUid !== frameOfReferenceUid) {
+      throw new Error('SVR cannot fuse incompatible frame-of-reference coordinate frames');
+    }
+    acceptedFrameOfReferenceUid = frameOfReferenceUid;
+  }
 
   // Normalize all slices to [0,1] using a robust global percentile window.
   //
@@ -534,7 +758,7 @@ export async function computeSvrFromLoadedSlices(params: {
       if (!m) continue;
 
       for (let i = 0; i < s.pixels.length; i++) {
-        s.pixels[i] = mapValue(s.pixels[i] ?? 0, m);
+        if (!s.valid || s.valid[i]) s.pixels[i] = mapValue(s.pixels[i] ?? 0, m);
       }
     }
 
@@ -573,6 +797,10 @@ export async function computeSvrFromLoadedSlices(params: {
 
   for (const s of allSlices) {
     for (let i = 0; i < s.pixels.length; i++) {
+      if (s.valid && !s.valid[i]) {
+        s.pixels[i] = 0;
+        continue;
+      }
       const v = s.pixels[i] ?? 0;
       const n = invWinRange > 0 ? (v - winLo) * invWinRange : 0;
       s.pixels[i] = clamp01(n);
@@ -594,6 +822,7 @@ export async function computeSvrFromLoadedSlices(params: {
       if (arr) arr.push(s);
       else bySeries.set(s.seriesUid, [s]);
     }
+    const sourceOrdinals = new Map(Array.from(bySeries.keys(), (uid, index) => [uid, index + 1] as const));
 
     // Pick reference series:
     // - Prefer the ROI's source series (if provided), so the ROI stays in the same coordinate frame.
@@ -626,7 +855,8 @@ export async function computeSvrFromLoadedSlices(params: {
       debugSvrLog(
         'registration.reference',
         {
-          referenceUid,
+          referenceSource: sourceOrdinals.get(referenceUid),
+          sourceCount: bySeries.size,
           loadedSlices: refSlices.length,
           centerMm: { x: refCenter.x, y: refCenter.y, z: refCenter.z },
         },
@@ -650,7 +880,8 @@ export async function computeSvrFromLoadedSlices(params: {
         debugSvrLog(
           'registration.bounds-center',
           {
-            seriesUid: uid,
+            source: sourceOrdinals.get(uid),
+            sourceCount: bySeries.size,
             translateMm: { x: Number(t.x.toFixed(3)), y: Number(t.y.toFixed(3)), z: Number(t.z.toFixed(3)) },
             magnitudeMm: Number(tMag.toFixed(3)),
           },
@@ -660,7 +891,8 @@ export async function computeSvrFromLoadedSlices(params: {
         // Warn if we're doing something large; this is often a sign of inconsistent DICOM spatial tags.
         if (tMag > 20) {
           console.warn('[svr] Large coarse alignment translation applied', {
-            seriesUid: uid,
+            source: sourceOrdinals.get(uid),
+            sourceCount: bySeries.size,
             magnitudeMm: tMag,
             translateMm: t,
           });
@@ -686,67 +918,51 @@ export async function computeSvrFromLoadedSlices(params: {
   });
 
   const iterations = Math.max(0, Math.round(svrParams.iterations));
+  const sourceBytes = allSlices.reduce(
+    (total, slice) => total + slice.pixels.byteLength + (slice.valid?.byteLength ?? 0),
+    0,
+  );
 
-  const estimatePeakBytes = (nvox: number, iters: number): number => {
-    // Persistent arrays:
-    // - volume
-    // - weight (reused as updateW during refinement)
-    // Per-iteration arrays:
-    // - update
-    const floatBytes = 4;
-    const arrays = iters > 0 ? 3 : 2;
-    return arrays * nvox * floatBytes;
-  };
-
-  // Rough safety budget to avoid browser OOM / tab crashes.
-  // Note: this is only for the core volume arrays; it does not include slice buffers, JS overhead, or GPU textures.
-  const MAX_PEAK_BYTES = 512 * 1024 * 1024;
-
-  let grid = chooseOutputGrid({
+  const grid = chooseOutputGrid({
     bounds,
     voxelSizeMm: svrParams.targetVoxelSizeMm,
     maxDim: svrParams.maxVolumeDim,
   });
 
-  // Preflight: if the volume would be huge, auto-increase voxel size until it fits a memory budget.
-  // This prevents hard crashes/hangs from attempting multi-hundred-MiB allocations.
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const nvox = grid.dims.nx * grid.dims.ny * grid.dims.nz;
-    const peakBytes = estimatePeakBytes(nvox, iterations);
-
-    if (peakBytes <= MAX_PEAK_BYTES) break;
-
-    const factor = Math.cbrt(peakBytes / MAX_PEAK_BYTES) * 1.05;
-    const nextVoxelSizeMm = grid.voxelSizeMm * factor;
-
-    console.warn('[svr] Volume would be too large; increasing voxel size to fit memory budget', {
-      attempt: attempt + 1,
-      dims: grid.dims,
-      voxelSizeMm: Number(grid.voxelSizeMm.toFixed(4)),
-      nextVoxelSizeMm: Number(nextVoxelSizeMm.toFixed(4)),
-      peak: formatMiB(peakBytes),
-      budget: formatMiB(MAX_PEAK_BYTES),
-      iterations,
-      maxVolumeDim: svrParams.maxVolumeDim,
-      roi: roi ? { mode: roi.mode, sourcePlane: roi.sourcePlane } : null,
-    });
-
-    grid = chooseOutputGrid({
-      bounds,
-      voxelSizeMm: nextVoxelSizeMm,
-      maxDim: svrParams.maxVolumeDim,
-    });
-  }
-
   const { dims, originMm, voxelSizeMm } = grid;
   const nvox = dims.nx * dims.ny * dims.nz;
-  const peakBytes = estimatePeakBytes(nvox, iterations);
+  let registrationScoreMaxDim = 160;
+  if (roi && svrParams.seriesRegistrationMode === 'roi-rigid') {
+    try {
+      const override = Number(localStorage.getItem('miraviewer:svr-roi-rigid-score-max-dim'));
+      if (Number.isFinite(override) && override > 0) {
+        registrationScoreMaxDim = Math.max(64, Math.min(256, Math.round(override)));
+      }
+    } catch {
+      // Dedicated workers have no localStorage and always use the canonical 160-voxel score grid.
+    }
+  }
+  const registrationBytes =
+    roi && svrParams.seriesRegistrationMode === 'roi-rigid'
+      ? estimateSvrRegistrationBytes(nvox, registrationScoreMaxDim)
+      : 0;
+  const memoryPlan = estimateSvrPeakMemoryBytes({
+    voxelCount: nvox,
+    sourceBytes,
+    iterations,
+    retainedBytes: params.residentCacheBytes,
+    registrationBytes,
+  });
+  const peakBytes = memoryPlan.totalBytes;
 
-  if (peakBytes > MAX_PEAK_BYTES) {
+  if (peakBytes > SVR_MEMORY_BUDGET_BYTES) {
     throw new Error(
-      `SVR volume too large (${dims.nx}×${dims.ny}×${dims.nz}); estimated peak ${formatMiB(peakBytes)} exceeds budget ${formatMiB(
-        MAX_PEAK_BYTES,
-      )}. Try enabling ROI, increasing voxel size, lowering maxVolumeDim, or reducing iterations.`,
+      `SVR volume too large (${dims.nx}×${dims.ny}×${dims.nz}); estimated peak ${formatMiB(peakBytes)} ` +
+        `(source ${formatMiB(memoryPlan.sourceBytes)}, solver ${formatMiB(memoryPlan.solverBytes)}, ` +
+        `support ${formatMiB(memoryPlan.supportBytes)}, display ${formatMiB(memoryPlan.displayBytes)}, ` +
+        `decoded cache ${formatMiB(memoryPlan.retainedBytes)}, registration ${formatMiB(memoryPlan.registrationBytes)}) ` +
+        `exceeds budget ${formatMiB(SVR_MEMORY_BUDGET_BYTES)}. ` +
+        'Select a smaller focus region, lower the maximum dimension, or explicitly choose a coarser voxel size.',
     );
   }
 
@@ -759,6 +975,12 @@ export async function computeSvrFromLoadedSlices(params: {
     maxVolumeDim: svrParams.maxVolumeDim,
     dims,
     estimatedPeak: formatMiB(peakBytes),
+    estimatedSource: formatMiB(memoryPlan.sourceBytes),
+    estimatedSolver: formatMiB(memoryPlan.solverBytes),
+    estimatedSupport: formatMiB(memoryPlan.supportBytes),
+    estimatedDisplay: formatMiB(memoryPlan.displayBytes),
+    estimatedResidentCache: formatMiB(memoryPlan.retainedBytes),
+    estimatedRegistration: formatMiB(memoryPlan.registrationBytes),
     iterations,
     boundsMm: {
       min: {
@@ -785,7 +1007,6 @@ export async function computeSvrFromLoadedSlices(params: {
       onProgress?.({ phase: 'initializing', current: 56, total: 100, message: 'ROI rigid alignment…' });
       await rigidAlignSeriesInRoi({
         allSlices,
-        selectedSeries: seriesMeta,
         roiBounds: bounds,
         dims,
         originMm,
@@ -830,6 +1051,10 @@ export async function computeSvrFromLoadedSlices(params: {
       afterCount: allSlices.length,
     });
 
+    if (allSlices.length === 0) {
+      throw new Error('SVR focus region contains no physically acquired source slices');
+    }
+
     if (debug) {
       const sliceBytes = allSlices.reduce((acc, s) => acc + (s.pixels?.byteLength ?? 0), 0);
       debugSvrLog(
@@ -843,6 +1068,8 @@ export async function computeSvrFromLoadedSlices(params: {
       );
     }
   }
+
+  const acquisitionEvidence = deriveAcquisitionEvidence(allSlices, voxelSizeMm);
 
   // 5) Reconstruction (higher-fidelity forward model + solver).
   onProgress?.({ phase: 'reconstructing', current: 60, total: 100, message: 'Reconstructing volume…' });
@@ -882,6 +1109,8 @@ export async function computeSvrFromLoadedSlices(params: {
     iterations > 0;
 
   let volume: Float32Array;
+  let observedSupport: Uint8Array;
+  let supportedVoxelCount = 0;
 
   if (multiresEnabled) {
     const factor = Math.max(1.01, svrParams.multiResolutionFactor ?? 2);
@@ -903,9 +1132,11 @@ export async function computeSvrFromLoadedSlices(params: {
 
     onProgress?.({ phase: 'reconstructing', current: 62, total: 100, message: 'Coarse reconstruction…' });
 
+    const coarseSupport = new Uint8Array(coarseGrid.dims.nx * coarseGrid.dims.ny * coarseGrid.dims.nz);
     let coarse: Float32Array | null = await reconstructVolumeFromSlices({
       slices: allSlices,
       grid: coarseGrid,
+      occupancy: coarseSupport,
       options: {
         ...solverOptions,
         iterations: coarseIters,
@@ -935,6 +1166,19 @@ export async function computeSvrFromLoadedSlices(params: {
     // Best-effort: drop the coarse reference as early as possible to reduce peak memory.
     coarse = null;
 
+    // A coarse-grid footprint is deliberately wider than the fine acquired domain.
+    // Rebuild support directly from fine-grid source observations rather than
+    // promoting interpolated coarse neighbors to fabricated anatomy.
+    observedSupport = await buildObservedSupportFromSlices({
+      slices: allSlices,
+      grid: fineGrid,
+      psfMode: solverOptions.psfMode,
+      hooks: { signal, yieldToMain },
+      onObservedSupport: (count) => {
+        supportedVoxelCount = count;
+      },
+    });
+
     onProgress?.({ phase: 'reconstructing', current: 70, total: 100, message: 'Refining volume…' });
 
     await refineVolumeInPlace({
@@ -942,22 +1186,35 @@ export async function computeSvrFromLoadedSlices(params: {
       slices: allSlices,
       grid: fineGrid,
       options: solverOptions,
+      occupancy: observedSupport,
       hooks: {
         signal,
         yieldToMain,
       },
     });
   } else {
+    observedSupport = new Uint8Array(nvox);
     volume = await reconstructVolumeFromSlices({
       slices: allSlices,
       grid: fineGrid,
       options: solverOptions,
+      occupancy: observedSupport,
+      onObservedSupport: (count) => {
+        supportedVoxelCount = count;
+      },
       hooks: {
         signal,
         yieldToMain,
       },
     });
   }
+
+  const reconstructionFingerprint = fingerprintReconstruction({
+    slices: allSlices,
+    svrParams,
+    grid: fineGrid,
+    supportedVoxelCount,
+  });
 
   // The solver is the last consumer of the slice stack. Its decoded/downsampled pixel
   // buffers (typically tens of MiB across all series) would otherwise stay reachable until
@@ -966,5 +1223,15 @@ export async function computeSvrFromLoadedSlices(params: {
   // the LoadedSlice objects at this point (the per-phase series maps are scope-local).
   allSlices.length = 0;
 
-  return { volume, dims, originMm, voxelSizeMm, bounds };
+  return {
+    volume,
+    observedSupport,
+    supportedVoxelCount,
+    ...acquisitionEvidence,
+    reconstructionFingerprint,
+    dims,
+    originMm,
+    voxelSizeMm,
+    bounds,
+  };
 }

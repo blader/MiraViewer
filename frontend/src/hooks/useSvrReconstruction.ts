@@ -4,9 +4,11 @@ import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
 
 export type UseSvrReconstructionState = {
+  status: 'idle' | 'running' | 'canceling' | 'ready' | 'canceled' | 'failed';
   isRunning: boolean;
   progress: SvrProgress | null;
   result: SvrResult | null;
+  resultIdentity: string | null;
   error: string | null;
 };
 
@@ -18,9 +20,11 @@ export type SvrRunOutcome = {
 
 export function useSvrReconstruction() {
   const [state, setState] = useState<UseSvrReconstructionState>({
+    status: 'idle',
     isRunning: false,
     progress: null,
     result: null,
+    resultIdentity: null,
     error: null,
   });
 
@@ -38,32 +42,53 @@ export function useSvrReconstruction() {
   );
 
   const cancel = useCallback(() => {
-    abortRef.current?.abort();
+    const controller = abortRef.current;
+    if (!controller) return;
+
+    setState((current) => ({
+      ...current,
+      status: 'canceling',
+      progress: current.progress
+        ? { ...current.progress, message: 'Canceling reconstruction…' }
+        : { phase: 'idle', current: 0, total: 100, message: 'Canceling reconstruction…' },
+    }));
+    controller.abort();
   }, []);
 
   const clear = useCallback(() => {
     runIdRef.current++;
     abortRef.current?.abort();
     abortRef.current = null;
-    setState({ isRunning: false, progress: null, result: null, error: null });
+    setState({ status: 'idle', isRunning: false, progress: null, result: null, resultIdentity: null, error: null });
   }, []);
 
   const run = useCallback(
-    async (selectedSeries: SvrSelectedSeries[], params?: Partial<SvrParams>): Promise<SvrRunOutcome> => {
+    async (
+      selectedSeries: SvrSelectedSeries[],
+      params?: Partial<SvrParams>,
+      identity?: string,
+    ): Promise<SvrRunOutcome> => {
       abortRef.current?.abort();
 
       const controller = new AbortController();
       const runId = ++runIdRef.current;
       abortRef.current = controller;
+      const operationIdentity =
+        identity ??
+        selectedSeries
+          .map((series) => series.seriesUid)
+          .sort((left, right) => left.localeCompare(right))
+          .join('|');
 
       const svrParams: SvrParams = { ...DEFAULT_SVR_PARAMS, ...(params || {}) };
 
-      setState({
+      setState((current) => ({
+        ...current,
+        status: 'running',
         isRunning: true,
         progress: { phase: 'idle', current: 0, total: 100, message: 'Starting…' },
-        result: null,
         error: null,
-      });
+      }));
 
       lastProgressUpdateMsRef.current = 0;
 
@@ -85,21 +110,40 @@ export function useSvrReconstruction() {
             }
             lastProgressUpdateMsRef.current = now;
 
-            setState((s) => ({
-              ...s,
-              progress: p,
-            }));
+            setState((current) => {
+              const previous = current.progress
+                ? (current.progress.current / Math.max(1, current.progress.total)) * 100
+                : 0;
+              const next = (p.current / Math.max(1, p.total)) * 100;
+
+              return {
+                ...current,
+                progress: {
+                  ...p,
+                  current: Math.min(100, Math.max(previous, next)),
+                  total: 100,
+                },
+              };
+            });
           },
         });
 
-        if (runIdRef.current === runId && !controller.signal.aborted) {
-          setState({
-            isRunning: false,
-            progress: { phase: 'finalizing', current: 100, total: 100, message: 'Done' },
-            result,
-            error: null,
-          });
+        if (runIdRef.current !== runId || controller.signal.aborted) {
+          return {
+            result: null,
+            error: 'Reconstruction was canceled.',
+            durationMs: performance.now() - started,
+          };
         }
+
+        setState({
+          status: 'ready',
+          isRunning: false,
+          progress: null,
+          result,
+          resultIdentity: operationIdentity,
+          error: null,
+        });
 
         return {
           result,
@@ -109,12 +153,13 @@ export function useSvrReconstruction() {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (runIdRef.current === runId) {
-          setState({
+          setState((current) => ({
+            ...current,
+            status: controller.signal.aborted ? 'canceled' : 'failed',
             isRunning: false,
             progress: null,
-            result: null,
             error: controller.signal.aborted ? null : msg,
-          });
+          }));
         }
 
         return {

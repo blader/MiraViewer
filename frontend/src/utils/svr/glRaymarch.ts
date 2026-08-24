@@ -6,6 +6,7 @@
  */
 
 import { clamp } from '../math';
+import { yieldToMain } from './svrUtils';
 
 export const SVR3D_CAMERA_Z = 1.6;
 export const SVR3D_FOCAL_Z = 1.2;
@@ -42,6 +43,60 @@ export function chooseVolumeTextureFormat(gl: WebGL2RenderingContext): {
   return { primary, fallback };
 }
 
+const ALWAYS_SUPPORTED_PLACEHOLDER = new Uint8Array([255]);
+
+/** Upload acquired support separately: normalized intensity zero is still valid evidence. */
+export function createObservedSupportTexture(
+  gl: WebGL2RenderingContext,
+  params: { data?: Uint8Array; dims: { nx: number; ny: number; nz: number } },
+): { texture: WebGLTexture; enabled: boolean } {
+  const support = params.data;
+  const voxelCount = params.dims.nx * params.dims.ny * params.dims.nz;
+  if (support && support.length !== voxelCount) {
+    throw new Error('Acquired-support evidence does not match the displayed reconstruction.');
+  }
+
+  const texture = gl.createTexture();
+  if (!texture) throw new Error('Failed to allocate the acquired-support 3D texture.');
+
+  gl.activeTexture(gl.TEXTURE4);
+  gl.bindTexture(gl.TEXTURE_3D, texture);
+
+  try {
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+    // Support is categorical evidence: filtering would invent observations across gaps.
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    gl.texImage3D(
+      gl.TEXTURE_3D,
+      0,
+      gl.R8,
+      support ? params.dims.nx : 1,
+      support ? params.dims.ny : 1,
+      support ? params.dims.nz : 1,
+      0,
+      gl.RED,
+      gl.UNSIGNED_BYTE,
+      support ?? ALWAYS_SUPPORTED_PLACEHOLDER,
+    );
+
+    if (gl.getError() !== gl.NO_ERROR) {
+      throw new Error('The GPU could not upload acquired-support evidence.');
+    }
+  } catch (error) {
+    gl.bindTexture(gl.TEXTURE_3D, null);
+    gl.deleteTexture(texture);
+    throw error;
+  }
+
+  gl.bindTexture(gl.TEXTURE_3D, null);
+  return { texture, enabled: Boolean(support) };
+}
+
 /**
  * Convert float32 samples to IEEE 754 half-float bit patterns for HALF_FLOAT texture upload
  * (WebGL2 requires the data view for HALF_FLOAT to be a Uint16Array of raw f16 bits).
@@ -51,13 +106,8 @@ export function chooseVolumeTextureFormat(gl: WebGL2RenderingContext): {
  * mantissa bits and rounds to nearest. Volume data is normalized ~[0,1], so the
  * subnormal/overflow branches are correctness backstops rather than hot paths.
  */
-export function float32ToFloat16Bits(src: Float32Array): Uint16Array {
-  const n = src.length;
-  const out = new Uint16Array(n);
-  // Float32Array is always 4-byte aligned, so reinterpreting its buffer is safe.
-  const words = new Uint32Array(src.buffer, src.byteOffset, n);
-
-  for (let i = 0; i < n; i++) {
+function writeFloat16Range(words: Uint32Array, out: Uint16Array, start: number, end: number): void {
+  for (let i = start; i < end; i++) {
     const x = words[i]!;
     let h = (x >> 16) & 0x8000; // sign
     const e = (x >> 23) & 0xff; // f32 exponent
@@ -83,8 +133,48 @@ export function float32ToFloat16Bits(src: Float32Array): Uint16Array {
 
     out[i] = h;
   }
+}
 
+async function runCooperatively<T>(work: Generator<void, T, void>, isCancelled: () => boolean): Promise<T> {
+  if (isCancelled()) throw new Error('3D render preparation cancelled');
+  let started = performance.now();
+
+  for (let current = work.next(); ; current = work.next()) {
+    if (isCancelled()) throw new Error('3D render preparation cancelled');
+    if (current.done) return current.value;
+
+    if (performance.now() - started >= 8) {
+      await yieldToMain();
+      if (isCancelled()) throw new Error('3D render preparation cancelled');
+      started = performance.now();
+    }
+  }
+}
+
+export function float32ToFloat16Bits(src: Float32Array): Uint16Array {
+  const out = new Uint16Array(src.length);
+  // Float32Array is always 4-byte aligned, so reinterpreting its buffer is safe.
+  const words = new Uint32Array(src.buffer, src.byteOffset, src.length);
+  writeFloat16Range(words, out, 0, src.length);
   return out;
+}
+
+/** Prepare the same exact half-float representation without a long main-thread task. */
+export async function float32ToFloat16BitsAsync(src: Float32Array, isCancelled: () => boolean): Promise<Uint16Array> {
+  if (isCancelled()) throw new Error('3D render preparation cancelled');
+  const out = new Uint16Array(src.length);
+  const words = new Uint32Array(src.buffer, src.byteOffset, src.length);
+
+  function* prepare(): Generator<void, Uint16Array, void> {
+    const chunkSize = 131_072;
+    for (let start = 0; start < words.length; start += chunkSize) {
+      writeFloat16Range(words, out, start, Math.min(words.length, start + chunkSize));
+      yield;
+    }
+    return out;
+  }
+
+  return runCooperatively(prepare(), isCancelled);
 }
 
 export function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -142,11 +232,18 @@ export const SVR3D_OCC_BLOCK = 8;
  *   swallows the R16F upload's round-to-nearest (which can land a hair above the f32
  *   source value). Bigger stored max == fewer skips == always safe.
  */
-export function buildOccupancyMaxGrid(params: {
+type OccupancyMaxGridParams = {
   data: Float32Array | Uint8Array;
   dims: { nx: number; ny: number; nz: number };
   blockSize?: number;
-}): { data: Uint8Array; dims: { nx: number; ny: number; nz: number } } {
+};
+
+export type OccupancyMaxGrid = {
+  data: Uint8Array;
+  dims: { nx: number; ny: number; nz: number };
+};
+
+function* prepareOccupancyMaxGrid(params: OccupancyMaxGridParams): Generator<void, OccupancyMaxGrid, void> {
   const { data, dims } = params;
   const B = Math.max(2, Math.round(params.blockSize ?? SVR3D_OCC_BLOCK));
 
@@ -181,6 +278,7 @@ export function buildOccupancyMaxGrid(params: {
         if (v > rawMax[oi]!) rawMax[oi] = v;
       }
     }
+    yield;
   }
 
   // Pass 2: dilate over neighboring cells + quantize conservatively. The occupancy grid is
@@ -216,9 +314,25 @@ export function buildOccupancyMaxGrid(params: {
         out[z * occStrideZ + y * occStrideY + x] = Math.min(255, q + 1);
       }
     }
+    yield;
   }
 
   return { data: out, dims: { nx: ox, ny: oy, nz: oz } };
+}
+
+export function buildOccupancyMaxGrid(params: OccupancyMaxGridParams): OccupancyMaxGrid {
+  const work = prepareOccupancyMaxGrid(params);
+  for (let current = work.next(); ; current = work.next()) {
+    if (current.done) return current.value;
+  }
+}
+
+/** Build the identical conservative grid while yielding between physical slabs. */
+export function buildOccupancyMaxGridAsync(
+  params: OccupancyMaxGridParams,
+  isCancelled: () => boolean,
+): Promise<OccupancyMaxGrid> {
+  return runCooperatively(prepareOccupancyMaxGrid(params), isCancelled);
 }
 
 export const RAYMARCH_VERTEX_SHADER = `#version 300 es
@@ -239,6 +353,8 @@ in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler3D u_vol;
+uniform sampler3D u_support;
+uniform int u_supportEnabled;
 uniform usampler3D u_labels;
 uniform sampler2D u_palette;
 uniform int u_labelsEnabled;
@@ -272,14 +388,6 @@ const float FOCAL_Z = ${SVR3D_FOCAL_Z};
 
 float saturate(float x) {
   return clamp(x, 0.0, 1.0);
-}
-
-float radial01(vec3 pos) {
-  // pos is in object space centered at the volume centroid.
-  // Normalize by the half box extents so r=1 is approximately the box surface (clamped).
-  vec3 halfBox = 0.5 * u_box;
-  vec3 q = pos / max(halfBox, vec3(1e-6));
-  return saturate(length(q));
 }
 
 bool intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1) {
@@ -322,16 +430,10 @@ void main() {
   int n = clamp(u_steps, 8, MAX_STEPS);
   float dt = (t1 - t0) / float(n);
 
-  // Radial prior + gradient-based shading.
-  //
-  // Prior: the center of the box is more likely to contain the structure of interest.
-  // We use that to:
-  // - keep the intensity threshold low near the center and higher near the edges
-  // - boost edge shading near the center
-  //
-  // NOTE: Use *linear* radial ramps for predictability.
+  // The transfer function is spatially neutral: equal acquired intensities and
+  // gradients must remain equally visible at the center and at the periphery.
   const float EDGE_K = 14.0;
-  const float CENTER_EDGE_GAIN = 2.5;
+  float thr = saturate(u_thr);
 
   vec3 accum = vec3(0.0);
   float aAccum = 0.0;
@@ -348,11 +450,7 @@ void main() {
   vec3 vDir = normalize(-rd);
 
   // Frame-constant terms for empty-space skipping, hoisted out of the march loop.
-  // occPad bounds how much the radial coordinate can change across one occupancy cell
-  // (cell size in r-units is 2x its size in texture units, since r normalizes by the half
-  // box): subtracting it from r gives a threshold floor valid for the entire cell.
   vec3 occCellSizeTc = vec3(float(u_occBlock)) * u_texel;
-  float occPad = 2.0 * length(occCellSizeTc);
   vec3 rdTc = rd / u_box;
   vec3 aRdTc = abs(rdTc) + 1e-12;
 
@@ -363,14 +461,11 @@ void main() {
     // Map object-space box to texture coords [0,1]
     vec3 tc = pos / u_box + 0.5;
 
-    float r = radial01(pos);
-
-    // thrW ramps 0 at center -> 1 at edge.
-    float thrW = r;
-    // centerW ramps 1 at center -> 0 at edge.
-    float centerW = 1.0 - r;
-
-    float thr = saturate(u_thr * thrW);
+    // Acquired bytes are 0/1; normalized R8 turns supported 1 into 1/255,
+    // so any positive value is evidence. Never infer support from intensity.
+    if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) {
+      continue;
+    }
 
     if (u_occEnabled != 0) {
       // Empty-space skipping: if even the lowest threshold anywhere in this occupancy
@@ -380,9 +475,7 @@ void main() {
       ivec3 vox = ivec3(clamp(tc, 0.0, 1.0) / u_texel);
       ivec3 cell = clamp(vox / u_occBlock, ivec3(0), u_occMaxCell);
       float occMax = texelFetch(u_occ, cell, 0).r;
-      float thrFloor = saturate(u_thr * saturate(r - occPad));
-
-      if (thrFloor > 0.0 && occMax < thrFloor) {
+      if (thr > 0.0 && occMax < thr) {
         // Distance (in ray-parameter units) to this cell's exit, via per-axis positive
         // distances — formulated to avoid div-by-zero/NaN for axis-aligned rays. The eps
         // in aRdTc only shrinks the leap, never overshoots.
@@ -414,12 +507,10 @@ void main() {
       vec3 grad = vec3(vx1 - vx0, vy1 - vy0, vz1 - vz0);
       float gmag = length(grad);
 
-      // Edge factor (boosted near the center).
-      //
+      // Edge factor, applied uniformly throughout the physical volume.
       // IMPORTANT: use an exponential mapping so the "Edge strength" slider stays responsive
       // instead of quickly saturating to 1.0 for most edges.
-      float centerGain = mix(1.0, CENTER_EDGE_GAIN, saturate(centerW));
-      float edgeRaw = gmag * EDGE_K * centerGain;
+      float edgeRaw = gmag * EDGE_K;
       float edge = 1.0 - exp(-edgeRaw * u_gamma);
       edge = saturate(edge);
       edge = edge * edge;

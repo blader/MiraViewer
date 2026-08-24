@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { VolumeDims } from '../src/utils/svr/trilinear';
 import type { SvrReconstructionGrid, SvrReconstructionOptions } from '../src/utils/svr/reconstructionCore';
-import { reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
+import { buildObservedSupportFromSlices, reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
 import type { LoadedSlice } from '../src/utils/svr/rigidRegistration';
 import { computeSvrFromLoadedSlices } from '../src/utils/svr/svrComputeCore';
+import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import type { SvrParams } from '../src/types/svr';
 
 // Synthetic-slice helpers mirror tests/svrPhantom.test.ts (its helpers are not
@@ -230,6 +231,206 @@ describe('svr/computeCore', () => {
     expect(Array.from(volume)).toEqual([-2, 0, 5, 0]);
   });
 
+  it('preserves a supported intensity of 100 instead of averaging it with unsupported padding into 50', async () => {
+    const source = {
+      dsRows: 1,
+      dsCols: 1,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      normalDir: { x: 0, y: 0, z: 1 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+      sliceThicknessMm: null,
+      spacingBetweenSlicesMm: null,
+    };
+    const observedSupport = new Uint8Array(1);
+
+    const volume = await reconstructVolumeFromSlices({
+      slices: [
+        { ...source, pixels: new Float32Array([100]), valid: new Uint8Array([1]) },
+        { ...source, pixels: new Float32Array([0]), valid: new Uint8Array([0]) },
+      ],
+      grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy: observedSupport,
+      options: {
+        iterations: 0,
+        stepSize: 0,
+        clampOutput: false,
+        psfMode: 'none',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0,
+      },
+    });
+
+    expect(Array.from(observedSupport)).toEqual([1]);
+    expect(Array.from(volume)).toEqual([100]);
+  });
+
+  it('weights a 25%-acquired footprint one quarter as strongly as fully acquired anatomy', async () => {
+    const source = {
+      dsRows: 1,
+      dsCols: 1,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      normalDir: { x: 0, y: 0, z: 1 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+      sliceThicknessMm: null,
+      spacingBetweenSlicesMm: null,
+      validScale: 255,
+    };
+    const observedSupport = new Uint8Array(1);
+
+    const volume = await reconstructVolumeFromSlices({
+      slices: [
+        { ...source, pixels: new Float32Array([100]), valid: new Uint8Array([255]) },
+        { ...source, pixels: new Float32Array([0]), valid: new Uint8Array([64]) },
+      ],
+      grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy: observedSupport,
+      options: {
+        iterations: 2,
+        stepSize: 0.6,
+        clampOutput: false,
+        psfMode: 'none',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0,
+      },
+    });
+
+    expect(observedSupport[0]).toBe(1);
+    expect(volume[0]).toBeCloseTo(100 / (1 + 64 / 255), 5);
+  });
+
+  it('does not reinterpret inter-slice spacing as acquired slice thickness', async () => {
+    const dims = { nx: 1, ny: 1, nz: 15 };
+    const observedSupport = new Uint8Array(15);
+
+    await reconstructVolumeFromSlices({
+      slices: [
+        {
+          pixels: new Float32Array([1]),
+          valid: new Uint8Array([1]),
+          dsRows: 1,
+          dsCols: 1,
+          ippMm: { x: 0, y: 0, z: 7 },
+          rowDir: { x: 1, y: 0, z: 0 },
+          colDir: { x: 0, y: 1, z: 0 },
+          normalDir: { x: 0, y: 0, z: 1 },
+          rowSpacingDsMm: 1,
+          colSpacingDsMm: 1,
+          sliceThicknessMm: null,
+          spacingBetweenSlicesMm: 8,
+        },
+      ],
+      grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy: observedSupport,
+      options: {
+        iterations: 0,
+        stepSize: 0,
+        clampOutput: true,
+        psfMode: 'box',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0,
+      },
+    });
+
+    expect(observedSupport[7]).toBe(1);
+    expect(observedSupport.reduce((count, supported) => count + supported, 0)).toBe(1);
+  });
+
+  it('integrates the complete coarse in-plane pixel footprint instead of inventing unsupported gaps', async () => {
+    const dims = { nx: 11, ny: 11, nz: 1 };
+    const observedSupport = new Uint8Array(dims.nx * dims.ny);
+
+    const volume = await reconstructVolumeFromSlices({
+      slices: [
+        {
+          pixels: new Float32Array([0.75]),
+          valid: new Uint8Array([1]),
+          dsRows: 1,
+          dsCols: 1,
+          ippMm: { x: 5, y: 5, z: 0 },
+          rowDir: { x: 1, y: 0, z: 0 },
+          colDir: { x: 0, y: 1, z: 0 },
+          normalDir: { x: 0, y: 0, z: 1 },
+          rowSpacingDsMm: 4,
+          colSpacingDsMm: 4,
+          sliceThicknessMm: 1,
+          spacingBetweenSlicesMm: 1,
+        },
+      ],
+      grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy: observedSupport,
+      options: {
+        iterations: 2,
+        stepSize: 0.6,
+        clampOutput: true,
+        psfMode: 'box',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0.02,
+      },
+    });
+
+    expect(observedSupport.reduce((count, supported) => count + supported, 0)).toBe(25);
+    for (let y = 3; y <= 7; y++) {
+      for (let x = 3; x <= 7; x++) {
+        const index = x + y * dims.nx;
+        expect(observedSupport[index]).toBe(1);
+        expect(volume[index]).toBeCloseTo(0.75, 5);
+      }
+    }
+  });
+
+  it('builds multiresolution support identically to direct matched observation backprojection', async () => {
+    const slices = makeAllSlices().slice(0, 4);
+    for (const slice of slices) {
+      slice.valid = new Uint8Array(slice.pixels.length).fill(1);
+      slice.valid[0] = 0;
+      slice.sliceThicknessMm = 3;
+    }
+    const grid: SvrReconstructionGrid = {
+      dims: { nx: 37, ny: 37, nz: 37 },
+      originMm: { x: -0.35, y: -0.45, z: -0.55 },
+      voxelSizeMm: 1,
+    };
+    const expectedSupport = new Uint8Array(37 * 37 * 37);
+
+    await reconstructVolumeFromSlices({
+      slices,
+      grid,
+      occupancy: expectedSupport,
+      options: {
+        iterations: 0,
+        stepSize: 0,
+        clampOutput: true,
+        psfMode: 'gaussian',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0,
+      },
+    });
+
+    let observedCount = -1;
+    const observedSupport = await buildObservedSupportFromSlices({
+      slices,
+      grid,
+      psfMode: 'gaussian',
+      onObservedSupport: (count) => {
+        observedCount = count;
+      },
+    });
+
+    expect(observedSupport).toEqual(expectedSupport);
+    expect(observedCount).toBe(expectedSupport.reduce((count, supported) => count + supported, 0));
+  });
+
   it('computeSvrFromLoadedSlices matches a direct solver run on the same grid', async () => {
     const allSlices = makeAllSlices();
     // The compute phase mutates pixels in place and empties the array, so the
@@ -245,14 +446,19 @@ describe('svr/computeCore', () => {
       debug: false,
     });
 
-    // Grid selection is deterministic: slices span 0..32mm on every axis,
-    // computeBoundsMm pads by 1mm → bounds [-1, 33], extent 34mm at 1mm voxels
-    // → ceil(34) + 1 = 35 per axis.
-    expect(result.dims).toEqual({ nx: 35, ny: 35, nz: 35 });
-    expect(result.originMm).toEqual({ x: -1, y: -1, z: -1 });
+    // DICOM IPP denotes a pixel center. A 33-pixel, 1 mm acquisition spans
+    // the complete physical footprint [-0.5, 32.5] on each axis.
+    expect(result.dims).toEqual({ nx: 34, ny: 34, nz: 34 });
+    expect(result.originMm).toEqual({ x: -0.5, y: -0.5, z: -0.5 });
     expect(result.voxelSizeMm).toBe(1);
-    expect(result.bounds).toEqual({ min: { x: -1, y: -1, z: -1 }, max: { x: 33, y: 33, z: 33 } });
-    expect(result.volume.length).toBe(35 * 35 * 35);
+    expect(result.bounds).toEqual({ min: { x: -0.5, y: -0.5, z: -0.5 }, max: { x: 32.5, y: 32.5, z: 32.5 } });
+    expect(result.volume.length).toBe(34 * 34 * 34);
+    expect(result.observedSupport).toHaveLength(result.volume.length);
+    expect(result.supportedVoxelCount).toBe(result.observedSupport.reduce((total, supported) => total + supported, 0));
+    expect(result.acquiredOrientationCount).toBe(3);
+    expect(result.effectiveResolutionMm).toEqual([1, 1, 1]);
+    expect(result.sliceProfileSource).toBe('unknown');
+    expect(result.reconstructionFingerprint).toMatch(/^[a-f0-9]{16}$/);
 
     // The compute phase released the slice stack once the solver finished.
     expect(allSlices.length).toBe(0);
@@ -273,6 +479,303 @@ describe('svr/computeCore', () => {
     const reference = await reconstructVolumeFromSlices({ slices: referenceSlices, grid, options });
 
     expect(result.volume).toEqual(reference);
+  });
+
+  it('rejects decoded-frame cache residency before allocating an otherwise admissible output volume', async () => {
+    const allSlices = makeAllSlices();
+
+    await expect(
+      computeSvrFromLoadedSlices({
+        allSlices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta: SERIES_META,
+        svrParams: { ...SVR_PARAMS, iterations: 0 },
+        residentCacheBytes: SVR_MEMORY_BUDGET_BYTES - 1_000,
+        debug: false,
+      }),
+    ).rejects.toThrow(/cache.*budget|budget.*cache/i);
+
+    expect(allSlices).toHaveLength(18);
+  });
+
+  it('rejects ROI-rigid registration scratch before starting an otherwise admissible reconstruction', async () => {
+    const roi: NonNullable<SvrParams['roi']> = {
+      mode: 'cube',
+      sourcePlane: 'axial',
+      sourceSeriesUid: 's-ax',
+      boundsMm: { min: [0, 0, 0], max: [32, 32, 32] },
+    };
+    const residentCacheBytes = SVR_MEMORY_BUDGET_BYTES - 1_000_000;
+    const withoutRegistration = await computeSvrFromLoadedSlices({
+      allSlices: makeAllSlices(),
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META,
+      svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'none', roi },
+      residentCacheBytes,
+      debug: false,
+    });
+    const allSlices = makeAllSlices();
+    const progress: string[] = [];
+
+    expect(withoutRegistration.volume.length).toBeGreaterThan(0);
+    await expect(
+      computeSvrFromLoadedSlices({
+        allSlices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta: SERIES_META,
+        svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'roi-rigid', roi },
+        residentCacheBytes,
+        onProgress: (event) => progress.push(event.message),
+        debug: false,
+      }),
+    ).rejects.toThrow(/registration.*budget|budget.*registration/i);
+
+    expect(progress).not.toContain('ROI rigid alignment…');
+    expect(allSlices).toHaveLength(18);
+  });
+
+  it('rejects distinct nonempty patient coordinate frames before fusion', async () => {
+    const allSlices = makeAllSlices();
+    for (const slice of allSlices) {
+      slice.frameOfReferenceUid = slice.seriesUid === 's-ax' ? 'frame-one' : 'frame-two';
+    }
+
+    await expect(
+      computeSvrFromLoadedSlices({
+        allSlices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta: SERIES_META,
+        svrParams: SVR_PARAMS,
+        debug: false,
+      }),
+    ).rejects.toThrow(/frame.*reference|coordinate frame/i);
+    expect(allSlices).toHaveLength(18);
+  });
+
+  it('allows legacy slices without a frame UID when all declared coordinate frames agree', async () => {
+    const allSlices = makeAllSlices();
+    allSlices[0]!.frameOfReferenceUid = 'shared-frame';
+    allSlices[1]!.frameOfReferenceUid = 'shared-frame';
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices,
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META,
+      svrParams: { ...SVR_PARAMS, iterations: 0 },
+      debug: false,
+    });
+
+    expect(result.supportedVoxelCount).toBeGreaterThan(0);
+  });
+
+  it('reports anisotropic acquired evidence and never confuses slice cadence with profile provenance', async () => {
+    const slice = makeAllSlices()[0]!;
+    slice.pixels = new Float32Array([0, 1, 1, 0]);
+    slice.valid = new Uint8Array([1, 1, 1, 1]);
+    slice.dsRows = 2;
+    slice.dsCols = 2;
+    slice.ippMm = { x: 0, y: 0, z: 0 };
+    slice.rowSpacingDsMm = 0.5;
+    slice.colSpacingDsMm = 1;
+    slice.sliceThicknessMm = 3;
+    slice.spacingBetweenSlicesMm = 8;
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices: [slice],
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META.slice(0, 1),
+      svrParams: { ...SVR_PARAMS, targetVoxelSizeMm: 0.5, iterations: 0 },
+      debug: false,
+    });
+
+    expect(result.acquiredOrientationCount).toBe(1);
+    expect(result.sliceProfileSource).toBe('declared');
+    expect(result.effectiveResolutionMm).toEqual([1, 0.5, 8]);
+  });
+
+  it('distinguishes mixed slice-profile provenance and opposite normals from independent orientations', async () => {
+    const slices = makeAllSlices()
+      .filter((slice) => slice.seriesUid === 's-ax')
+      .slice(0, 2);
+    slices[0]!.sliceThicknessMm = 3;
+    slices[1]!.sliceThicknessMm = null;
+    slices[1]!.normalDir = { x: 0, y: 0, z: -1 };
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices: slices,
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META.slice(0, 1),
+      svrParams: { ...SVR_PARAMS, iterations: 0 },
+      debug: false,
+    });
+
+    expect(result.acquiredOrientationCount).toBe(1);
+    expect(result.sliceProfileSource).toBe('mixed');
+  });
+
+  it('binds reconstructed annotation identity to source SOPs and accepted solver settings', async () => {
+    const reconstruct = (slices: LoadedSlice[], iterations: number) =>
+      computeSvrFromLoadedSlices({
+        allSlices: slices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta: SERIES_META,
+        svrParams: { ...SVR_PARAMS, iterations },
+        debug: false,
+      });
+
+    const first = await reconstruct(makeAllSlices(), 0);
+    const identical = await reconstruct(makeAllSlices(), 0);
+    const changedSettings = await reconstruct(makeAllSlices(), 1);
+    const changedSources = makeAllSlices();
+    changedSources[0]!.sopInstanceUid = 'different-source-instance';
+    const changedIdentity = await reconstruct(changedSources, 0);
+
+    expect(identical.reconstructionFingerprint).toBe(first.reconstructionFingerprint);
+    expect(changedSettings.reconstructionFingerprint).not.toBe(first.reconstructionFingerprint);
+    expect(changedIdentity.reconstructionFingerprint).not.toBe(first.reconstructionFingerprint);
+    expect(changedIdentity.reconstructionFingerprint).not.toContain('different-source-instance');
+  });
+
+  it('keeps exactly one observed voxel supported and never diffuses it into six unsupported neighbors', async () => {
+    const dims = { nx: 5, ny: 5, nz: 5 };
+    const occupancy = new Uint8Array(dims.nx * dims.ny * dims.nz);
+    const centerIndex = idxOf(2, 2, 2, dims);
+
+    const volume = await reconstructVolumeFromSlices({
+      slices: [
+        {
+          pixels: new Float32Array([1]),
+          valid: new Uint8Array([1]),
+          dsRows: 1,
+          dsCols: 1,
+          ippMm: { x: 2, y: 2, z: 2 },
+          rowDir: { x: 1, y: 0, z: 0 },
+          colDir: { x: 0, y: 1, z: 0 },
+          normalDir: { x: 0, y: 0, z: 1 },
+          rowSpacingDsMm: 1,
+          colSpacingDsMm: 1,
+          sliceThicknessMm: 1,
+          spacingBetweenSlicesMm: 1,
+        },
+      ],
+      grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy,
+      options: {
+        iterations: 2,
+        stepSize: 0.6,
+        clampOutput: true,
+        psfMode: 'none',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0.2,
+      },
+    });
+
+    expect(occupancy[centerIndex]).toBe(1);
+    expect(volume[centerIndex]).toBeCloseTo(1);
+    for (let index = 0; index < volume.length; index++) {
+      if (index === centerIndex) continue;
+      expect(occupancy[index]).toBe(0);
+      expect(volume[index]).toBe(0);
+    }
+  });
+
+  it('returns acquired support and excludes padded pixels from production reconstruction', async () => {
+    const allSlices = makeAllSlices();
+    for (const slice of allSlices) {
+      slice.valid = new Uint8Array(slice.pixels.length).fill(1);
+      slice.valid[0] = 0;
+      slice.pixels[0] = 1;
+    }
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices,
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META,
+      svrParams: { ...SVR_PARAMS, multiResolution: true, multiResolutionFactor: 2, multiResolutionCoarseIterations: 1 },
+      debug: false,
+    });
+
+    expect(result.observedSupport).toHaveLength(result.volume.length);
+    expect(result.observedSupport.some((value) => value > 0)).toBe(true);
+    expect(result.observedSupport.some((value) => value === 0)).toBe(true);
+    expect(result.supportedVoxelCount).toBe(result.observedSupport.reduce((total, supported) => total + supported, 0));
+    for (let index = 0; index < result.volume.length; index++) {
+      if (!result.observedSupport[index]) expect(result.volume[index]).toBe(0);
+    }
+  });
+
+  it('preserves production support through physical ROI cropping and refinement', async () => {
+    const allSlices = makeAllSlices();
+    for (const slice of allSlices) {
+      slice.valid = new Uint8Array(slice.pixels.length).fill(1);
+      slice.valid[11 * slice.dsCols + 11] = 0;
+    }
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices,
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META,
+      svrParams: {
+        ...SVR_PARAMS,
+        roi: {
+          mode: 'cube',
+          sourcePlane: 'axial',
+          sourceSeriesUid: 's-ax',
+          boundsMm: { min: [9, 9, 9], max: [21, 21, 21] },
+        },
+      },
+      debug: false,
+    });
+
+    expect(result.supportedVoxelCount).toBeGreaterThan(0);
+    expect(result.supportedVoxelCount).toBeLessThan(result.volume.length);
+    for (let index = 0; index < result.volume.length; index++) {
+      if (!result.observedSupport[index]) expect(result.volume[index]).toBe(0);
+    }
+  });
+
+  it('encloses the complete rotated pixel footprint and declared through-plane profile', async () => {
+    const rootHalf = Math.SQRT1_2;
+    const slice = makeAllSlices()[0]!;
+    slice.pixels = new Float32Array([0, 1, 1, 0]);
+    slice.valid = new Uint8Array([1, 1, 1, 1]);
+    slice.dsRows = 2;
+    slice.dsCols = 2;
+    slice.rowSpacingDsMm = 10;
+    slice.colSpacingDsMm = 10;
+    slice.ippMm = { x: 0, y: 0, z: 0 };
+    slice.rowDir = { x: rootHalf, y: rootHalf, z: 0 };
+    slice.colDir = { x: -rootHalf, y: rootHalf, z: 0 };
+    slice.normalDir = { x: 0, y: 0, z: 1 };
+    slice.sliceThicknessMm = 6;
+    slice.spacingBetweenSlicesMm = 20;
+
+    const result = await computeSvrFromLoadedSlices({
+      allSlices: [slice],
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META.slice(0, 1),
+      svrParams: { ...SVR_PARAMS, iterations: 0 },
+      debug: false,
+    });
+
+    expect(result.bounds.min.x).toBeCloseTo(-10 * Math.SQRT2, 6);
+    expect(result.bounds.max.x).toBeCloseTo(10 * Math.SQRT2, 6);
+    expect(result.bounds.min.y).toBeCloseTo(-5 * Math.SQRT2, 6);
+    expect(result.bounds.max.y).toBeCloseTo(15 * Math.SQRT2, 6);
+    expect(result.bounds.min.z).toBeCloseTo(-3, 6);
+    expect(result.bounds.max.z).toBeCloseTo(3, 6);
   });
 
   it('rejects with the SVR cancelled error when the signal is already aborted', async () => {
@@ -308,5 +811,106 @@ describe('svr/computeCore', () => {
     });
 
     expect(partial.map((slice) => slice.ippMm)).toEqual(original);
+  });
+
+  it('redacts source, patient, frame, and study identities from coarse-registration diagnostics', async () => {
+    const allSlices = makeAllSlices();
+    const byOriginalUid = new Map([
+      ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
+      ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
+      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789'],
+    ]);
+    for (const slice of allSlices) {
+      const originalUid = slice.seriesUid;
+      slice.seriesUid = byOriginalUid.get(originalUid)!;
+      slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
+      slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
+      if (originalUid === 's-cor') slice.ippMm.x += 40;
+    }
+    const seriesMeta = SERIES_META.map((series) => ({
+      ...series,
+      seriesUid: byOriginalUid.get(series.seriesUid)!,
+      label: 'PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987',
+    }));
+    const spies = [
+      vi.spyOn(console, 'info').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+    ];
+    const progress: string[] = [];
+
+    try {
+      await computeSvrFromLoadedSlices({
+        allSlices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta,
+        svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'bounds-center' },
+        onProgress: (event) => progress.push(event.message),
+        debug: true,
+      });
+
+      const diagnostics = JSON.stringify({ calls: spies.flatMap((spy) => spy.mock.calls), progress });
+      expect(diagnostics).toContain('referenceSource');
+      expect(diagnostics).toContain('sourceCount');
+      expect(diagnostics).not.toMatch(/PRIVATE_(?:SERIES|SOP|FRAME|PATIENT|STUDY)/);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it('redacts source identity from ROI registration plans, skipped-series warnings, and progress', async () => {
+    const allSlices = makeAllSlices();
+    const byOriginalUid = new Map([
+      ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
+      ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
+      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789'],
+    ]);
+    for (const slice of allSlices) {
+      slice.seriesUid = byOriginalUid.get(slice.seriesUid)!;
+      slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
+      slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
+    }
+    const seriesMeta = SERIES_META.map((series) => ({
+      ...series,
+      seriesUid: byOriginalUid.get(series.seriesUid)!,
+      label: 'PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987',
+    }));
+    const spies = [
+      vi.spyOn(console, 'info').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+    ];
+    const progress: string[] = [];
+
+    try {
+      await computeSvrFromLoadedSlices({
+        allSlices,
+        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+        intensitySamplesBySeries: new Map(),
+        seriesMeta,
+        svrParams: {
+          ...SVR_PARAMS,
+          iterations: 0,
+          seriesRegistrationMode: 'roi-rigid',
+          roi: {
+            mode: 'cube',
+            sourcePlane: 'axial',
+            sourceSeriesUid: 'PRIVATE_SERIES_AXIAL_123',
+            boundsMm: { min: [10, 10, 10], max: [14, 14, 14] },
+          },
+        },
+        onProgress: (event) => progress.push(event.message),
+        debug: true,
+      });
+
+      const diagnostics = JSON.stringify({ calls: spies.flatMap((spy) => spy.mock.calls), progress });
+      expect(diagnostics).toContain('registration.roi-rigid.plan');
+      expect(diagnostics).toContain('too few samples');
+      expect(diagnostics).toContain('sourceCount');
+      expect(diagnostics).not.toMatch(/PRIVATE_(?:SERIES|SOP|FRAME|PATIENT|STUDY)/);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

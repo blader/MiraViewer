@@ -896,6 +896,7 @@ export function ComparisonMatrix() {
               }
             >
               <Svr3DView
+                key={data.selected_patient_key ?? 'selected-patient'}
                 data={data}
                 defaultDateIso={svr3dSeed.defaultDateIso}
                 defaultSeqId={selectedSeqId}

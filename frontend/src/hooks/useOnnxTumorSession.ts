@@ -3,15 +3,15 @@ import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
 import { deleteModelBlob, getModelBlob, getModelRecord, putModelBlob } from '../utils/segmentation/onnx/modelCache';
-import { verifyTumorModelManifest } from '../utils/segmentation/onnx/modelManifest';
+import { TUMOR_MODEL_MANIFEST_EXAMPLE, verifyTumorModelManifest } from '../utils/segmentation/onnx/modelManifest';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
 import { formatMiB } from '../utils/svr/svrUtils';
+import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES } from '../utils/svr/svrMemoryPlan';
 
 const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 const ONNX_TUMOR_MANIFEST_KEY = `${ONNX_TUMOR_MODEL_KEY}:manifest`;
-const ONNX_PREFLIGHT_CLASS_COUNT = 4;
-const ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES = 384 * 1024 * 1024;
+const ONNX_PREFLIGHT_CLASS_COUNT = TUMOR_MODEL_MANIFEST_EXAMPLE.classes.length;
 
 type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
 
@@ -32,6 +32,9 @@ export type OnnxPreflight = {
   nvox: number;
   logitsBytes: number;
   inputBytes: number;
+  readyResidentBytes: number;
+  estimatedPeakBytes: number;
+  budgetBytes: number;
   blockedByDefault: boolean;
 };
 
@@ -89,6 +92,7 @@ export function useOnnxTumorSession(
 
   // We can't reliably abort ORT execution mid-run in the browser; cancellation just ignores late results.
   const segRunIdRef = useRef(0);
+  const inferenceTaskRef = useRef<Promise<void> | null>(null);
   const [segRunning, setSegRunning] = useState(false);
   const [allowUnsafeFullRes, setAllowUnsafeFullRes] = useState(false);
 
@@ -98,7 +102,7 @@ export function useOnnxTumorSession(
   // so the invalidation lives here rather than in the consuming viewer.
   useEffect(() => {
     segRunIdRef.current++;
-    setSegRunning(false);
+    setSegRunning(inferenceTaskRef.current !== null);
     setAllowUnsafeFullRes(false);
     setStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
@@ -147,6 +151,18 @@ export function useOnnxTumorSession(
     const nvox = nx * ny * nz;
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
+    // The existing labels remain visible while inference builds their
+    // replacement. Both overlap the immutable supported result and tensors.
+    const inferencePlan = estimateSvrPeakMemoryBytes({
+      phase: 'inference',
+      voxelCount: nvox,
+      sourceBytes: 0,
+      iterations: 0,
+      labelBytes: nvox * Uint8Array.BYTES_PER_ELEMENT * 2,
+      modelTensorBytes: inputBytes + logitsBytes,
+    });
+    const readyResidentBytes = inferencePlan.totalBytes - inferencePlan.modelTensorBytes;
+    const estimatedPeakBytes = inferencePlan.totalBytes;
     return {
       nx,
       ny,
@@ -154,7 +170,10 @@ export function useOnnxTumorSession(
       nvox,
       logitsBytes,
       inputBytes,
-      blockedByDefault: logitsBytes > ONNX_PREFLIGHT_LOGITS_BUDGET_BYTES,
+      readyResidentBytes,
+      estimatedPeakBytes,
+      budgetBytes: SVR_MEMORY_BUDGET_BYTES,
+      blockedByDefault: estimatedPeakBytes > SVR_MEMORY_BUDGET_BYTES,
     };
   }, [volume]);
 
@@ -289,9 +308,33 @@ export function useOnnxTumorSession(
   const runSegmentation = useCallback(() => {
     if (!volume) return;
 
-    if (preflight?.blockedByDefault && !allowUnsafeFullRes) {
+    if (inferenceTaskRef.current) {
+      setSegRunning(true);
+      setStatus((current) => ({
+        ...current,
+        loading: true,
+        message: 'Waiting for the previous model operation to release its memory…',
+      }));
+      return;
+    }
+
+    const observedSupport = volume.observedSupport;
+    if (observedSupport && observedSupport.length !== volume.data.length) {
+      setStatus((s) => ({
+        ...s,
+        loading: false,
+        error: 'Cannot segment this volume: acquired-support evidence does not match its reconstructed dimensions.',
+      }));
+      return;
+    }
+
+    if (preflight?.blockedByDefault) {
       const dims = `${preflight.nx}×${preflight.ny}×${preflight.nz}`;
-      const msg = `ONNX blocked for huge volume by default (${dims}; est logits ${formatMiB(preflight.logitsBytes)}). Re-run SVR at lower resolution/ROI or enable the unsafe override.`;
+      const msg =
+        `ONNX exceeds the shared ${formatMiB(preflight.budgetBytes)} memory budget ` +
+        `(${dims}; estimated resident peak ${formatMiB(preflight.estimatedPeakBytes)}, ` +
+        `including ${formatMiB(preflight.logitsBytes)} model logits). ` +
+        'Reconstruct a smaller focus region or use a lower resolution.';
       setStatus((s) => ({ ...s, loading: false, error: msg }));
       return;
     }
@@ -302,7 +345,7 @@ export function useOnnxTumorSession(
     const started = performance.now();
     setStatus((s) => ({ ...s, loading: true, message: 'Running ONNX segmentation…', error: undefined }));
 
-    void (async () => {
+    const inferenceTask: Promise<void> = (async () => {
       try {
         const { session, mode } = await ensureSession();
         if (segRunIdRef.current !== runId) return;
@@ -315,8 +358,27 @@ export function useOnnxTumorSession(
             mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
         }));
 
-        const res = await runTumorSegmentationOnnx({ session, volume: volume.data, dims: volume.dims });
+        let modelInput = volume.data;
+        if (observedSupport) {
+          for (let index = 0; index < observedSupport.length; index++) {
+            if (!observedSupport[index] && modelInput[index] !== 0) {
+              modelInput = new Float32Array(volume.data);
+              for (let masked = index; masked < modelInput.length; masked++) {
+                if (!observedSupport[masked]) modelInput[masked] = 0;
+              }
+              break;
+            }
+          }
+        }
+
+        const res = await runTumorSegmentationOnnx({ session, volume: modelInput, dims: volume.dims });
         if (segRunIdRef.current !== runId) return;
+
+        if (observedSupport) {
+          for (let index = 0; index < res.labels.length; index++) {
+            if (!observedSupport[index]) res.labels[index] = 0;
+          }
+        }
 
         onLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
 
@@ -327,19 +389,29 @@ export function useOnnxTumorSession(
         const msg = e instanceof Error ? e.message : String(e);
         setStatus((s) => ({ ...s, loading: false, sessionReady: sessionRef.current !== null, error: msg }));
       } finally {
-        if (segRunIdRef.current === runId) setSegRunning(false);
+        // Admission forbids a second task until this one settles, so the
+        // single in-flight ref itself is the only lifecycle authority.
+        inferenceTaskRef.current = null;
+        setSegRunning(false);
+        if (segRunIdRef.current !== runId) {
+          setStatus((current) => ({
+            ...current,
+            loading: false,
+            message: 'The canceled model operation has finished and released its memory.',
+          }));
+        }
       }
     })();
-  }, [allowUnsafeFullRes, ensureSession, onLabels, preflight, volume]);
+    inferenceTaskRef.current = inferenceTask;
+  }, [ensureSession, onLabels, preflight, volume]);
 
   const cancelSegmentation = useCallback(() => {
     if (!segRunning) return;
     segRunIdRef.current++;
-    setSegRunning(false);
     setStatus((s) => ({
       ...s,
-      loading: false,
-      message: 'Result discarded; the current model operation may finish in the background.',
+      loading: true,
+      message: 'Result discarded; waiting for the current model operation to release its memory…',
       error: undefined,
     }));
   }, [segRunning]);

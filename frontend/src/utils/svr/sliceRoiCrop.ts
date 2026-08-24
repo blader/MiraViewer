@@ -1,10 +1,18 @@
+import type { SvrParams, SvrRoi } from '../../types/svr';
+import type { SeriesFrameManifest } from '../localApi';
+import { getSliceGeometryFromInstance } from './dicomGeometry';
 import type { Vec3 } from './vec3';
 import { dot, v3 } from './vec3';
 
 export type BoundsMm = { min: Vec3; max: Vec3 };
 
+const MAX_RIGID_TRANSLATION_MM = 20;
+const MAX_RIGID_ROTATION_DISPLACEMENT = 2 * Math.sin((3 * 10 * Math.PI) / 360);
+
 export type CropSlice = {
   pixels: Float32Array;
+  /** Acquired-pixel support is inseparable from the corresponding pixel grid. */
+  valid?: Uint8Array;
   dsRows: number;
   dsCols: number;
 
@@ -35,7 +43,78 @@ export function boundsCornersMm(bounds: BoundsMm): Vec3[] {
   return corners;
 }
 
+/** Keep every physical source slab that could contribute to the selected focus region. */
+export function filterSvrManifestFramesForRoi(
+  manifest: SeriesFrameManifest,
+  roi: SvrRoi | null | undefined,
+  params: Pick<SvrParams, 'targetVoxelSizeMm' | 'maxVolumeDim' | 'seriesRegistrationMode'>,
+): SeriesFrameManifest {
+  // Coarse bounds-center registration can translate sources without a physical bound.
+  if (!roi || params.seriesRegistrationMode === 'bounds-center') return manifest;
+
+  const spans = roi.boundsMm.min.map((lower, axis) => roi.boundsMm.max[axis]! - lower);
+  if (
+    spans.some((span) => !Number.isFinite(span) || span < 0) ||
+    roi.boundsMm.min.some((coordinate) => !Number.isFinite(coordinate))
+  ) {
+    throw new Error('The SVR focus region has invalid patient-space bounds');
+  }
+
+  const corners = boundsCornersMm({ min: v3(...roi.boundsMm.min), max: v3(...roi.boundsMm.max) });
+  const regionExtentMm = Math.hypot(...spans);
+  const requestedVoxelSizeMm =
+    Number.isFinite(params.targetVoxelSizeMm) && params.targetVoxelSizeMm > 0 ? params.targetVoxelSizeMm : 1;
+  const maxVolumeDim = Math.max(2, Math.floor(params.maxVolumeDim));
+  const outputVoxelMarginMm = Math.max(requestedVoxelSizeMm, Math.max(...spans) / Math.max(1, maxVolumeDim - 1));
+  const rigidRegistration = params.seriesRegistrationMode === 'roi-rigid';
+
+  const frames = manifest.frames.filter((frame) => {
+    const geometry = getSliceGeometryFromInstance(frame);
+    const normal = geometry.normalDir;
+    let regionMin = Number.POSITIVE_INFINITY;
+    let regionMax = Number.NEGATIVE_INFINITY;
+    for (const corner of corners) {
+      const position = dot(corner, normal);
+      regionMin = Math.min(regionMin, position);
+      regionMax = Math.max(regionMax, position);
+    }
+
+    const declaredThicknessMm = frame.sliceThickness;
+    const spacingMm = frame.spacingBetweenSlices ?? manifest.sliceSpacingMm;
+    const profileThicknessMm =
+      typeof declaredThicknessMm === 'number' && declaredThicknessMm > 0
+        ? declaredThicknessMm
+        : typeof spacingMm === 'number' && spacingMm > 0
+          ? spacingMm
+          : requestedVoxelSizeMm;
+    const profileMarginMm = profileThicknessMm / 2;
+    const interpolationMarginMm = Math.max(outputVoxelMarginMm, geometry.rowSpacingMm, geometry.colSpacingMm);
+    let marginMm = profileMarginMm + interpolationMarginMm;
+
+    if (rigidRegistration) {
+      // Three independent 10-degree Euler rotations have a composed angular
+      // displacement no greater than 30 degrees. A source point capable of
+      // entering the ROI lies within its full diagonal plus the maximum
+      // translation, physical slice profile, and output sampling footprint.
+      const translationMarginMm =
+        MAX_RIGID_TRANSLATION_MM * (Math.abs(normal.x) + Math.abs(normal.y) + Math.abs(normal.z));
+      const rotationRadiusMm =
+        regionExtentMm + MAX_RIGID_TRANSLATION_MM * Math.sqrt(3) + profileMarginMm + interpolationMarginMm;
+      marginMm += translationMarginMm + MAX_RIGID_ROTATION_DISPLACEMENT * rotationRadiusMm;
+    }
+
+    const slicePositionMm = dot(geometry.ippMm, normal);
+    return slicePositionMm >= regionMin - marginMm && slicePositionMm <= regionMax + marginMm;
+  });
+
+  return frames.length === manifest.frames.length ? manifest : { ...manifest, frames };
+}
+
 export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boolean {
+  if (slice.valid && slice.valid.length !== slice.pixels.length) {
+    throw new Error('SVR acquired-pixel support does not match its image dimensions');
+  }
+
   // Reject slices whose plane does not intersect the ROI slab along its normal.
   const n = slice.normalDir;
   const planeD = dot(slice.ippMm, n);
@@ -92,12 +171,20 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
   const oldCols = slice.dsCols;
   const oldPixels = slice.pixels;
 
+  if (nextRows === slice.dsRows && nextCols === slice.dsCols) {
+    return true;
+  }
+
   const nextPixels = new Float32Array(nextRows * nextCols);
+  const nextValid = slice.valid ? new Uint8Array(nextRows * nextCols) : undefined;
 
   for (let r = r0; r <= r1; r++) {
     const oldBase = r * oldCols + c0;
     const newBase = (r - r0) * nextCols;
     nextPixels.set(oldPixels.subarray(oldBase, oldBase + nextCols), newBase);
+    if (nextValid && slice.valid) {
+      nextValid.set(slice.valid.subarray(oldBase, oldBase + nextCols), newBase);
+    }
   }
 
   // Shift IPP so (r0,c0) becomes the new (0,0) for the cropped pixel buffer.
@@ -110,6 +197,7 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
   slice.dsRows = nextRows;
   slice.dsCols = nextCols;
   slice.pixels = nextPixels;
+  if (nextValid) slice.valid = nextValid;
 
   return true;
 }
