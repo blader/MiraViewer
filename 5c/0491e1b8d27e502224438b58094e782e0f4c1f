@@ -1,0 +1,47 @@
+frontend/src/utils/segmentation/regionGrow3D_v2.ts
+  s_3b5c6669968514::t_0a4d59cb420557 331
+frontend/src/utils/segmentation/regionGrow3DWorker.ts
+  s_3b5c6669968514::t_0a4d59cb420557 78
+frontend/src/utils/svr/reconstructVolume.ts
+  s_3b5c6669968514::t_0f8ac4b7ed3f23 465-467,672-674
+frontend/src/components/Svr3DView.tsx
+  s_3b5c6669968514::t_c6be62f107cecc 440-445,447,465-466,468,471,480-484,487,922-930,983,986-987,1317,1327,1342,1574
+  s_3b5c6669968514::t_1f2ac56d3faf80 508-513,751
+frontend/tests/svrComputeCore.test.ts
+  s_3b5c6669968514::t_67ca04eefa9008 801,841
+frontend/src/hooks/useAutoAlign.ts
+  s_3b5c6669968514::t_cce3c15b20872f 205-208,723,1149,1159,1682,1688
+  s_3b5c6669968514::t_1fee02f7cecab8 368-369,373,376,406,444,481,512,534,549
+frontend/src/utils/localApi.ts
+  s_3b5c6669968514::t_1fee02f7cecab8 713-716,721-722
+  s_3b5c6669968514::t_f409b03819142d 717-720
+frontend/src/utils/svr/runLongitudinalRegistration.ts
+  s_3b5c6669968514::t_2854f4f5b4d09f 111,113-114,117,125
+frontend/src/utils/svr/svrComputeCore.ts
+  s_3b5c6669968514::t_a6ed6bd9f7c2a8 22,70-74,94,629-631
+  s_3b5c6669968514::t_a6ed186cdd9611 225-229,238-241,252
+frontend/tests/svrSourceAdmission.test.ts
+  s_3b5c6669968514::t_785d81387a663c 131-146,440,486,541
+  s_3b5c6669968514::t_9a512a61ba818c 515,535
+frontend/src/components/SvrVolume3DViewer.tsx
+  s_3b5c6669968514::t_d02484a817010a 2504,2507-2510,2517,2526,2539,2542-2543
+  s_3b5c6669968514::t_47c0c600db4f29 1960,1968-1969,1972,1974-1978,1980
+  s_3b5c6669968514::t_a4fc0029e2f97f 1051,1055,1059
+  s_3b5c6669968514::t_a8d67e816fbc00 508,510-511,515,518
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "5c0491e1b8d27e502224438b58094e782e0f4c1f",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
