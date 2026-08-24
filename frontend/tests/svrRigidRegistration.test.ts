@@ -416,6 +416,17 @@ describe('svr/rigidRegistration', () => {
     });
   });
 
+  const syntheticSliceGeometry = () => ({
+    ippMm: v3(0, 0, 0),
+    rowDir: v3(1, 0, 0),
+    colDir: v3(0, 1, 0),
+    normalDir: v3(0, 0, 1),
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+    sliceThicknessMm: 1,
+    spacingBetweenSlicesMm: 1,
+  });
+
   it('samples across the complete slice field instead of exhausting its quota in the first rows', () => {
     const samples = buildSeriesSamples({
       slices: [
@@ -423,14 +434,7 @@ describe('svr/rigidRegistration', () => {
           pixels: new Float32Array(20 * 20).fill(1),
           dsRows: 20,
           dsCols: 20,
-          ippMm: v3(0, 0, 0),
-          rowDir: v3(1, 0, 0),
-          colDir: v3(0, 1, 0),
-          normalDir: v3(0, 0, 1),
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
+          ...syntheticSliceGeometry(),
         },
       ],
       roiBounds: { min: v3(0, 0, 0), max: v3(20, 20, 1) },
@@ -450,14 +454,7 @@ describe('svr/rigidRegistration', () => {
           valid: new Uint8Array([1, 1, 1, 0]),
           dsRows: 2,
           dsCols: 2,
-          ippMm: v3(0, 0, 0),
-          rowDir: v3(1, 0, 0),
-          colDir: v3(0, 1, 0),
-          normalDir: v3(0, 0, 1),
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
+          ...syntheticSliceGeometry(),
         },
       ],
       roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
@@ -477,14 +474,7 @@ describe('svr/rigidRegistration', () => {
           validScale: 255,
           dsRows: 2,
           dsCols: 2,
-          ippMm: v3(0, 0, 0),
-          rowDir: v3(1, 0, 0),
-          colDir: v3(0, 1, 0),
-          normalDir: v3(0, 0, 1),
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
+          ...syntheticSliceGeometry(),
         },
       ],
       roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
