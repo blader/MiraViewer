@@ -1,0 +1,19 @@
+frontend/src/utils/localApi.ts
+  s_3b5c6669968514::t_fb6869f62a0647 466-467
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "219eb32b58a472c10c906ca269349dece678b4b0",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
