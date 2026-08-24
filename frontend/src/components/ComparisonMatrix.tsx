@@ -508,9 +508,7 @@ export function ComparisonMatrix() {
       {uploadModalOpen && (
         <UploadModal
           onClose={() => setUploadModalOpen(false)}
-          onUploadComplete={() => {
-            reload();
-          }}
+          onUploadComplete={() => reload(undefined, { background: true })}
         />
       )}
       {exportModalOpen && <ExportModal onClose={() => setExportModalOpen(false)} />}
@@ -697,7 +695,7 @@ export function ComparisonMatrix() {
                     className="w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
                   >
                     <Upload className="w-4 h-4" />
-                    Import (DICOM ZIP)
+                    Import scans
                   </button>
                   {hasData ? (
                     <button
@@ -840,7 +838,7 @@ export function ComparisonMatrix() {
                   className="flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl bg-[var(--accent)] text-white font-medium hover:bg-[var(--accent-hover)] transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5"
                 >
                   <Upload className="w-5 h-5" />
-                  Load DICOM Files
+                  Import scans
                 </button>
               </div>
             </div>

@@ -1,5 +1,5 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY, subscribeDatasetMutations } from '../db/db';
-import { getPatientIdentityKey } from '../db/patientIdentity';
+import { getPatientIdentityKey, getPatientIdentityKeys } from '../db/patientIdentity';
 import type {
   DicomInstance,
   DicomSeries,
@@ -85,14 +85,37 @@ function labelCombo(plane?: string, weight?: string, sequence?: string): string 
   return [plane, weight, sequence].filter(Boolean).join(' ') || 'Unknown';
 }
 
+async function getInstanceCountsBySeries(series: readonly DicomSeries[]): Promise<Record<string, number>> {
+  const instanceCounts: Record<string, number> = {};
+  if (series.length === 0) return instanceCounts;
+
+  const db = await getDB();
+  const transaction = db.transaction('instances', 'readonly');
+  const index = transaction.store.index('by-series');
+  const maxPendingCounts = 64;
+
+  for (let offset = 0; offset < series.length; offset += maxPendingCounts) {
+    const group = series.slice(offset, offset + maxPendingCounts);
+    const counts = await Promise.all(group.map((item) => index.count(item.seriesInstanceUid)));
+    for (let position = 0; position < group.length; position++) {
+      instanceCounts[group[position]!.seriesInstanceUid] = counts[position]!;
+    }
+  }
+
+  await transaction.done;
+  return instanceCounts;
+}
+
 export async function getStudies() {
   const db = await getDB();
   const selectedPatientKey = await getSelectedPatientKey();
   const allStudies = await db.getAll('studies');
+  const patientIdentityKeys = getPatientIdentityKeys(allStudies);
   const studies = allStudies.filter(
-    (study) => !selectedPatientKey || getPatientIdentityKey(study, allStudies) === selectedPatientKey,
+    (study) => !selectedPatientKey || patientIdentityKeys.get(study.studyInstanceUid) === selectedPatientKey,
   );
-  const allSeries = await db.getAll('series');
+  const selectedStudyUids = new Set(studies.map((study) => study.studyInstanceUid));
+  const allSeries = (await db.getAll('series')).filter((series) => selectedStudyUids.has(series.studyInstanceUid));
 
   // Aggregate counts without loading instance Blob payloads.
   const seriesByStudy: Record<string, DicomSeries[]> = {};
@@ -101,16 +124,7 @@ export async function getStudies() {
     seriesByStudy[s.studyInstanceUid].push(s);
   });
 
-  const instanceCountsBySeries: Record<string, number> = {};
-  await Promise.all(
-    allSeries.map(async (s) => {
-      instanceCountsBySeries[s.seriesInstanceUid] = await db.countFromIndex(
-        'instances',
-        'by-series',
-        s.seriesInstanceUid,
-      );
-    }),
-  );
+  const instanceCountsBySeries = await getInstanceCountsBySeries(allSeries);
 
   return studies
     .map((study) => {
@@ -151,10 +165,11 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
   const db = await getDB();
   const allSeries = await db.getAll('series');
   const allStudies = await db.getAll('studies');
+  const patientIdentityKeys = getPatientIdentityKeys(allStudies);
 
   const patientMap = new Map<string, PatientSummary>();
   for (const study of allStudies) {
-    const key = getPatientIdentityKey(study, allStudies);
+    const key = patientIdentityKeys.get(study.studyInstanceUid)!;
     const existing = patientMap.get(key);
     if (existing) existing.study_count += 1;
     else
@@ -176,7 +191,9 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
     await setSelectedPatientKey(selectedPatientKey);
   }
 
-  const selectedStudies = allStudies.filter((study) => getPatientIdentityKey(study, allStudies) === selectedPatientKey);
+  const selectedStudies = allStudies.filter(
+    (study) => patientIdentityKeys.get(study.studyInstanceUid) === selectedPatientKey,
+  );
   const studyByUid = new Map(selectedStudies.map((study) => [study.studyInstanceUid, study]));
   const studyDateCounts = new Map<string, number>();
   for (const study of selectedStudies) {
@@ -201,12 +218,7 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
   const selectedSeries = allSeries.filter((series) => studyByUid.has(series.studyInstanceUid));
 
   // Instance counts without loading instance Blob payloads.
-  const instanceCounts: Record<string, number> = {};
-  await Promise.all(
-    selectedSeries.map(async (s) => {
-      instanceCounts[s.seriesInstanceUid] = await db.countFromIndex('instances', 'by-series', s.seriesInstanceUid);
-    }),
-  );
+  const instanceCounts = await getInstanceCountsBySeries(selectedSeries);
 
   const planes = new Set<string>();
   const dates = new Set<string>();
@@ -289,7 +301,7 @@ export async function getPanelSettings(comboId: string): Promise<Record<string, 
   let row = await db.get('panel_settings', scopedComboId);
   if (!row && patientKey) {
     const studies = await db.getAll('studies');
-    const distinctPatients = new Set(studies.map((study) => getPatientIdentityKey(study, studies)));
+    const distinctPatients = new Set(getPatientIdentityKeys(studies).values());
     if (distinctPatients.size <= 1) row = await db.get('panel_settings', comboId);
   }
   if (!row) return {};
@@ -370,12 +382,17 @@ export async function getSortedSopInstanceUidsForSeries(seriesUid: string): Prom
     [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
     [seriesUid, Number.MAX_SAFE_INTEGER, '\uffff'],
   );
-  const totalFrames = await db.countFromIndex('instances', 'by-series', seriesUid);
-  const physicalKeys = await db.getAllKeysFromIndex('instances', 'by-series-physicalPosition-uid', range);
+  const transaction = db.transaction('instances', 'readonly');
+  const store = transaction.store;
+  const [totalFrames, physicalKeys] = await Promise.all([
+    store.index('by-series').count(seriesUid),
+    store.index('by-series-physicalPosition-uid').getAllKeys(range),
+  ]);
   const keys =
     physicalKeys.length === totalFrames && totalFrames > 0
       ? physicalKeys
-      : await db.getAllKeysFromIndex('instances', 'by-series-instanceNumber-uid', range);
+      : await store.index('by-series-instanceNumber-uid').getAllKeys(range);
+  await transaction.done;
   const uids = keys.map((k) => String(k));
 
   if (uids.length === 0) {
@@ -412,20 +429,42 @@ export type SeriesFrameManifest = {
 
 export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesFrameManifest> {
   const db = await getDB();
-  const series = await db.get('series', seriesUid);
+  const transaction = db.transaction(['series', 'studies', 'instances'], 'readonly');
+  const [series, studies] = await Promise.all([
+    transaction.objectStore('series').get(seriesUid),
+    transaction.objectStore('studies').getAll(),
+  ]);
   if (!series) throw new Error('Series not found');
-  const study = await db.get('studies', series.studyInstanceUid);
+  const study = studies.find((candidate) => candidate.studyInstanceUid === series.studyInstanceUid);
   if (!study) throw new Error('Series study not found');
-  const orderedUids = await getSortedSopInstanceUidsForSeries(seriesUid);
-  const frames = await Promise.all(
-    orderedUids.map(async (uid) => {
-      const instance = await db.get('instances', uid);
-      if (!instance) throw new Error('Series frame disappeared while constructing its manifest');
-      const { fileBlob: _fileBlob, ...metadata } = instance;
-      void _fileBlob;
-      return metadata;
-    }),
+
+  const range = IDBKeyRange.bound(
+    [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
+    [seriesUid, Number.MAX_SAFE_INTEGER, '\uffff'],
   );
+  const instanceStore = transaction.objectStore('instances');
+  const physicalIndex = instanceStore.index('by-series-physicalPosition-uid');
+  const [totalFrames, physicallyOrderedFrames] = await Promise.all([
+    instanceStore.index('by-series').count(seriesUid),
+    physicalIndex.count(range),
+  ]);
+  const orderedIndex =
+    physicallyOrderedFrames === totalFrames && totalFrames > 0
+      ? physicalIndex
+      : instanceStore.index('by-series-instanceNumber-uid');
+  const frames: SeriesFrameManifest['frames'] = [];
+  const orderedUids: string[] = [];
+  let cursor = await orderedIndex.openCursor(range);
+  while (cursor) {
+    const { fileBlob: _fileBlob, ...metadata } = cursor.value;
+    void _fileBlob;
+    frames.push(metadata);
+    orderedUids.push(metadata.sopInstanceUid);
+    cursor = await cursor.continue();
+  }
+  await transaction.done;
+  if (frames.length === 0) throw new Error('No instances for series');
+  cacheSeriesInstanceOrder(seriesUid, orderedUids);
   let sortedPositions: number[] = [];
   let geometryReliable = frames.every(
     (frame) => typeof frame.physicalSlicePosition === 'number' && Number.isFinite(frame.physicalSlicePosition),
@@ -471,7 +510,7 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
   return {
     seriesUid,
     studyUid: study.studyInstanceUid,
-    patientKey: getPatientIdentityKey(study, await db.getAll('studies')),
+    patientKey: getPatientIdentityKeys(studies).get(study.studyInstanceUid)!,
     frameOfReferenceUid: series.frameOfReferenceUid,
     ordering: geometryReliable ? 'physical' : 'instance-number',
     geometryReliable,

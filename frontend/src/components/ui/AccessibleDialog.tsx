@@ -11,6 +11,7 @@ type AccessibleDialogProps = {
   className?: string;
   closeOnBackdrop?: boolean;
   closeOnEscape?: boolean;
+  closeDisabled?: boolean;
 };
 
 const FOCUSABLE_SELECTOR =
@@ -25,6 +26,7 @@ export function AccessibleDialog({
   className,
   closeOnBackdrop = true,
   closeOnEscape = true,
+  closeDisabled = false,
 }: AccessibleDialogProps) {
   const titleId = useId();
   const descriptionId = useId();
@@ -120,7 +122,8 @@ export function AccessibleDialog({
             type="button"
             aria-label={`Close ${title}`}
             onClick={onClose}
-            className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+            disabled={closeDisabled}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>

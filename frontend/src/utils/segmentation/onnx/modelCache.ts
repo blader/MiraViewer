@@ -61,6 +61,37 @@ export async function putModelBlob(key: string, blob: Blob): Promise<void> {
   await db.put(STORE, rec, key);
 }
 
+/** Complete all recoverable model-cache writes before a medical-data restore becomes visible. */
+export async function putModelBlobs(
+  models: ReadonlyArray<Pick<ModelRecord, 'key' | 'blob'>>,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  if (models.length === 0) return;
+  const abortIfRequested = () => {
+    if (options.signal?.aborted) throw new DOMException('Backup restoration cancelled.', 'AbortError');
+  };
+  abortIfRequested();
+  const db = await getDb();
+  abortIfRequested();
+  const transaction = db.transaction(STORE, 'readwrite');
+  try {
+    for (const model of models) {
+      abortIfRequested();
+      await transaction.store.put({ key: model.key, blob: model.blob, savedAtMs: Date.now() }, model.key);
+    }
+    abortIfRequested();
+    await transaction.done;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {
+      // A completed transaction cannot be aborted; its failure still prevents the medical commit.
+    }
+    await transaction.done.catch(() => {});
+    throw error;
+  }
+}
+
 export async function getModelRecord(key: string): Promise<ModelRecord | null> {
   const db = await getDb();
   return ((await db.get(STORE, key)) as ModelRecord | undefined) ?? null;

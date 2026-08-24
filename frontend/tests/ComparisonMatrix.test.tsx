@@ -1,28 +1,42 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import type * as ReactTypes from 'react';
 import { ComparisonMatrix } from '../src/components/ComparisonMatrix';
+import * as dicomIngestion from '../src/services/dicomIngestion';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { COMPARISON_UI_STORAGE_KEY } from '../src/utils/storageKeys';
 
-vi.mock('../src/hooks/useComparisonData', () => ({
-  useComparisonData: () => ({
-    data: {
-      planes: ['Axial'],
-      dates: ['2024-01-01T00:00:00'],
-      sequences: [
-        { id: 'axial-t1', plane: 'Axial', weight: 'T1', sequence: 'SE', label: 'Axial T1 SE', date_count: 1 },
-      ],
-      series_map: {
-        'axial-t1': {
-          '2024-01-01T00:00:00': { study_id: 'study-1', series_uid: 'series-1', instance_count: 1 },
+const { reloadComparisonData } = vi.hoisted(() => ({ reloadComparisonData: vi.fn() }));
+
+vi.mock('../src/hooks/useComparisonData', async () => {
+  const { useCallback, useState } = await vi.importActual<typeof ReactTypes>('react');
+  return {
+    useComparisonData: () => {
+      const [loading, setLoading] = useState(false);
+      const reload = useCallback(async (patientKey?: string, options?: { background?: boolean }) => {
+        reloadComparisonData(patientKey, options);
+        if (!options?.background) setLoading(true);
+      }, []);
+      return {
+        data: {
+          planes: ['Axial'],
+          dates: ['2024-01-01T00:00:00'],
+          sequences: [
+            { id: 'axial-t1', plane: 'Axial', weight: 'T1', sequence: 'SE', label: 'Axial T1 SE', date_count: 1 },
+          ],
+          series_map: {
+            'axial-t1': {
+              '2024-01-01T00:00:00': { study_id: 'study-1', series_uid: 'series-1', instance_count: 1 },
+            },
+          },
         },
-      },
+        loading,
+        error: null,
+        reload,
+      };
     },
-    loading: false,
-    error: null,
-    reload: vi.fn(),
-  }),
-}));
+  };
+});
 
 vi.mock('../src/hooks/useComparisonFilters', () => ({
   useComparisonFilters: () => ({
@@ -81,6 +95,11 @@ vi.mock('../src/components/DicomViewer', () => ({
 describe('ComparisonMatrix', () => {
   beforeEach(() => {
     localStorage.clear();
+    reloadComparisonData.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('renders header menu actions', () => {
@@ -91,9 +110,36 @@ describe('ComparisonMatrix', () => {
 
     fireEvent.click(menuButton);
 
-    expect(screen.getByText(/import \(dicom zip\)/i)).toBeInTheDocument();
+    expect(screen.getByText('Import scans')).toBeInTheDocument();
     expect(screen.getByText(/export backup \(zip\)/i)).toBeInTheDocument();
     expect(screen.getByTestId('dicom-viewer')).toBeInTheDocument();
+  });
+
+  it('keeps a successful intake result mounted while comparison data refreshes in the background', async () => {
+    vi.spyOn(dicomIngestion, 'processFiles').mockResolvedValue({
+      total: 1,
+      ingested: 1,
+      duplicates: 0,
+      skipped: 0,
+      errors: 0,
+      errorSamples: [],
+    });
+    render(<ComparisonMatrix />);
+    fireEvent.click(screen.getByTitle('Menu'));
+    fireEvent.click(screen.getByRole('button', { name: 'Import scans' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Import scans' });
+    const file = new File([new Uint8Array([1])], 'scan.dcm', { type: 'application/dicom' });
+    fireEvent.change(within(dialog).getByLabelText('Select DICOM image files'), {
+      target: { files: [file] },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Import scans' }));
+
+    await waitFor(() => expect(reloadComparisonData).toHaveBeenCalledWith(undefined, { background: true }));
+    expect(screen.getByRole('dialog', { name: 'Import scans' })).toBeInTheDocument();
+    expect(within(dialog).getByText('Import complete')).toBeInTheDocument();
+    expect(screen.getByTestId('dicom-viewer')).toBeInTheDocument();
+    expect(screen.queryByText('Loading comparison data…')).not.toBeInTheDocument();
   });
 
   it('defaults aligned output to reference resolution and persists an explicitly selected physical preset', () => {

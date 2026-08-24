@@ -1,6 +1,12 @@
 import JSZip from 'jszip';
-import { DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation, SELECTED_PATIENT_STATE_KEY } from '../db/db';
-import { getPatientIdentityKey } from '../db/patientIdentity';
+import {
+  assertStorageHeadroom,
+  DATASET_REVISION_STATE_KEY,
+  getDB,
+  notifyDatasetMutation,
+  SELECTED_PATIENT_STATE_KEY,
+} from '../db/db';
+import { getPatientIdentityKeys } from '../db/patientIdentity';
 import type {
   AppStateRow,
   DerivedAlignmentFrameRow,
@@ -13,11 +19,12 @@ import type {
   VolumeSegmentationRow,
 } from '../db/schema';
 import { isOwnedStorageKey } from '../utils/storageKeys';
-import { getAllModelRecords, putModelBlob } from '../utils/segmentation/onnx/modelCache';
+import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
 import { assertValidDerivedAlignmentFrameShape, MAX_DERIVED_ALIGNMENT_FRAMES } from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
+import type { ArchiveReadOptions } from './archiveSafety';
 
 export type ExportProgress = {
   stage: 'collecting' | 'zipping' | 'finalizing';
@@ -25,6 +32,20 @@ export type ExportProgress = {
   total: number;
   detail?: string;
 };
+
+export type RestoreSnapshotOptions = ArchiveReadOptions & {
+  onCommitStart?: () => void;
+};
+
+export type RestoreSnapshotResult = ProcessFilesResult & {
+  integrityWarnings?: string[];
+};
+
+export const MAX_SNAPSHOT_RESTORE_BYTES = 512 * 1024 * 1024;
+
+function throwIfRestoreAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Backup restoration cancelled.', 'AbortError');
+}
 
 type SnapshotFile = {
   path: string;
@@ -60,6 +81,26 @@ type SnapshotManifest = {
     localStorage: Record<string, string>;
   };
 };
+
+/** Complete restores must remain atomic; verified payloads cannot yet be staged without a schema migration. */
+export function getSnapshotRestoreBytes(manifest: SnapshotManifest): number {
+  let total = 0;
+  const add = (file: SnapshotFile) => {
+    if (!Number.isSafeInteger(file.byteLength) || file.byteLength < 0) {
+      throw new Error('The backup contains a file with an invalid declared size.');
+    }
+    total += file.byteLength;
+    if (!Number.isSafeInteger(total)) throw new Error('The complete backup exceeds the supported browser range.');
+  };
+  for (const entry of manifest.records.instances) add(entry.file);
+  for (const entry of manifest.records.volumeSegmentations) add(entry.file);
+  for (const entry of manifest.records.derivedAlignmentFrames ?? []) {
+    add(entry.file);
+    if (entry.validFile) add(entry.validFile);
+  }
+  for (const entry of manifest.records.models) add(entry.file);
+  return total;
+}
 
 async function toArrayBuffer(value: Blob | ArrayBuffer | ArrayBufferView): Promise<ArrayBuffer> {
   if (value instanceof ArrayBuffer) return value;
@@ -113,7 +154,8 @@ export async function exportStudiesToZip(
   const studies = allStudies.filter((study) => selectedStudies.has(study.studyInstanceUid));
   if (studies.length !== selectedStudies.size) throw new Error('One or more selected examinations no longer exist.');
 
-  const patientKeys = new Set(studies.map((study) => getPatientIdentityKey(study, allStudies)));
+  const identityByStudy = getPatientIdentityKeys(allStudies);
+  const patientKeys = new Set(studies.map((study) => identityByStudy.get(study.studyInstanceUid)!));
   if (patientKeys.size > 1) throw new Error('A backup cannot combine examinations from different patients.');
   const selectedPatientKey = patientKeys.values().next().value as string | undefined;
   const series = (await db.getAll('series')).filter((item) => selectedStudies.has(item.studyInstanceUid));
@@ -207,13 +249,21 @@ export async function exportStudiesToZip(
   return blob;
 }
 
-export async function readSnapshotManifest(zip: JSZip): Promise<SnapshotManifest | null> {
+export async function readSnapshotManifest(
+  zip: JSZip,
+  options: ArchiveReadOptions = {},
+): Promise<SnapshotManifest | null> {
+  throwIfRestoreAborted(options.signal);
   const entry = zip.file('export.json');
   if (!entry) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await entry.async('string'));
-  } catch {
+    const bytes = await (await readArchiveEntry(entry, options)).arrayBuffer();
+    throwIfRestoreAborted(options.signal);
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    if (!(error instanceof SyntaxError)) throw error;
     throw new Error('The backup manifest is invalid.');
   }
   if (!parsed || typeof parsed !== 'object') return null;
@@ -243,15 +293,26 @@ export async function readSnapshotManifest(zip: JSZip): Promise<SnapshotManifest
   return manifest as SnapshotManifest;
 }
 
-async function readVerifiedFile(zip: JSZip, descriptor: SnapshotFile): Promise<Blob> {
+async function readVerifiedFile(
+  zip: JSZip,
+  descriptor: SnapshotFile,
+  signal?: AbortSignal,
+  integrityWarnings?: Set<string>,
+): Promise<Blob> {
+  throwIfRestoreAborted(signal);
   const entry = zip.file(descriptor.path);
   if (!entry) throw new Error('The backup is incomplete: a referenced file is missing.');
-  const blob = await readArchiveEntry(entry);
+  const blob = await readArchiveEntry(entry, { signal });
   if (blob.size !== descriptor.byteLength) throw new Error('A backup file has an invalid size.');
-  if (descriptor.sha256 && globalThis.crypto?.subtle) {
-    const actual = await describeFile(descriptor.path, await toArrayBuffer(blob));
-    if (actual.sha256 !== descriptor.sha256) throw new Error('A backup file failed its integrity check.');
+  if (descriptor.sha256) {
+    if (globalThis.crypto?.subtle) {
+      const actual = await describeFile(descriptor.path, await toArrayBuffer(blob));
+      if (actual.sha256 !== descriptor.sha256) throw new Error('A backup file failed its integrity check.');
+    } else {
+      integrityWarnings?.add('SHA-256 verification was unavailable; every archive member passed its CRC32 check.');
+    }
   }
+  throwIfRestoreAborted(signal);
   return blob;
 }
 
@@ -259,17 +320,28 @@ export async function restoreSnapshot(
   zip: JSZip,
   manifest: SnapshotManifest,
   onProgress?: (current: number, total: number) => void,
-): Promise<ProcessFilesResult> {
+  options: RestoreSnapshotOptions = {},
+): Promise<RestoreSnapshotResult> {
+  const { signal, onCommitStart } = options;
+  const integrityWarnings = new Set<string>();
+  throwIfRestoreAborted(signal);
+  const restoreBytes = getSnapshotRestoreBytes(manifest);
+  if (restoreBytes > MAX_SNAPSHOT_RESTORE_BYTES) {
+    throw new Error(
+      'This complete backup exceeds the 512 MiB safe restore limit. Import the original DICOM files instead.',
+    );
+  }
+  await assertStorageHeadroom(restoreBytes);
+  throwIfRestoreAborted(signal);
   const studyUids = new Set(manifest.records.studies.map((study) => study.studyInstanceUid));
   if (studyUids.size !== manifest.records.studies.length) {
     throw new Error('The backup contains duplicate examination identifiers.');
   }
-  const patientKeys = new Set(
-    manifest.records.studies.map((study) => getPatientIdentityKey(study, manifest.records.studies)),
-  );
+  const patientKeys = new Set(getPatientIdentityKeys(manifest.records.studies).values());
   if (patientKeys.size > 1) throw new Error('This backup contains multiple patients and cannot be safely restored.');
   const selectedPatientKey = patientKeys.values().next().value as string | undefined;
   for (const series of manifest.records.series) {
+    throwIfRestoreAborted(signal);
     if (!studyUids.has(series.studyInstanceUid)) throw new Error('The backup contains an orphaned series.');
   }
   const seriesByUid = new Map(manifest.records.series.map((series) => [series.seriesInstanceUid, series]));
@@ -280,6 +352,7 @@ export async function restoreSnapshot(
   const instancesByUid = new Map<string, DicomInstance>();
   let current = 0;
   for (const metadata of manifest.records.instances) {
+    throwIfRestoreAborted(signal);
     const parentSeries = seriesByUid.get(metadata.seriesInstanceUid);
     if (!studyUids.has(metadata.studyInstanceUid) || parentSeries?.studyInstanceUid !== metadata.studyInstanceUid) {
       throw new Error('The backup contains an orphaned image.');
@@ -287,8 +360,12 @@ export async function restoreSnapshot(
     if (instancesByUid.has(metadata.sopInstanceUid))
       throw new Error('The backup contains duplicate image identifiers.');
     const { file, ...instance } = metadata;
-    instancesByUid.set(metadata.sopInstanceUid, { ...instance, fileBlob: await readVerifiedFile(zip, file) });
+    instancesByUid.set(metadata.sopInstanceUid, {
+      ...instance,
+      fileBlob: await readVerifiedFile(zip, file, signal, integrityWarnings),
+    });
     onProgress?.(++current, manifest.records.instances.length);
+    throwIfRestoreAborted(signal);
   }
   const instances = Array.from(instancesByUid.values());
   const orderedInstancesForSeries = (seriesUid: string): DicomInstance[] => {
@@ -307,6 +384,7 @@ export async function restoreSnapshot(
   };
 
   for (const annotation of [...manifest.records.tumorSegmentations, ...manifest.records.tumorGroundTruth]) {
+    throwIfRestoreAborted(signal);
     const parentSeries = seriesByUid.get(annotation.seriesUid);
     if (
       parentSeries?.studyInstanceUid !== annotation.studyId ||
@@ -318,8 +396,9 @@ export async function restoreSnapshot(
 
   const volumes: VolumeSegmentationRow[] = [];
   for (const metadata of manifest.records.volumeSegmentations) {
+    throwIfRestoreAborted(signal);
     const { file, ...volume } = metadata;
-    const bytes = new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, file)));
+    const bytes = new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, file, signal, integrityWarnings)));
     if (bytes.length !== volume.dims[0] * volume.dims[1] * volume.dims[2]) {
       throw new Error('A saved volume segmentation does not match its reconstruction geometry.');
     }
@@ -329,6 +408,7 @@ export async function restoreSnapshot(
   const derivedFrames: DerivedAlignmentFrameRow[] = [];
   const derivedFrameIds = new Set<string>();
   for (const metadata of manifest.records.derivedAlignmentFrames ?? []) {
+    throwIfRestoreAborted(signal);
     const { file, validFile, ...frame } = metadata;
     const target = seriesByUid.get(frame.targetSeriesUid);
     const targetInstance = frame.targetSopInstanceUid ? instancesByUid.get(frame.targetSopInstanceUid) : undefined;
@@ -381,12 +461,14 @@ export async function restoreSnapshot(
       validateOutputGridReference(frame.outputGrid, referenceInstance, reference?.frameOfReferenceUid);
     }
     derivedFrameIds.add(frame.id);
-    const bytes = await toArrayBuffer(await readVerifiedFile(zip, file));
+    const bytes = await toArrayBuffer(await readVerifiedFile(zip, file, signal, integrityWarnings));
     if (bytes.byteLength !== frame.rows * frame.columns * Float32Array.BYTES_PER_ELEMENT) {
       throw new Error('A saved derived alignment frame does not match its pixel geometry.');
     }
     const pixels = new Float32Array(bytes);
-    const valid = validFile ? new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, validFile))) : undefined;
+    const valid = validFile
+      ? new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, validFile, signal, integrityWarnings)))
+      : undefined;
     const derivedFrame = { ...frame, pixels, ...(valid && { valid }) };
     assertValidDerivedAlignmentFrameShape(derivedFrame);
     derivedFrames.push(derivedFrame);
@@ -396,10 +478,15 @@ export async function restoreSnapshot(
 
   const models = [] as Array<{ key: string; blob: Blob }>;
   for (const model of manifest.records.models) {
-    models.push({ key: model.key, blob: await readVerifiedFile(zip, model.file) });
+    throwIfRestoreAborted(signal);
+    models.push({ key: model.key, blob: await readVerifiedFile(zip, model.file, signal, integrityWarnings) });
   }
 
   const db = await getDB();
+  throwIfRestoreAborted(signal);
+  if (models.length > 0) await putModelBlobs(models, { signal });
+  throwIfRestoreAborted(signal);
+  onCommitStart?.();
   const tx = db.transaction(
     [
       'studies',
@@ -467,12 +554,14 @@ export async function restoreSnapshot(
   await revisionStore.put({ key: DATASET_REVISION_STATE_KEY, value: nextRevision });
   await tx.done;
 
-  for (const model of models) {
-    await putModelBlob(model.key, model.blob);
-  }
   if (typeof localStorage !== 'undefined') {
     for (const [key, value] of Object.entries(manifest.records.localStorage ?? {})) {
-      if (isOwnedStorageKey(key)) localStorage.setItem(key, value);
+      if (!isOwnedStorageKey(key)) continue;
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+        integrityWarnings.add('Some display preferences could not be restored; all medical data was restored safely.');
+      }
     }
   }
   notifyDatasetMutation();
@@ -484,5 +573,6 @@ export async function restoreSnapshot(
     skipped: 0,
     errors: 0,
     errorSamples: [],
+    ...(integrityWarnings.size > 0 && { integrityWarnings: Array.from(integrityWarnings) }),
   };
 }

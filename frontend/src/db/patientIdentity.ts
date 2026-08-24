@@ -24,3 +24,33 @@ export function getPatientIdentityKey(study: DicomStudy, studies: readonly Dicom
   }
   return base;
 }
+
+/** Resolve every conservative patient identity without rescanning the full study set per examination. */
+export function getPatientIdentityKeys(studies: readonly DicomStudy[]): ReadonlyMap<string, string> {
+  const namesByIdentity = new Map<string, Set<string>>();
+  const identityByStudy = new Map<string, string>();
+
+  for (const study of studies) {
+    const identity = basePatientIdentity(study);
+    identityByStudy.set(study.studyInstanceUid, identity);
+    if (!study.patientId.trim()) continue;
+
+    const normalizedName = study.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    if (!normalizedName) continue;
+    let names = namesByIdentity.get(identity);
+    if (!names) {
+      names = new Set<string>();
+      namesByIdentity.set(identity, names);
+    }
+    names.add(normalizedName);
+  }
+
+  for (const study of studies) {
+    const identity = identityByStudy.get(study.studyInstanceUid)!;
+    if ((namesByIdentity.get(identity)?.size ?? 0) > 1) {
+      identityByStudy.set(study.studyInstanceUid, `${identity}#${study.studyInstanceUid}`);
+    }
+  }
+
+  return identityByStudy;
+}

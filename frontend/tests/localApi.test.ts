@@ -1,6 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getDB, resetDbForTests } from '../src/db/db';
-import { getComparisonData, getImageIdForInstance, getPanelSettings, savePanelSettings } from '../src/utils/localApi';
+import {
+  getComparisonData,
+  getImageIdForInstance,
+  getPanelSettings,
+  getSeriesFrameManifest,
+  getStudies,
+  savePanelSettings,
+} from '../src/utils/localApi';
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -13,6 +20,7 @@ async function resetDb() {
 
 describe('localApi', () => {
   afterEach(async () => {
+    vi.restoreAllMocks();
     await resetDbForTests();
     await resetDb();
   });
@@ -153,5 +161,103 @@ describe('localApi', () => {
 
     const imageId = await getImageIdForInstance('series-1', 0);
     expect(imageId).toBe('miradb:inst-0');
+  });
+
+  it('counts all selected series through one bounded IndexedDB read transaction', async () => {
+    const db = await getDB();
+    await db.put('studies', {
+      studyInstanceUid: 'count-study',
+      studyDate: '20350101',
+      studyDescription: 'Synthetic examination',
+      patientName: 'Synthetic Patient',
+      patientId: 'synthetic-patient',
+      modality: 'MR',
+    });
+
+    for (let index = 0; index < 80; index++) {
+      const seriesUid = `count-series-${index}`;
+      await db.put('series', {
+        seriesInstanceUid: seriesUid,
+        studyInstanceUid: 'count-study',
+        seriesDescription: 'Axial T2',
+        seriesNumber: index,
+        modality: 'MR',
+      });
+      await db.put('instances', {
+        sopInstanceUid: `count-instance-${index}`,
+        seriesInstanceUid: seriesUid,
+        studyInstanceUid: 'count-study',
+        instanceNumber: 1,
+        rows: 16,
+        columns: 16,
+        fileBlob: new Blob([new Uint8Array([index])]),
+      });
+    }
+
+    const transactions = vi.spyOn(IDBDatabase.prototype, 'transaction');
+    const comparison = await getComparisonData();
+    const instanceTransactions = transactions.mock.calls.filter(([stores]) =>
+      (typeof stores === 'string' ? [stores] : Array.from(stores)).includes('instances'),
+    );
+
+    expect(comparison.patients).toHaveLength(1);
+    expect(instanceTransactions).toHaveLength(1);
+
+    transactions.mockClear();
+    expect(await getStudies()).toHaveLength(1);
+    const exportStudyTransactions = transactions.mock.calls.filter(([stores]) =>
+      (typeof stores === 'string' ? [stores] : Array.from(stores)).includes('instances'),
+    );
+    expect(exportStudyTransactions).toHaveLength(1);
+  });
+
+  it('reads a complete ordered frame manifest through one IndexedDB snapshot transaction', async () => {
+    const db = await getDB();
+    await db.put('studies', {
+      studyInstanceUid: 'manifest-study',
+      studyDate: '20350101',
+      studyDescription: 'Synthetic examination',
+      patientName: 'Synthetic Patient',
+      patientId: 'synthetic-patient',
+      modality: 'MR',
+    });
+    await db.put('series', {
+      seriesInstanceUid: 'manifest-series',
+      studyInstanceUid: 'manifest-study',
+      seriesDescription: 'Axial T2',
+      seriesNumber: 1,
+      modality: 'MR',
+      frameOfReferenceUid: 'synthetic-frame',
+    });
+
+    for (let index = 0; index < 24; index++) {
+      await db.put('instances', {
+        sopInstanceUid: `manifest-instance-${String(index).padStart(2, '0')}`,
+        seriesInstanceUid: 'manifest-series',
+        studyInstanceUid: 'manifest-study',
+        instanceNumber: 24 - index,
+        physicalSlicePosition: index,
+        frameOfReferenceUid: 'synthetic-frame',
+        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+        imagePositionPatient: `0\\0\\${index}`,
+        pixelSpacing: '1\\1',
+        rows: 16,
+        columns: 16,
+        fileBlob: new Blob([new Uint8Array([index])]),
+      });
+    }
+
+    const transactions = vi.spyOn(IDBDatabase.prototype, 'transaction');
+    const manifest = await getSeriesFrameManifest('manifest-series');
+    const instanceTransactions = transactions.mock.calls.filter(([stores]) =>
+      (typeof stores === 'string' ? [stores] : Array.from(stores)).includes('instances'),
+    );
+
+    expect(manifest.ordering).toBe('physical');
+    expect(manifest.geometryReliable).toBe(true);
+    expect(manifest.frames).toHaveLength(24);
+    expect(manifest.frames[0]?.physicalSlicePosition).toBe(0);
+    expect(manifest.frames[23]?.physicalSlicePosition).toBe(23);
+    expect(instanceTransactions).toHaveLength(1);
   });
 });
