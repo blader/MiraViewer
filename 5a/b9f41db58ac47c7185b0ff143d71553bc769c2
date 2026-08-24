@@ -1,0 +1,19 @@
+frontend/tests/svrRigidRegistration.test.ts
+  s_3b5c6669968514::t_99e3d372728cd4 419-429,437,457,477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "5ab9f41db58ac47c7185b0ff143d71553bc769c2",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
