@@ -60,18 +60,21 @@ describe('canonical decoded DICOM frames', () => {
     });
   });
 
-  it('area-downsamples decoded modality values without an 8-bit display or a DOM canvas', () => {
-    const image = {
-      rows: 2,
-      columns: 2,
-      slope: 0.5,
-      intercept: 100,
-      getPixelData: () => new Uint16Array([1000, 2000, 3000, 4000]),
-    };
+  it.each(['area', 'lanczos3'] as const)(
+    '%s-downsamples decoded modality values without an 8-bit display or a DOM canvas',
+    (kernel) => {
+      const image = {
+        rows: 2,
+        columns: 2,
+        slope: 0.5,
+        intercept: 100,
+        getPixelData: () => new Uint16Array([1000, 2000, 3000, 4000]),
+      };
 
-    const result = resampleDecodedImage(image, 1, 1);
+      const result = resampleDecodedImage(image, 1, 1, kernel);
 
-    expect(Array.from(result)).toEqual([1350]);
-    expect(document.querySelector('canvas')).toBeNull();
-  });
+      expect(Array.from(result)).toEqual([1350]);
+      expect(document.querySelector('canvas')).toBeNull();
+    },
+  );
 });

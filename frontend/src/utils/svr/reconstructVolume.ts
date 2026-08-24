@@ -3,11 +3,10 @@ import { getDB } from '../../db/db';
 import type { DicomInstance } from '../../db/schema';
 import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../../types/svr';
 import { getSortedSopInstanceUidsForSeries } from '../localApi';
-import { loadCornerstoneImage } from '../decodedFrame';
+import { loadCornerstoneImage, resampleDecodedImage, type DecodedFrameResampleKernel } from '../decodedFrame';
 import type { SliceGeometry } from './dicomGeometry';
 import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
-import { resample2dAreaAverage, resample2dLanczos3 } from './resample2d';
 import { dot } from './vec3';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
 import type { LoadedSlice } from './rigidRegistration';
@@ -21,9 +20,7 @@ import type {
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 
-type SvrSliceResampleKernel = 'area' | 'lanczos3';
-
-function getSvrSliceResampleKernel(debug?: boolean): SvrSliceResampleKernel {
+function getSvrSliceResampleKernel(debug?: boolean): DecodedFrameResampleKernel {
   if (!debug) return 'area';
 
   try {
@@ -114,35 +111,15 @@ async function loadSeriesSlices(params: {
     const imageId = `miradb:${sopInstanceUid}`;
     const image = await loadCornerstoneImage(imageId);
 
-    const getPixelData = (image as unknown as { getPixelData?: () => ArrayLike<number> }).getPixelData;
-    if (typeof getPixelData !== 'function') {
-      throw new Error('Cornerstone image did not expose getPixelData()');
-    }
-
-    const pixelData = getPixelData.call(image);
-
     // Higher-fidelity downsampling (anti-aliasing) to reduce aliasing.
     // Default is box/area averaging; Lanczos is available behind a debug flag.
-    const down =
-      resampleKernel === 'lanczos3'
-        ? resample2dLanczos3(pixelData, geom.rows, geom.cols, dsRows, dsCols)
-        : resample2dAreaAverage(pixelData, geom.rows, geom.cols, dsRows, dsCols);
-
     // Apply modality scaling when available. (Linear, so applying post-downsample is equivalent.)
-    const slope =
-      typeof (image as unknown as { slope?: unknown }).slope === 'number'
-        ? (image as unknown as { slope: number }).slope
-        : 1;
-    const intercept =
-      typeof (image as unknown as { intercept?: unknown }).intercept === 'number'
-        ? (image as unknown as { intercept: number }).intercept
-        : 0;
-
-    if (slope !== 1 || intercept !== 0) {
-      for (let p = 0; p < down.length; p++) {
-        down[p] = down[p] * slope + intercept;
-      }
-    }
+    const down = resampleDecodedImage(
+      image as unknown as Parameters<typeof resampleDecodedImage>[0],
+      dsRows,
+      dsCols,
+      resampleKernel,
+    );
 
     // Sample intensities deterministically for robust global normalization.
     if (intensitySamples.length < maxIntensitySamples) {

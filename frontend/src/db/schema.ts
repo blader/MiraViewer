@@ -236,19 +236,11 @@ export interface PanelSettingsRow {
   comboId: string;
   settings: Record<
     string,
-    {
+    ViewerTransform & {
       offset: number;
       reverseSliceOrder: boolean;
-      zoom: number;
-      rotation: number;
       brightness: number;
       contrast: number;
-      panX: number;
-      panY: number;
-      affine00: number;
-      affine01: number;
-      affine10: number;
-      affine11: number;
       progress: number;
     }
   >;

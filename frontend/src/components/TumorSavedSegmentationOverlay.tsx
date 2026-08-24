@@ -6,7 +6,7 @@ import {
   normalizeViewerTransform,
   polygonToSvgPath,
   remapPolygonBetweenViewerTransforms,
-  viewerPolygonToImagePolygon,
+  restoreImagePolygon,
 } from '../utils/viewTransform';
 
 export type TumorSavedSegmentationOverlayProps = {
@@ -73,34 +73,17 @@ export function TumorSavedSegmentationOverlay({
         if (cancelled) return;
 
         const savedTransform = row?.meta?.viewTransform ?? normalizeViewerTransform(null);
-        const legacyViewport = row?.meta?.viewportSize;
-        if (row && row.meta?.coordinateSpace !== 'image-normalized') {
-          if (!imageSize || !legacyViewport || legacyViewport.w <= 0 || legacyViewport.h <= 0) {
-            setSavedPolygon(null);
-            setSavedImageSize(null);
-            setCoordinateWarning(
-              'Saved tumor annotation cannot be displayed safely: its original viewport or image dimensions are unavailable. The stored annotation is preserved.',
-            );
-            return;
-          }
-          setSavedPolygon(viewerPolygonToImagePolygon(row.polygon, legacyViewport, imageSize, savedTransform));
-          setSavedImageSize(imageSize);
-        } else if (row) {
-          const canonicalImageSize = row.meta?.imageSize ?? imageSize;
-          if (!canonicalImageSize) {
-            setSavedPolygon(null);
-            setSavedImageSize(null);
-            setCoordinateWarning(
-              'Saved tumor annotation cannot be displayed safely: its source image dimensions are unavailable. The stored annotation is preserved.',
-            );
-            return;
-          }
-          setSavedPolygon(row.polygon);
-          setSavedImageSize(canonicalImageSize);
-        } else {
+        const restored = row ? restoreImagePolygon(row.polygon, row.meta ?? {}, imageSize) : null;
+        if (restored && 'error' in restored) {
           setSavedPolygon(null);
           setSavedImageSize(null);
+          setCoordinateWarning(
+            `Saved tumor annotation cannot be displayed safely: its ${restored.error}. The stored annotation is preserved.`,
+          );
+          return;
         }
+        setSavedPolygon(restored?.polygon ?? null);
+        setSavedImageSize(restored?.imageSize ?? null);
         setSavedViewTransform(savedTransform);
       } catch (e) {
         console.error(e);

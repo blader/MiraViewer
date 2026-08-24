@@ -1,6 +1,6 @@
 import cornerstone from 'cornerstone-core';
 import { getImageIdForInstance } from './localApi';
-import { resample2dAreaAverage } from './svr/resample2d';
+import { resample2dAreaAverage, resample2dLanczos3 } from './svr/resample2d';
 
 type DecodedCornerstoneImage = {
   imageId?: string;
@@ -25,6 +25,8 @@ export type DecodedFrame = {
   rowSpacingMm?: number;
   colSpacingMm?: number;
 };
+
+export type DecodedFrameResampleKernel = 'area' | 'lanczos3';
 
 /** The bounded Cornerstone cache is the sole owner of decoded DICOM image objects. */
 export function loadCornerstoneImage(imageId: string): ReturnType<typeof cornerstone.loadImage> {
@@ -51,6 +53,7 @@ export function resampleDecodedImage(
   image: DecodedCornerstoneImage,
   targetRows: number,
   targetCols: number,
+  kernel: DecodedFrameResampleKernel = 'area',
 ): Float32Array {
   const { rows, cols } = getImageDimensions(image);
   if (typeof image.getPixelData !== 'function') {
@@ -62,7 +65,8 @@ export function resampleDecodedImage(
     throw new Error('Decoded DICOM image pixel data is smaller than its native dimensions');
   }
 
-  const pixels = resample2dAreaAverage(source, rows, cols, targetRows, targetCols);
+  const resample = kernel === 'lanczos3' ? resample2dLanczos3 : resample2dAreaAverage;
+  const pixels = resample(source, rows, cols, targetRows, targetCols);
   const slope = Number.isFinite(image.slope) ? image.slope! : 1;
   const intercept = Number.isFinite(image.intercept) ? image.intercept! : 0;
   if (slope !== 1 || intercept !== 0) {

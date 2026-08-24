@@ -96,6 +96,15 @@ export async function exportStudiesToZip(
 ): Promise<Blob> {
   const db = await getDB();
   const zip = new JSZip();
+  const addSnapshotFile = async (
+    path: string,
+    value: Blob | ArrayBufferView,
+    uncompressed = false,
+  ): Promise<SnapshotFile> => {
+    const bytes = await toArrayBuffer(value);
+    zip.file(path, bytes, uncompressed ? { compression: 'STORE' } : undefined);
+    return describeFile(path, bytes);
+  };
   const selectedStudies = new Set(studyIds);
   const allStudies = await db.getAll('studies');
   const studies = allStudies.filter((study) => selectedStudies.has(study.studyInstanceUid));
@@ -118,9 +127,7 @@ export async function exportStudiesToZip(
     for (const row of rows) {
       const { fileBlob, ...metadata } = row;
       const path = `studies/${encodeURIComponent(row.studyInstanceUid)}/series/${encodeURIComponent(row.seriesInstanceUid)}/${encodeURIComponent(row.sopInstanceUid)}.dcm`;
-      const bytes = await toArrayBuffer(fileBlob);
-      const file = await describeFile(path, bytes);
-      zip.file(path, bytes);
+      const file = await addSnapshotFile(path, fileBlob);
       instances.push({ ...metadata, file });
       collected += 1;
       onProgress?.({ stage: 'collecting', current: collected, total: Math.max(totalInstances, 1) });
@@ -140,10 +147,8 @@ export async function exportStudiesToZip(
     if (row.seriesUids?.length && !row.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
     const { labels, ...metadata } = row;
     const path = `segmentations/${encodeURIComponent(row.volumeKey)}.labels`;
-    const bytes = await toArrayBuffer(labels);
-    const file = await describeFile(path, bytes);
     // Sparse label masks can legitimately exceed archive expansion-ratio guards.
-    zip.file(path, bytes, { compression: 'STORE' });
+    const file = await addSnapshotFile(path, labels, true);
     volumeSegmentations.push({ ...metadata, file });
   }
 
@@ -155,18 +160,14 @@ export async function exportStudiesToZip(
     if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
     const { pixels, ...metadata } = row;
     const path = `derived-frames/${encodeURIComponent(row.id)}.f32`;
-    const bytes = await toArrayBuffer(pixels);
-    const file = await describeFile(path, bytes);
-    zip.file(path, bytes, { compression: 'STORE' });
+    const file = await addSnapshotFile(path, pixels, true);
     derivedAlignmentFrames.push({ ...metadata, file });
   }
 
   const models: SnapshotModel[] = [];
   for (const model of await getAllModelRecords()) {
     const path = `models/${encodeURIComponent(model.key)}.onnx`;
-    const bytes = await toArrayBuffer(model.blob);
-    const file = await describeFile(path, bytes);
-    zip.file(path, bytes);
+    const file = await addSnapshotFile(path, model.blob);
     models.push({ key: model.key, savedAtMs: model.savedAtMs, file });
   }
 
@@ -270,21 +271,20 @@ export async function restoreSnapshot(
     throw new Error('The backup contains duplicate series identifiers.');
   }
 
-  const instances: DicomInstance[] = [];
-  const instanceUids = new Set<string>();
+  const instancesByUid = new Map<string, DicomInstance>();
   let current = 0;
   for (const metadata of manifest.records.instances) {
     const parentSeries = seriesByUid.get(metadata.seriesInstanceUid);
     if (!studyUids.has(metadata.studyInstanceUid) || parentSeries?.studyInstanceUid !== metadata.studyInstanceUid) {
       throw new Error('The backup contains an orphaned image.');
     }
-    if (instanceUids.has(metadata.sopInstanceUid)) throw new Error('The backup contains duplicate image identifiers.');
-    instanceUids.add(metadata.sopInstanceUid);
+    if (instancesByUid.has(metadata.sopInstanceUid))
+      throw new Error('The backup contains duplicate image identifiers.');
     const { file, ...instance } = metadata;
-    instances.push({ ...instance, fileBlob: await readVerifiedFile(zip, file) });
+    instancesByUid.set(metadata.sopInstanceUid, { ...instance, fileBlob: await readVerifiedFile(zip, file) });
     onProgress?.(++current, manifest.records.instances.length);
   }
-  const instancesByUid = new Map(instances.map((instance) => [instance.sopInstanceUid, instance]));
+  const instances = Array.from(instancesByUid.values());
   const orderedInstancesForSeries = (seriesUid: string): DicomInstance[] => {
     const matching = instances.filter((instance) => instance.seriesInstanceUid === seriesUid);
     const hasPhysicalOrdering = matching.every(

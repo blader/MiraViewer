@@ -154,7 +154,6 @@ export function useAutoAlign() {
     error: null,
   });
 
-  const abortRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
@@ -162,10 +161,7 @@ export function useAutoAlign() {
   /**
    * Abort the current alignment operation.
    */
-  const abort = useCallback(() => {
-    abortRef.current = true;
-    abortControllerRef.current?.abort();
-  }, []);
+  const abort = useCallback(() => abortControllerRef.current?.abort(), []);
 
   /**
    * Auto-align all target dates to the reference.
@@ -186,7 +182,6 @@ export function useAutoAlign() {
       abortControllerRef.current?.abort();
       const alignmentAbortController = new AbortController();
       abortControllerRef.current = alignmentAbortController;
-      abortRef.current = false;
       const runId =
         globalThis.crypto?.randomUUID?.() ?? `alignment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       clearDerivedAlignmentFrames();
@@ -218,7 +213,7 @@ export function useAutoAlign() {
         const captureScratchFull = createPixelCaptureScratch(ALIGNMENT_IMAGE_SIZE);
         const captureScratchCoarse = createPixelCaptureScratch(COARSE_IMAGE_SIZE);
         const ensureNotAborted = () => {
-          if (abortRef.current || alignmentAbortController.signal.aborted) {
+          if (alignmentAbortController.signal.aborted) {
             throw new AlignmentCancelledError();
           }
         };
@@ -1078,7 +1073,7 @@ export function useAutoAlign() {
             const recordCandidateDebug = (candidate: RankedCandidate, stage: 'coarse' | 'fine', selected: boolean) => {
               const stageSnapshot = buildStageSnapshot(candidate, stage);
               const stageHistory = stage === 'coarse' ? { coarseStage: stageSnapshot } : { fineStage: stageSnapshot };
-              recordAlignmentSliceScore(seriesRef.series_uid, candidate.index, {
+              const metrics: Parameters<typeof recordAlignmentSliceScore>[2] = {
                 ssim: averageMetric(candidate.components, 'contrastStructure'),
                 lncc: averageMetric(candidate.components, 'lncc'),
                 zncc: candidate.appearanceRank,
@@ -1111,7 +1106,8 @@ export function useAutoAlign() {
                 selected,
                 perScale: candidate.components.perScale,
                 ...stageHistory,
-              });
+              };
+              recordAlignmentSliceScore(seriesRef.series_uid, candidate.index, metrics);
               debugAlignmentLog(
                 'slice-search.score',
                 {
@@ -1149,11 +1145,16 @@ export function useAutoAlign() {
                 },
                 debugAlignment,
               );
+              return metrics;
             };
             for (const candidate of rankedCoarse) recordCandidateDebug(candidate, 'coarse', false);
+            let winningFineMetrics: Parameters<typeof recordAlignmentSliceScore>[2] | undefined;
             for (const candidate of rankedFine) {
-              recordCandidateDebug(candidate, 'fine', candidate.index === winningCandidate.index);
+              const selected = candidate.index === winningCandidate.index;
+              const metrics = recordCandidateDebug(candidate, 'fine', selected);
+              if (selected) winningFineMetrics = metrics;
             }
+            if (!winningFineMetrics) throw new Error('Final affine invariant: selected slice diagnostics are missing');
 
             setStateForCurrentRun((s) => ({
               ...s,
@@ -1376,40 +1377,8 @@ export function useAutoAlign() {
               throw new Error('Final affine invariant: seed-only proposal is not eligible');
             }
 
-            const winningFineSnapshot = buildStageSnapshot(winningCandidate, 'fine');
             recordAlignmentSliceScore(seriesRef.series_uid, winningCandidate.index, {
-              ssim: averageMetric(winningCandidate.components, 'contrastStructure'),
-              lncc: averageMetric(winningCandidate.components, 'lncc'),
-              zncc: winningCandidate.appearanceRank,
-              ngf: averageMetric(winningCandidate.components, 'ngf'),
-              mind: averageMetric(winningCandidate.components, 'mind'),
-              rawMindDistance: averageRawMindDistance(winningCandidate.components),
-              census: winningCandidate.boundaryRank,
-              phase: winningCandidate.phase.peak,
-              mi: winningCandidate.components.coverage,
-              nmi: winningCandidate.phase.peakToSidelobeRatio,
-              score: winningCandidate.perceptualRank,
-              stage: 'fine',
-              distanceFromSeed: winningCandidate.index - seedIdx,
-              rigidSeed: seedTransform,
-              coverage: winningCandidate.components.coverage,
-              mindRank: winningCandidate.mindRank,
-              appearanceRank: winningCandidate.appearanceRank,
-              boundaryRank: winningCandidate.boundaryRank,
-              structuralRank: winningCandidate.structuralRank,
-              perceptualRank: winningCandidate.perceptualRank,
-              mindActive: winningCandidate.mindActive,
-              appearanceActive: winningCandidate.appearanceActive,
-              boundaryActive: winningCandidate.boundaryActive,
-              structuralActive: winningCandidate.structuralActive,
-              phaseInput: 'structural-edge-energy',
-              correctionX: winningCandidate.phase.correctionX,
-              correctionY: winningCandidate.phase.correctionY,
-              phasePeakToSidelobeRatio: winningCandidate.phase.peakToSidelobeRatio,
-              retainedForFine: true,
-              selected: true,
-              perScale: winningCandidate.components.perScale,
-              fineStage: winningFineSnapshot,
+              ...winningFineMetrics,
               finalAffineSelected: selectedProposal.kind,
               finalAffineStructuralScore: selectedProposal.structuralScore,
               finalAffineSeedStructuralScore: seedProposal.structuralScore,

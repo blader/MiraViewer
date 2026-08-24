@@ -17,19 +17,8 @@ import type {
 import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
 import { parseSeriesDescription } from './dicomSeriesParsing';
 
-export type PatientSummary = {
-  key: string;
-  patient_id: string;
-  patient_name: string;
-  study_count: number;
-};
-
-export type ExaminationSummary = {
-  study_uid: string;
-  date_iso: string;
-  acquisition_time?: string;
-  patient_key: string;
-};
+export type PatientSummary = NonNullable<ComparisonData['patients']>[number];
+export type ExaminationSummary = NonNullable<ComparisonData['examinations']>[string];
 
 export type PatientScopedComparisonData = ComparisonData & {
   patients: PatientSummary[];
@@ -252,22 +241,7 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
 
     const prev = seriesMap[comboId][dateIso];
 
-    if (!prev) {
-      seriesMap[comboId][dateIso] = {
-        study_id: s.studyInstanceUid,
-        study_uid: s.studyInstanceUid,
-        series_uid: s.seriesInstanceUid,
-        instance_count: instanceCount,
-        patient_key: selectedPatientKey ?? undefined,
-        frame_of_reference_uid: s.frameOfReferenceUid,
-        acquisition_time: s.acquisitionTime,
-        rows: s.rows,
-        columns: s.columns,
-        pixel_spacing: parsePixelSpacing(s.pixelSpacing),
-      };
-      sequences[comboId].date_count++;
-      continue;
-    }
+    if (!prev) sequences[comboId].date_count++;
 
     // If multiple series map to the same (plane, weight, sequenceType) combo for a given date,
     // prefer the one with the most instances.
@@ -277,7 +251,7 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
     //   localizers, reformats) that would otherwise get picked arbitrarily based on ingestion order.
     // - Auto-alignment relies on having a full through-plane stack; choosing a tiny series can make
     //   alignment look "broken" even though the real series exists.
-    if (instanceCount > prev.instance_count) {
+    if (!prev || instanceCount > prev.instance_count) {
       seriesMap[comboId][dateIso] = {
         study_id: s.studyInstanceUid,
         study_uid: s.studyInstanceUid,

@@ -7,27 +7,16 @@ export function useComparisonData() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (patientKey?: string) => {
     try {
       setLoading(true);
       setError(null);
-      const d = await getComparisonData();
+      if (patientKey !== undefined) await setSelectedPatientKey(patientKey);
+      const d = await getComparisonData(patientKey);
       setData(d);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load comparison data');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const selectPatient = useCallback(async (patientKey: string) => {
-    try {
-      setLoading(true);
-      setError(null);
-      await setSelectedPatientKey(patientKey);
-      setData(await getComparisonData(patientKey));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to select patient');
+      const fallback = patientKey === undefined ? 'Failed to load comparison data' : 'Failed to select patient';
+      setError(e instanceof Error ? e.message : fallback);
     } finally {
       setLoading(false);
     }
@@ -51,5 +40,5 @@ export function useComparisonData() {
     };
   }, []);
 
-  return { data, loading, error, reload, selectPatient };
+  return { data, loading, error, reload, selectPatient: reload };
 }

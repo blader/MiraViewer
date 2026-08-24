@@ -45,7 +45,8 @@ export function useOverlayNavigation(
   options: { interactionBlocked?: boolean } = {},
 ) {
   const { interactionBlocked = false } = options;
-  const persistedRef = useRef<PersistedOverlayNav>(readPersistedOverlayNav());
+  const [initialPersistedNav] = useState(readPersistedOverlayNav);
+  const persistedRef = useRef<PersistedOverlayNav>(initialPersistedNav);
 
   const persist = useCallback((update: PersistedOverlayNav) => {
     const next: PersistedOverlayNav = { ...persistedRef.current, ...update };
@@ -53,16 +54,11 @@ export function useOverlayNavigation(
     writeLocalStorageJson(OVERLAY_NAV_STORAGE_KEY, next);
   }, []);
 
-  const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(() => {
-    const restored = readPersistedOverlayNav().viewMode;
-    return restored === 'overlay' ? 'overlay' : restored === 'svr3d' ? 'svr3d' : 'grid';
-  });
+  const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(initialPersistedNav.viewMode ?? 'grid');
   const [overlayDateIndex, setOverlayDateIndexState] = useState(0);
   const [previousOverlayDateIndex, setPreviousOverlayDateIndex] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeedState] = useState(() => {
-    return readPersistedOverlayNav().playSpeed ?? 1000;
-  }); // ms between frames
+  const [playSpeed, setPlaySpeedState] = useState(initialPersistedNav.playSpeed ?? 1000); // ms between frames
 
   // Track spacebar held state for compare feature
   const [spaceHeld, setSpaceHeld] = useState(false);

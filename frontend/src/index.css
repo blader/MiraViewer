@@ -46,15 +46,6 @@ textarea {
   outline-offset: 3px;
 }
 
-button:focus-visible,
-[role='button']:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
-}
-
 .study-controls {
   opacity: 0;
   pointer-events: none;

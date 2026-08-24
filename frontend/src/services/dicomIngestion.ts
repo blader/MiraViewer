@@ -76,6 +76,17 @@ function getText(dataSet: dicomParser.DataSet, tag: string): string {
   return dataSet.string(tag) || '';
 }
 
+const NUMERIC_ACCESSORS = {
+  DS: 'floatString',
+  IS: 'intString',
+  US: 'uint16',
+  SS: 'int16',
+  UL: 'uint32',
+  SL: 'int32',
+  FL: 'float',
+  FD: 'double',
+} as const;
+
 function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   // IMPORTANT: Many numeric DICOM tags are *not* stored as ASCII.
   // For example, Rows/Columns are VR=US (binary). Reading them via dataSet.string()
@@ -91,25 +102,14 @@ function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
         ? 'IS'
         : undefined;
   const vr = dataSet.elements?.[tag]?.vr ?? knownVr;
-  const accessors: Record<string, (() => number | undefined) | undefined> = {
-    DS: () => dataSet.floatString(tag, 0),
-    IS: () => dataSet.intString(tag, 0),
-    US: () => dataSet.uint16(tag, 0),
-    SS: () => dataSet.int16(tag, 0),
-    UL: () => dataSet.uint32(tag, 0),
-    SL: () => dataSet.int32(tag, 0),
-    FL: () => dataSet.float(tag, 0),
-    FD: () => dataSet.double(tag, 0),
-  };
-  const preferred = vr ? accessors[vr] : undefined;
+  const preferred = vr ? NUMERIC_ACCESSORS[vr as keyof typeof NUMERIC_ACCESSORS] : undefined;
   const candidates = preferred
-    ? [preferred, accessors.DS, accessors.IS]
-    : [accessors.DS, accessors.IS, accessors.US, accessors.SS, accessors.UL, accessors.SL, accessors.FL, accessors.FD];
+    ? [preferred, NUMERIC_ACCESSORS.DS, NUMERIC_ACCESSORS.IS]
+    : Object.values(NUMERIC_ACCESSORS);
 
-  for (const read of candidates) {
-    if (!read) continue;
+  for (const accessor of candidates) {
     try {
-      const value = read();
+      const value = dataSet[accessor](tag, 0);
       if (typeof value === 'number' && Number.isFinite(value)) return value;
     } catch {
       // Malformed optional values must not abort an otherwise valid import.
@@ -198,42 +198,18 @@ const TAGS = {
 };
 
 // Common non-DICOM file extensions to skip
-const SKIP_EXTENSIONS = new Set([
-  '.txt',
-  '.md',
-  '.json',
-  '.xml',
-  '.html',
-  '.htm',
-  '.css',
-  '.js',
-  '.jpg',
-  '.jpeg',
-  '.png',
-  '.gif',
-  '.bmp',
-  '.tiff',
-  '.pdf',
-  '.zip',
-  '.tar',
-  '.gz',
-  '.rar',
-  '.7z',
-  '.doc',
-  '.docx',
-  '.xls',
-  '.xlsx',
-  '.ppt',
-  '.pptx',
-  '.log',
-  '.csv',
-  '.ini',
-  '.cfg',
-  '.conf',
-  '.ds_store',
-  '.gitignore',
-  '.gitkeep',
-]);
+const SKIP_EXTENSIONS = new Set(
+  [
+    '.txt .md .json .xml .html .htm .css .js',
+    '.jpg .jpeg .png .gif .bmp .tiff .pdf',
+    '.zip .tar .gz .rar .7z',
+    '.doc .docx .xls .xlsx .ppt .pptx',
+    '.log .csv .ini .cfg .conf',
+    '.ds_store .gitignore .gitkeep',
+  ]
+    .join(' ')
+    .split(' '),
+);
 
 function shouldSkipFile(filename: string): boolean {
   const base = basename(filename);
@@ -345,29 +321,19 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const iop = getText(dataSet, TAGS.ImageOrientationPatient);
   const imagePosition = getText(dataSet, TAGS.ImagePositionPatient);
   const pixelSpacing = getText(dataSet, TAGS.PixelSpacing);
-  if (iop && !parseImageOrientationPatient(iop)) {
-    return {
-      status: 'error',
-      fileName,
-      reason: 'parse-error',
-      message: 'Invalid DICOM image orientation; the frame cannot be positioned safely.',
-    };
-  }
-  if (imagePosition && !parseImagePositionPatient(imagePosition)) {
-    return {
-      status: 'error',
-      fileName,
-      reason: 'parse-error',
-      message: 'Invalid DICOM image position; the frame cannot be positioned safely.',
-    };
-  }
-  if (pixelSpacing && !parsePixelSpacingMm(pixelSpacing)) {
-    return {
-      status: 'error',
-      fileName,
-      reason: 'parse-error',
-      message: 'Invalid DICOM pixel spacing; the frame cannot be calibrated safely.',
-    };
+  for (const [value, parser, label, consequence] of [
+    [iop, parseImageOrientationPatient, 'image orientation', 'positioned'],
+    [imagePosition, parseImagePositionPatient, 'image position', 'positioned'],
+    [pixelSpacing, parsePixelSpacingMm, 'pixel spacing', 'calibrated'],
+  ] as const) {
+    if (value && !parser(value)) {
+      return {
+        status: 'error',
+        fileName,
+        reason: 'parse-error',
+        message: `Invalid DICOM ${label}; the frame cannot be ${consequence} safely.`,
+      };
+    }
   }
   const frameOfReferenceUid = getText(dataSet, TAGS.FrameOfReferenceUID) || undefined;
   const acquisitionTime = getText(dataSet, TAGS.AcquisitionTime) || undefined;

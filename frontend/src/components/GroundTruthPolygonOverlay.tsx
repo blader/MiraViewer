@@ -14,6 +14,7 @@ import {
   remapPointsBetweenViewerTransforms,
   polygonToSvgPath,
   remapPolygonBetweenViewerTransforms,
+  restoreImagePolygon,
   viewerPolygonToImagePolygon,
 } from '../utils/viewTransform';
 import { clamp01 } from '../utils/math';
@@ -79,35 +80,17 @@ export function GroundTruthPolygonOverlay({
         const sop = await getSopInstanceUidForInstanceIndex(seriesUid, effectiveInstanceIndex);
         const row = await getTumorGroundTruthForInstance(seriesUid, sop);
         if (cancelled || generation !== sliceGenerationRef.current) return;
-        const legacyViewport = row?.viewportSize;
-        const legacyTransform = row?.viewTransform ?? normalizeViewerTransform(null);
-        if (row && row.coordinateSpace !== 'image-normalized') {
-          if (!imageSize || !legacyViewport || legacyViewport.w <= 0 || legacyViewport.h <= 0) {
-            setSavedPolygon(null);
-            setSavedImageSize(null);
-            setError(
-              'Saved ground-truth annotation cannot be displayed safely: its original viewport or image dimensions are unavailable. The stored annotation is preserved.',
-            );
-            return;
-          }
-          setSavedPolygon(viewerPolygonToImagePolygon(row.polygon, legacyViewport, imageSize, legacyTransform));
-          setSavedImageSize(imageSize);
-        } else if (row) {
-          const canonicalImageSize = row.imageSize ?? imageSize;
-          if (!canonicalImageSize) {
-            setSavedPolygon(null);
-            setSavedImageSize(null);
-            setError(
-              'Saved ground-truth annotation cannot be displayed safely: its source image dimensions are unavailable. The stored annotation is preserved.',
-            );
-            return;
-          }
-          setSavedPolygon(row.polygon);
-          setSavedImageSize(canonicalImageSize);
-        } else {
+        const restored = row ? restoreImagePolygon(row.polygon, row, imageSize) : null;
+        if (restored && 'error' in restored) {
           setSavedPolygon(null);
           setSavedImageSize(null);
+          setError(
+            `Saved ground-truth annotation cannot be displayed safely: its ${restored.error}. The stored annotation is preserved.`,
+          );
+          return;
         }
+        setSavedPolygon(restored?.polygon ?? null);
+        setSavedImageSize(restored?.imageSize ?? null);
         setSavedViewTransform(row?.viewTransform ?? normalizeViewerTransform(null));
       } catch (e) {
         console.error(e);

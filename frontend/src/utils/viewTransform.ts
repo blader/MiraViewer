@@ -169,6 +169,33 @@ export function viewerPolygonToImagePolygon(
   return { points: polygon.points.map((point) => viewerPointToImagePoint(point, viewport, image, transform)) };
 }
 
+/** Restore persisted annotations only when their authored coordinate space can be proven. */
+export function restoreImagePolygon(
+  polygon: TumorPolygon,
+  metadata: {
+    coordinateSpace?: 'image-normalized' | 'viewer-normalized';
+    imageSize?: ImageSizePx;
+    viewportSize?: ViewportSize;
+    viewTransform?: ViewerTransform;
+  },
+  imageSize?: ImageSizePx,
+): { polygon: TumorPolygon; imageSize: ImageSizePx } | { error: string } {
+  if (metadata.coordinateSpace === 'image-normalized') {
+    const savedImageSize = metadata.imageSize ?? imageSize;
+    return savedImageSize
+      ? { polygon, imageSize: savedImageSize }
+      : { error: 'source image dimensions are unavailable' };
+  }
+
+  const viewport = metadata.viewportSize;
+  if (!imageSize || !viewport || viewport.w <= 0 || viewport.h <= 0) {
+    return { error: 'original viewport or image dimensions are unavailable' };
+  }
+
+  const transform = metadata.viewTransform ?? normalizeViewerTransform(null);
+  return { polygon: viewerPolygonToImagePolygon(polygon, viewport, imageSize, transform), imageSize };
+}
+
 export function imagePolygonToViewerPolygon(
   polygon: TumorPolygon,
   viewport: ViewportSize,

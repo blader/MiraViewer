@@ -196,28 +196,17 @@ export async function resetDbForTests() {
 }
 
 export async function initStoragePersistence() {
-  if (navigator.storage && navigator.storage.persist) {
-    try {
-      const isPersisted = await navigator.storage.persist();
-      const estimate = navigator.storage.estimate ? await navigator.storage.estimate() : undefined;
-      storageHealth = {
-        checked: true,
-        persisted: isPersisted,
-        usage: estimate?.usage,
-        quota: estimate?.quota,
-      };
-      publishStorageHealth();
-      return isPersisted;
-    } catch (err) {
-      console.warn('Failed to request persistent storage:', err);
-      storageHealth = { checked: true, persisted: false };
-      publishStorageHealth();
-      return false;
-    }
+  try {
+    const storage: Partial<StorageManager> | undefined = navigator.storage;
+    const persisted = (await storage?.persist?.()) ?? false;
+    const estimate = storage?.persist ? await storage.estimate?.() : undefined;
+    storageHealth = { checked: true, persisted, usage: estimate?.usage, quota: estimate?.quota };
+  } catch (err) {
+    console.warn('Failed to request persistent storage:', err);
+    storageHealth = { checked: true, persisted: false };
   }
-  storageHealth = { checked: true, persisted: false };
   publishStorageHealth();
-  return false;
+  return storageHealth.persisted;
 }
 
 function publishStorageHealth() {

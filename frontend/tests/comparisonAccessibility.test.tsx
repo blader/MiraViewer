@@ -91,8 +91,8 @@ describe('comparison accessibility', () => {
     expect(stylesheet).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
     expect(stylesheet).toMatch(/@media\s*\(hover:\s*none\)/);
     expect(stylesheet).toMatch(/\.study-cell:focus-within\s+\.study-controls/);
-    expect(stylesheet).toMatch(/\.svr-generation-layout\[data-generation-open="true"\]/);
-    expect(stylesheet).toMatch(/\.svr-volume-layout\[data-controls-open="true"\]/);
+    expect(stylesheet).toMatch(/\.svr-generation-layout\[data-generation-open=['"]true['"]\]/);
+    expect(stylesheet).toMatch(/\.svr-volume-layout\[data-controls-open=['"]true['"]\]/);
   });
 
   it('immediately cancels active slice playback and disables navigation while interaction is blocked', () => {
