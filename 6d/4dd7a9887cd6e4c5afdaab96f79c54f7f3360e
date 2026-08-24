@@ -1,0 +1,63 @@
+frontend/src/utils/storageKeys.ts
+  s_3b5c6669968514::t_e97fb35ebe4a46 53-56
+frontend/src/hooks/usePanelSettings.ts
+  s_3b5c6669968514::t_e2cecc8ee0806a 323,327,332,338,342-343
+frontend/src/hooks/useOnnxTumorSession.ts
+  s_3b5c6669968514::t_c889d62510be0a 5,108-109,111,115
+frontend/src/services/exportBackup.ts
+  s_3b5c6669968514::t_e97fb35ebe4a46 15,17,89,394,475
+frontend/tests/useAutoAlign.test.tsx
+  s_3b5c6669968514::t_88ecfb220d4658 100,173,233,392,540,636,760,826,895
+  s_3b5c6669968514::t_8f3654e4e8a8b0 170-172,174,232,391,539,630-635,637,759,825,888-894,896
+  s_3b5c6669968514::t_a5e2d526e50751 105,287-288,291,293,295,314-315,919-920
+frontend/src/components/ComparisonMatrix.tsx
+  s_3b5c6669968514::t_e2cecc8ee0806a 251
+  s_3b5c6669968514::t_d69c96d20170ad 250
+frontend/tests/DicomViewer.test.tsx
+  s_3b5c6669968514::t_8f91d23855cd7b 17
+frontend/src/utils/svr/svrComputeCore.ts
+  s_3b5c6669968514::t_f816aaaf7b5058 276,285-288,290-291
+frontend/src/utils/svr/longitudinalRegistration.ts
+  s_3b5c6669968514::t_abc88cfb8e747c 42,48,51-54,129,596,1243-1259,1278-1282,1303,1308,1313,1422,1432,1473
+  s_3b5c6669968514::t_7e836e21508a17 3,293-304,477-487,626,637,733,793,1000-1002,1007
+frontend/src/utils/localApi.ts
+  s_3b5c6669968514::t_e97fb35ebe4a46 641,664
+  s_3b5c6669968514::t_f6274e5f22d0fa 684-693
+frontend/tests/useAutoAlignConfidence.test.tsx
+  s_3b5c6669968514::t_a5e2d526e50751 14,31
+frontend/src/utils/derivedAlignmentFrame.ts
+  s_3b5c6669968514::t_e97fb35ebe4a46 3,41
+frontend/src/utils/segmentation/onnx/modelCache.ts
+  s_3b5c6669968514::t_c889d62510be0a 64,66,69-70,73,75
+frontend/tests/cornerstoneSliceCapture.test.ts
+  s_3b5c6669968514::t_d9782cd9fd9833 36,58,78,101,120,128,131-132,147
+frontend/tests/useOnnxTumorSession.test.tsx
+  s_3b5c6669968514::t_c889d62510be0a 13-16
+frontend/tests/useAutoAlignPhysical.test.tsx
+  s_3b5c6669968514::t_a5e2d526e50751 28,31
+  s_3b5c6669968514::t_b754e085aa161c 24
+frontend/tests/derivedAlignmentFrame.test.ts
+  s_3b5c6669968514::t_c889d62510be0a 14
+frontend/src/hooks/useAutoAlign.ts
+  s_3b5c6669968514::t_2770619c58e9fc 60,742-744
+  s_3b5c6669968514::t_8bbd2d332dc869 6,222,228,233-238,261,279,861,1007,1021,1125,1370
+  s_3b5c6669968514::t_987d85988dcd9a 148
+frontend/src/components/ClearDataModal.tsx
+  s_3b5c6669968514::t_b19c6c42dc1590 5,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "6d4dd7a9887cd6e4c5afdaab96f79c54f7f3360e",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
