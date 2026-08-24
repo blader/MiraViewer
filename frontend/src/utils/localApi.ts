@@ -463,10 +463,8 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
   }
   if (!geometryReliable) sortedPositions = [];
   const spacings = sortedPositions.slice(1).map((position, index) => position - sortedPositions[index]!);
-  const positiveSpacings = spacings.filter((spacing) => spacing > 1e-6).sort((a, b) => a - b);
-  const sliceSpacingMm = positiveSpacings.length
-    ? positiveSpacings[Math.floor(positiveSpacings.length / 2)]
-    : undefined;
+  spacings.sort((a, b) => a - b);
+  const sliceSpacingMm = spacings.length ? spacings[Math.floor(spacings.length / 2)] : undefined;
   const coverageMm =
     sortedPositions.length > 1 ? sortedPositions[sortedPositions.length - 1]! - sortedPositions[0]! : undefined;
 
