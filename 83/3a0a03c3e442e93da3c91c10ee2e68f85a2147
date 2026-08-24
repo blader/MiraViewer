@@ -1,0 +1,30 @@
+frontend/src/index.css
+  s_3b5c6669968514::t_651cb298a6cc44 295-296,302,313-316,527,532,541,589
+frontend/src/utils/svr/longitudinalRegistration.ts
+  s_3b5c6669968514::t_0d23996319f1fe 302,319-322,325-328,331-336,339,1210-1211
+frontend/src/utils/svr/longitudinalFrames.ts
+  s_3b5c6669968514::t_7829f92fb1f8da 76-81,443,472,700
+frontend/src/services/exportBackup.ts
+  s_3b5c6669968514::t_157492b033b185 23,165,439,465,468
+frontend/src/utils/svr/reconstructVolume.ts
+  s_3b5c6669968514::t_8ea5121a6a9a59 706,718-719
+frontend/src/utils/localApi.ts
+  s_3b5c6669968514::t_2e8cf8a3de09f9 681-690
+  s_3b5c6669968514::t_157492b033b185 680,851
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "833a0a03c3e442e93da3c91c10ee2e68f85a2147",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
