@@ -61,7 +61,7 @@ function main() {
 
   // 3) Zip it up. We prefer the system zip so executable bits (start.command/start.sh)
   // are preserved.
-  run('zip', ['-r', zipName, 'MiraViewer'], { cwd: releaseDir });
+  run('zip', ['-q', '-r', zipName, 'MiraViewer'], { cwd: releaseDir });
 
   console.log(`[package] Wrote ${path.join(releaseDir, zipName)}`);
 }

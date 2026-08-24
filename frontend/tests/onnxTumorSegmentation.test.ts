@@ -64,4 +64,46 @@ describe('runTumorSegmentationOnnx', () => {
     const out = await runTumorSegmentationOnnx({ session, volume, dims });
     expect(Array.from(out.labels)).toEqual([1, 4]);
   });
+
+  it('rejects a permuted output shape even when its voxel count matches', async () => {
+    const dispose = vi.fn();
+    const session = {
+      inputNames: ['input'],
+      outputNames: ['logits'],
+      run: vi.fn(async () => ({
+        logits: {
+          type: 'float32',
+          dims: [1, 4, 1, 2, 3],
+          data: new Float32Array(24),
+          dispose,
+        },
+      })),
+    } as unknown as Ort.InferenceSession;
+
+    await expect(runTumorSegmentationOnnx({ session, volume: new Float32Array(6), dims: [2, 3, 1] })).rejects.toThrow(
+      /spatial axes/i,
+    );
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an unsupported output class before it can disappear into background', async () => {
+    const dispose = vi.fn();
+    const session = {
+      inputNames: ['input'],
+      outputNames: ['logits'],
+      run: vi.fn(async () => ({
+        logits: {
+          type: 'float32',
+          dims: [1, 5, 1, 1, 1],
+          data: new Float32Array([0, 0, 0, 0, 9]),
+          dispose,
+        },
+      })),
+    } as unknown as Ort.InferenceSession;
+
+    await expect(runTumorSegmentationOnnx({ session, volume: new Float32Array(1), dims: [1, 1, 1] })).rejects.toThrow(
+      /output classes/i,
+    );
+    expect(dispose).toHaveBeenCalledOnce();
+  });
 });

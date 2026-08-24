@@ -1,11 +1,5 @@
 import type { ExclusionMask } from '../types/api';
-import {
-  det2,
-  invert2,
-  invertStandardAffine2D,
-  standardToAffineAboutOrigin,
-  type StandardAffine2D,
-} from './affine2d';
+import { det2, invert2, invertStandardAffine2D, standardToAffineAboutOrigin, type StandardAffine2D } from './affine2d';
 import {
   composeResidualWithWarpAtSize,
   expandExclusionRect,
@@ -13,6 +7,7 @@ import {
   type WarpTransform,
 } from './alignmentTransform';
 import {
+  createPerceptualScoringScratch,
   normalizePerceptualSource,
   preparePerceptualReference,
   scoreAlignedCandidate,
@@ -23,10 +18,7 @@ import { warpGrayscaleAffineWithValidity } from './warpAffine';
 const MAX_RESIDUAL_DISPLACEMENT_FRACTION = 0.125;
 const FINAL_AFFINE_SCORE_EPSILON = 1e-6;
 
-export type FinalAffineProposalKind =
-  | 'seed-only'
-  | 'intensity-elastix'
-  | 'structure-elastix';
+export type FinalAffineProposalKind = 'seed-only' | 'intensity-elastix' | 'structure-elastix';
 
 export type OptimizerFinalAffineProposal = {
   kind: Exclude<FinalAffineProposalKind, 'seed-only'>;
@@ -213,15 +205,8 @@ export function selectFinalAffineProposal(options: {
   fixedExclusionRect?: ExclusionMask;
   optimizerProposals: readonly OptimizerFinalAffineProposal[];
 }): FinalAffineSelection {
-  const {
-    normalizedReference,
-    movingPixels,
-    size,
-    scales,
-    winningWarp,
-    fixedExclusionRect,
-    optimizerProposals,
-  } = options;
+  const { normalizedReference, movingPixels, size, scales, winningWarp, fixedExclusionRect, optimizerProposals } =
+    options;
   if (!Number.isInteger(size) || size <= 0) {
     throw new Error('selectFinalAffineProposal: size must be a positive integer');
   }
@@ -229,13 +214,13 @@ export function selectFinalAffineProposal(options: {
   assertSquare(movingPixels, size, 'selectFinalAffineProposal movingPixels');
   validateOptimizerProposals(optimizerProposals);
 
-  const temporaryFixedReference = preparePerceptualReference(normalizedReference, size, {
-    scales: [...scales],
-  });
-  const scaleSizes = temporaryFixedReference.scales.map((scale) => scale.size);
-  const maximumMindFootprintAtFullResolution = Math.max(
-    ...temporaryFixedReference.scales.map((scale) => (scale.mind.footprintRadius * size) / scale.size),
+  const scaleSizes = [...new Set(scales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
+    (a, b) => b - a,
   );
+  if (scaleSizes.length === 0) scaleSizes.push(size);
+  // MIND uses a fixed one-pixel patch plus one-pixel offset; constructing an entire unused
+  // reference pyramid solely to rediscover its two-pixel footprint was unnecessary.
+  const maximumMindFootprintAtFullResolution = Math.max(...scaleSizes.map((scale) => (2 * size) / scale));
   const fixedScoringExclusionRect = fixedExclusionRect
     ? expandExclusionRect(fixedExclusionRect, MAX_RESIDUAL_DISPLACEMENT_FRACTION)
     : undefined;
@@ -258,6 +243,7 @@ export function selectFinalAffineProposal(options: {
     scales: scaleSizes,
     exclusionRect: sourceExclusionRect,
   });
+  const scoringScratch = createPerceptualScoringScratch();
 
   const seedResidual = createIdentityResidual();
   const seed: GeometricallyAdmissibleProposal = {
@@ -266,9 +252,7 @@ export function selectFinalAffineProposal(options: {
     totalMovingToFixed: composeResidualWithWarpAtSize(seedResidual, winningWarp, size),
     deformationMagnitude: 0,
   };
-  const validatedOptimizers = optimizerProposals.map((proposal) =>
-    validateGeometry(proposal, winningWarp, size),
-  );
+  const validatedOptimizers = optimizerProposals.map((proposal) => validateGeometry(proposal, winningWarp, size));
 
   const scoreProposal = (proposal: GeometricallyAdmissibleProposal): ScoredFinalAffineProposal => {
     const forwardWarp = warpGrayscaleAffineWithValidity(
@@ -281,22 +265,20 @@ export function selectFinalAffineProposal(options: {
       forwardWarp.pixels,
       forwardWarp.validity,
       size,
+      scoringScratch,
     );
     const mindScore = average(forward.perScale.map((scale) => scale.mind));
     const ngfScore = average(forward.perScale.map((scale) => scale.ngf));
     const structuralScore = (mindScore + ngfScore) / 2;
 
     const fixedToMoving = invertStandardAffine2D(proposal.totalMovingToFixed);
-    const reverseWarp = warpGrayscaleAffineWithValidity(
-      normalizedReference,
-      size,
-      centeredWarp(fixedToMoving, size),
-    );
+    const reverseWarp = warpGrayscaleAffineWithValidity(normalizedReference, size, centeredWarp(fixedToMoving, size));
     const sourceCoverage = scoreAlignedCandidate(
       preparedMovingSource,
       reverseWarp.pixels,
       reverseWarp.validity,
       size,
+      scoringScratch,
     ).coverage;
 
     return {
@@ -322,10 +304,8 @@ export function selectFinalAffineProposal(options: {
       continue;
     }
     const scored = scoreProposal(proposal);
-    const sourceCoverageLoss =
-      scoredSeed.components.sourceCoverage - scored.components.sourceCoverage;
-    const forwardCoverageLoss =
-      scoredSeed.components.forward.coverage - scored.components.forward.coverage;
+    const sourceCoverageLoss = scoredSeed.components.sourceCoverage - scored.components.sourceCoverage;
+    const forwardCoverageLoss = scoredSeed.components.forward.coverage - scored.components.forward.coverage;
     if (sourceCoverageLoss - forwardCoverageLoss > excessSourceCoverageLossTolerance) {
       proposals.push({
         kind: proposal.kind,
@@ -343,17 +323,13 @@ export function selectFinalAffineProposal(options: {
     proposals.push(scored);
   }
 
-  const eligible = proposals.filter(
-    (proposal): proposal is ScoredFinalAffineProposal => proposal.eligible,
-  );
+  const eligible = proposals.filter((proposal): proposal is ScoredFinalAffineProposal => proposal.eligible);
   const maximumScore = Math.max(...eligible.map((proposal) => proposal.structuralScore));
   const contenders = eligible.filter(
     (proposal) => maximumScore - proposal.structuralScore <= FINAL_AFFINE_SCORE_EPSILON,
   );
   const selected = [...contenders].sort(
-    (a, b) =>
-      a.deformationMagnitude - b.deformationMagnitude ||
-      KIND_ORDER[a.kind] - KIND_ORDER[b.kind],
+    (a, b) => a.deformationMagnitude - b.deformationMagnitude || KIND_ORDER[a.kind] - KIND_ORDER[b.kind],
   )[0];
   if (!selected) {
     throw new Error('selectFinalAffineProposal invariant: no eligible final affine proposal');

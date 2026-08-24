@@ -83,4 +83,23 @@ describe('svr/sliceRoiCrop', () => {
     expect(slice.dsCols).toBe(before.dsCols);
     expect(slice.ippMm).toEqual(before.ipp);
   });
+
+  it('keeps a thick slice when its physical slab overlaps the ROI despite its center being outside', () => {
+    const slice = {
+      pixels: makeGridPixels(3, 3),
+      dsRows: 3,
+      dsCols: 3,
+      ippMm: { x: 0, y: 0, z: -0.4 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      normalDir: { x: 0, y: 0, z: 1 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+      sliceThicknessMm: 1.2,
+    };
+
+    expect(
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2, z: 1 } })),
+    ).toBe(true);
+  });
 });

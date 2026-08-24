@@ -31,11 +31,11 @@ export function StepControl({
   tabular = false,
 }: StepControlProps) {
   const chevronClass = accent
-    ? 'p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100'
-    : 'p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]';
+    ? 'p-1 min-h-6 min-w-6 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100'
+    : 'p-1 min-h-6 min-w-6 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]';
 
   const valueClass = [
-    'text-[var(--text-primary)] text-[10px] text-center font-mono',
+    'text-[var(--text-primary)] text-xs text-center font-mono',
     valueWidth,
     tabular ? 'tabular-nums' : '',
   ]
@@ -44,12 +44,20 @@ export function StepControl({
 
   return (
     <div className="flex items-center gap-0.5" title={title}>
-      {label && <span className="text-[var(--text-secondary)] text-[10px]">{label}</span>}
-      <RepeatButton onAction={onDecrement} className={chevronClass}>
+      {label && <span className="text-[var(--text-secondary)] text-xs">{label}</span>}
+      <RepeatButton
+        onAction={onDecrement}
+        className={chevronClass}
+        aria-label={`Decrease ${title ?? label ?? 'value'}`}
+      >
         <ChevronLeft className="w-3 h-3" />
       </RepeatButton>
       <span className={valueClass}>{value}</span>
-      <RepeatButton onAction={onIncrement} className={chevronClass}>
+      <RepeatButton
+        onAction={onIncrement}
+        className={chevronClass}
+        aria-label={`Increase ${title ?? label ?? 'value'}`}
+      >
         <ChevronRight className="w-3 h-3" />
       </RepeatButton>
     </div>

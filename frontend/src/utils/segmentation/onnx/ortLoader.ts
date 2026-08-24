@@ -26,9 +26,9 @@ export async function loadOrtAll(): Promise<typeof Ort> {
     const ort: typeof Ort = (mod?.default ?? mod) as typeof Ort;
 
     // Multithreaded WASM needs cross-origin isolation (COOP/COEP response headers). The
-    // Vite dev/preview servers send them (see vite.config.ts), so local dev gets the
-    // multi-core fast path; the offline download-and-run ZIP is served without headers and
-    // safely stays single-threaded. Cap at 8 threads: ORT's intra-op parallelism has
+    // Vite dev/preview and the offline launcher send them, so every isolated supported
+    // surface can use the same multi-core fast path. Unisolated/custom hosts safely stay
+    // single-threaded. Cap at 8 threads: ORT's intra-op parallelism has
     // diminishing returns beyond that, and spawning one worker per core on big machines
     // wastes memory.
     ort.env.wasm.numThreads = globalThis.crossOriginIsolated

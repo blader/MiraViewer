@@ -27,6 +27,8 @@ export type SliceLoopNavigatorProps = {
   progressRef: React.MutableRefObject<number>;
   /** Setter for progress. */
   setProgress: (nextProgress: number) => void;
+  /** Modal dialogs and active registration own navigation until they complete. */
+  interactionBlocked?: boolean;
 };
 
 export function SliceLoopNavigator({
@@ -35,6 +37,7 @@ export function SliceLoopNavigator({
   progress,
   progressRef,
   setProgress,
+  interactionBlocked = false,
 }: SliceLoopNavigatorProps) {
   // Loop playback for slice navigation
   const [loopStart, setLoopStart] = useState(0);
@@ -49,6 +52,12 @@ export function SliceLoopNavigator({
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
 
   const playbackHydratedSeqIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!interactionBlocked) return;
+    const timer = window.setTimeout(() => setIsLooping(false), 0);
+    return () => window.clearTimeout(timer);
+  }, [interactionBlocked]);
 
   // Hydrate playback settings when the user switches sequence combos.
   // Layout effect prevents a one-frame flash of the previous combo's handles.
@@ -93,12 +102,12 @@ export function SliceLoopNavigator({
       progressRef.current = clamped;
       setProgress(clamped);
     },
-    [progressRef, setProgress]
+    [progressRef, setProgress],
   );
 
   // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
   useEffect(() => {
-    if (!isLooping) {
+    if (!isLooping || interactionBlocked) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       lastTsRef.current = null;
@@ -165,7 +174,7 @@ export function SliceLoopNavigator({
       lastTsRef.current = null;
       loopStepAccumRef.current = 0;
     };
-  }, [isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, progressRef, setProgress]);
+  }, [interactionBlocked, isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, progressRef, setProgress]);
 
   // Stop looping if bounds collapse
   useEffect(() => {
@@ -205,7 +214,10 @@ export function SliceLoopNavigator({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className={`p-2 rounded-md border border-[var(--border-color)] ${isLooping ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+          aria-label={isLooping && !interactionBlocked ? 'Pause slice playback' : 'Play slices'}
+          aria-pressed={isLooping && !interactionBlocked}
+          disabled={interactionBlocked}
+          className={`p-2 rounded-md border border-[var(--border-color)] disabled:cursor-not-allowed disabled:opacity-50 ${isLooping && !interactionBlocked ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
           onClick={() => {
             // Ensure loop window has size before starting
             const minGap = 0.02;
@@ -220,12 +232,15 @@ export function SliceLoopNavigator({
         >
           {isLooping ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
         </button>
-        <div className="flex items-center gap-1 text-[10px] text-[var(--text-secondary)]">
+        <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)]">
           {[1, 2, 4].map((s) => (
             <button
               key={s}
               type="button"
-              className={`px-2 py-1 rounded border text-[10px] ${loopSpeed === s ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-color)]'}`}
+              aria-label={`Playback speed ${s} times`}
+              aria-pressed={loopSpeed === s}
+              disabled={interactionBlocked}
+              className={`px-2 py-1 rounded border text-xs disabled:cursor-not-allowed disabled:opacity-50 ${loopSpeed === s ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-color)]'}`}
               onClick={() => setLoopSpeed(s as 1 | 2 | 4)}
             >
               {s}x
@@ -254,15 +269,16 @@ export function SliceLoopNavigator({
           min={0}
           max={CONTROL_LIMITS.SLICE_NAV.MAX_RANGE}
           step={1}
+          disabled={interactionBlocked}
           value={Math.round(progress * CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
           onChange={(e) => setProgress(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
-          className="absolute inset-0 w-full h-8 opacity-0 cursor-pointer"
+          className="slice-position-input absolute inset-0 w-full h-8 opacity-0 cursor-pointer"
           aria-label="Slice position"
         />
 
         {/* Visible thumb for current position */}
         <div
-          className="absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-[var(--text-primary)] rounded pointer-events-none"
+          className="slice-position-thumb absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-[var(--text-primary)] rounded pointer-events-none"
           style={{ left: `calc(${progress * 100}% - 4px)` }}
           aria-hidden
         />
@@ -274,11 +290,30 @@ export function SliceLoopNavigator({
             <button
               key={handle}
               type="button"
-              className="absolute top-1/2 -translate-y-1/2 w-3 h-5 bg-white border border-[var(--accent)] rounded cursor-ew-resize"
+              role="slider"
+              aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(pos * 100)}
+              disabled={interactionBlocked}
+              className="absolute top-1/2 -translate-y-1/2 min-w-6 min-h-8 bg-white border border-[var(--accent)] rounded cursor-ew-resize"
               style={{ left: `calc(${pos * 100}% - 6px)` }}
               onMouseDown={(e) => {
                 e.preventDefault();
                 setDraggingHandle(handle);
+              }}
+              onKeyDown={(event) => {
+                const direction =
+                  event.key === 'ArrowLeft' || event.key === 'ArrowDown'
+                    ? -1
+                    : event.key === 'ArrowRight' || event.key === 'ArrowUp'
+                      ? 1
+                      : 0;
+                if (direction === 0) return;
+                event.preventDefault();
+                const step = direction / Math.max(1, playbackInstanceCount - 1);
+                if (handle === 'start') updateLoop(loopStart + step, loopEnd);
+                else updateLoop(loopStart, loopEnd + step);
               }}
               title={handle === 'start' ? 'Loop start' : 'Loop end'}
             />

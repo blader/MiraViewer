@@ -44,6 +44,8 @@ export type SvrReconstructionSlice = {
   // Optional thickness/spacing hints (if present in DICOM metadata)
   sliceThicknessMm: number | null;
   spacingBetweenSlicesMm: number | null;
+  /** DICOM patient-space compatibility authority; absent means unverified. */
+  frameOfReferenceUid?: string;
 };
 
 export type SvrCoreHooks = {
@@ -186,6 +188,8 @@ export async function reconstructVolumeFromSlices(params: {
   grid: SvrReconstructionGrid;
   options: SvrReconstructionOptions;
   hooks?: SvrCoreHooks;
+  /** Optional caller-owned support map: 1 iff the voxel received an observation. */
+  occupancy?: Uint8Array;
 }): Promise<Float32Array> {
   const { slices, grid, options, hooks } = params;
   const { dims, originMm, voxelSizeMm } = grid;
@@ -253,6 +257,10 @@ export async function reconstructVolumeFromSlices(params: {
     }
   }
 
+  if (params.occupancy) {
+    if (params.occupancy.length !== nvox) throw new Error('SVR occupancy map does not match reconstruction grid');
+    for (let i = 0; i < nvox; i++) params.occupancy[i] = weight[i] > 1e-12 ? 1 : 0;
+  }
   normalizeVolumeInPlace(volume, weight);
 
   // Memory optimization: the `weight` buffer is only needed for the initial splat normalization.

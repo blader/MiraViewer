@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
-import type {
-  NormalizedPoint,
-  TumorGrow2dMeta,
-  TumorPolygon,
-  TumorThreshold,
-  ViewerTransform,
-} from '../db/schema';
+import type { NormalizedPoint, TumorGrow2dMeta, TumorPolygon, TumorThreshold, ViewerTransform } from '../db/schema';
 import type { DicomViewerHandle } from './DicomViewer';
 import {
   getSopInstanceUidForInstanceIndex,
@@ -14,7 +8,8 @@ import {
   getTumorSegmentationForInstance,
   saveTumorSegmentation,
 } from '../utils/localApi';
-import { decodeCapturedPngToGrayscale } from '../utils/segmentation/segmentTumor';
+import { normalizeModalityPixelsToGrayscale } from '../utils/segmentation/segmentTumor';
+import { segmentationAreaMm2 } from '../utils/segmentation/physicalMeasurements';
 import {
   computeCostDistanceMap,
   distThresholdFromSlider,
@@ -24,9 +19,13 @@ import {
 import { marchingSquaresContour } from '../utils/segmentation/marchingSquares';
 import {
   normalizeViewerTransform,
+  imagePointToViewerPoint,
+  imagePolygonToViewerPolygon,
   polygonToSvgPath,
   remapPointBetweenViewerTransforms,
   remapPolygonBetweenViewerTransforms,
+  viewerPointToImagePoint,
+  viewerPolygonToImagePolygon,
 } from '../utils/viewTransform';
 import { clamp, clamp01 } from '../utils/math';
 
@@ -134,7 +133,14 @@ export type TumorSegmentationOverlayProps = {
   viewerTransform: ViewerTransform;
 };
 
-type Capture = { gray: Uint8Array; w: number; h: number; viewTransform: ViewerTransform };
+type Capture = {
+  gray: Uint8Array;
+  w: number;
+  h: number;
+  viewTransform: ViewerTransform;
+  viewportSize: { w: number; h: number };
+  imageSize: { w: number; h: number };
+};
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
 
@@ -245,16 +251,12 @@ export function TumorSegmentationOverlay({
   const grow2dTuning = grow2dUi.tuning;
   const targetAreaPx = grow2dUi.targetAreaPx;
 
-  const setGrow2dTuning = useCallback(
-    (updater: Grow2dTuningUi | ((prev: Grow2dTuningUi) => Grow2dTuningUi)) => {
-      setGrow2dUi((s) => ({
-        ...s,
-        tuning:
-          typeof updater === 'function' ? (updater as (p: Grow2dTuningUi) => Grow2dTuningUi)(s.tuning) : updater,
-      }));
-    },
-    [],
-  );
+  const setGrow2dTuning = useCallback((updater: Grow2dTuningUi | ((prev: Grow2dTuningUi) => Grow2dTuningUi)) => {
+    setGrow2dUi((s) => ({
+      ...s,
+      tuning: typeof updater === 'function' ? (updater as (p: Grow2dTuningUi) => Grow2dTuningUi)(s.tuning) : updater,
+    }));
+  }, []);
 
   const setTargetAreaPx = useCallback(
     (updater: number | ((prev: number) => number)) => {
@@ -296,7 +298,6 @@ export function TumorSegmentationOverlay({
   // Built once per seed grow so the slider isn't overly sensitive (especially at small areas).
   const areaThresholdsRef = useRef<Float32Array | null>(null);
 
-
   // Segmentation starts from a user-drawn seed box (no single-click anchor).
   // Use a single seed at the box centroid.
   const SEED_COUNT = 1;
@@ -313,12 +314,13 @@ export function TumorSegmentationOverlay({
     draftSeedViewTransformRef.current = draftSeedViewTransform;
   }, [draftSeedViewTransform]);
 
-
   const [draftPolygon, setDraftPolygon] = useState<TumorPolygon | null>(null);
   const [draftPolygonViewTransform, setDraftPolygonViewTransform] = useState<ViewerTransform | null>(null);
   const [draftAreaPx, setDraftAreaPx] = useState<number | null>(null);
+  const [pixelAreaMm2, setPixelAreaMm2] = useState<number | null>(null);
 
   const [savedPolygon, setSavedPolygon] = useState<TumorPolygon | null>(null);
+  const [savedImageSize, setSavedImageSize] = useState<{ w: number; h: number } | null>(null);
   const [savedPolygonViewTransform, setSavedPolygonViewTransform] = useState<ViewerTransform | null>(null);
   const [savedSeed, setSavedSeed] = useState<NormalizedPoint | null>(null);
   const [savedGrow2d, setSavedGrow2d] = useState<TumorGrow2dMeta | null>(null);
@@ -329,15 +331,16 @@ export function TumorSegmentationOverlay({
   const savedViewTransformRef = useRef<ViewerTransform>(normalizeViewerTransform(null));
 
   const [groundTruthPolygon, setGroundTruthPolygon] = useState<TumorPolygon | null>(null);
+  const [groundTruthImageSize, setGroundTruthImageSize] = useState<{ w: number; h: number } | null>(null);
   const [groundTruthPolygonViewTransform, setGroundTruthPolygonViewTransform] = useState<ViewerTransform | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const sliceGenerationRef = useRef(0);
 
   const startGrowRef = useRef<((params: { seedBox: NormalizedRoi }) => Promise<void>) | null>(null);
   const autoStartSliceKeyRef = useRef<string | null>(null);
 
-  const debugEnabled =
-    typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow2d') === '1';
+  const debugEnabled = typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow2d') === '1';
 
   // Track container size (used for hit-testing + UI placement).
   useEffect(() => {
@@ -356,14 +359,13 @@ export function TumorSegmentationOverlay({
     return () => ro.disconnect();
   }, [enabled]);
 
-
-
   // Load saved segmentation + GT when enabled or slice changes.
   // IMPORTANT: clear any draft/captured state immediately so we don't render stale overlays while loading.
   useEffect(() => {
     if (!enabled) return;
 
     const sliceKey = `${seriesUid}:${effectiveInstanceIndex}`;
+    sliceGenerationRef.current++;
     savedDataSliceKeyRef.current = sliceKey;
     savedSeedRef.current = null;
     savedViewTransformRef.current = normalizeViewerTransform(null);
@@ -389,11 +391,12 @@ export function TumorSegmentationOverlay({
     setDraftPolygon(null);
     setDraftPolygonViewTransform(null);
     setDraftAreaPx(null);
-
+    setPixelAreaMm2(null);
 
     // Clear per-slice saved/GT state until the async load completes.
     setSopInstanceUid(null);
     setSavedPolygon(null);
+    setSavedImageSize(null);
     setSavedPolygonViewTransform(normalizeViewerTransform(null));
     setSavedSeed(null);
     setSavedGrow2d(null);
@@ -403,6 +406,7 @@ export function TumorSegmentationOverlay({
     savedViewTransformRef.current = normalizeViewerTransform(null);
 
     setGroundTruthPolygon(null);
+    setGroundTruthImageSize(null);
     setGroundTruthPolygonViewTransform(normalizeViewerTransform(null));
 
     let cancelled = false;
@@ -423,19 +427,28 @@ export function TumorSegmentationOverlay({
         const fallbackView = normalizeViewerTransform(null);
 
         const savedView = row?.meta?.viewTransform ?? fallbackView;
+        const canonicalImageSize =
+          row?.meta?.coordinateSpace === 'image-normalized' ? (row.meta.imageSize ?? null) : null;
+        const currentViewport = viewSizeRef.current;
+        const savedSeed =
+          row?.seed && canonicalImageSize && currentViewport.w > 0 && currentViewport.h > 0
+            ? imagePointToViewerPoint(row.seed, currentViewport, canonicalImageSize, viewerTransformRef.current)
+            : (row?.seed ?? null);
 
         setSavedPolygon(row?.polygon ?? null);
+        setSavedImageSize(canonicalImageSize);
         setSavedPolygonViewTransform(savedView);
-        setSavedSeed(row?.seed ?? null);
+        setSavedSeed(savedSeed);
         setSavedGrow2d((row?.meta?.grow2d as TumorGrow2dMeta | undefined) ?? null);
 
         // Update refs for slice-change auto-start.
         if (savedDataSliceKeyRef.current === sliceKey) {
-          savedSeedRef.current = row?.seed ?? null;
-          savedViewTransformRef.current = savedView;
+          savedSeedRef.current = savedSeed;
+          savedViewTransformRef.current = canonicalImageSize ? viewerTransformRef.current : savedView;
         }
 
         setGroundTruthPolygon(gt?.polygon ?? null);
+        setGroundTruthImageSize(gt?.coordinateSpace === 'image-normalized' ? (gt.imageSize ?? null) : null);
         setGroundTruthPolygonViewTransform(gt?.viewTransform ?? fallbackView);
       } catch (e) {
         console.error(e);
@@ -446,7 +459,6 @@ export function TumorSegmentationOverlay({
       cancelled = true;
     };
   }, [enabled, effectiveInstanceIndex, seriesUid]);
-
 
   // If we have a saved grow2d row and no per-sequence/date slider settings yet, seed the settings from it.
   useEffect(() => {
@@ -543,10 +555,14 @@ export function TumorSegmentationOverlay({
         return;
       }
 
-      const points = contourPx.map((p) => ({
-        x: p.x / Math.max(1, grow.w - 1),
-        y: p.y / Math.max(1, grow.h - 1),
-      }));
+      const points = contourPx.map((p) =>
+        imagePointToViewerPoint(
+          { x: p.x / Math.max(1, grow.w - 1), y: p.y / Math.max(1, grow.h - 1) },
+          cap.viewportSize,
+          cap.imageSize,
+          cap.viewTransform,
+        ),
+      );
 
       setDraftPolygon({ points });
       setDraftPolygonViewTransform(cap.viewTransform);
@@ -561,7 +577,7 @@ export function TumorSegmentationOverlay({
         });
       }
     },
-    [MAX_TARGET_AREA_PX, debugEnabled, targetAreaPx]
+    [MAX_TARGET_AREA_PX, debugEnabled, targetAreaPx],
   );
 
   // Update draft polygon when slider changes (throttled to animation frames).
@@ -612,33 +628,41 @@ export function TumorSegmentationOverlay({
         };
 
         if (debugEnabled) {
-          console.log('[TumorSeedGrow] capturing PNG for grow', {
+          console.log('[TumorSeedGrow] decoding native frame for grow', {
             anchor,
             seedBox: params.seedBox,
             viewTransformAtCapture,
           });
         }
 
-        const png = await v.captureVisiblePng({ maxSize: 512 });
-        const decoded = await decodeCapturedPngToGrayscale(png);
+        const decoded = await v.getDecodedFrame();
+        if (ac.signal.aborted) return;
+        if (decoded.seriesUid !== seriesUid) {
+          throw new Error('The displayed image changed before segmentation could start');
+        }
+        const viewportSize =
+          decoded.viewportSize.w > 0 && decoded.viewportSize.h > 0 ? decoded.viewportSize : viewSizeRef.current;
+        if (viewportSize.w <= 0 || viewportSize.h <= 0) {
+          throw new Error('Viewer dimensions are unavailable for image-space segmentation');
+        }
 
         const cap: Capture = {
-          gray: decoded.gray,
-          w: decoded.width,
-          h: decoded.height,
+          gray: normalizeModalityPixelsToGrayscale(decoded.pixels),
+          w: decoded.cols,
+          h: decoded.rows,
           viewTransform: viewTransformAtCapture,
+          viewportSize,
+          imageSize: { w: decoded.cols, h: decoded.rows },
         };
+        setPixelAreaMm2(segmentationAreaMm2(1, decoded.rowSpacingMm, decoded.colSpacingMm));
         capturedRef.current = cap;
         setCaptureVersion((x) => x + 1);
 
         setDraftSeed(anchor);
         setDraftSeedViewTransform(viewTransformAtCapture);
 
-        const seedPx = {
-          x: anchor.x * (cap.w - 1),
-          y: anchor.y * (cap.h - 1),
-        };
-
+        const imageAnchor = viewerPointToImagePoint(anchor, cap.viewportSize, cap.imageSize, cap.viewTransform);
+        const seedPx = { x: imageAnchor.x * (cap.w - 1), y: imageAnchor.y * (cap.h - 1) };
 
         const grow = await computeCostDistanceMap({
           gray: cap.gray,
@@ -705,7 +729,16 @@ export function TumorSegmentationOverlay({
         }
       }
     },
-    [SEED_COUNT, computeDraftPolygonFromGrow, debugEnabled, grow2dTuning, viewerRef, setTargetAreaPx, targetAreaPx]
+    [
+      SEED_COUNT,
+      computeDraftPolygonFromGrow,
+      debugEnabled,
+      grow2dTuning,
+      seriesUid,
+      viewerRef,
+      setTargetAreaPx,
+      targetAreaPx,
+    ],
   );
 
   // Keep a ref so slice-change auto-start can call the latest startGrow without pulling its deps.
@@ -726,10 +759,8 @@ export function TumorSegmentationOverlay({
     abortRef.current = ac;
 
     try {
-      const seedPx = {
-        x: anchor.x * (cap.w - 1),
-        y: anchor.y * (cap.h - 1),
-      };
+      const imageAnchor = viewerPointToImagePoint(anchor, cap.viewportSize, cap.imageSize, cap.viewTransform);
+      const seedPx = { x: imageAnchor.x * (cap.w - 1), y: imageAnchor.y * (cap.h - 1) };
 
       const grow = await computeCostDistanceMap({
         gray: cap.gray,
@@ -797,7 +828,15 @@ export function TumorSegmentationOverlay({
         setBusy(false);
       }
     }
-  }, [MAX_TARGET_AREA_PX, SEED_COUNT, computeDraftPolygonFromGrow, debugEnabled, grow2dTuning, setTargetAreaPx, targetAreaPx]);
+  }, [
+    MAX_TARGET_AREA_PX,
+    SEED_COUNT,
+    computeDraftPolygonFromGrow,
+    debugEnabled,
+    grow2dTuning,
+    setTargetAreaPx,
+    targetAreaPx,
+  ]);
 
   const tuningRecomputeTimerRef = useRef<number | null>(null);
 
@@ -915,7 +954,17 @@ export function TumorSegmentationOverlay({
       const ay = clamp01(anchor.y);
       await start({ seedBox: { x0: ax, y0: ay, x1: ax, y1: ay } });
     })();
-  }, [debugEnabled, draftSeed, effectiveInstanceIndex, enabled, savedSeed, seedBoxToStart, seriesUid, studyId, viewerRef]);
+  }, [
+    debugEnabled,
+    draftSeed,
+    effectiveInstanceIndex,
+    enabled,
+    savedSeed,
+    seedBoxToStart,
+    seriesUid,
+    studyId,
+    viewerRef,
+  ]);
 
   const seedBoxPath = useMemo(() => {
     // Depend on capture/grow versions so we recompute when the underlying refs update.
@@ -935,7 +984,7 @@ export function TumorSegmentationOverlay({
       { x: grow.seedBox.x1 / w, y: grow.seedBox.y0 / h },
       { x: grow.seedBox.x1 / w, y: grow.seedBox.y1 / h },
       { x: grow.seedBox.x0 / w, y: grow.seedBox.y1 / h },
-    ].map((p) => remapPointBetweenViewerTransforms(p, viewSize, cap.viewTransform, viewerTransform));
+    ].map((p) => imagePointToViewerPoint(p, viewSize, cap.imageSize, viewerTransform));
 
     return pointsToSvgPath(corners);
   }, [captureVersion, draftSeed, growVersion, viewSize, viewerTransform]);
@@ -953,7 +1002,7 @@ export function TumorSegmentationOverlay({
     const h = Math.max(1, grow.h - 1);
 
     const pts = grow.seedPxs.map((sp) => ({ x: sp.x / w, y: sp.y / h }));
-    return pts.map((p) => remapPointBetweenViewerTransforms(p, viewSize, cap.viewTransform, viewerTransform));
+    return pts.map((p) => imagePointToViewerPoint(p, viewSize, cap.imageSize, viewerTransform));
   }, [captureVersion, draftSeed, growVersion, viewSize, viewerTransform]);
 
   const draftPolygonDisplay = useMemo(() => {
@@ -968,25 +1017,38 @@ export function TumorSegmentationOverlay({
     if (!savedPolygon) return null;
     if (viewSize.w <= 0 || viewSize.h <= 0) return savedPolygon;
 
+    if (savedImageSize) {
+      return imagePolygonToViewerPolygon(savedPolygon, viewSize, savedImageSize, viewerTransform);
+    }
+
     const from = savedPolygonViewTransform ?? viewerTransform;
     return remapPolygonBetweenViewerTransforms(savedPolygon, viewSize, from, viewerTransform);
-  }, [savedPolygon, savedPolygonViewTransform, viewSize, viewerTransform]);
+  }, [savedImageSize, savedPolygon, savedPolygonViewTransform, viewSize, viewerTransform]);
 
   const groundTruthPolygonDisplay = useMemo(() => {
     if (!groundTruthPolygon) return null;
     if (viewSize.w <= 0 || viewSize.h <= 0) return groundTruthPolygon;
 
+    if (groundTruthImageSize) {
+      return imagePolygonToViewerPolygon(groundTruthPolygon, viewSize, groundTruthImageSize, viewerTransform);
+    }
+
     const from = groundTruthPolygonViewTransform ?? viewerTransform;
     return remapPolygonBetweenViewerTransforms(groundTruthPolygon, viewSize, from, viewerTransform);
-  }, [groundTruthPolygon, groundTruthPolygonViewTransform, viewSize, viewerTransform]);
+  }, [groundTruthImageSize, groundTruthPolygon, groundTruthPolygonViewTransform, viewSize, viewerTransform]);
 
-  const draftPath = useMemo(() => (draftPolygonDisplay ? polygonToSvgPath(draftPolygonDisplay) : ''), [draftPolygonDisplay]);
-  const savedPath = useMemo(() => (savedPolygonDisplay ? polygonToSvgPath(savedPolygonDisplay) : ''), [savedPolygonDisplay]);
+  const draftPath = useMemo(
+    () => (draftPolygonDisplay ? polygonToSvgPath(draftPolygonDisplay) : ''),
+    [draftPolygonDisplay],
+  );
+  const savedPath = useMemo(
+    () => (savedPolygonDisplay ? polygonToSvgPath(savedPolygonDisplay) : ''),
+    [savedPolygonDisplay],
+  );
   const groundTruthPath = useMemo(
     () => (groundTruthPolygonDisplay ? polygonToSvgPath(groundTruthPolygonDisplay) : ''),
-    [groundTruthPolygonDisplay]
+    [groundTruthPolygonDisplay],
   );
-
 
   const AUTO_SAVE_DEBOUNCE_MS = 350;
   const autoSaveTimerRef = useRef<number | null>(null);
@@ -1067,6 +1129,7 @@ export function TumorSegmentationOverlay({
 
     autoSaveInFlightRef.current = true;
     setSaving(true);
+    const saveGeneration = sliceGenerationRef.current;
 
     void (async () => {
       try {
@@ -1092,39 +1155,51 @@ export function TumorSegmentationOverlay({
           maxTargetAreaPx: MAX_TARGET_AREA_PX,
         });
 
+        const canonicalPolygon = viewerPolygonToImagePolygon(polygon, ctx.viewSize, cap.imageSize, view);
+        const canonicalSeed = viewerPointToImagePoint(seed, ctx.viewSize, cap.imageSize, view);
+
         await saveTumorSegmentation({
           comboId: ctx.comboId,
           dateIso: ctx.dateIso,
           studyId: ctx.studyId,
           seriesUid: ctx.seriesUid,
           sopInstanceUid: sop,
-          polygon,
+          polygon: canonicalPolygon,
           threshold,
-          seed,
-          meta: { areaPx: ctx.draftAreaPx ?? undefined, viewTransform: view, viewportSize, grow2d },
+          seed: canonicalSeed,
+          meta: {
+            areaPx: ctx.draftAreaPx ?? undefined,
+            coordinateSpace: 'image-normalized',
+            imageSize: cap.imageSize,
+            viewTransform: view,
+            viewportSize,
+            grow2d,
+          },
           algorithmVersion: 'v12-seedbox-areacap10000-costgrow2d-directional-v6-tensionq-step15',
         });
 
+        if (sliceGenerationRef.current !== saveGeneration) return;
         setSopInstanceUid(sop);
-        setSavedPolygon(polygon);
+        setSavedPolygon(canonicalPolygon);
+        setSavedImageSize(cap.imageSize);
         setSavedPolygonViewTransform(view);
         setSavedSeed(seed);
         setSavedGrow2d(grow2d);
       } catch (err) {
+        if (sliceGenerationRef.current !== saveGeneration) return;
         console.error(err);
         setError(err instanceof Error ? err.message : 'Save failed');
       }
-    })()
-      .finally(() => {
-        autoSaveInFlightRef.current = false;
-        setSaving(false);
+    })().finally(() => {
+      autoSaveInFlightRef.current = false;
+      if (sliceGenerationRef.current === saveGeneration) setSaving(false);
 
-        if (autoSaveNeedsFlushRef.current) {
-          autoSaveNeedsFlushRef.current = false;
-          // Defer to avoid deep recursion if the UI is in a rapid-update loop.
-          window.setTimeout(() => flushAutoSave(), 0);
-        }
-      });
+      if (autoSaveNeedsFlushRef.current) {
+        autoSaveNeedsFlushRef.current = false;
+        // Defer to avoid deep recursion if the UI is in a rapid-update loop.
+        window.setTimeout(() => flushAutoSave(), 0);
+      }
+    });
   }, [MAX_TARGET_AREA_PX]);
 
   useEffect(() => {
@@ -1200,7 +1275,10 @@ export function TumorSegmentationOverlay({
         </div>
 
         {/* capPx */}
-        <div className="flex flex-col items-center gap-1 select-none" title={`capPx is the target area cap (pixels).${saving ? ' saving…' : ''}`}>
+        <div
+          className="flex flex-col items-center gap-1 select-none"
+          title={`Target area: ${aClamped} pixels${pixelAreaMm2 !== null ? ` (${(aClamped * pixelAreaMm2).toFixed(1)} mm²)` : ''}.${saving ? ' Saving…' : ''}`}
+        >
           <div className="text-[10px] text-white/90 tabular-nums whitespace-nowrap bg-black/60 border border-white/10 px-1.5 py-0.5 rounded">
             capPx {aClamped}
           </div>
@@ -1220,7 +1298,7 @@ export function TumorSegmentationOverlay({
                 transform: 'translate(-50%, -50%) rotate(-90deg)',
                 transformOrigin: 'center',
               }}
-              title={`capPx ${targetAreaPx}${draftAreaPx != null ? ` · areaPx ${draftAreaPx}` : ''}${saving ? ' · saving…' : ''}`}
+              title={`Target ${targetAreaPx} px${draftAreaPx != null ? ` · area ${draftAreaPx} px${pixelAreaMm2 !== null ? ` (${(draftAreaPx * pixelAreaMm2).toFixed(1)} mm²)` : ''}` : ''}${saving ? ' · saving…' : ''}`}
               aria-label="Area cap (px)"
             />
           </div>
@@ -1230,23 +1308,27 @@ export function TumorSegmentationOverlay({
   })();
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 pointer-events-none"
-      onContextMenu={(e) => e.preventDefault()}
-    >
+    <div ref={containerRef} className="absolute inset-0 pointer-events-none" onContextMenu={(e) => e.preventDefault()}>
       {/* UI chrome */}
       <div className="absolute top-12 left-2 z-20 flex items-center gap-2 pointer-events-auto" data-tumor-ui="true">
         <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-xs flex items-center gap-2">
           <Sparkles className="w-3.5 h-3.5 text-[var(--accent)]" />
           Tumor
+          {draftAreaPx !== null ? (
+            <span className="tabular-nums text-white/80" aria-label="Segmented area">
+              {pixelAreaMm2 !== null
+                ? `${(draftAreaPx * pixelAreaMm2).toFixed(1)} mm²`
+                : `${draftAreaPx.toLocaleString()} px`}
+            </span>
+          ) : null}
           {busy ? <span className="text-white/70">…</span> : null}
         </div>
 
         <button
           type="button"
           onClick={onRequestClose}
-          className="p-1 rounded bg-black/70 border border-white/10 text-white/80 hover:text-white"
+          aria-label="Close tumor segmentation tool"
+          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded bg-black/70 border border-white/10 text-white/80 hover:text-white"
           title="Close tumor tool"
         >
           <X className="w-4 h-4" />

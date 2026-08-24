@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { AlignmentReference, AlignmentResult, AlignmentProgress, SeriesRef } from '../types/api';
 import { collectBoundedSliceCandidates, computeAlignedSettings, selectFineSliceShortlist } from '../utils/alignment';
 import { ALIGNMENT_IMAGE_SIZE, computeHistogramStats } from '../utils/imageCapture';
@@ -12,14 +12,8 @@ import {
   type RenderedSlice,
 } from '../utils/cornerstoneSliceCapture';
 import { clamp, nowMs } from '../utils/math';
-import { registerAffine2DWithElastix, registerRigid2DWithElastix } from '../utils/elastixRegistration';
 import { fillInvalidWarpWithValidMean, warpGrayscaleAffineWithValidity } from '../utils/warpAffine';
-import {
-  buildSoftForegroundSupportSquare,
-  buildStructuralPhaseImageSquare,
-  erodeFractionalSupportSquare,
-  inpaintExclusionRectSquare,
-} from '../utils/imageFeatures';
+import { buildStructuralPhaseImageSquare, inpaintExclusionRectSquare } from '../utils/imageFeatures';
 import { affineAboutOriginToStandard, composeStandardAffine2D, standardToAffineAboutOrigin } from '../utils/affine2d';
 import {
   affineAboutCenterToPanelGeometry,
@@ -33,17 +27,11 @@ import {
   type AlignmentFinalAffineProposalMetrics,
   type AlignmentPerceptualStageMetrics,
 } from '../utils/alignmentSliceScoreStore';
-import {
-  estimatePreparedPhaseCorrection,
-  preparePhaseCorrectionReference,
-  type PhaseCorrection,
-} from '../utils/phaseCorrelation';
+import type { PhaseCorrection } from '../utils/phaseCorrelation';
 import {
   choosePerceptualWinner,
   normalizePerceptualSource,
-  preparePerceptualReference,
   rankFixedCandidateSet,
-  scoreAlignedCandidate,
   type PerceptualComponents,
 } from '../utils/perceptualSliceSimilarity';
 import {
@@ -53,11 +41,19 @@ import {
   mapFixedExclusionToMovingBounds,
   type GridSeedTransform,
 } from '../utils/alignmentTransform';
+import { type FinalAffineProposalKind, type OptimizerFinalAffineProposal } from '../utils/structuralAffineSelection';
+import { createAlignmentScoringRunner, type AlignmentScoringRunner } from '../utils/alignmentScoringRunner';
+import { assessSliceAlignmentEvidence } from '../utils/alignmentConfidence';
+import { rasterizeImageExclusion, selectPhysicalTargetSlice } from '../utils/alignmentGeometry';
+import { clearDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
+import { getSeriesFrameManifest, type SeriesFrameManifest } from '../utils/localApi';
 import {
-  selectFinalAffineProposal,
-  type FinalAffineProposalKind,
-  type OptimizerFinalAffineProposal,
-} from '../utils/structuralAffineSelection';
+  densifyLongitudinalRegistration,
+  measureLongitudinalPlaneDrift,
+  prepareLongitudinalRegistrationInput,
+} from '../utils/svr/longitudinalFrames';
+import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
+import { resample2dAreaAverage } from '../utils/svr/resample2d';
 
 const COARSE_IMAGE_SIZE = 128;
 const PHASE_SAMPLE_SIZE = 128;
@@ -161,6 +157,8 @@ export function useAutoAlign() {
   const abortRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  useEffect(() => () => abortControllerRef.current?.abort(), []);
+
   /**
    * Abort the current alignment operation.
    */
@@ -189,6 +187,9 @@ export function useAutoAlign() {
       const alignmentAbortController = new AbortController();
       abortControllerRef.current = alignmentAbortController;
       abortRef.current = false;
+      const runId =
+        globalThis.crypto?.randomUUID?.() ?? `alignment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      clearDerivedAlignmentFrames();
       const results: AlignmentResult[] = [];
       const setStateForCurrentRun = (nextState: Parameters<typeof setState>[0]) => {
         if (abortControllerRef.current === alignmentAbortController) setState(nextState);
@@ -209,6 +210,7 @@ export function useAutoAlign() {
       });
 
       let renderElement: HTMLDivElement | null = null;
+      let scoringRunner: AlignmentScoringRunner | null = null;
       try {
         // One element and two reusable capture grids keep the exhaustive search allocation-bounded.
         const activeRenderElement = createCornerstoneRenderElement(ALIGNMENT_IMAGE_SIZE);
@@ -255,27 +257,22 @@ export function useAutoAlign() {
 
         const debugAlignment = isDebugAlignmentEnabled();
 
-        console.info('[alignment] Align All started', {
-          referenceDate: reference.date,
-          referenceSeriesUid: reference.seriesUid,
-          referenceSliceIndex: reference.sliceIndex,
-          referenceSliceCount: reference.sliceCount,
-          targetDates: targetDates.length,
-          exclusionMask: reference.exclusionMask ?? null,
-          debug: debugAlignment,
-        });
+        if (debugAlignment)
+          console.info('[alignment] Align All started', {
+            referenceDate: reference.date,
+            referenceSeriesUid: reference.seriesUid,
+            referenceSliceIndex: reference.sliceIndex,
+            referenceSliceCount: reference.sliceCount,
+            targetDates: targetDates.length,
+            exclusionMask: reference.exclusionMask ?? null,
+            debug: debugAlignment,
+          });
 
         // In-memory store used by the per-cell debug overlay (SSIM/LNCC + MI/NMI breakdown).
         resetAlignmentSliceScoreStore({
           referenceSeriesUid: reference.seriesUid,
           referenceSliceIndex: reference.sliceIndex,
         });
-
-        if (!debugAlignment) {
-          console.info(
-            "[alignment] Tip: enable verbose logs with localStorage.setItem('miraviewer:debug-alignment', '1')",
-          );
-        }
 
         // Render the reference slice from DICOM directly (identity view space).
         const referenceRender = await renderVerifiedSlice(
@@ -285,12 +282,13 @@ export function useAutoAlign() {
           captureScratchFull,
         );
 
-        console.info('[alignment] Reference slice rendered', {
-          imageId: referenceRender.imageId,
-          expectedImageId: referenceRender.expectedImageId,
-          renderedImageId: referenceRender.renderedImageId,
-          renderTimedOut: referenceRender.renderTimedOut,
-        });
+        if (debugAlignment)
+          console.info('[alignment] Reference slice rendered', {
+            imageId: referenceRender.imageId,
+            expectedImageId: referenceRender.expectedImageId,
+            renderedImageId: referenceRender.renderedImageId,
+            renderTimedOut: referenceRender.renderTimedOut,
+          });
         const referencePixels = referenceRender.pixels;
 
         // Normalize once in reference source space. Candidate normalization is likewise performed
@@ -308,30 +306,20 @@ export function useAutoAlign() {
           captureScratchCoarse,
         );
         const referencePixelsCoarse = referenceCoarseRender.pixels;
-        const coarseExclusionRect = reference.exclusionMask
-          ? expandExclusionRect(reference.exclusionMask, PHASE_MAX_CORRECTION_PX / PHASE_SAMPLE_SIZE)
-          : undefined;
-        const normalizedReferenceCoarse = normalizePerceptualSource(referencePixelsCoarse, COARSE_IMAGE_SIZE, {
-          exclusionRect: coarseExclusionRect,
-        });
-        const coarsePerceptualReference = preparePerceptualReference(normalizedReferenceCoarse, COARSE_IMAGE_SIZE, {
-          scales: [...COARSE_PERCEPTUAL_SCALES],
-          exclusionRect: reference.exclusionMask,
-        });
-        const finePerceptualReference = preparePerceptualReference(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, {
-          scales: [...FINE_PERCEPTUAL_SCALES],
-          exclusionRect: reference.exclusionMask,
-        });
-        const phaseReferenceSupport = buildSoftForegroundSupportSquare(normalizedReferenceCoarse, PHASE_SAMPLE_SIZE);
-        const phaseReferencePixels = buildStructuralPhaseImageSquare(
-          inpaintExclusionRectSquare(normalizedReferenceCoarse, PHASE_SAMPLE_SIZE, coarseExclusionRect, 6).pixels,
-          PHASE_SAMPLE_SIZE,
+        scoringRunner = await createAlignmentScoringRunner(
+          {
+            referenceFinePixels: referencePixels,
+            referenceCoarsePixels: referencePixelsCoarse,
+            fineSize: ALIGNMENT_IMAGE_SIZE,
+            coarseSize: COARSE_IMAGE_SIZE,
+            fineScales: [...FINE_PERCEPTUAL_SCALES],
+            coarseScales: [...COARSE_PERCEPTUAL_SCALES],
+            phaseFftSize: PHASE_FFT_SIZE,
+            phaseMaxCorrectionPx: PHASE_MAX_CORRECTION_PX,
+            exclusionMask: reference.exclusionMask,
+          },
+          alignmentAbortController.signal,
         );
-        const preparedPhaseReference = preparePhaseCorrectionReference(phaseReferencePixels, PHASE_SAMPLE_SIZE, {
-          fftSize: PHASE_FFT_SIZE,
-          maxCorrectionPx: PHASE_MAX_CORRECTION_PX,
-          support: phaseReferenceSupport,
-        });
 
         if (debugAlignment) {
           console.info('[alignment] Perceptual slice-search config', {
@@ -352,11 +340,233 @@ export function useAutoAlign() {
         }
 
         const referenceDisplayedPixels = applyBrightnessContrastToPixels(
-          referencePixels,
+          referencePixels.some((value) => value < 0 || value > 1) ? normalizedReferenceFine : referencePixels,
           reference.settings.brightness,
           reference.settings.contrast,
         );
         const referenceDisplayedStats = computeHistogramStats(referenceDisplayedPixels);
+        const referenceManifest: SeriesFrameManifest | null =
+          reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null;
+        const targetManifests = new Map<string, SeriesFrameManifest>();
+
+        const terminalResult = (
+          date: string,
+          seriesRef: SeriesRef,
+          outcome: NonNullable<AlignmentResult['outcome']>,
+          message: string,
+        ): AlignmentResult => ({
+          date,
+          seriesUid: seriesRef.series_uid,
+          bestSliceIndex: 0,
+          nmiScore: 0,
+          computedSettings: reference.settings,
+          slicesChecked: 0,
+          runId,
+          patientKey: reference.patientKey,
+          sequenceId: reference.sequenceId,
+          referenceSeriesUid: reference.seriesUid,
+          datasetRevision: reference.datasetRevision,
+          outcome,
+          message,
+        });
+
+        const alignPhysicalTarget = async (date: string, seriesRef: SeriesRef): Promise<AlignmentResult | null> => {
+          if (!referenceManifest || seriesRef.instance_count < 2 || referenceManifest.frames.length < 2) return null;
+          const targetManifest = await getSeriesFrameManifest(seriesRef.series_uid);
+          targetManifests.set(seriesRef.series_uid, targetManifest);
+          if (targetManifest.patientKey !== referenceManifest.patientKey) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'Reference and target belong to different patients',
+            );
+          }
+          if (!referenceManifest.geometryReliable || !targetManifest.geometryReliable) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'Reliable patient-space position and orientation are required for safe longitudinal registration',
+            );
+          }
+
+          const drift = measureLongitudinalPlaneDrift(referenceManifest, targetManifest);
+          const referenceFrame = referenceManifest.frames[reference.sliceIndex];
+          const centerSpacing = referenceFrame?.spacingBetweenSlices ?? referenceFrame?.sliceThickness ?? 1;
+          const requiresReslice =
+            drift.frameRelationship !== 'same' || drift.maximumThroughPlaneDriftMm > Math.max(0.01, centerSpacing / 2);
+          if (!requiresReslice) return null;
+
+          setStateForCurrentRun((state) => ({
+            ...state,
+            progress: state.progress
+              ? { ...state.progress, currentDate: date, phase: 'computing', slicesChecked: 0 }
+              : null,
+          }));
+
+          const prepared = await prepareLongitudinalRegistrationInput(
+            referenceManifest,
+            targetManifest,
+            reference.sliceIndex,
+            { signal: alignmentAbortController.signal, maxDimension: 96, outputMaxDimension: 512, maxSlices: 48 },
+          );
+          const selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
+          if (!selectedReference) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'Selected physical reference frame is unavailable',
+            );
+          }
+          const exclusion = rasterizeImageExclusion(
+            reference.exclusionMask,
+            selectedReference.dsRows,
+            selectedReference.dsCols,
+          );
+          const coarseRegistration = await runLongitudinalRegistration(
+            {
+              referenceSlices: prepared.referenceSlices,
+              targetSlices: prepared.targetSlices,
+              referenceSliceIndex: prepared.referenceSliceIndex,
+              referenceExclusionMask: exclusion,
+              maxDimension: 96,
+              maxSamples: 12_000,
+              minCoverage: 0.55,
+              signal: alignmentAbortController.signal,
+            },
+            alignmentAbortController.signal,
+          );
+          ensureNotAborted();
+
+          const rejectRegistration = (failed: { reason: string; message: string }): AlignmentResult => {
+            const outcome =
+              failed.reason === 'insufficient-coverage' || failed.reason === 'insufficient-samples'
+                ? 'insufficient-overlap'
+                : failed.reason === 'ambiguous' || failed.reason === 'insufficient-evidence'
+                  ? 'ambiguous'
+                  : failed.reason === 'invalid-geometry'
+                    ? 'incompatible-geometry'
+                    : failed.reason === 'cancelled'
+                      ? 'cancelled'
+                      : 'failed';
+            return terminalResult(date, seriesRef, outcome, failed.message);
+          };
+          if (!coarseRegistration.ok) return rejectRegistration(coarseRegistration);
+
+          // The registration stack is intentionally sparse and bounded. Once pose is verified,
+          // reconstruct the presentation from every acquired native slice intersecting the
+          // oblique reference plane so small lesions are not blurred between 4-5 mm samples.
+          const registration = await densifyLongitudinalRegistration(
+            targetManifest,
+            selectedReference,
+            coarseRegistration,
+            {
+              signal: alignmentAbortController.signal,
+              maxSlices: 96,
+              maxDimension: 512,
+              minCoverage: 0.55,
+            },
+          );
+          ensureNotAborted();
+          if (!registration.ok) {
+            return rejectRegistration(registration);
+          }
+
+          const bestSliceIndex = selectPhysicalTargetSlice(referenceManifest, targetManifest, reference.sliceIndex, {
+            rigid: registration.targetToReference,
+            centerMm: registration.centerMm,
+          });
+          const nativeFrame = targetManifest.frames[bestSliceIndex];
+          if (!nativeFrame) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'Registered frame has no native source identity',
+            );
+          }
+          const resampled = resample2dAreaAverage(
+            registration.pixels,
+            registration.rows,
+            registration.cols,
+            ALIGNMENT_IMAGE_SIZE,
+            ALIGNMENT_IMAGE_SIZE,
+          );
+          const normalized = normalizePerceptualSource(resampled, ALIGNMENT_IMAGE_SIZE, {
+            exclusionRect: fineNormalizationExclusion,
+          });
+          const quality = computeMutualInformation(normalizedReferenceFine, normalized, {
+            bins: 64,
+            exclusionRect: reference.exclusionMask,
+            imageWidth: ALIGNMENT_IMAGE_SIZE,
+            imageHeight: ALIGNMENT_IMAGE_SIZE,
+          });
+          const computedSettings = computeAlignedSettings(
+            referenceDisplayedStats,
+            computeHistogramStats(normalized),
+            bestSliceIndex,
+            seriesRef.instance_count,
+            currentProgress,
+            reference.settings,
+          );
+
+          return {
+            date,
+            seriesUid: seriesRef.series_uid,
+            bestSliceIndex,
+            nmiScore: quality.nmi,
+            computedSettings,
+            slicesChecked: registration.diagnostics.presentationSourceFrameCount ?? prepared.targetSourceIndices.length,
+            runId,
+            patientKey: referenceManifest.patientKey,
+            sequenceId: reference.sequenceId,
+            referenceSeriesUid: reference.seriesUid,
+            datasetRevision: reference.datasetRevision,
+            outcome: 'aligned',
+            evidence: {
+              structuralScore: registration.score,
+              runnerUpGap: registration.diagnostics.scoreMargin,
+              coverage: registration.coverage,
+              geometryMode: 'registered-3d',
+              planeAngleDegrees: drift.angleDegrees,
+              maximumNativePlaneDriftMm: drift.maximumThroughPlaneDriftMm,
+              presentationSliceSpacingMm: registration.diagnostics.presentationSliceSpacingMm,
+              presentationSourceFrameCount: registration.diagnostics.presentationSourceFrameCount,
+            },
+            derivedFrame: {
+              pixels: registration.pixels,
+              rows: registration.rows,
+              columns: registration.cols,
+              sourceImageId: `miradb:${nativeFrame.sopInstanceUid}`,
+              referenceStudyUid: referenceManifest.studyUid,
+              referenceSeriesUid: referenceManifest.seriesUid,
+              referenceSopInstanceUid: referenceFrame?.sopInstanceUid,
+              referenceFrameIndex: reference.sliceIndex,
+              referenceImagePositionPatient: referenceFrame?.imagePositionPatient,
+              referenceImageOrientationPatient: referenceFrame?.imageOrientationPatient,
+              referencePixelSpacing: referenceFrame?.pixelSpacing,
+              referenceRows: referenceFrame?.rows,
+              referenceColumns: referenceFrame?.columns,
+              targetStudyUid: targetManifest.studyUid,
+              targetSopInstanceUid: nativeFrame.sopInstanceUid,
+              referenceFrameOfReferenceUid: registration.provenance.referenceFrameOfReferenceUid,
+              targetFrameOfReferenceUid: registration.provenance.targetFrameOfReferenceUid,
+              rigidTransform: [
+                registration.targetToReference.tx,
+                registration.targetToReference.ty,
+                registration.targetToReference.tz,
+                registration.targetToReference.rx,
+                registration.targetToReference.ry,
+                registration.targetToReference.rz,
+              ],
+              rotationCenterMm: [registration.centerMm.x, registration.centerMm.y, registration.centerMm.z],
+              nativeSliceSpacingMm: registration.diagnostics.presentationSliceSpacingMm,
+              sourceFrameCount: registration.diagnostics.presentationSourceFrameCount,
+            },
+          };
+        };
 
         // Flip the progress UI to matching now that the reference is ready.
         setStateForCurrentRun((s) => ({
@@ -378,478 +588,473 @@ export function useAutoAlign() {
             continue;
           }
 
-          setStateForCurrentRun((s) => ({
-            ...s,
-            progress: {
-              phase: 'matching',
-              currentDate: date,
-              dateIndex: dateIdx,
-              totalDates: targetDates.length,
-              slicesChecked: 0,
-              bestMiSoFar: 0,
-            },
-          }));
+          if (referenceManifest) {
+            let physicalResult: AlignmentResult | null;
+            try {
+              physicalResult = await alignPhysicalTarget(date, seriesRef);
+            } catch (error) {
+              ensureNotAborted();
+              physicalResult = terminalResult(
+                date,
+                seriesRef,
+                'failed',
+                error instanceof Error ? error.message : 'Physical alignment failed',
+              );
+            }
+            if (physicalResult) {
+              ensureNotAborted();
+              results.push(physicalResult);
+              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              await yieldToMain();
+              continue;
+            }
+          }
 
-          // Yield to keep UI responsive.
-          await yieldToMain();
-
-          const startIdxUnclamped = Math.round(
-            (reference.sliceIndex / Math.max(1, reference.sliceCount - 1)) * (seriesRef.instance_count - 1),
-          );
-          const startIdx = clamp(startIdxUnclamped, 0, Math.max(0, seriesRef.instance_count - 1));
-
-          // Best initial guess: normalized index mapping from reference -> target.
-          const seedIdx = startIdx;
-
-          const sliceSearchMinIndex = clamp(
-            seedIdx - SLICE_SEARCH_WINDOW_RADIUS,
-            0,
-            Math.max(0, seriesRef.instance_count - 1),
-          );
-          const sliceSearchMaxIndex = clamp(
-            seedIdx + SLICE_SEARCH_WINDOW_RADIUS,
-            0,
-            Math.max(0, seriesRef.instance_count - 1),
-          );
-
-          debugAlignmentLog(
-            'date.plan',
-            {
-              date,
-              startIdx,
-              seedIdx,
-              strategy: {
-                // Slice choice gets only shared rigid freedom plus candidate-specific translation.
-                sliceSearchWarp: true,
-                seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
-                seedResolutions: SEED_REGISTRATION_RESOLUTIONS,
-                sliceSearchImageSize: COARSE_IMAGE_SIZE,
-                phaseSampleSize: PHASE_SAMPLE_SIZE,
-                phaseMaxCorrectionPx: PHASE_MAX_CORRECTION_PX,
-                sliceSearchWindowRadius: SLICE_SEARCH_WINDOW_RADIUS,
-                sliceSearchYieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
-                refinementImageSize: ALIGNMENT_IMAGE_SIZE,
-                refinementResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
+          try {
+            setStateForCurrentRun((s) => ({
+              ...s,
+              progress: {
+                phase: 'matching',
+                currentDate: date,
+                dateIndex: dateIdx,
+                totalDates: targetDates.length,
+                slicesChecked: 0,
+                bestMiSoFar: 0,
               },
-              meta: {
-                seriesUid: seriesRef.series_uid,
-                referenceSeriesUid: reference.seriesUid,
-              },
-            },
-            debugAlignment,
-          );
+            }));
 
-          console.info('[alignment] Date plan', {
-            date,
-            seriesUid: seriesRef.series_uid,
-            instanceCount: seriesRef.instance_count,
-            startIdx,
-            seedIdx,
-            sliceSearchBounds: {
-              minIndex: sliceSearchMinIndex,
-              maxIndex: sliceSearchMaxIndex,
-            },
-            seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
-            refinementImageSize: ALIGNMENT_IMAGE_SIZE,
-            resolutions: {
-              seed: SEED_REGISTRATION_RESOLUTIONS,
-              refinement: REFINEMENT_REGISTRATION_RESOLUTIONS,
-            },
-          });
+            // Yield to keep UI responsive.
+            await yieldToMain();
 
-          // 1) Estimate a shared rigid seed. Affine freedom is intentionally deferred until after
-          // the slice is selected, so a wrong depth cannot win through shear or anisotropic scale.
+            const targetManifest = targetManifests.get(seriesRef.series_uid);
+            const startIdxUnclamped =
+              referenceManifest && targetManifest
+                ? selectPhysicalTargetSlice(referenceManifest, targetManifest, reference.sliceIndex)
+                : Math.round(
+                    (reference.sliceIndex / Math.max(1, reference.sliceCount - 1)) * (seriesRef.instance_count - 1),
+                  );
+            const startIdx = clamp(startIdxUnclamped, 0, Math.max(0, seriesRef.instance_count - 1));
 
-          console.info('[alignment] Seed registration starting', {
-            date,
-            seedIdx,
-            size: SEED_REGISTRATION_IMAGE_SIZE,
-            numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
-          });
+            // Best initial guess: normalized index mapping from reference -> target.
+            const seedIdx = startIdx;
 
-          const seedRender = await renderVerifiedSlice(
-            seriesRef.series_uid,
-            seedIdx,
-            SEED_REGISTRATION_IMAGE_SIZE,
-            captureScratchFull,
-          );
+            // Reliable shared patient geometry bounds the uncertainty in millimeters. Without
+            // physical geometry, a normalized-index prior cannot safely exclude any stack depth.
+            const physicalSpacingMm =
+              targetManifest?.sliceSpacingMm ??
+              targetManifest?.frames[seedIdx]?.spacingBetweenSlices ??
+              targetManifest?.frames[seedIdx]?.sliceThickness;
+            const coverageDifferenceMm = Math.abs(
+              (referenceManifest?.coverageMm ?? 0) - (targetManifest?.coverageMm ?? 0),
+            );
+            const sliceSearchWindowRadius =
+              referenceManifest && targetManifest && physicalSpacingMm && physicalSpacingMm > 0
+                ? Math.max(8, Math.ceil((12 + coverageDifferenceMm / 2) / physicalSpacingMm))
+                : seriesRef.instance_count > 2 * SLICE_SEARCH_WINDOW_RADIUS
+                  ? seriesRef.instance_count - 1
+                  : SLICE_SEARCH_WINDOW_RADIUS;
+            const sliceSearchMinIndex = clamp(
+              seedIdx - sliceSearchWindowRadius,
+              0,
+              Math.max(0, seriesRef.instance_count - 1),
+            );
+            const sliceSearchMaxIndex = clamp(
+              seedIdx + sliceSearchWindowRadius,
+              0,
+              Math.max(0, seriesRef.instance_count - 1),
+            );
 
-          const tSeed0 = nowMs();
-          const initialSeedReg = await registerRigid2DWithElastix(
-            referencePixels,
-            seedRender.pixels,
-            SEED_REGISTRATION_IMAGE_SIZE,
-            {
-              numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
-              webWorker: sharedWebWorker,
-              signal: alignmentAbortController.signal,
-            },
-          );
-          ensureNotAborted();
-          sharedWebWorker = initialSeedReg.webWorker;
-
-          let seedTransform: GridSeedTransform = {
-            A: initialSeedReg.A,
-            translatePx: initialSeedReg.translatePx,
-            gridSize: SEED_REGISTRATION_IMAGE_SIZE,
-          };
-          let seedQualityReg = initialSeedReg;
-
-          // A reference-space exclusion cannot be applied to the unwarped moving seed. When an
-          // exclusion exists, first establish pose without it, then estimate a residual rigid on a
-          // prewarped image where the same smoothly-inpainted rectangle is geometrically valid.
-          if (reference.exclusionMask) {
-            const initialWarp = correctedWarpAtSize(
-              seedTransform,
+            debugAlignmentLog(
+              'date.plan',
               {
-                correctionX: 0,
-                correctionY: 0,
-                sampleGridSize: PHASE_SAMPLE_SIZE,
-                fftSize: PHASE_FFT_SIZE,
+                date,
+                startIdx,
+                seedIdx,
+                strategy: {
+                  // Slice choice gets only shared rigid freedom plus candidate-specific translation.
+                  sliceSearchWarp: true,
+                  seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
+                  seedResolutions: SEED_REGISTRATION_RESOLUTIONS,
+                  sliceSearchImageSize: COARSE_IMAGE_SIZE,
+                  phaseSampleSize: PHASE_SAMPLE_SIZE,
+                  phaseMaxCorrectionPx: PHASE_MAX_CORRECTION_PX,
+                  sliceSearchWindowRadius,
+                  sliceSearchYieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+                  refinementImageSize: ALIGNMENT_IMAGE_SIZE,
+                  refinementResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
+                },
+                meta: {
+                  seriesUid: seriesRef.series_uid,
+                  referenceSeriesUid: reference.seriesUid,
+                },
               },
-              SEED_REGISTRATION_IMAGE_SIZE,
+              debugAlignment,
             );
-            const prewarpedSeed = warpGrayscaleAffineWithValidity(
+
+            if (debugAlignment)
+              console.info('[alignment] Date plan', {
+                date,
+                seriesUid: seriesRef.series_uid,
+                instanceCount: seriesRef.instance_count,
+                startIdx,
+                seedIdx,
+                sliceSearchBounds: {
+                  minIndex: sliceSearchMinIndex,
+                  maxIndex: sliceSearchMaxIndex,
+                },
+                seedImageSize: SEED_REGISTRATION_IMAGE_SIZE,
+                refinementImageSize: ALIGNMENT_IMAGE_SIZE,
+                resolutions: {
+                  seed: SEED_REGISTRATION_RESOLUTIONS,
+                  refinement: REFINEMENT_REGISTRATION_RESOLUTIONS,
+                },
+              });
+
+            // 1) Estimate a shared rigid seed. Affine freedom is intentionally deferred until after
+            // the slice is selected, so a wrong depth cannot win through shear or anisotropic scale.
+
+            if (debugAlignment)
+              console.info('[alignment] Seed registration starting', {
+                date,
+                seedIdx,
+                size: SEED_REGISTRATION_IMAGE_SIZE,
+                numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
+              });
+
+            const seedRender = await renderVerifiedSlice(
+              seriesRef.series_uid,
+              seedIdx,
+              SEED_REGISTRATION_IMAGE_SIZE,
+              captureScratchFull,
+            );
+
+            // Keep the ITK/Elastix runtime out of first paint and physical 3D-only comparisons.
+            // Native import caching gives the whole alignment run one shared registration module.
+            const { registerRigid2DWithElastix, registerAffine2DWithElastix } =
+              await import('../utils/elastixRegistration');
+            ensureNotAborted();
+            const tSeed0 = nowMs();
+            // The exclusion lives in reference coordinates before a pose exists. Remove its
+            // influence from the fixed image immediately; only project it onto the moving
+            // image after the first rigid estimate establishes that coordinate relationship.
+            const initialFixedPixels = reference.exclusionMask
+              ? inpaintExclusionRectSquare(
+                  referencePixels,
+                  SEED_REGISTRATION_IMAGE_SIZE,
+                  expandExclusionRect(reference.exclusionMask, 3 / SEED_REGISTRATION_IMAGE_SIZE),
+                  6,
+                ).pixels
+              : referencePixels;
+            const initialSeedReg = await registerRigid2DWithElastix(
+              initialFixedPixels,
               seedRender.pixels,
-              SEED_REGISTRATION_IMAGE_SIZE,
-              initialWarp,
-            );
-            const residualSeedReg = await registerRigid2DWithElastix(
-              referencePixels,
-              fillInvalidWarpWithValidMean(prewarpedSeed),
               SEED_REGISTRATION_IMAGE_SIZE,
               {
                 numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
                 webWorker: sharedWebWorker,
-                exclusionRect: reference.exclusionMask,
                 signal: alignmentAbortController.signal,
               },
             );
             ensureNotAborted();
-            sharedWebWorker = residualSeedReg.webWorker;
-            const totalSeedStandard = composeResidualWithWarpAtSize(
-              residualSeedReg.movingToFixed,
-              initialWarp,
-              SEED_REGISTRATION_IMAGE_SIZE,
-            );
-            const center = (SEED_REGISTRATION_IMAGE_SIZE - 1) / 2;
-            const totalSeedAboutCenter = standardToAffineAboutOrigin(totalSeedStandard.A, totalSeedStandard.b, {
-              x: center,
-              y: center,
-            });
-            seedTransform = {
-              A: totalSeedAboutCenter.A,
-              translatePx: totalSeedAboutCenter.t,
+            sharedWebWorker = initialSeedReg.webWorker;
+
+            let seedTransform: GridSeedTransform = {
+              A: initialSeedReg.A,
+              translatePx: initialSeedReg.translatePx,
               gridSize: SEED_REGISTRATION_IMAGE_SIZE,
             };
-            seedQualityReg = residualSeedReg;
-          }
+            let seedQualityReg = initialSeedReg;
 
-          const seedRegistrationMs = nowMs() - tSeed0;
-
-          console.info('[alignment] Seed registration finished', {
-            date,
-            seedIdx,
-            nmi: Number(seedQualityReg.quality.nmi.toFixed(4)),
-            exclusionAwareResidual: Boolean(reference.exclusionMask),
-            registrationMs: Math.round(seedRegistrationMs),
-            renderMs: Math.round(seedRender.timingMs.total),
-          });
-
-          debugAlignmentLog(
-            'seed.perf',
-            {
-              date,
-              seedIdx,
-              registrationMs: seedRegistrationMs,
-              renderTimingMs: seedRender.timingMs,
-            },
-            debugAlignment,
-          );
-
-          debugAlignmentLog(
-            'seed.registration',
-            {
-              date,
-              seedIdx,
-              nmi: seedQualityReg.quality.nmi,
-              mi: seedQualityReg.quality.mi,
-              elastixFinalMetric: seedQualityReg.quality.elastixFinalMetric,
-              elastixMetricSamples: seedQualityReg.quality.elastixMetricSamples,
-              translatePx: seedTransform.translatePx,
-              A: seedTransform.A,
-              initial: { A: initialSeedReg.A, translatePx: initialSeedReg.translatePx },
-              exclusionAwareResidual: Boolean(reference.exclusionMask),
-              renderTimedOut: seedRender.renderTimedOut,
-              render: {
-                imageId: seedRender.imageId,
-                expectedImageId: seedRender.expectedImageId,
-                renderedImageId: seedRender.renderedImageId,
-              },
-            },
-            debugAlignment,
-          );
-
-          // 2) Exhaustively score the bounded window. Phase correlation estimates only the
-          // residual translation; aligned local structure decides which slice wins.
-          let sliceSearchRenderMs = 0;
-          let sliceSearchWarpMs = 0;
-          let sliceSearchScoreMs = 0;
-          let slicesChecked = 0;
-          let provisionalBestScore = 0;
-          const progressUpdateMinIntervalMs = 100;
-          let lastProgressUpdateMs = 0;
-          const seedWarpAtCoarse = correctedWarpAtSize(
-            seedTransform,
-            {
-              correctionX: 0,
-              correctionY: 0,
-              sampleGridSize: PHASE_SAMPLE_SIZE,
-              fftSize: PHASE_FFT_SIZE,
-            },
-            COARSE_IMAGE_SIZE,
-          );
-
-          const scoreCoarseSlice = async (index: number): Promise<SlicePerceptualCandidate> => {
-            const rendered = await renderVerifiedSlice(
-              seriesRef.series_uid,
-              index,
-              COARSE_IMAGE_SIZE,
-              captureScratchCoarse,
-            );
-            sliceSearchRenderMs += rendered.timingMs.total;
-
-            const tWarp0 = nowMs();
-            const sourceNormalizationExclusion = reference.exclusionMask
-              ? mapFixedExclusionToMovingBounds(
-                  reference.exclusionMask,
-                  seedWarpAtCoarse,
-                  COARSE_IMAGE_SIZE,
-                  PHASE_MAX_CORRECTION_PX,
-                )
-              : undefined;
-            const normalizedSource = normalizePerceptualSource(rendered.pixels, COARSE_IMAGE_SIZE, {
-              exclusionRect: sourceNormalizationExclusion,
-            });
-            const inpaintedPhaseSource = inpaintExclusionRectSquare(
-              normalizedSource,
-              PHASE_SAMPLE_SIZE,
-              sourceNormalizationExclusion,
-              6,
-            ).pixels;
-            const structuralPhaseSource = buildStructuralPhaseImageSquare(inpaintedPhaseSource, PHASE_SAMPLE_SIZE);
-            const warpedStructuralPhase = warpGrayscaleAffineWithValidity(
-              structuralPhaseSource,
-              PHASE_SAMPLE_SIZE,
-              seedWarpAtCoarse,
-            );
-            const sourceSupport = buildSoftForegroundSupportSquare(normalizedSource, COARSE_IMAGE_SIZE);
-            const warpedSupport = warpGrayscaleAffineWithValidity(sourceSupport, COARSE_IMAGE_SIZE, seedWarpAtCoarse);
-            const erodedGeometricValidity = erodeFractionalSupportSquare(
-              warpedStructuralPhase.validity,
-              PHASE_SAMPLE_SIZE,
-              1,
-            );
-            const phaseMovingPixels = new Float32Array(warpedStructuralPhase.pixels.length);
-            const phaseSupport = new Float32Array(warpedStructuralPhase.pixels.length);
-            for (let pixelIndex = 0; pixelIndex < phaseMovingPixels.length; pixelIndex++) {
-              const structuralValidity = warpedStructuralPhase.validity[pixelIndex] ?? 0;
-              const supportValidity = warpedSupport.validity[pixelIndex] ?? 0;
-              phaseMovingPixels[pixelIndex] =
-                structuralValidity > 1e-6 ? (warpedStructuralPhase.pixels[pixelIndex] ?? 0) / structuralValidity : 0;
-              const conditionalSupport =
-                supportValidity > 1e-6 ? (warpedSupport.pixels[pixelIndex] ?? 0) / supportValidity : 0;
-              phaseSupport[pixelIndex] = conditionalSupport * (erodedGeometricValidity[pixelIndex] ?? 0);
+            // A reference-space exclusion cannot be applied to the unwarped moving seed. When an
+            // exclusion exists, first establish pose without it, then estimate a residual rigid on a
+            // prewarped image where the same smoothly-inpainted rectangle is geometrically valid.
+            if (reference.exclusionMask) {
+              const initialWarp = correctedWarpAtSize(
+                seedTransform,
+                {
+                  correctionX: 0,
+                  correctionY: 0,
+                  sampleGridSize: PHASE_SAMPLE_SIZE,
+                  fftSize: PHASE_FFT_SIZE,
+                },
+                SEED_REGISTRATION_IMAGE_SIZE,
+              );
+              const prewarpedSeed = warpGrayscaleAffineWithValidity(
+                seedRender.pixels,
+                SEED_REGISTRATION_IMAGE_SIZE,
+                initialWarp,
+              );
+              const residualSeedReg = await registerRigid2DWithElastix(
+                referencePixels,
+                fillInvalidWarpWithValidMean(prewarpedSeed),
+                SEED_REGISTRATION_IMAGE_SIZE,
+                {
+                  numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
+                  webWorker: sharedWebWorker,
+                  exclusionRect: reference.exclusionMask,
+                  signal: alignmentAbortController.signal,
+                },
+              );
+              ensureNotAborted();
+              sharedWebWorker = residualSeedReg.webWorker;
+              const totalSeedStandard = composeResidualWithWarpAtSize(
+                residualSeedReg.movingToFixed,
+                initialWarp,
+                SEED_REGISTRATION_IMAGE_SIZE,
+              );
+              const center = (SEED_REGISTRATION_IMAGE_SIZE - 1) / 2;
+              const totalSeedAboutCenter = standardToAffineAboutOrigin(totalSeedStandard.A, totalSeedStandard.b, {
+                x: center,
+                y: center,
+              });
+              seedTransform = {
+                A: totalSeedAboutCenter.A,
+                translatePx: totalSeedAboutCenter.t,
+                gridSize: SEED_REGISTRATION_IMAGE_SIZE,
+              };
+              seedQualityReg = residualSeedReg;
             }
-            const phase = estimatePreparedPhaseCorrection(preparedPhaseReference, phaseMovingPixels, {
-              support: phaseSupport,
+
+            const seedRegistrationMs = nowMs() - tSeed0;
+
+            if (debugAlignment)
+              console.info('[alignment] Seed registration finished', {
+                date,
+                seedIdx,
+                nmi: Number(seedQualityReg.quality.nmi.toFixed(4)),
+                exclusionAwareResidual: Boolean(reference.exclusionMask),
+                registrationMs: Math.round(seedRegistrationMs),
+                renderMs: Math.round(seedRender.timingMs.total),
+              });
+
+            debugAlignmentLog(
+              'seed.perf',
+              {
+                date,
+                seedIdx,
+                registrationMs: seedRegistrationMs,
+                renderTimingMs: seedRender.timingMs,
+              },
+              debugAlignment,
+            );
+
+            debugAlignmentLog(
+              'seed.registration',
+              {
+                date,
+                seedIdx,
+                nmi: seedQualityReg.quality.nmi,
+                mi: seedQualityReg.quality.mi,
+                elastixFinalMetric: seedQualityReg.quality.elastixFinalMetric,
+                elastixMetricSamples: seedQualityReg.quality.elastixMetricSamples,
+                translatePx: seedTransform.translatePx,
+                A: seedTransform.A,
+                initial: { A: initialSeedReg.A, translatePx: initialSeedReg.translatePx },
+                exclusionAwareResidual: Boolean(reference.exclusionMask),
+                renderTimedOut: seedRender.renderTimedOut,
+                render: {
+                  imageId: seedRender.imageId,
+                  expectedImageId: seedRender.expectedImageId,
+                  renderedImageId: seedRender.renderedImageId,
+                },
+              },
+              debugAlignment,
+            );
+
+            // 2) Exhaustively score the bounded window. Phase correlation estimates only the
+            // residual translation; aligned local structure decides which slice wins.
+            let sliceSearchRenderMs = 0;
+            const sliceSearchWarpMs = 0;
+            let sliceSearchScoreMs = 0;
+            let slicesChecked = 0;
+            let provisionalBestScore = 0;
+            const progressUpdateMinIntervalMs = 100;
+            let lastProgressUpdateMs = 0;
+            const scoreCoarseSlice = async (index: number): Promise<SlicePerceptualCandidate> => {
+              const rendered = await renderVerifiedSlice(
+                seriesRef.series_uid,
+                index,
+                COARSE_IMAGE_SIZE,
+                captureScratchCoarse,
+              );
+              sliceSearchRenderMs += rendered.timingMs.total;
+
+              const tScore0 = nowMs();
+              const { phase, components } = await scoringRunner!.scoreCoarse(rendered.pixels, seedTransform);
+              sliceSearchScoreMs += nowMs() - tScore0;
+              return { index, phase, components };
+            };
+
+            if (debugAlignment)
+              console.info('[alignment] Slice search starting', {
+                date,
+                strategy: 'rigid-phase-perceptual',
+                referenceSliceIndex: reference.sliceIndex,
+                referenceSliceCount: reference.sliceCount,
+                targetSliceCount: seriesRef.instance_count,
+              });
+
+            const onCoarseScored = (candidate: { index: number; value: SlicePerceptualCandidate }) => {
+              slicesChecked++;
+              provisionalBestScore = Math.max(
+                provisionalBestScore,
+                meanPerceptualComponents(candidate.value.components),
+              );
+              const now = nowMs();
+              if (now - lastProgressUpdateMs < progressUpdateMinIntervalMs && slicesChecked !== 1) return;
+              lastProgressUpdateMs = now;
+              setStateForCurrentRun((s) => ({
+                ...s,
+                progress: s.progress ? { ...s.progress, slicesChecked, bestMiSoFar: provisionalBestScore } : null,
+              }));
+            };
+
+            const collectCoarseRange = async (minIndex: number, maxIndex: number, startIndex: number) =>
+              await collectBoundedSliceCandidates({
+                minIndex,
+                maxIndex,
+                startIndex,
+                scoreSlice: scoreCoarseSlice,
+                onScored: onCoarseScored,
+                yieldEvery: SLICE_SEARCH_YIELD_EVERY_SLICES,
+                yieldFn: yieldToMain,
+              });
+
+            const initialCollected = await collectCoarseRange(sliceSearchMinIndex, sliceSearchMaxIndex, seedIdx);
+            let coarseCandidates = initialCollected.map((candidate) => candidate.value);
+            let rankedCoarse = rankFixedCandidateSet(coarseCandidates, seedIdx);
+            const provisionalShortlist = selectFineSliceShortlist(
+              rankedCoarse.map((candidate) => ({ index: candidate.index, score: candidate.perceptualRank })),
+              seedIdx,
+              { peakCount: FINE_PEAK_COUNT, suppressionRadius: FINE_PEAK_SUPPRESSION_RADIUS },
+            );
+
+            // A boundary peak is evidence that the prior-centered window may have clipped the mode.
+            // Extend each implicated side once, then recompute all ranks over one unified universe.
+            const extendLeft =
+              provisionalShortlist.peakSelections.some(
+                (selection) => selection.index === sliceSearchMinIndex && selection.reason === 'local-peak',
+              ) && sliceSearchMinIndex > 0;
+            const extendRight =
+              provisionalShortlist.peakSelections.some(
+                (selection) => selection.index === sliceSearchMaxIndex && selection.reason === 'local-peak',
+              ) && sliceSearchMaxIndex < seriesRef.instance_count - 1;
+            let finalSearchMinIndex = sliceSearchMinIndex;
+            let finalSearchMaxIndex = sliceSearchMaxIndex;
+            if (extendLeft) {
+              finalSearchMinIndex = Math.max(0, sliceSearchMinIndex - sliceSearchWindowRadius);
+              const added = await collectCoarseRange(
+                finalSearchMinIndex,
+                sliceSearchMinIndex - 1,
+                sliceSearchMinIndex - 1,
+              );
+              coarseCandidates = [...coarseCandidates, ...added.map((candidate) => candidate.value)];
+            }
+            if (extendRight) {
+              finalSearchMaxIndex = Math.min(
+                seriesRef.instance_count - 1,
+                sliceSearchMaxIndex + sliceSearchWindowRadius,
+              );
+              const added = await collectCoarseRange(
+                sliceSearchMaxIndex + 1,
+                finalSearchMaxIndex,
+                sliceSearchMaxIndex + 1,
+              );
+              coarseCandidates = [...coarseCandidates, ...added.map((candidate) => candidate.value)];
+            }
+
+            coarseCandidates.sort((a, b) => a.index - b.index);
+            rankedCoarse = rankFixedCandidateSet(coarseCandidates, seedIdx);
+            const shortlist = selectFineSliceShortlist(
+              rankedCoarse.map((candidate) => ({ index: candidate.index, score: candidate.perceptualRank })),
+              seedIdx,
+              { peakCount: FINE_PEAK_COUNT, suppressionRadius: FINE_PEAK_SUPPRESSION_RADIUS },
+            );
+            const coarseByIndex = new Map(coarseCandidates.map((candidate) => [candidate.index, candidate]));
+
+            const fineCandidates: SlicePerceptualCandidate[] = [];
+            for (const index of shortlist.fineIndices) {
+              const coarseCandidate = coarseByIndex.get(index);
+              if (!coarseCandidate) continue;
+              const rendered = await renderVerifiedSlice(
+                seriesRef.series_uid,
+                index,
+                ALIGNMENT_IMAGE_SIZE,
+                captureScratchFull,
+              );
+              sliceSearchRenderMs += rendered.timingMs.total;
+              const tScore0 = nowMs();
+              const { components } = await scoringRunner.scoreFine(
+                rendered.pixels,
+                seedTransform,
+                coarseCandidate.phase,
+              );
+              sliceSearchScoreMs += nowMs() - tScore0;
+              fineCandidates.push({ index, phase: coarseCandidate.phase, components });
+              await yieldToMain();
+              ensureNotAborted();
+            }
+
+            const rankedFine = rankFixedCandidateSet(fineCandidates, seedIdx);
+            const winningCandidate = choosePerceptualWinner(rankedFine, seedIdx);
+            const sliceEvidence = assessSliceAlignmentEvidence({
+              winner: winningCandidate,
+              candidates: rankedFine,
+              normalizedReference: normalizedReferenceFine,
+              imageSize: ALIGNMENT_IMAGE_SIZE,
+              sliceSpacingMm: physicalSpacingMm,
+              exclusionMask: reference.exclusionMask,
             });
-            const correctedWarp = correctedWarpAtSize(seedTransform, phase, COARSE_IMAGE_SIZE);
-            const aligned = warpGrayscaleAffineWithValidity(normalizedSource, COARSE_IMAGE_SIZE, correctedWarp);
-            sliceSearchWarpMs += nowMs() - tWarp0;
+            const runnerUpGap = sliceEvidence.runnerUpGap;
+            if (sliceEvidence.outcome === 'ambiguous') {
+              const ambiguous = terminalResult(
+                date,
+                seriesRef,
+                'ambiguous',
+                'Several slices have indistinguishable anatomical evidence; existing image settings were preserved',
+              );
+              ambiguous.bestSliceIndex = winningCandidate.index;
+              ambiguous.slicesChecked = slicesChecked;
+              ambiguous.evidence = {
+                structuralScore: sliceEvidence.structuralScore,
+                runnerUpGap,
+                coverage: winningCandidate.components.coverage,
+                geometryMode: referenceManifest ? 'physical-2d' : 'fallback-2d',
+              };
+              results.push(ambiguous);
+              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              continue;
+            }
+            if (sliceEvidence.outcome === 'insufficient-overlap') {
+              const insufficient = terminalResult(
+                date,
+                seriesRef,
+                'insufficient-overlap',
+                'The candidate does not retain enough supported reference anatomy for a safe alignment',
+              );
+              results.push(insufficient);
+              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              continue;
+            }
 
-            const tScore0 = nowMs();
-            const components = scoreAlignedCandidate(
-              coarsePerceptualReference,
-              aligned.pixels,
-              aligned.validity,
-              COARSE_IMAGE_SIZE,
+            // Preserve both stage-local universes. Fine values become the overlay headline for
+            // shortlisted candidates, while the coarse snapshot still explains why they advanced.
+            type RankedCandidate = (typeof rankedCoarse)[number];
+            const coarseUniverseId = `${date}:coarse:${finalSearchMinIndex}-${finalSearchMaxIndex}`;
+            const fineUniverseId = `${date}:fine:${shortlist.fineIndices.join(',')}`;
+            const peakReasonByIndex = new Map(
+              shortlist.peakSelections.map((selection) => [selection.index, selection.reason]),
             );
-            sliceSearchScoreMs += nowMs() - tScore0;
-            return { index, phase, components };
-          };
-
-          console.info('[alignment] Slice search starting', {
-            date,
-            strategy: 'rigid-phase-perceptual',
-            referenceSliceIndex: reference.sliceIndex,
-            referenceSliceCount: reference.sliceCount,
-            targetSliceCount: seriesRef.instance_count,
-          });
-
-          const onCoarseScored = (candidate: { index: number; value: SlicePerceptualCandidate }) => {
-            slicesChecked++;
-            provisionalBestScore = Math.max(provisionalBestScore, meanPerceptualComponents(candidate.value.components));
-            const now = nowMs();
-            if (now - lastProgressUpdateMs < progressUpdateMinIntervalMs && slicesChecked !== 1) return;
-            lastProgressUpdateMs = now;
-            setStateForCurrentRun((s) => ({
-              ...s,
-              progress: s.progress ? { ...s.progress, slicesChecked, bestMiSoFar: provisionalBestScore } : null,
-            }));
-          };
-
-          const collectCoarseRange = async (minIndex: number, maxIndex: number, startIndex: number) =>
-            await collectBoundedSliceCandidates({
-              minIndex,
-              maxIndex,
-              startIndex,
-              scoreSlice: scoreCoarseSlice,
-              onScored: onCoarseScored,
-              yieldEvery: SLICE_SEARCH_YIELD_EVERY_SLICES,
-              yieldFn: yieldToMain,
-            });
-
-          const initialCollected = await collectCoarseRange(sliceSearchMinIndex, sliceSearchMaxIndex, seedIdx);
-          let coarseCandidates = initialCollected.map((candidate) => candidate.value);
-          let rankedCoarse = rankFixedCandidateSet(coarseCandidates, seedIdx);
-          const provisionalShortlist = selectFineSliceShortlist(
-            rankedCoarse.map((candidate) => ({ index: candidate.index, score: candidate.perceptualRank })),
-            seedIdx,
-            { peakCount: FINE_PEAK_COUNT, suppressionRadius: FINE_PEAK_SUPPRESSION_RADIUS },
-          );
-
-          // A boundary peak is evidence that the prior-centered window may have clipped the mode.
-          // Extend each implicated side once, then recompute all ranks over one unified universe.
-          const extendLeft =
-            provisionalShortlist.peakSelections.some(
-              (selection) => selection.index === sliceSearchMinIndex && selection.reason === 'local-peak',
-            ) && sliceSearchMinIndex > 0;
-          const extendRight =
-            provisionalShortlist.peakSelections.some(
-              (selection) => selection.index === sliceSearchMaxIndex && selection.reason === 'local-peak',
-            ) && sliceSearchMaxIndex < seriesRef.instance_count - 1;
-          let finalSearchMinIndex = sliceSearchMinIndex;
-          let finalSearchMaxIndex = sliceSearchMaxIndex;
-          if (extendLeft) {
-            finalSearchMinIndex = Math.max(0, sliceSearchMinIndex - SLICE_SEARCH_WINDOW_RADIUS);
-            const added = await collectCoarseRange(
-              finalSearchMinIndex,
-              sliceSearchMinIndex - 1,
-              sliceSearchMinIndex - 1,
-            );
-            coarseCandidates = [...coarseCandidates, ...added.map((candidate) => candidate.value)];
-          }
-          if (extendRight) {
-            finalSearchMaxIndex = Math.min(
-              seriesRef.instance_count - 1,
-              sliceSearchMaxIndex + SLICE_SEARCH_WINDOW_RADIUS,
-            );
-            const added = await collectCoarseRange(
-              sliceSearchMaxIndex + 1,
-              finalSearchMaxIndex,
-              sliceSearchMaxIndex + 1,
-            );
-            coarseCandidates = [...coarseCandidates, ...added.map((candidate) => candidate.value)];
-          }
-
-          coarseCandidates.sort((a, b) => a.index - b.index);
-          rankedCoarse = rankFixedCandidateSet(coarseCandidates, seedIdx);
-          const shortlist = selectFineSliceShortlist(
-            rankedCoarse.map((candidate) => ({ index: candidate.index, score: candidate.perceptualRank })),
-            seedIdx,
-            { peakCount: FINE_PEAK_COUNT, suppressionRadius: FINE_PEAK_SUPPRESSION_RADIUS },
-          );
-          const coarseByIndex = new Map(coarseCandidates.map((candidate) => [candidate.index, candidate]));
-
-          const fineCandidates: SlicePerceptualCandidate[] = [];
-          for (const index of shortlist.fineIndices) {
-            const coarseCandidate = coarseByIndex.get(index);
-            if (!coarseCandidate) continue;
-            const rendered = await renderVerifiedSlice(
-              seriesRef.series_uid,
-              index,
-              ALIGNMENT_IMAGE_SIZE,
-              captureScratchFull,
-            );
-            sliceSearchRenderMs += rendered.timingMs.total;
-            const correctedWarp = correctedWarpAtSize(seedTransform, coarseCandidate.phase, ALIGNMENT_IMAGE_SIZE);
-            const sourceNormalizationExclusion = reference.exclusionMask
-              ? mapFixedExclusionToMovingBounds(reference.exclusionMask, correctedWarp, ALIGNMENT_IMAGE_SIZE, 3)
-              : undefined;
-            const normalizedSource = normalizePerceptualSource(rendered.pixels, ALIGNMENT_IMAGE_SIZE, {
-              exclusionRect: sourceNormalizationExclusion,
-            });
-            const tWarp0 = nowMs();
-            const aligned = warpGrayscaleAffineWithValidity(normalizedSource, ALIGNMENT_IMAGE_SIZE, correctedWarp);
-            sliceSearchWarpMs += nowMs() - tWarp0;
-            const tScore0 = nowMs();
-            const components = scoreAlignedCandidate(
-              finePerceptualReference,
-              aligned.pixels,
-              aligned.validity,
-              ALIGNMENT_IMAGE_SIZE,
-            );
-            sliceSearchScoreMs += nowMs() - tScore0;
-            fineCandidates.push({ index, phase: coarseCandidate.phase, components });
-            await yieldToMain();
-            ensureNotAborted();
-          }
-
-          const rankedFine = rankFixedCandidateSet(fineCandidates, seedIdx);
-          const winningCandidate = choosePerceptualWinner(rankedFine, seedIdx);
-
-          // Preserve both stage-local universes. Fine values become the overlay headline for
-          // shortlisted candidates, while the coarse snapshot still explains why they advanced.
-          type RankedCandidate = (typeof rankedCoarse)[number];
-          const coarseUniverseId = `${date}:coarse:${finalSearchMinIndex}-${finalSearchMaxIndex}`;
-          const fineUniverseId = `${date}:fine:${shortlist.fineIndices.join(',')}`;
-          const peakReasonByIndex = new Map(
-            shortlist.peakSelections.map((selection) => [selection.index, selection.reason]),
-          );
-          const retentionReason = (index: number): 'local-peak' | 'fallback-fill' | 'peak-neighbor' | 'not-retained' =>
-            peakReasonByIndex.get(index) ?? (shortlist.fineIndices.includes(index) ? 'peak-neighbor' : 'not-retained');
-          const buildStageSnapshot = (
-            candidate: RankedCandidate,
-            stage: 'coarse' | 'fine',
-          ): AlignmentPerceptualStageMetrics => ({
-            universeId: stage === 'coarse' ? coarseUniverseId : fineUniverseId,
-            distanceFromSeed: candidate.index - seedIdx,
-            rigidSeed: seedTransform,
-            coverage: candidate.components.coverage,
-            mindRank: candidate.mindRank,
-            appearanceRank: candidate.appearanceRank,
-            boundaryRank: candidate.boundaryRank,
-            structuralRank: candidate.structuralRank,
-            perceptualRank: candidate.perceptualRank,
-            mindActive: candidate.mindActive,
-            appearanceActive: candidate.appearanceActive,
-            boundaryActive: candidate.boundaryActive,
-            structuralActive: candidate.structuralActive,
-            phaseInput: 'structural-edge-energy',
-            correctionX: candidate.phase.correctionX,
-            correctionY: candidate.phase.correctionY,
-            phasePeak: candidate.phase.peak,
-            phasePeakToSidelobeRatio: candidate.phase.peakToSidelobeRatio,
-            retentionReason: retentionReason(candidate.index),
-            perScale: candidate.components.perScale,
-          });
-          const recordCandidateDebug = (candidate: RankedCandidate, stage: 'coarse' | 'fine', selected: boolean) => {
-            const stageSnapshot = buildStageSnapshot(candidate, stage);
-            const stageHistory = stage === 'coarse' ? { coarseStage: stageSnapshot } : { fineStage: stageSnapshot };
-            recordAlignmentSliceScore(seriesRef.series_uid, candidate.index, {
-              ssim: averageMetric(candidate.components, 'contrastStructure'),
-              lncc: averageMetric(candidate.components, 'lncc'),
-              zncc: candidate.appearanceRank,
-              ngf: averageMetric(candidate.components, 'ngf'),
-              mind: averageMetric(candidate.components, 'mind'),
-              rawMindDistance: averageRawMindDistance(candidate.components),
-              census: candidate.boundaryRank,
-              phase: candidate.phase.peak,
-              mi: candidate.components.coverage,
-              nmi: candidate.phase.peakToSidelobeRatio,
-              score: candidate.perceptualRank,
-              stage,
+            const retentionReason = (
+              index: number,
+            ): 'local-peak' | 'fallback-fill' | 'peak-neighbor' | 'not-retained' =>
+              peakReasonByIndex.get(index) ??
+              (shortlist.fineIndices.includes(index) ? 'peak-neighbor' : 'not-retained');
+            const buildStageSnapshot = (
+              candidate: RankedCandidate,
+              stage: 'coarse' | 'fine',
+            ): AlignmentPerceptualStageMetrics => ({
+              universeId: stage === 'coarse' ? coarseUniverseId : fineUniverseId,
               distanceFromSeed: candidate.index - seedIdx,
               rigidSeed: seedTransform,
               coverage: candidate.components.coverage,
@@ -865,420 +1070,508 @@ export function useAutoAlign() {
               phaseInput: 'structural-edge-energy',
               correctionX: candidate.phase.correctionX,
               correctionY: candidate.phase.correctionY,
+              phasePeak: candidate.phase.peak,
               phasePeakToSidelobeRatio: candidate.phase.peakToSidelobeRatio,
-              retainedForFine: shortlist.fineIndices.includes(candidate.index),
-              selected,
+              retentionReason: retentionReason(candidate.index),
               perScale: candidate.components.perScale,
-              ...stageHistory,
             });
-            debugAlignmentLog(
-              'slice-search.score',
-              {
-                date,
+            const recordCandidateDebug = (candidate: RankedCandidate, stage: 'coarse' | 'fine', selected: boolean) => {
+              const stageSnapshot = buildStageSnapshot(candidate, stage);
+              const stageHistory = stage === 'coarse' ? { coarseStage: stageSnapshot } : { fineStage: stageSnapshot };
+              recordAlignmentSliceScore(seriesRef.series_uid, candidate.index, {
+                ssim: averageMetric(candidate.components, 'contrastStructure'),
+                lncc: averageMetric(candidate.components, 'lncc'),
+                zncc: candidate.appearanceRank,
+                ngf: averageMetric(candidate.components, 'ngf'),
+                mind: averageMetric(candidate.components, 'mind'),
+                rawMindDistance: averageRawMindDistance(candidate.components),
+                census: candidate.boundaryRank,
+                phase: candidate.phase.peak,
+                mi: candidate.components.coverage,
+                nmi: candidate.phase.peakToSidelobeRatio,
+                score: candidate.perceptualRank,
                 stage,
-                index: candidate.index,
                 distanceFromSeed: candidate.index - seedIdx,
                 rigidSeed: seedTransform,
                 coverage: candidate.components.coverage,
-                perScale: candidate.components.perScale,
                 mindRank: candidate.mindRank,
                 appearanceRank: candidate.appearanceRank,
                 boundaryRank: candidate.boundaryRank,
                 structuralRank: candidate.structuralRank,
                 perceptualRank: candidate.perceptualRank,
+                mindActive: candidate.mindActive,
+                appearanceActive: candidate.appearanceActive,
+                boundaryActive: candidate.boundaryActive,
+                structuralActive: candidate.structuralActive,
                 phaseInput: 'structural-edge-energy',
-                activeFamilies: {
-                  mind: candidate.mindActive,
-                  appearance: candidate.appearanceActive,
-                  boundary: candidate.boundaryActive,
-                  structural: candidate.structuralActive,
-                },
-                phase: candidate.phase,
-                phaseCorrectionAtScoringSize: {
-                  x:
-                    (candidate.phase.correctionX * (stage === 'coarse' ? COARSE_IMAGE_SIZE : ALIGNMENT_IMAGE_SIZE)) /
-                    candidate.phase.sampleGridSize,
-                  y:
-                    (candidate.phase.correctionY * (stage === 'coarse' ? COARSE_IMAGE_SIZE : ALIGNMENT_IMAGE_SIZE)) /
-                    candidate.phase.sampleGridSize,
-                },
-                universeId: stageSnapshot.universeId,
-                retentionReason: stageSnapshot.retentionReason,
+                correctionX: candidate.phase.correctionX,
+                correctionY: candidate.phase.correctionY,
+                phasePeakToSidelobeRatio: candidate.phase.peakToSidelobeRatio,
+                retainedForFine: shortlist.fineIndices.includes(candidate.index),
                 selected,
+                perScale: candidate.components.perScale,
+                ...stageHistory,
+              });
+              debugAlignmentLog(
+                'slice-search.score',
+                {
+                  date,
+                  stage,
+                  index: candidate.index,
+                  distanceFromSeed: candidate.index - seedIdx,
+                  rigidSeed: seedTransform,
+                  coverage: candidate.components.coverage,
+                  perScale: candidate.components.perScale,
+                  mindRank: candidate.mindRank,
+                  appearanceRank: candidate.appearanceRank,
+                  boundaryRank: candidate.boundaryRank,
+                  structuralRank: candidate.structuralRank,
+                  perceptualRank: candidate.perceptualRank,
+                  phaseInput: 'structural-edge-energy',
+                  activeFamilies: {
+                    mind: candidate.mindActive,
+                    appearance: candidate.appearanceActive,
+                    boundary: candidate.boundaryActive,
+                    structural: candidate.structuralActive,
+                  },
+                  phase: candidate.phase,
+                  phaseCorrectionAtScoringSize: {
+                    x:
+                      (candidate.phase.correctionX * (stage === 'coarse' ? COARSE_IMAGE_SIZE : ALIGNMENT_IMAGE_SIZE)) /
+                      candidate.phase.sampleGridSize,
+                    y:
+                      (candidate.phase.correctionY * (stage === 'coarse' ? COARSE_IMAGE_SIZE : ALIGNMENT_IMAGE_SIZE)) /
+                      candidate.phase.sampleGridSize,
+                  },
+                  universeId: stageSnapshot.universeId,
+                  retentionReason: stageSnapshot.retentionReason,
+                  selected,
+                },
+                debugAlignment,
+              );
+            };
+            for (const candidate of rankedCoarse) recordCandidateDebug(candidate, 'coarse', false);
+            for (const candidate of rankedFine) {
+              recordCandidateDebug(candidate, 'fine', candidate.index === winningCandidate.index);
+            }
+
+            setStateForCurrentRun((s) => ({
+              ...s,
+              progress: s.progress
+                ? {
+                    ...s.progress,
+                    slicesChecked,
+                    bestMiSoFar: winningCandidate.perceptualRank,
+                  }
+                : null,
+            }));
+
+            if (debugAlignment)
+              console.info('[alignment] Slice search finished', {
+                date,
+                strategy: 'rigid-phase-perceptual',
+                bestIndex: winningCandidate.index,
+                bestScore: Number(winningCandidate.perceptualRank.toFixed(6)),
+                coverage: Number(winningCandidate.components.coverage.toFixed(4)),
+                slicesChecked,
+                coarseCandidates: coarseCandidates.length,
+                fineCandidates: fineCandidates.length,
+                windowExtended: { left: extendLeft, right: extendRight },
+              });
+
+            debugAlignmentLog(
+              'slice-search.perf',
+              {
+                date,
+                strategy: 'rigid-phase-perceptual',
+                coarseSize: COARSE_IMAGE_SIZE,
+                fineSize: ALIGNMENT_IMAGE_SIZE,
+                bounds: {
+                  minIndex: finalSearchMinIndex,
+                  maxIndex: finalSearchMaxIndex,
+                },
+                yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
+                slicesChecked,
+                scoreMs: sliceSearchScoreMs,
+                renderMs: sliceSearchRenderMs,
+                warpMs: sliceSearchWarpMs,
+                peakIndices: shortlist.peakIndices,
+                peakSelections: shortlist.peakSelections,
+                fineIndices: shortlist.fineIndices,
               },
               debugAlignment,
             );
-          };
-          for (const candidate of rankedCoarse) recordCandidateDebug(candidate, 'coarse', false);
-          for (const candidate of rankedFine) {
-            recordCandidateDebug(candidate, 'fine', candidate.index === winningCandidate.index);
-          }
 
-          setStateForCurrentRun((s) => ({
-            ...s,
-            progress: s.progress
-              ? {
-                  ...s.progress,
-                  slicesChecked,
-                  bestMiSoFar: winningCandidate.perceptualRank,
-                }
-              : null,
-          }));
+            ensureNotAborted();
 
-          console.info('[alignment] Slice search finished', {
-            date,
-            strategy: 'rigid-phase-perceptual',
-            bestIndex: winningCandidate.index,
-            bestScore: Number(winningCandidate.perceptualRank.toFixed(6)),
-            coverage: Number(winningCandidate.components.coverage.toFixed(4)),
-            slicesChecked,
-            coarseCandidates: coarseCandidates.length,
-            fineCandidates: fineCandidates.length,
-            windowExtended: { left: extendLeft, right: extendRight },
-          });
+            // 3) Refine only the selected slice. The moving image is first prewarped by the winning
+            // rigid + phase transform, so Elastix estimates a residual affine instead of restarting.
+            setStateForCurrentRun((s) => ({
+              ...s,
+              progress: s.progress
+                ? {
+                    ...s.progress,
+                    phase: 'computing',
+                  }
+                : null,
+            }));
 
-          debugAlignmentLog(
-            'slice-search.perf',
-            {
-              date,
-              strategy: 'rigid-phase-perceptual',
-              coarseSize: COARSE_IMAGE_SIZE,
-              fineSize: ALIGNMENT_IMAGE_SIZE,
-              bounds: {
-                minIndex: finalSearchMinIndex,
-                maxIndex: finalSearchMaxIndex,
-              },
-              yieldEverySlices: SLICE_SEARCH_YIELD_EVERY_SLICES,
-              slicesChecked,
-              scoreMs: sliceSearchScoreMs,
-              renderMs: sliceSearchRenderMs,
-              warpMs: sliceSearchWarpMs,
-              peakIndices: shortlist.peakIndices,
-              peakSelections: shortlist.peakSelections,
-              fineIndices: shortlist.fineIndices,
-            },
-            debugAlignment,
-          );
+            if (debugAlignment)
+              console.info('[alignment] Refinement starting', { date, bestSliceIndex: winningCandidate.index });
 
-          ensureNotAborted();
+            const bestRender = await renderVerifiedSlice(
+              seriesRef.series_uid,
+              winningCandidate.index,
+              ALIGNMENT_IMAGE_SIZE,
+              captureScratchFull,
+            );
+            const winningWarp = correctedWarpAtSize(seedTransform, winningCandidate.phase, ALIGNMENT_IMAGE_SIZE);
+            const prewarpedBest = warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, winningWarp);
+            const prewarpedBestPixels = fillInvalidWarpWithValidMean(prewarpedBest);
 
-          // 3) Refine only the selected slice. The moving image is first prewarped by the winning
-          // rigid + phase transform, so Elastix estimates a residual affine instead of restarting.
-          setStateForCurrentRun((s) => ({
-            ...s,
-            progress: s.progress
-              ? {
-                  ...s.progress,
-                  phase: 'computing',
-                }
-              : null,
-          }));
+            const tRefine0 = nowMs();
+            const sourceStructureExclusion = reference.exclusionMask
+              ? mapFixedExclusionToMovingBounds(reference.exclusionMask, winningWarp, ALIGNMENT_IMAGE_SIZE, 3)
+              : undefined;
+            const normalizedBestForStructure = normalizePerceptualSource(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
+              exclusionRect: sourceStructureExclusion,
+            });
+            const referenceStructure = buildStructuralPhaseImageSquare(
+              inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
+                .pixels,
+              ALIGNMENT_IMAGE_SIZE,
+            );
+            const movingStructureSource = buildStructuralPhaseImageSquare(
+              inpaintExclusionRectSquare(normalizedBestForStructure, ALIGNMENT_IMAGE_SIZE, sourceStructureExclusion, 6)
+                .pixels,
+              ALIGNMENT_IMAGE_SIZE,
+            );
+            const prewarpedMovingStructure = fillInvalidWarpWithValidMean(
+              warpGrayscaleAffineWithValidity(movingStructureSource, ALIGNMENT_IMAGE_SIZE, winningWarp),
+            );
 
-          console.info('[alignment] Refinement starting', { date, bestSliceIndex: winningCandidate.index });
+            type OptimizerKind = Exclude<FinalAffineProposalKind, 'seed-only'>;
+            const optimizerProposals: OptimizerFinalAffineProposal[] = [];
+            const failedOptimizerAttempts: Array<{
+              kind: OptimizerKind;
+              message: string;
+            }> = [];
+            const successfulOptimizerQuality: Array<{
+              kind: OptimizerKind;
+              mi: number;
+              nmi: number;
+              elastixFinalMetric?: number;
+              elastixMetricSamples?: number;
+            }> = [];
+            const runOptimizerAttempt = async (
+              kind: OptimizerKind,
+              fixedPixels: Float32Array,
+              movingPixels: Float32Array,
+            ) => {
+              try {
+                const registration = await registerAffine2DWithElastix(
+                  fixedPixels,
+                  movingPixels,
+                  ALIGNMENT_IMAGE_SIZE,
+                  {
+                    numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
+                    webWorker: sharedWebWorker,
+                    exclusionRect: reference.exclusionMask,
+                    signal: alignmentAbortController.signal,
+                  },
+                );
+                ensureNotAborted();
+                sharedWebWorker = registration.webWorker;
+                successfulOptimizerQuality.push({
+                  kind,
+                  mi: registration.quality.mi,
+                  nmi: registration.quality.nmi,
+                  elastixFinalMetric: registration.quality.elastixFinalMetric,
+                  elastixMetricSamples: registration.quality.elastixMetricSamples,
+                });
+                optimizerProposals.push({
+                  kind,
+                  residualMovingToFixed: registration.movingToFixed,
+                });
+              } catch (error) {
+                ensureNotAborted();
+                sharedWebWorker = undefined;
+                failedOptimizerAttempts.push({
+                  kind,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              }
+            };
 
-          const bestRender = await renderVerifiedSlice(
-            seriesRef.series_uid,
-            winningCandidate.index,
-            ALIGNMENT_IMAGE_SIZE,
-            captureScratchFull,
-          );
-          const winningWarp = correctedWarpAtSize(seedTransform, winningCandidate.phase, ALIGNMENT_IMAGE_SIZE);
-          const prewarpedBest = warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, winningWarp);
-          const prewarpedBestPixels = fillInvalidWarpWithValidMean(prewarpedBest);
+            await runOptimizerAttempt('intensity-elastix', referencePixels, prewarpedBestPixels);
+            await runOptimizerAttempt('structure-elastix', referenceStructure, prewarpedMovingStructure);
+            ensureNotAborted();
 
-          const tRefine0 = nowMs();
-          const sourceStructureExclusion = reference.exclusionMask
-            ? mapFixedExclusionToMovingBounds(reference.exclusionMask, winningWarp, ALIGNMENT_IMAGE_SIZE, 3)
-            : undefined;
-          const normalizedBestForStructure = normalizePerceptualSource(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
-            exclusionRect: sourceStructureExclusion,
-          });
-          const referenceStructure = buildStructuralPhaseImageSquare(
-            inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
-              .pixels,
-            ALIGNMENT_IMAGE_SIZE,
-          );
-          const movingStructureSource = buildStructuralPhaseImageSquare(
-            inpaintExclusionRectSquare(normalizedBestForStructure, ALIGNMENT_IMAGE_SIZE, sourceStructureExclusion, 6)
-              .pixels,
-            ALIGNMENT_IMAGE_SIZE,
-          );
-          const prewarpedMovingStructure = fillInvalidWarpWithValidMean(
-            warpGrayscaleAffineWithValidity(movingStructureSource, ALIGNMENT_IMAGE_SIZE, winningWarp),
-          );
+            const finalAffineSelection = await scoringRunner.scoreFinal({
+              movingPixels: bestRender.pixels,
+              winningWarp,
+              fixedExclusionRect: reference.exclusionMask,
+              optimizerProposals,
+            });
+            ensureNotAborted();
+            const selectedProposal = finalAffineSelection.selected;
+            const deltaStd = selectedProposal.totalMovingToFixed;
+            const origin = { x: (ALIGNMENT_IMAGE_SIZE - 1) / 2, y: (ALIGNMENT_IMAGE_SIZE - 1) / 2 };
+            const selectedAboutCenter = standardToAffineAboutOrigin(deltaStd.A, deltaStd.b, origin);
+            const selectedRawResample = fillInvalidWarpWithValidMean(
+              warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
+                A: selectedAboutCenter.A,
+                translateX: selectedAboutCenter.t.x,
+                translateY: selectedAboutCenter.t.y,
+              }),
+            );
+            const selectedQuality = computeMutualInformation(referencePixels, selectedRawResample, {
+              bins: 64,
+              exclusionRect: reference.exclusionMask,
+              imageWidth: ALIGNMENT_IMAGE_SIZE,
+              imageHeight: ALIGNMENT_IMAGE_SIZE,
+            });
+            const refinementMs = nowMs() - tRefine0;
 
-          type OptimizerKind = Exclude<FinalAffineProposalKind, 'seed-only'>;
-          const optimizerProposals: OptimizerFinalAffineProposal[] = [];
-          const failedOptimizerAttempts: Array<{
-            kind: OptimizerKind;
-            message: string;
-          }> = [];
-          const successfulOptimizerQuality: Array<{
-            kind: OptimizerKind;
-            mi: number;
-            nmi: number;
-            elastixFinalMetric?: number;
-            elastixMetricSamples?: number;
-          }> = [];
-          const runOptimizerAttempt = async (
-            kind: OptimizerKind,
-            fixedPixels: Float32Array,
-            movingPixels: Float32Array,
-          ) => {
-            try {
-              const registration = await registerAffine2DWithElastix(fixedPixels, movingPixels, ALIGNMENT_IMAGE_SIZE, {
-                numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
-                webWorker: sharedWebWorker,
-                exclusionRect: reference.exclusionMask,
-                signal: alignmentAbortController.signal,
-              });
-              ensureNotAborted();
-              sharedWebWorker = registration.webWorker;
-              successfulOptimizerQuality.push({
-                kind,
-                mi: registration.quality.mi,
-                nmi: registration.quality.nmi,
-                elastixFinalMetric: registration.quality.elastixFinalMetric,
-                elastixMetricSamples: registration.quality.elastixMetricSamples,
-              });
-              optimizerProposals.push({
-                kind,
-                residualMovingToFixed: registration.movingToFixed,
-              });
-            } catch (error) {
-              ensureNotAborted();
-              sharedWebWorker = undefined;
-              failedOptimizerAttempts.push({
-                kind,
-                message: error instanceof Error ? error.message : String(error),
-              });
-            }
-          };
-
-          await runOptimizerAttempt('intensity-elastix', referencePixels, prewarpedBestPixels);
-          await runOptimizerAttempt('structure-elastix', referenceStructure, prewarpedMovingStructure);
-          ensureNotAborted();
-
-          const finalAffineSelection = selectFinalAffineProposal({
-            normalizedReference: normalizedReferenceFine,
-            movingPixels: bestRender.pixels,
-            size: ALIGNMENT_IMAGE_SIZE,
-            scales: finePerceptualReference.scales.map((scale) => scale.size),
-            winningWarp,
-            fixedExclusionRect: reference.exclusionMask,
-            optimizerProposals,
-          });
-          const selectedProposal = finalAffineSelection.selected;
-          const deltaStd = selectedProposal.totalMovingToFixed;
-          const origin = { x: (ALIGNMENT_IMAGE_SIZE - 1) / 2, y: (ALIGNMENT_IMAGE_SIZE - 1) / 2 };
-          const selectedAboutCenter = standardToAffineAboutOrigin(deltaStd.A, deltaStd.b, origin);
-          const selectedRawResample = fillInvalidWarpWithValidMean(
-            warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
-              A: selectedAboutCenter.A,
-              translateX: selectedAboutCenter.t.x,
-              translateY: selectedAboutCenter.t.y,
-            }),
-          );
-          const selectedQuality = computeMutualInformation(referencePixels, selectedRawResample, {
-            bins: 64,
-            exclusionRect: reference.exclusionMask,
-            imageWidth: ALIGNMENT_IMAGE_SIZE,
-            imageHeight: ALIGNMENT_IMAGE_SIZE,
-          });
-          const refinementMs = nowMs() - tRefine0;
-
-          const failedByKind = new Map(
-            failedOptimizerAttempts.map((attempt) => [attempt.kind, attempt.message] as const),
-          );
-          const selectedByKind = new Map(
-            finalAffineSelection.proposals.map((proposal) => [proposal.kind, proposal] as const),
-          );
-          const finalAffineProposals: AlignmentFinalAffineProposalMetrics[] = [];
-          for (const kind of ['seed-only', 'intensity-elastix', 'structure-elastix'] as const) {
-            const failureMessage = failedByKind.get(kind as OptimizerKind);
-            if (failureMessage) {
-              finalAffineProposals.push({ kind, status: 'failed', failureMessage });
-              continue;
-            }
-            const proposal = selectedByKind.get(kind);
-            if (!proposal) continue;
-            if (!proposal.eligible) {
+            const failedByKind = new Map(
+              failedOptimizerAttempts.map((attempt) => [attempt.kind, attempt.message] as const),
+            );
+            const selectedByKind = new Map(
+              finalAffineSelection.proposals.map((proposal) => [proposal.kind, proposal] as const),
+            );
+            const finalAffineProposals: AlignmentFinalAffineProposalMetrics[] = [];
+            for (const kind of ['seed-only', 'intensity-elastix', 'structure-elastix'] as const) {
+              const failureMessage = failedByKind.get(kind as OptimizerKind);
+              if (failureMessage) {
+                finalAffineProposals.push({ kind, status: 'failed', failureMessage });
+                continue;
+              }
+              const proposal = selectedByKind.get(kind);
+              if (!proposal) continue;
+              if (!proposal.eligible) {
+                finalAffineProposals.push({
+                  kind,
+                  status: 'rejected',
+                  rejectionReason: proposal.rejectionReason,
+                  mindScore: proposal.mindScore,
+                  ngfScore: proposal.ngfScore,
+                  structuralScore: proposal.structuralScore,
+                  deformationMagnitude: proposal.deformationMagnitude,
+                  bidirectionalCoverage: proposal.bidirectionalCoverage,
+                });
+                continue;
+              }
               finalAffineProposals.push({
                 kind,
-                status: 'rejected',
-                rejectionReason: proposal.rejectionReason,
+                status: kind === selectedProposal.kind ? 'selected' : 'eligible',
                 mindScore: proposal.mindScore,
                 ngfScore: proposal.ngfScore,
                 structuralScore: proposal.structuralScore,
                 deformationMagnitude: proposal.deformationMagnitude,
                 bidirectionalCoverage: proposal.bidirectionalCoverage,
               });
-              continue;
             }
-            finalAffineProposals.push({
-              kind,
-              status: kind === selectedProposal.kind ? 'selected' : 'eligible',
-              mindScore: proposal.mindScore,
-              ngfScore: proposal.ngfScore,
-              structuralScore: proposal.structuralScore,
-              deformationMagnitude: proposal.deformationMagnitude,
-              bidirectionalCoverage: proposal.bidirectionalCoverage,
+            const seedProposal = finalAffineSelection.proposals.find((proposal) => proposal.kind === 'seed-only');
+            if (!seedProposal?.eligible) {
+              throw new Error('Final affine invariant: seed-only proposal is not eligible');
+            }
+
+            const winningFineSnapshot = buildStageSnapshot(winningCandidate, 'fine');
+            recordAlignmentSliceScore(seriesRef.series_uid, winningCandidate.index, {
+              ssim: averageMetric(winningCandidate.components, 'contrastStructure'),
+              lncc: averageMetric(winningCandidate.components, 'lncc'),
+              zncc: winningCandidate.appearanceRank,
+              ngf: averageMetric(winningCandidate.components, 'ngf'),
+              mind: averageMetric(winningCandidate.components, 'mind'),
+              rawMindDistance: averageRawMindDistance(winningCandidate.components),
+              census: winningCandidate.boundaryRank,
+              phase: winningCandidate.phase.peak,
+              mi: winningCandidate.components.coverage,
+              nmi: winningCandidate.phase.peakToSidelobeRatio,
+              score: winningCandidate.perceptualRank,
+              stage: 'fine',
+              distanceFromSeed: winningCandidate.index - seedIdx,
+              rigidSeed: seedTransform,
+              coverage: winningCandidate.components.coverage,
+              mindRank: winningCandidate.mindRank,
+              appearanceRank: winningCandidate.appearanceRank,
+              boundaryRank: winningCandidate.boundaryRank,
+              structuralRank: winningCandidate.structuralRank,
+              perceptualRank: winningCandidate.perceptualRank,
+              mindActive: winningCandidate.mindActive,
+              appearanceActive: winningCandidate.appearanceActive,
+              boundaryActive: winningCandidate.boundaryActive,
+              structuralActive: winningCandidate.structuralActive,
+              phaseInput: 'structural-edge-energy',
+              correctionX: winningCandidate.phase.correctionX,
+              correctionY: winningCandidate.phase.correctionY,
+              phasePeakToSidelobeRatio: winningCandidate.phase.peakToSidelobeRatio,
+              retainedForFine: true,
+              selected: true,
+              perScale: winningCandidate.components.perScale,
+              fineStage: winningFineSnapshot,
+              finalAffineSelected: selectedProposal.kind,
+              finalAffineStructuralScore: selectedProposal.structuralScore,
+              finalAffineSeedStructuralScore: seedProposal.structuralScore,
+              finalAffineProposals,
             });
-          }
-          const seedProposal = finalAffineSelection.proposals.find((proposal) => proposal.kind === 'seed-only');
-          if (!seedProposal?.eligible) {
-            throw new Error('Final affine invariant: seed-only proposal is not eligible');
-          }
 
-          const winningFineSnapshot = buildStageSnapshot(winningCandidate, 'fine');
-          recordAlignmentSliceScore(seriesRef.series_uid, winningCandidate.index, {
-            ssim: averageMetric(winningCandidate.components, 'contrastStructure'),
-            lncc: averageMetric(winningCandidate.components, 'lncc'),
-            zncc: winningCandidate.appearanceRank,
-            ngf: averageMetric(winningCandidate.components, 'ngf'),
-            mind: averageMetric(winningCandidate.components, 'mind'),
-            rawMindDistance: averageRawMindDistance(winningCandidate.components),
-            census: winningCandidate.boundaryRank,
-            phase: winningCandidate.phase.peak,
-            mi: winningCandidate.components.coverage,
-            nmi: winningCandidate.phase.peakToSidelobeRatio,
-            score: winningCandidate.perceptualRank,
-            stage: 'fine',
-            distanceFromSeed: winningCandidate.index - seedIdx,
-            rigidSeed: seedTransform,
-            coverage: winningCandidate.components.coverage,
-            mindRank: winningCandidate.mindRank,
-            appearanceRank: winningCandidate.appearanceRank,
-            boundaryRank: winningCandidate.boundaryRank,
-            structuralRank: winningCandidate.structuralRank,
-            perceptualRank: winningCandidate.perceptualRank,
-            mindActive: winningCandidate.mindActive,
-            appearanceActive: winningCandidate.appearanceActive,
-            boundaryActive: winningCandidate.boundaryActive,
-            structuralActive: winningCandidate.structuralActive,
-            phaseInput: 'structural-edge-energy',
-            correctionX: winningCandidate.phase.correctionX,
-            correctionY: winningCandidate.phase.correctionY,
-            phasePeakToSidelobeRatio: winningCandidate.phase.peakToSidelobeRatio,
-            retainedForFine: true,
-            selected: true,
-            perScale: winningCandidate.components.perScale,
-            fineStage: winningFineSnapshot,
-            finalAffineSelected: selectedProposal.kind,
-            finalAffineStructuralScore: selectedProposal.structuralScore,
-            finalAffineSeedStructuralScore: seedProposal.structuralScore,
-            finalAffineProposals,
-          });
+            if (debugAlignment)
+              console.info('[alignment] Refinement finished', {
+                date,
+                selectedProposal: selectedProposal.kind,
+                nmi: Number(selectedQuality.nmi.toFixed(4)),
+                refinementMs: Math.round(refinementMs),
+                renderMs: Math.round(bestRender.timingMs.total),
+              });
 
-          console.info('[alignment] Refinement finished', {
-            date,
-            selectedProposal: selectedProposal.kind,
-            nmi: Number(selectedQuality.nmi.toFixed(4)),
-            refinementMs: Math.round(refinementMs),
-            renderMs: Math.round(bestRender.timingMs.total),
-          });
+            debugAlignmentLog(
+              'refine.perf',
+              {
+                date,
+                bestSliceIndex: winningCandidate.index,
+                numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
+                refinementMs,
+                renderTimingMs: bestRender.timingMs,
+              },
+              debugAlignment,
+            );
 
-          debugAlignmentLog(
-            'refine.perf',
-            {
+            debugAlignmentLog(
+              'refine.proposals',
+              {
+                date,
+                bestSliceIndex: winningCandidate.index,
+                finePerceptualRank: winningCandidate.perceptualRank,
+                proposals: finalAffineProposals,
+                optimizerQuality: successfulOptimizerQuality,
+                selectedQuality: { mi: selectedQuality.mi, nmi: selectedQuality.nmi },
+                compositionOrder: 'selectedResidual(winningRigidPlusPhase(originalCandidate))',
+              },
+              debugAlignment,
+            );
+
+            const targetDisplayPixels = selectedRawResample.some((value) => value < 0 || value > 1)
+              ? normalizePerceptualSource(selectedRawResample, ALIGNMENT_IMAGE_SIZE)
+              : selectedRawResample;
+            const targetStats = computeHistogramStats(targetDisplayPixels);
+
+            // Compose recovered delta onto the reference geometry so the displayed target matches the
+            // displayed reference (including reference zoom/rotation/pan and any stored shear).
+            const referenceGeometry: PanelGeometry = {
+              zoom: reference.settings.zoom,
+              rotation: reference.settings.rotation,
+              panX: reference.settings.panX,
+              panY: reference.settings.panY,
+              affine00: reference.settings.affine00,
+              affine01: reference.settings.affine01,
+              affine10: reference.settings.affine10,
+              affine11: reference.settings.affine11,
+            };
+
+            const referenceMapping =
+              reference.viewportSize && reference.imageSize
+                ? { viewportSize: reference.viewportSize, imageSize: reference.imageSize }
+                : undefined;
+            const targetMapping = referenceMapping
+              ? {
+                  viewportSize: referenceMapping.viewportSize,
+                  imageSize: {
+                    width: seriesRef.columns ?? referenceMapping.imageSize.width,
+                    height: seriesRef.rows ?? referenceMapping.imageSize.height,
+                  },
+                }
+              : undefined;
+            const refAffine = panelGeometryToAffineAboutCenter(
+              referenceGeometry,
+              ALIGNMENT_IMAGE_SIZE,
+              referenceMapping,
+            );
+            const refStd = affineAboutOriginToStandard(refAffine);
+
+            // Composition order matters:
+            // - `deltaStd` maps target -> reference (in the downsampled alignment pixel space)
+            // - `refStd` maps reference -> displayed reference
+            // To display the *target* in the same view as the reference we want:
+            //   displayed = refStd(deltaStd(x_target))
+            const composedStd = composeStandardAffine2D(refStd, deltaStd);
+
+            const composedAboutOrigin = standardToAffineAboutOrigin(composedStd.A, composedStd.b, origin);
+            const composedGeometry = affineAboutCenterToPanelGeometry(
+              { A: composedAboutOrigin.A, translatePx: composedAboutOrigin.t },
+              ALIGNMENT_IMAGE_SIZE,
+              targetMapping,
+            );
+
+            const computedSettings = computeAlignedSettings(
+              referenceDisplayedStats,
+              targetStats,
+              winningCandidate.index,
+              seriesRef.instance_count,
+              currentProgress,
+              composedGeometry,
+            );
+
+            debugAlignmentLog(
+              'refine.composed-transform',
+              {
+                date,
+                bestSliceIndex: winningCandidate.index,
+                winningRigidPlusPhase: winningWarp,
+                selectedProposal: selectedProposal.kind,
+                residualMovingToFixed: selectedProposal.residualMovingToFixed,
+                totalTargetToReference: deltaStd,
+                referenceToDisplayed: refStd,
+                totalTargetToDisplayed: composedStd,
+                computedGeometry: composedGeometry,
+                computedSettings,
+              },
+              debugAlignment,
+            );
+
+            const result: AlignmentResult = {
               date,
+              seriesUid: seriesRef.series_uid,
               bestSliceIndex: winningCandidate.index,
-              numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
-              refinementMs,
-              renderTimingMs: bestRender.timingMs,
-            },
-            debugAlignment,
-          );
-
-          debugAlignmentLog(
-            'refine.proposals',
-            {
-              date,
-              bestSliceIndex: winningCandidate.index,
-              finePerceptualRank: winningCandidate.perceptualRank,
-              proposals: finalAffineProposals,
-              optimizerQuality: successfulOptimizerQuality,
-              selectedQuality: { mi: selectedQuality.mi, nmi: selectedQuality.nmi },
-              compositionOrder: 'selectedResidual(winningRigidPlusPhase(originalCandidate))',
-            },
-            debugAlignment,
-          );
-
-          const targetStats = computeHistogramStats(selectedRawResample);
-
-          // Compose recovered delta onto the reference geometry so the displayed target matches the
-          // displayed reference (including reference zoom/rotation/pan and any stored shear).
-          const referenceGeometry: PanelGeometry = {
-            zoom: reference.settings.zoom,
-            rotation: reference.settings.rotation,
-            panX: reference.settings.panX,
-            panY: reference.settings.panY,
-            affine00: reference.settings.affine00,
-            affine01: reference.settings.affine01,
-            affine10: reference.settings.affine10,
-            affine11: reference.settings.affine11,
-          };
-
-          const refAffine = panelGeometryToAffineAboutCenter(referenceGeometry, ALIGNMENT_IMAGE_SIZE);
-          const refStd = affineAboutOriginToStandard(refAffine);
-
-          // Composition order matters:
-          // - `deltaStd` maps target -> reference (in the downsampled alignment pixel space)
-          // - `refStd` maps reference -> displayed reference
-          // To display the *target* in the same view as the reference we want:
-          //   displayed = refStd(deltaStd(x_target))
-          const composedStd = composeStandardAffine2D(refStd, deltaStd);
-
-          const composedAboutOrigin = standardToAffineAboutOrigin(composedStd.A, composedStd.b, origin);
-          const composedGeometry = affineAboutCenterToPanelGeometry(
-            { A: composedAboutOrigin.A, translatePx: composedAboutOrigin.t },
-            ALIGNMENT_IMAGE_SIZE,
-          );
-
-          const computedSettings = computeAlignedSettings(
-            referenceDisplayedStats,
-            targetStats,
-            winningCandidate.index,
-            seriesRef.instance_count,
-            currentProgress,
-            composedGeometry,
-          );
-
-          debugAlignmentLog(
-            'refine.composed-transform',
-            {
-              date,
-              bestSliceIndex: winningCandidate.index,
-              winningRigidPlusPhase: winningWarp,
-              selectedProposal: selectedProposal.kind,
-              residualMovingToFixed: selectedProposal.residualMovingToFixed,
-              totalTargetToReference: deltaStd,
-              referenceToDisplayed: refStd,
-              totalTargetToDisplayed: composedStd,
-              computedGeometry: composedGeometry,
+              nmiScore: selectedQuality.nmi,
               computedSettings,
-            },
-            debugAlignment,
-          );
+              slicesChecked,
+              runId,
+              patientKey: reference.patientKey ?? seriesRef.patient_key,
+              sequenceId: reference.sequenceId,
+              referenceSeriesUid: reference.seriesUid,
+              datasetRevision: reference.datasetRevision,
+              outcome: 'aligned',
+              evidence: {
+                structuralScore: sliceEvidence.structuralScore,
+                runnerUpGap,
+                coverage: winningCandidate.components.coverage,
+                geometryMode: reference.frameOfReferenceUid ? 'physical-2d' : 'fallback-2d',
+              },
+            };
 
-          const result: AlignmentResult = {
-            date,
-            seriesUid: seriesRef.series_uid,
-            bestSliceIndex: winningCandidate.index,
-            nmiScore: selectedQuality.nmi,
-            computedSettings,
-            slicesChecked,
-          };
+            ensureNotAborted();
+            results.push(result);
 
-          ensureNotAborted();
-          results.push(result);
+            setStateForCurrentRun((s) => ({
+              ...s,
+              results: [...results],
+            }));
 
-          setStateForCurrentRun((s) => ({
-            ...s,
-            results: [...results],
-          }));
-
-          await yieldToMain();
+            await yieldToMain();
+          } catch (error) {
+            ensureNotAborted();
+            sharedWebWorker = undefined;
+            results.push(
+              terminalResult(
+                date,
+                seriesRef,
+                'failed',
+                error instanceof Error ? error.message : 'Alignment failed for this examination',
+              ),
+            );
+            setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+          }
         }
 
         setStateForCurrentRun((s) => ({
@@ -1301,6 +1594,7 @@ export function useAutoAlign() {
         if (cancelled) return results;
         throw err;
       } finally {
+        scoringRunner?.close();
         if (abortControllerRef.current === alignmentAbortController) abortControllerRef.current = null;
         if (renderElement) disposeCornerstoneRenderElement(renderElement);
       }

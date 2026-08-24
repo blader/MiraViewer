@@ -169,7 +169,9 @@ function removeInternalStructures(labels: Uint8Array): Uint8Array {
   );
 }
 
-describe('useAutoAlign perceptual production path', () => {
+// This suite deliberately exercises production multi-scale descriptors and up to 90 candidates.
+// Give the integration workload its own explicit budget; unit suites keep the normal 5-second limit.
+describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
   beforeEach(() => {
     vi.clearAllMocks();
     const worker = { terminate: vi.fn() } as unknown as Worker;

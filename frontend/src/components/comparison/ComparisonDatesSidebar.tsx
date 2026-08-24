@@ -28,8 +28,12 @@ export function ComparisonDatesSidebar({
     <>
       {/* Right sidebar toggle (compact) */}
       <button
+        type="button"
         onClick={onToggleOpen}
-        className="absolute right-2 top-1/2 -translate-y-1/2 z-20 p-1 rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
+        aria-label={open ? 'Hide examination dates' : 'Show examination dates'}
+        aria-expanded={open}
+        aria-controls="comparison-dates-panel"
+        className="absolute right-2 top-1/2 -translate-y-1/2 z-40 min-h-9 min-w-9 inline-flex items-center justify-center rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
         title={open ? 'Hide dates' : 'Show dates'}
       >
         {open ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
@@ -37,26 +41,35 @@ export function ComparisonDatesSidebar({
 
       {/* Right sidebar - Dates */}
       <div
-        className={`flex-shrink-0 bg-[var(--bg-secondary)] border-l border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${
+        id="comparison-dates-panel"
+        role="complementary"
+        aria-label="Examination dates"
+        data-open={open}
+        data-side="right"
+        inert={!open}
+        className={`comparison-sidebar flex-shrink-0 bg-[var(--bg-secondary)] border-l border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${
           open ? 'w-56' : 'w-0'
         }`}
       >
-        <div className="w-56 h-full overflow-y-auto p-4">
+        <div className="comparison-sidebar-content w-56 h-full overflow-y-auto p-4">
           <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <CalendarDays className="w-4 h-4" />Dates
+              <CalendarDays className="w-4 h-4" />
+              Dates
             </div>
             <div className="flex gap-1">
               <button
+                type="button"
                 onClick={onSelectAllDates}
-                className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                className="px-2 py-1 text-xs rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
                 title="Select all dates"
               >
                 All
               </button>
               <button
+                type="button"
                 onClick={onSelectNoDates}
-                className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                className="px-2 py-1 text-xs rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
                 title="Deselect all dates"
               >
                 None
@@ -71,24 +84,23 @@ export function ComparisonDatesSidebar({
               return (
                 <button
                   key={d}
-                  onMouseDown={(e) => e.preventDefault()}
+                  type="button"
                   onClick={() => onToggleDate(d)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 focus:outline-none ${
+                  aria-pressed={enabled}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 ${
                     enabled
                       ? hasData
                         ? 'bg-[var(--accent)] text-white'
                         : 'bg-[var(--accent)] text-white opacity-50'
                       : hasData
-                      ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                      : 'text-[var(--text-tertiary)] opacity-50'
+                        ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                        : 'text-[var(--text-tertiary)] opacity-50'
                   }`}
                   title={hasData ? undefined : 'No data for selected sequence'}
                 >
                   <span
                     className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${
-                      enabled
-                        ? 'bg-white text-[var(--accent)] border-white'
-                        : 'border-[var(--border-color)]'
+                      enabled ? 'bg-white text-[var(--accent)] border-white' : 'border-[var(--border-color)]'
                     }`}
                   >
                     {enabled && '✓'}

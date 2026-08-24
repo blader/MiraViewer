@@ -2,10 +2,22 @@ import { openDB } from 'idb';
 import type { IDBPDatabase } from 'idb';
 import type { MiraDB } from './schema';
 
-const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 4;
+export const DB_NAME = 'MiraViewerDB';
+const DB_VERSION = 6;
+export const SELECTED_PATIENT_STATE_KEY = 'selected_patient_key';
+export const DATASET_REVISION_STATE_KEY = 'dataset_revision';
+
+export type StorageHealth = {
+  checked: boolean;
+  persisted: boolean;
+  usage?: number;
+  quota?: number;
+};
 
 let dbPromise: Promise<IDBPDatabase<MiraDB>> | null = null;
+let storageHealth: StorageHealth = { checked: false, persisted: false };
+const storageHealthListeners = new Set<(health: StorageHealth) => void>();
+const datasetMutationListeners = new Set<(seriesUid?: string) => void>();
 
 /**
  * Delete the entire MiraViewer IndexedDB database.
@@ -13,7 +25,7 @@ let dbPromise: Promise<IDBPDatabase<MiraDB>> | null = null;
  * This is the most reliable way to "reset" the app's stored MRI data because it
  * removes all object stores (studies/series/instances/panel_settings) in one go.
  */
-export async function deleteAllStoredMriData(): Promise<void> {
+export async function deleteAllStoredMriData(options?: { onBlocked?: () => void }): Promise<void> {
   // Close any open connection first; otherwise deleteDatabase can be "blocked".
   if (dbPromise) {
     try {
@@ -31,13 +43,17 @@ export async function deleteAllStoredMriData(): Promise<void> {
 
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error ?? new Error('Failed to delete IndexedDB database'));
-    req.onblocked = () => reject(new Error('Delete blocked: another tab may still be using the database'));
+    // A blocked delete remains queued and cannot be cancelled. Reporting it as a
+    // terminal failure would let it silently destroy data after the user left.
+    req.onblocked = () => options?.onBlocked?.();
   });
+
+  notifyDatasetMutation();
 }
 
 export function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB<MiraDB>(DB_NAME, DB_VERSION, {
+    const opening = openDB<MiraDB>(DB_NAME, DB_VERSION, {
       upgrade(db, _oldVersion, _newVersion, transaction) {
         // Studies
         if (!db.objectStoreNames.contains('studies')) {
@@ -71,6 +87,14 @@ export function getDB() {
             instanceStore.createIndex('by-series-instanceNumber-uid', [
               'seriesInstanceUid',
               'instanceNumber',
+              'sopInstanceUid',
+            ]);
+          }
+
+          if (!instanceStore.indexNames.contains('by-series-physicalPosition-uid')) {
+            instanceStore.createIndex('by-series-physicalPosition-uid', [
+              'seriesInstanceUid',
+              'physicalSlicePosition',
               'sopInstanceUid',
             ]);
           }
@@ -114,7 +138,45 @@ export function getDB() {
             gtStore.createIndex('by-combo-date', ['comboId', 'dateIso']);
           }
         }
+
+        if (!db.objectStoreNames.contains('app_state')) {
+          db.createObjectStore('app_state', { keyPath: 'key' });
+        }
+
+        {
+          const volumeStore = db.objectStoreNames.contains('volume_segmentations')
+            ? transaction.objectStore('volume_segmentations')
+            : db.createObjectStore('volume_segmentations', { keyPath: 'volumeKey' });
+          if (!volumeStore.indexNames.contains('by-study')) {
+            volumeStore.createIndex('by-study', 'studyUid');
+          }
+        }
+
+        {
+          const derivedStore = db.objectStoreNames.contains('derived_alignment_frames')
+            ? transaction.objectStore('derived_alignment_frames')
+            : db.createObjectStore('derived_alignment_frames', { keyPath: 'id' });
+          if (!derivedStore.indexNames.contains('by-patient')) {
+            derivedStore.createIndex('by-patient', 'patientKey');
+          }
+          if (!derivedStore.indexNames.contains('by-created-at')) {
+            derivedStore.createIndex('by-created-at', 'createdAt');
+          }
+        }
       },
+      blocking(_currentVersion, _blockedVersion, event) {
+        const connection = event.target as IDBDatabase | null;
+        connection?.close();
+        dbPromise = null;
+      },
+      terminated() {
+        dbPromise = null;
+      },
+    });
+
+    dbPromise = opening.catch((error: unknown) => {
+      dbPromise = null;
+      throw error;
     });
   }
   return dbPromise;
@@ -137,19 +199,60 @@ export async function initStoragePersistence() {
   if (navigator.storage && navigator.storage.persist) {
     try {
       const isPersisted = await navigator.storage.persist();
-      console.log(`Storage Persisted: ${isPersisted}`);
-      
-      // Check quota usage
-      if (navigator.storage.estimate) {
-        const estimate = await navigator.storage.estimate();
-        console.log(`Storage Usage: ${estimate.usage} / ${estimate.quota} bytes`);
-      }
-      
+      const estimate = navigator.storage.estimate ? await navigator.storage.estimate() : undefined;
+      storageHealth = {
+        checked: true,
+        persisted: isPersisted,
+        usage: estimate?.usage,
+        quota: estimate?.quota,
+      };
+      publishStorageHealth();
       return isPersisted;
     } catch (err) {
       console.warn('Failed to request persistent storage:', err);
+      storageHealth = { checked: true, persisted: false };
+      publishStorageHealth();
       return false;
     }
   }
+  storageHealth = { checked: true, persisted: false };
+  publishStorageHealth();
   return false;
+}
+
+function publishStorageHealth() {
+  for (const listener of storageHealthListeners) listener(storageHealth);
+}
+
+export function getStorageHealth(): StorageHealth {
+  return storageHealth;
+}
+
+export function subscribeStorageHealth(listener: (health: StorageHealth) => void): () => void {
+  storageHealthListeners.add(listener);
+  return () => storageHealthListeners.delete(listener);
+}
+
+export async function assertStorageHeadroom(requiredBytes: number): Promise<void> {
+  if (!Number.isFinite(requiredBytes) || requiredBytes <= 0 || !navigator.storage?.estimate) return;
+  const estimate = await navigator.storage.estimate();
+  if (typeof estimate.quota !== 'number' || typeof estimate.usage !== 'number') return;
+
+  storageHealth = { ...storageHealth, usage: estimate.usage, quota: estimate.quota };
+  publishStorageHealth();
+
+  const reserveBytes = Math.min(64 * 1024 * 1024, Math.max(1024 * 1024, estimate.quota * 0.05));
+  const availableBytes = estimate.quota - estimate.usage - reserveBytes;
+  if (requiredBytes > availableBytes) {
+    throw new Error('Insufficient browser storage for this import. Export a backup or free storage before continuing.');
+  }
+}
+
+export function notifyDatasetMutation(seriesUid?: string): void {
+  for (const listener of datasetMutationListeners) listener(seriesUid);
+}
+
+export function subscribeDatasetMutations(listener: (seriesUid?: string) => void): () => void {
+  datasetMutationListeners.add(listener);
+  return () => datasetMutationListeners.delete(listener);
 }

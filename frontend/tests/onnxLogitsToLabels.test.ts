@@ -45,7 +45,25 @@ describe('logitsToLabels', () => {
       logitsToLabels({
         logits: { data: new Float32Array([1, 2, 3]), dims: [1, 2, 1, 1, 2] },
         labelMap: [0, 1],
-      })
+      }),
     ).toThrow(/data length mismatch/i);
+  });
+
+  it('rejects output classes that do not have an explicit anatomical label', () => {
+    expect(() =>
+      logitsToLabels({
+        logits: { data: new Float32Array([0, 0, 0, 0, 9]), dims: [1, 5, 1, 1, 1] },
+        labelMap: [0, 1, 2, 4],
+      }),
+    ).toThrow(/output classes.*label contract/i);
+  });
+
+  it('rejects invalid label identifiers without silently truncating them', () => {
+    expect(() =>
+      logitsToLabels({
+        logits: { data: new Float32Array([1]), dims: [1, 1, 1, 1, 1] },
+        labelMap: [256],
+      }),
+    ).toThrow(/label IDs/i);
   });
 });

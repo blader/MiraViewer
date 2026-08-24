@@ -2,13 +2,7 @@ import { useCallback, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import { GridCell } from './GridCell';
-import type {
-  AlignmentProgress,
-  AlignmentReference,
-  ExclusionMask,
-  PanelSettings,
-  SeriesRef,
-} from '../../types/api';
+import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { DEFAULT_PANEL_SETTINGS } from '../../utils/constants';
 
@@ -67,15 +61,19 @@ export function GridView({
     <div className="flex-1 flex items-center justify-center">
       {isAligning && alignmentProgress && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20">
-          <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-black/70 border border-white/10 shadow-xl">
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex items-center gap-3 px-4 py-3 rounded-xl bg-black/70 border border-white/10 shadow-xl"
+          >
             <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
             <div className="min-w-0">
               <div className="text-sm font-medium text-white">
                 {alignmentProgress.phase === 'capturing'
                   ? 'Preparing reference…'
                   : alignmentProgress.currentDate
-                  ? `Aligning ${formatDate(alignmentProgress.currentDate)} (${alignmentProgress.dateIndex + 1}/${alignmentProgress.totalDates})`
-                  : 'Aligning…'}
+                    ? `Aligning ${formatDate(alignmentProgress.currentDate)} (${alignmentProgress.dateIndex + 1}/${alignmentProgress.totalDates})`
+                    : 'Aligning…'}
               </div>
               {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
                 <div className="text-xs text-white/70">
@@ -126,7 +124,11 @@ export function GridView({
             />
           );
         })}
-        {columns.length === 0 && <div className="h-full flex items-center justify-center text-[var(--text-secondary)]">Select dates to view</div>}
+        {columns.length === 0 && (
+          <div className="h-full flex items-center justify-center text-[var(--text-secondary)]">
+            Select dates to view
+          </div>
+        )}
       </div>
     </div>
   );

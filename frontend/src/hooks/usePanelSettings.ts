@@ -33,6 +33,11 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
   const [activePanel, setActivePanel] = useState<string | null>(null); // date of panel being adjusted
   const [progress, setProgress] = useState(0); // 0..1 normalized
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
+
+  const reportPersistenceFailure = useCallback((error: unknown) => {
+    setPersistenceError(error instanceof Error ? error.message : 'Viewer settings could not be saved locally');
+  }, []);
 
   // Keep activePanel usable even if enabled dates change.
   // enabledDatesKey is already sorted ascending (ISO), so newest is the last entry.
@@ -42,7 +47,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     if (activePanel && dates.includes(activePanel)) return activePanel;
     return dates[dates.length - 1] || null;
   }, [enabledDatesKey, activePanel]);
-  
+
   // Refs for persistence
   const panelSettingsRef = useRef(panelSettings);
   const selectedSeqIdRef = useRef(selectedSeqId);
@@ -66,19 +71,22 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     redoStackRef.current.length = 0;
   }, [selectedSeqId]);
 
-  const applyPanelSettings = useCallback((date: string, settings: PanelSettings) => {
-    const seqId = selectedSeqIdRef.current;
-    if (!seqId) return;
+  const applyPanelSettings = useCallback(
+    (date: string, settings: PanelSettings) => {
+      const seqId = selectedSeqIdRef.current;
+      if (!seqId) return;
 
-    setPanelSettings((prev) => {
-      const next = new Map(prev);
-      next.set(date, settings);
-      return next;
-    });
+      setPanelSettings((prev) => {
+        const next = new Map(prev);
+        next.set(date, settings);
+        return next;
+      });
 
-    // Persist to local storage (fire-and-forget)
-    savePanelSettings(seqId, date, settings).catch(() => {});
-  }, []);
+      // Persist to local storage (fire-and-forget)
+      savePanelSettings(seqId, date, settings).catch(reportPersistenceFailure);
+    },
+    [reportPersistenceFailure],
+  );
 
   const undoLastPanelSetting = useCallback(() => {
     const entry = undoStackRef.current.pop();
@@ -178,29 +186,27 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     if (!selectedSeqId) return;
     const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
     if (currentDates.size === 0) return;
-    
+
     // Determine if sequence changed or which dates are new
     const seqChanged = selectedSeqId !== prevSeqIdRef.current;
-    const newDates = seqChanged 
-      ? currentDates 
-      : new Set([...currentDates].filter(d => !prevDatesRef.current.has(d)));
-    
+    const newDates = seqChanged ? currentDates : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
+
     // Update refs
     prevSeqIdRef.current = selectedSeqId;
     prevDatesRef.current = currentDates;
-    
+
     // If no new dates to fetch, nothing to do (keep all settings in memory)
     if (newDates.size === 0) {
       return;
     }
-    
+
     let cancelled = false;
     (async () => {
       try {
         const stored = await getPanelSettings(selectedSeqId);
         if (cancelled) return;
-        
-        setPanelSettings(prev => {
+
+        setPanelSettings((prev) => {
           const next = new Map<string, PanelSettings>();
 
           // Keep existing settings for dates that are still enabled (unless seq changed)
@@ -226,7 +232,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
 
           return next;
         });
-        
+
         // Set initial active panel if none or if seq changed
         if (seqChanged) {
           const sortedDates = [...currentDates].sort((a, b) => b.localeCompare(a));
@@ -239,10 +245,11 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
             }
           }
         }
-      } catch {
+      } catch (error) {
         if (cancelled) return;
+        reportPersistenceFailure(error);
         // Fallback: add defaults for new dates only
-        setPanelSettings(prev => {
+        setPanelSettings((prev) => {
           const next = new Map(prev);
           for (const date of newDates) {
             if (!next.has(date)) {
@@ -253,96 +260,99 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
         });
       }
     })();
-    return () => { cancelled = true; };
-  }, [selectedSeqId, enabledDatesKey]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSeqId, enabledDatesKey, reportPersistenceFailure]);
 
   // Update a panel's settings
-  const updatePanelSetting = useCallback((date: string, update: Partial<PanelSettings>) => {
-    if (!selectedSeqId) return;
+  const updatePanelSetting = useCallback(
+    (date: string, update: Partial<PanelSettings>) => {
+      if (!selectedSeqId) return;
 
-    const updateKeys = Object.keys(update);
-    const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
+      const updateKeys = Object.keys(update);
+      const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
 
-    setPanelSettings((prev) => {
-      const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
-      const updated = { ...current, ...update };
+      setPanelSettings((prev) => {
+        const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
+        const updated = { ...current, ...update };
 
-      // Avoid pushing no-ops into history (e.g., clamped buttons).
-      const updatedAny = updated as unknown as Record<string, unknown>;
-      const currentAny = current as unknown as Record<string, unknown>;
-      const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
+        // Avoid pushing no-ops into history (e.g., clamped buttons).
+        const updatedAny = updated as unknown as Record<string, unknown>;
+        const currentAny = current as unknown as Record<string, unknown>;
+        const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
 
-      if (shouldRecordHistory && isMeaningfulChange) {
-        undoStackRef.current.push({
-          date,
-          before: { ...current },
-          after: { ...updated },
-        });
+        if (shouldRecordHistory && isMeaningfulChange) {
+          undoStackRef.current.push({
+            date,
+            before: { ...current },
+            after: { ...updated },
+          });
 
-        // New action invalidates redo stack.
-        redoStackRef.current.length = 0;
+          // New action invalidates redo stack.
+          redoStackRef.current.length = 0;
 
-        // Cap memory.
-        if (undoStackRef.current.length > MAX_HISTORY) {
-          undoStackRef.current.shift();
+          // Cap memory.
+          if (undoStackRef.current.length > MAX_HISTORY) {
+            undoStackRef.current.shift();
+          }
         }
-      }
 
-      // Persist to local storage (fire-and-forget)
-      savePanelSettings(selectedSeqId, date, updated).catch(() => {});
+        // Persist to local storage (fire-and-forget)
+        savePanelSettings(selectedSeqId, date, updated).catch(reportPersistenceFailure);
 
-      const next = new Map(prev);
-      next.set(date, updated);
-      return next;
-    });
-  }, [selectedSeqId]);
+        const next = new Map(prev);
+        next.set(date, updated);
+        return next;
+      });
+    },
+    [selectedSeqId, reportPersistenceFailure],
+  );
 
   // Batch update multiple panels at once (for alignment results).
   // The undo stack groups all entries with the same batchId so Cmd/Ctrl+Z reverts the whole batch.
-  const batchUpdateSettings = useCallback((updates: Map<string, PanelSettings>) => {
-    if (!selectedSeqId || updates.size === 0) return;
+  const batchUpdateSettings = useCallback(
+    (updates: Map<string, PanelSettings>, operationId?: string) => {
+      if (!selectedSeqId || updates.size === 0) return;
 
-    const batchId = `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+      const batchId = operationId ?? `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 
-    const historyEntries: PanelSettingsHistoryEntry[] = [];
-
-    setPanelSettings((prev) => {
-      const next = new Map(prev);
+      const historyEntries: PanelSettingsHistoryEntry[] = [];
+      const currentSettings = panelSettingsRef.current;
+      const persistedUpdates = new Map<string, PanelSettings>();
 
       for (const [date, newSettings] of updates) {
-        const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
+        const current = currentSettings.get(date) || { ...DEFAULT_PANEL_SETTINGS };
         const updated = { ...current, ...newSettings };
-
         historyEntries.push({
           date,
           before: { ...current },
           after: { ...updated },
           batchId,
         });
-
-        next.set(date, updated);
-
-        // Persist (fire-and-forget)
-        savePanelSettings(selectedSeqId, date, updated).catch(() => {});
+        persistedUpdates.set(date, updated);
       }
 
-      return next;
-    });
-
-    if (historyEntries.length > 0) {
-      for (const entry of historyEntries) {
-        undoStackRef.current.push(entry);
-      }
-
-      // New action invalidates redo stack.
+      for (const entry of historyEntries) undoStackRef.current.push(entry);
       redoStackRef.current.length = 0;
+      while (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
 
-      // Cap memory.
-      while (undoStackRef.current.length > MAX_HISTORY) {
-        undoStackRef.current.shift();
+      setPanelSettings((prev) => {
+        const next = new Map(prev);
+
+        for (const [date, updated] of persistedUpdates) {
+          next.set(date, updated);
+        }
+
+        return next;
+      });
+
+      for (const [date, settings] of persistedUpdates) {
+        savePanelSettings(selectedSeqId, date, settings).catch(reportPersistenceFailure);
       }
-    }
-  }, [selectedSeqId]);
+    },
+    [selectedSeqId, reportPersistenceFailure],
+  );
 
   // Debounced persistence of progress for the active panel
   useEffect(() => {
@@ -360,12 +370,12 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
       const settings = panelSettingsRef.current;
       if (!seqId || settings.size === 0) return;
       for (const [date, s] of settings) {
-        savePanelSettings(seqId, date, s).catch(() => {});
+        savePanelSettings(seqId, date, s).catch(reportPersistenceFailure);
       }
     };
     window.addEventListener('beforeunload', handleUnload);
     return () => window.removeEventListener('beforeunload', handleUnload);
-  }, []);
+  }, [reportPersistenceFailure]);
 
   return {
     panelSettings,
@@ -375,5 +385,8 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     setProgress,
     updatePanelSetting,
     batchUpdateSettings,
+    persistenceError,
+    reportPersistenceError: reportPersistenceFailure,
+    clearPersistenceError: () => setPersistenceError(null),
   };
 }

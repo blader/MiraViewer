@@ -59,6 +59,16 @@ export function logitsToLabels(params: {
     throw new Error(`logitsToLabels: invalid dims C=${c} Z=${z} Y=${y} X=${x}`);
   }
 
+  if (c !== labelMap.length) {
+    throw new Error(`logitsToLabels: model has ${c} output classes, but the label contract defines ${labelMap.length}`);
+  }
+
+  for (const label of labelMap) {
+    if (!Number.isInteger(label) || label < 0 || label > 255) {
+      throw new Error('logitsToLabels: label IDs must be integers between 0 and 255');
+    }
+  }
+
   const spatial = x * y * z;
   if (data.length !== c * spatial) {
     throw new Error(`logitsToLabels: data length mismatch (expected ${c * spatial}, got ${data.length})`);
@@ -78,8 +88,7 @@ export function logitsToLabels(params: {
       }
     }
 
-    const labelId = labelMap[bestC] ?? 0;
-    out[p] = (labelId & 0xff) >>> 0;
+    out[p] = labelMap[bestC]!;
   }
 
   return { labels: out, spatialDims: [x, y, z] };

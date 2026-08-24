@@ -1,7 +1,10 @@
-import { useRef, useState } from 'react';
-import { Upload, X, Loader2, AlertCircle, CheckCircle, FileArchive } from 'lucide-react';
-import JSZip from 'jszip';
-import { processDicomFile, processFiles } from '../services/dicomIngestion';
+import { useEffect, useRef, useState } from 'react';
+import { Upload, Loader2, AlertCircle, CheckCircle, FileArchive } from 'lucide-react';
+import { getStorageHealth, subscribeStorageHealth } from '../db/db';
+import { loadSafeArchive, readArchiveEntry } from '../services/archiveSafety';
+import { isDicomCandidate, processDicomFile, processFiles } from '../services/dicomIngestion';
+import { readSnapshotManifest, restoreSnapshot } from '../services/exportBackup';
+import { AccessibleDialog } from './ui/AccessibleDialog';
 
 interface UploadModalProps {
   onClose: () => void;
@@ -24,6 +27,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [storageHealth, setStorageHealth] = useState(getStorageHealth);
+
+  useEffect(() => subscribeStorageHealth(setStorageHealth), []);
 
   const openFilesPicker = () => {
     const input = fileInputRef.current;
@@ -115,14 +122,12 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       setFiles([]);
       setImportSummary(null);
       setErrorMessage(
-        'No files were selected. If you chose a folder containing DICOMs without extensions, try again using “Select folder”.'
+        'No files were selected. If you chose a folder containing DICOMs without extensions, try again using “Select folder”.',
       );
       return;
     }
 
-    const zip = selected.length === 1 && selected[0].name.toLowerCase().endsWith('.zip')
-      ? selected[0]
-      : null;
+    const zip = selected.length === 1 && selected[0].name.toLowerCase().endsWith('.zip') ? selected[0] : null;
 
     setZipFile(zip);
     setFiles(zip ? [] : selected);
@@ -138,6 +143,8 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     setErrorMessage(null);
     setImportSummary(null);
     setProgress({ current: 0, total: 1, label: 'Preparing…' });
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       let summary: {
@@ -150,42 +157,50 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       };
 
       if (zipFile) {
-        // Expand ZIP in browser and ingest file-by-file.
-        const zip = await JSZip.loadAsync(zipFile);
-        const entries = Object.values(zip.files).filter((f) => !f.dir);
-        const total = entries.length;
+        const archive = await loadSafeArchive(zipFile);
+        const manifest = await readSnapshotManifest(archive.zip);
+        if (manifest) {
+          summary = await restoreSnapshot(archive.zip, manifest, (current, total) => {
+            if (controller.signal.aborted) throw new DOMException('Import cancelled', 'AbortError');
+            setProgress({ current, total: Math.max(total, 1), label: 'Restoring complete backup…' });
+          });
+        } else {
+          const entries = archive.entries.filter((entry) => isDicomCandidate(entry.name));
+          const total = entries.length;
 
-        let current = 0;
-        let ingested = 0;
-        let duplicates = 0;
-        let skipped = 0;
-        let errors = 0;
-        const errorSamples: string[] = [];
+          let current = 0;
+          let ingested = 0;
+          let duplicates = 0;
+          let skipped = archive.entries.length - entries.length;
+          let errors = 0;
+          const errorSamples: string[] = [];
 
-        for (const entry of entries) {
-          const blob = await entry.async('blob');
+          for (const entry of entries) {
+            if (controller.signal.aborted) throw new DOMException('Import cancelled', 'AbortError');
+            const blob = await readArchiveEntry(entry);
 
-          // Preserve the full entry path for progress labels, but use only the
-          // filename for ingestion heuristics (extension checks, etc.).
-          const baseName = entry.name.split('/').pop() || entry.name;
-          const file = new File([blob], baseName, { type: blob.type || 'application/dicom' });
+            // Preserve the full entry path for progress labels, but use only the
+            // filename for ingestion heuristics (extension checks, etc.).
+            const baseName = entry.name.split('/').pop() || entry.name;
+            const file = new File([blob], baseName, { type: blob.type || 'application/dicom' });
 
-          const r = await processDicomFile(file);
-          if (r.status === 'ingested') ingested += 1;
-          else if (r.status === 'duplicate') duplicates += 1;
-          else if (r.status === 'skipped') skipped += 1;
-          else {
-            errors += 1;
-            if (errorSamples.length < 3) {
-              errorSamples.push(`${r.fileName}: ${r.message}`);
+            const r = await processDicomFile(file);
+            if (r.status === 'ingested') ingested += 1;
+            else if (r.status === 'duplicate') duplicates += 1;
+            else if (r.status === 'skipped') skipped += 1;
+            else {
+              errors += 1;
+              if (errorSamples.length < 3) {
+                errorSamples.push(`${r.fileName}: ${r.message}`);
+              }
             }
+
+            current += 1;
+            setProgress({ current, total: Math.max(total, 1), label: entry.name });
           }
 
-          current += 1;
-          setProgress({ current, total: Math.max(total, 1), label: entry.name });
+          summary = { total: archive.entries.length, ingested, duplicates, skipped, errors, errorSamples };
         }
-
-        summary = { total, ingested, duplicates, skipped, errors, errorSamples };
       } else {
         const res = await processFiles(files, (current, total) => {
           setProgress({ current, total });
@@ -220,8 +235,15 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         onClose();
       }, 2000);
     } catch (err) {
-      setStatus('error');
-      setErrorMessage(err instanceof Error ? err.message : 'Import failed');
+      if (isAbortError(err)) {
+        setStatus('idle');
+        setErrorMessage('Import cancelled. Previously committed images remain available.');
+      } else {
+        setStatus('error');
+        setErrorMessage(err instanceof Error ? err.message : 'Import failed');
+      }
+    } finally {
+      abortRef.current = null;
     }
   };
 
@@ -231,153 +253,156 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     : files.reduce((acc, f) => acc + f.size, 0) / (1024 * 1024);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-[480px] bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
-            <Upload className="w-4 h-4" />
-            Import DICOM files
-          </h3>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-6">
-          {status === 'success' ? (
-            <div className="flex flex-col items-center justify-center py-4 text-center">
-              <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
-                <CheckCircle className="w-6 h-6" />
-              </div>
-              <h4 className="text-[var(--text-primary)] font-medium mb-1">Import complete</h4>
-              <p className="text-sm text-[var(--text-secondary)]">
-                {importSummary
-                  ? importSummary.ingested > 0
-                    ? `Imported ${importSummary.ingested} new images into local storage.`
-                    : importSummary.duplicates > 0
-                      ? 'No new images were imported (all duplicates).'
-                      : 'Imported into local storage.'
-                  : 'Imported into local storage.'}
-              </p>
-              {importSummary && (importSummary.duplicates > 0 || importSummary.skipped > 0 || importSummary.errors > 0) && (
+    <AccessibleDialog
+      title="Import DICOM files"
+      onClose={() => {
+        if (status === 'uploading') abortRef.current?.abort();
+        else onClose();
+      }}
+      closeOnBackdrop={status !== 'uploading'}
+    >
+      <div className="overflow-y-auto p-6">
+        {status === 'success' ? (
+          <div className="flex flex-col items-center justify-center py-4 text-center">
+            <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
+              <CheckCircle className="w-6 h-6" />
+            </div>
+            <h4 className="text-[var(--text-primary)] font-medium mb-1">Import complete</h4>
+            <p className="text-sm text-[var(--text-secondary)]">
+              {importSummary
+                ? importSummary.ingested > 0
+                  ? `Imported ${importSummary.ingested} new images into local storage.`
+                  : importSummary.duplicates > 0
+                    ? 'No new images were imported (all duplicates).'
+                    : 'Imported into local storage.'
+                : 'Imported into local storage.'}
+            </p>
+            {importSummary &&
+              (importSummary.duplicates > 0 || importSummary.skipped > 0 || importSummary.errors > 0) && (
                 <p className="text-xs text-[var(--text-tertiary)] mt-1">
                   {importSummary.duplicates > 0 ? `Duplicates ${importSummary.duplicates}. ` : ''}
                   {importSummary.skipped > 0 ? `Skipped ${importSummary.skipped}. ` : ''}
                   {importSummary.errors > 0 ? `Errors ${importSummary.errors}.` : ''}
                 </p>
               )}
-            </div>
-          ) : (
-            <>
+          </div>
+        ) : (
+          <>
+            {storageHealth.checked && !storageHealth.persisted && (
               <div
-                onClick={() => {
-                  // Default: prefer folder import, but fall back to file picker in browsers
-                  // that don't support the File System Access API.
-                  const picker = (window as unknown as { showDirectoryPicker?: () => Promise<unknown> }).showDirectoryPicker;
-                  if (picker) {
-                    void openFolderPicker();
-                  } else {
-                    openFilesPicker();
-                  }
-                }}
-                className={`border-2 border-dashed rounded-lg p-8 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-                  hasSelection
-                    ? 'border-[var(--accent)] bg-[var(--accent)]/5'
-                    : 'border-[var(--border-color)] hover:border-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'
-                }`}
+                className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                role="status"
               >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".dcm,.dicom,.ima,.zip"
-                  multiple
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={handleFileChange}
-                  className="hidden"
-                />
-                
-                {hasSelection ? (
+                Browser storage is not guaranteed to persist. Keep an exported backup of important scans and
+                annotations.
+              </div>
+            )}
+            <div
+              onClick={() => {
+                // Default: prefer folder import, but fall back to file picker in browsers
+                // that don't support the File System Access API.
+                const picker = (window as unknown as { showDirectoryPicker?: () => Promise<unknown> })
+                  .showDirectoryPicker;
+                if (picker) {
+                  void openFolderPicker();
+                } else {
+                  openFilesPicker();
+                }
+              }}
+              className={`border-2 border-dashed rounded-lg p-8 flex flex-col items-center justify-center cursor-pointer transition-colors ${
+                hasSelection
+                  ? 'border-[var(--accent)] bg-[var(--accent)]/5'
+                  : 'border-[var(--border-color)] hover:border-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".dcm,.dicom,.ima,.zip"
+                multiple
+                onClick={(e) => e.stopPropagation()}
+                onChange={handleFileChange}
+                className="hidden"
+              />
+
+              {hasSelection ? (
+                <>
+                  <div className="w-10 h-10 rounded-full bg-[var(--accent)]/20 text-[var(--accent)] flex items-center justify-center mb-3">
+                    <FileArchive className="w-5 h-5" />
+                  </div>
+                  <p className="text-sm font-medium text-[var(--text-primary)] text-center break-all">
+                    {zipFile ? zipFile.name : `${files.length} files selected`}
+                  </p>
+                  <p className="text-xs text-[var(--text-secondary)] mt-1">{totalSizeMb.toFixed(2)} MB</p>
+                </>
+              ) : (
+                <>
+                  <Upload className="w-8 h-8 text-[var(--text-tertiary)] mb-3" />
+                  <p className="text-sm text-[var(--text-primary)] font-medium">Click to select files or folder</p>
+                  <p className="text-xs text-[var(--text-secondary)] mt-1">DICOM files (.dcm/.dicom/.ima) or a .zip</p>
+                </>
+              )}
+            </div>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={openFilesPicker}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+              >
+                Select files / ZIP
+              </button>
+              <button
+                type="button"
+                onClick={() => void openFolderPicker()}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+              >
+                Select folder
+              </button>
+            </div>
+            {status === 'uploading' && progress && (
+              <div className="mt-4 flex items-center gap-2 text-[var(--text-secondary)] text-sm">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                {progress.label
+                  ? `${progress.current}/${progress.total} · ${progress.label}`
+                  : `${progress.current}/${progress.total}`}
+              </div>
+            )}
+
+            {errorMessage && (
+              <div className="mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-400/10 px-3 py-2 rounded-lg">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {errorMessage}
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  if (status === 'uploading') abortRef.current?.abort();
+                  else onClose();
+                }}
+                className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUpload}
+                disabled={!hasSelection || status === 'uploading'}
+                className="px-4 py-2 text-sm bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {status === 'uploading' ? (
                   <>
-                    <div className="w-10 h-10 rounded-full bg-[var(--accent)]/20 text-[var(--accent)] flex items-center justify-center mb-3">
-                      <FileArchive className="w-5 h-5" /> 
-                    </div>
-                    <p className="text-sm font-medium text-[var(--text-primary)] text-center break-all">
-                      {zipFile ? zipFile.name : `${files.length} files selected`}
-                    </p>
-                    <p className="text-xs text-[var(--text-secondary)] mt-1">
-                      {totalSizeMb.toFixed(2)} MB
-                    </p>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Importing…
                   </>
                 ) : (
-                  <>
-                    <Upload className="w-8 h-8 text-[var(--text-tertiary)] mb-3" />
-                    <p className="text-sm text-[var(--text-primary)] font-medium">Click to select files or folder</p>
-                    <p className="text-xs text-[var(--text-secondary)] mt-1">DICOM files (.dcm/.dicom/.ima) or a .zip</p>
-                  </>
+                  'Import'
                 )}
-              </div>
-              <div className="mt-3 flex items-center justify-center gap-2">
-                <button
-                  type="button"
-                  onClick={openFilesPicker}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                >
-                  Select files / ZIP
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void openFolderPicker()}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                >
-                  Select folder
-                </button>
-              </div>
-              {status === 'uploading' && progress && (
-                <div className="mt-4 flex items-center gap-2 text-[var(--text-secondary)] text-sm">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  {progress.label
-                    ? `${progress.current}/${progress.total} · ${progress.label}`
-                    : `${progress.current}/${progress.total}`}
-                </div>
-              )}
-
-              {errorMessage && (
-                <div className="mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-400/10 px-3 py-2 rounded-lg">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  {errorMessage}
-                </div>
-              )}
-
-              <div className="mt-6 flex justify-end gap-2">
-                <button
-                  onClick={onClose}
-                  disabled={status === 'uploading'}
-                  className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleUpload}
-                  disabled={!hasSelection || status === 'uploading'}
-                  className="px-4 py-2 text-sm bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {status === 'uploading' ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Importing…
-                    </>
-                  ) : (
-                    'Import'
-                  )}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+              </button>
+            </div>
+          </>
+        )}
       </div>
-    </div>
+    </AccessibleDialog>
   );
 }

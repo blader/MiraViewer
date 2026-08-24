@@ -7,20 +7,23 @@ export type VolumeDims = { nx: number; ny: number; nz: number };
 // per corner: identical integer results, ~7 fewer multiplies per call, and no reliance on
 // the JIT inlining a helper.
 
-export function sampleTrilinear(volume: Float32Array, dims: VolumeDims, x: number, y: number, z: number): number {
+export function sampleTrilinear(
+  volume: Float32Array | Uint8Array,
+  dims: VolumeDims,
+  x: number,
+  y: number,
+  z: number,
+): number {
   const { nx, ny, nz } = dims;
+  if (x < 0 || y < 0 || z < 0 || x > nx - 1 || y > ny - 1 || z > nz - 1) return 0;
 
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const z0 = Math.floor(z);
 
-  const x1 = x0 + 1;
-  const y1 = y0 + 1;
-  const z1 = z0 + 1;
-
-  if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= nx || y1 >= ny || z1 >= nz) {
-    return 0;
-  }
+  const xStep = x0 + 1 < nx ? 1 : 0;
+  const yStep = y0 + 1 < ny ? nx : 0;
+  const zStep = z0 + 1 < nz ? nx * ny : 0;
 
   const fx = x - x0;
   const fy = y - y0;
@@ -33,18 +36,16 @@ export function sampleTrilinear(volume: Float32Array, dims: VolumeDims, x: numbe
   const wy1 = fy;
   const wz1 = fz;
 
-  const strideY = nx;
-  const strideZ = nx * ny;
-  const i000 = x0 + y0 * strideY + z0 * strideZ;
+  const i000 = x0 + y0 * nx + z0 * nx * ny;
 
   const c000 = volume[i000];
-  const c100 = volume[i000 + 1];
-  const c010 = volume[i000 + strideY];
-  const c110 = volume[i000 + strideY + 1];
-  const c001 = volume[i000 + strideZ];
-  const c101 = volume[i000 + strideZ + 1];
-  const c011 = volume[i000 + strideZ + strideY];
-  const c111 = volume[i000 + strideZ + strideY + 1];
+  const c100 = volume[i000 + xStep];
+  const c010 = volume[i000 + yStep];
+  const c110 = volume[i000 + yStep + xStep];
+  const c001 = volume[i000 + zStep];
+  const c101 = volume[i000 + zStep + xStep];
+  const c011 = volume[i000 + zStep + yStep];
+  const c111 = volume[i000 + zStep + yStep + xStep];
 
   const v00 = c000 * wx0 + c100 * wx1;
   const v10 = c010 * wx0 + c110 * wx1;
@@ -80,18 +81,15 @@ export function splatTrilinearScaled(
   weightScale: number,
 ): void {
   const { nx, ny, nz } = dims;
+  if (x < 0 || y < 0 || z < 0 || x > nx - 1 || y > ny - 1 || z > nz - 1) return;
 
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const z0 = Math.floor(z);
 
-  const x1 = x0 + 1;
-  const y1 = y0 + 1;
-  const z1 = z0 + 1;
-
-  if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= nx || y1 >= ny || z1 >= nz) {
-    return;
-  }
+  const xStep = x0 + 1 < nx ? 1 : 0;
+  const yStep = y0 + 1 < ny ? nx : 0;
+  const zStep = z0 + 1 < nz ? nx * ny : 0;
 
   const fx = x - x0;
   const fy = y - y0;
@@ -116,9 +114,7 @@ export function splatTrilinearScaled(
   // A non-finite scale would poison both accumulators (NaN spreads through normalize).
   const s = Number.isFinite(weightScale) ? weightScale : 0;
 
-  const strideY = nx;
-  const strideZ = nx * ny;
-  const i000 = x0 + y0 * strideY + z0 * strideZ;
+  const i000 = x0 + y0 * nx + z0 * nx * ny;
 
   // Writes stay in the same order as the original per-corner version so accumulation is
   // bit-identical (float addition is order-sensitive).
@@ -126,31 +122,31 @@ export function splatTrilinearScaled(
   accum[idx] += value * (w000 * s);
   weight[idx] += w000 * s;
 
-  idx = i000 + 1;
+  idx = i000 + xStep;
   accum[idx] += value * (w100 * s);
   weight[idx] += w100 * s;
 
-  idx = i000 + strideY;
+  idx = i000 + yStep;
   accum[idx] += value * (w010 * s);
   weight[idx] += w010 * s;
 
-  idx = i000 + strideY + 1;
+  idx = i000 + yStep + xStep;
   accum[idx] += value * (w110 * s);
   weight[idx] += w110 * s;
 
-  idx = i000 + strideZ;
+  idx = i000 + zStep;
   accum[idx] += value * (w001 * s);
   weight[idx] += w001 * s;
 
-  idx = i000 + strideZ + 1;
+  idx = i000 + zStep + xStep;
   accum[idx] += value * (w101 * s);
   weight[idx] += w101 * s;
 
-  idx = i000 + strideZ + strideY;
+  idx = i000 + zStep + yStep;
   accum[idx] += value * (w011 * s);
   weight[idx] += w011 * s;
 
-  idx = i000 + strideZ + strideY + 1;
+  idx = i000 + zStep + yStep + xStep;
   accum[idx] += value * (w111 * s);
   weight[idx] += w111 * s;
 }

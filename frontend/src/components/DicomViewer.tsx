@@ -6,13 +6,20 @@ import {
   useLayoutEffect,
   useCallback,
   useImperativeHandle,
+  useSyncExternalStore,
 } from 'react';
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
 import { getEffectiveInstanceIndex } from '../utils/math';
 import { CONTROL_LIMITS } from '../utils/constants';
-import { isDebugAlignmentEnabled } from '../utils/debugAlignment';
+import {
+  isDebugAlignmentEnabled,
+  isDebugAlignmentKeyHeld,
+  subscribeToDebugAlignmentKey,
+} from '../utils/debugAlignment';
 import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
+import { getDecodedFrame as loadDecodedFrame, loadCornerstoneImage, type DecodedFrame } from '../utils/decodedFrame';
+import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -34,6 +41,9 @@ export type DicomViewerHandle = {
    * This is useful because Cornerstone keeps the previous image visible while the next slice loads.
    */
   waitForDisplayedContentKey: (expectedKey: string, timeoutMs?: number) => Promise<void>;
+
+  /** Exact full-precision decoded DICOM frame; segmentation must never use a display screenshot. */
+  getDecodedFrame: () => Promise<DecodedFrame & { viewportSize: { w: number; h: number } }>;
 };
 
 function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
@@ -64,6 +74,8 @@ interface DicomViewerProps {
   instanceIndex: number;
   instanceCount: number;
   onInstanceChange: (index: number) => void;
+  /** Prevent any viewer-local scrolling or zoom from mutating an in-flight alignment reference. */
+  interactionBlocked?: boolean;
   /** If true, reverse through-plane order (logical 0 maps to last DICOM instance). */
   reverseSliceOrder?: boolean;
   /** If provided, this image URL will be displayed instead of the DICOM slice URL. */
@@ -130,6 +142,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     instanceIndex,
     instanceCount,
     onInstanceChange,
+    interactionBlocked = false,
     reverseSliceOrder = false,
     imageUrlOverride,
     brightness = 100,
@@ -145,7 +158,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     onPanChange,
     onZoomChange,
   }: DicomViewerProps,
-  ref
+  ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -155,7 +168,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // - Cmd+wheel zooms the hovered image when zoom control is available.
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || interactionBlocked) return;
 
     const handleWheel = (e: WheelEvent) => {
       if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
@@ -198,9 +211,14 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
-  }, [instanceCount, instanceIndex, onInstanceChange, onZoomChange, zoom]);
+  }, [instanceCount, instanceIndex, interactionBlocked, onInstanceChange, onZoomChange, zoom]);
 
   const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
+  const derivedFrame = useSyncExternalStore(
+    subscribeToDerivedAlignmentFrames,
+    () => getDerivedAlignmentFrame(seriesUid, effectiveInstanceIndex),
+    () => null,
+  );
 
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
   const [imageId, setImageId] = useState<string | null>(null);
@@ -215,40 +233,18 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
   const debugSliceScores = isDebugAlignmentEnabled();
 
-  // Only show the (very noisy) per-slice debug scores overlay while the user is holding 'Z'.
-  // This keeps the UI clean while still making it easy to inspect values on demand.
-  const [isZHeld, setIsZHeld] = useState(false);
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const isZKey = (e: KeyboardEvent) => (e.key || '').toLowerCase() === 'z';
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      // Ignore cmd/ctrl/alt modified combos (e.g. Cmd+Z) so we don't flash the overlay
-      // during common shortcuts.
-      if (!isZKey(e)) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      setIsZHeld(true);
-    };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (!isZKey(e)) return;
-      setIsZHeld(false);
-    };
-
-    const onBlur = () => {
-      setIsZHeld(false);
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
-    };
-  }, []);
+  const subscribeToVisibleDebugKey = useCallback(
+    (listener: () => void) => {
+      if (!debugSliceScores || interactionBlocked) return () => undefined;
+      return subscribeToDebugAlignmentKey(listener);
+    },
+    [debugSliceScores, interactionBlocked],
+  );
+  const isZHeld = useSyncExternalStore(
+    subscribeToVisibleDebugKey,
+    () => debugSliceScores && !interactionBlocked && isDebugAlignmentKeyHeld(),
+    () => false,
+  );
 
   const displayedForScores = displayedContentKey ? parseDicomViewerContentKey(displayedContentKey) : null;
   const scoreSeriesUid = displayedForScores?.seriesUid ?? seriesUid;
@@ -256,10 +252,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   const sliceScore = debugSliceScores ? getAlignmentSliceScore(scoreSeriesUid, scoreInstanceIndex) : null;
 
   useEffect(() => {
+    if (imageUrlOverride) return;
     let cancelled = false;
     (async () => {
       try {
-        const id = await getImageIdForInstance(seriesUid, effectiveInstanceIndex);
+        const id = derivedFrame?.imageId ?? (await getImageIdForInstance(seriesUid, effectiveInstanceIndex));
         if (!cancelled) setImageId(id);
       } catch (e) {
         console.error(e);
@@ -269,14 +266,14 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     return () => {
       cancelled = true;
     };
-  }, [seriesUid, effectiveInstanceIndex]);
+  }, [derivedFrame, effectiveInstanceIndex, imageUrlOverride, seriesUid]);
 
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
-  
+
   // Convert normalized pan to pixels for transform
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
-  
+
   // Track viewport size
   useLayoutEffect(() => {
     if (!containerRef.current) return;
@@ -293,11 +290,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
-  
+
   // Convert normalized pan to pixels
   const panXPx = panX * viewportSize.width;
   const panYPx = panY * viewportSize.height;
-  
+
   // Combined transform
   //
   // Order matters. We apply the hidden affine matrix first (rightmost), then user rotation/zoom,
@@ -335,6 +332,22 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   const getDisplayedContentKey = useCallback((): string | null => {
     return displayedContentKeyRef.current;
   }, []);
+
+  const getDecodedFrame = useCallback(async () => {
+    if (derivedFrame) {
+      throw new Error('Segmentation is unavailable on a derived alignment plane; return to a native acquired slice');
+    }
+    const frame = await loadDecodedFrame(seriesUid, effectiveInstanceIndex);
+    const element = containerRef.current;
+    const rect = element?.getBoundingClientRect();
+    return {
+      ...frame,
+      viewportSize: {
+        w: element?.clientWidth || rect?.width || 0,
+        h: element?.clientHeight || rect?.height || 0,
+      },
+    };
+  }, [derivedFrame, effectiveInstanceIndex, seriesUid]);
 
   const waitForDisplayedContentKey = useCallback(async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
     const t0 = performance.now();
@@ -448,17 +461,18 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         }, 'image/png');
       });
     },
-    [affine00, affine01, affine10, affine11, brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom]
+    [affine00, affine01, affine10, affine11, brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom],
   );
 
   useImperativeHandle(
     ref,
     () => ({
       captureVisiblePng,
+      getDecodedFrame,
       getDisplayedContentKey,
       waitForDisplayedContentKey,
     }),
-    [captureVisiblePng, getDisplayedContentKey, waitForDisplayedContentKey]
+    [captureVisiblePng, getDecodedFrame, getDisplayedContentKey, waitForDisplayedContentKey],
   );
 
   // Click to set center - calculates offset to move clicked point to viewport center
@@ -488,17 +502,19 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
       onPanChange(normalizedX, normalizedY);
     },
-    [onPanChange, panX, panY]
+    [onPanChange, panX, panY],
   );
 
   // Double-click to reset pan
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (onPanChange) {
-      onPanChange(0, 0);
-    }
-  }, [onPanChange]);
-
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (onPanChange) {
+        onPanChange(0, 0);
+      }
+    },
+    [onPanChange],
+  );
 
   return (
     <div className="h-full bg-black">
@@ -532,6 +548,15 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             Loading...
           </div>
         )}
+
+        {derivedFrame && !imageUrlOverride ? (
+          <div className="pointer-events-none absolute left-2 top-2 rounded border border-sky-300/30 bg-black/75 px-2 py-1 text-[11px] text-sky-100">
+            Derived 3D-aligned plane
+            {derivedFrame.nativeSliceSpacingMm
+              ? ` · ${derivedFrame.nativeSliceSpacingMm.toFixed(1)} mm native slices`
+              : ''}
+          </div>
+        ) : null}
 
         {debugSliceScores && isZHeld ? (
           <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
@@ -698,9 +723,7 @@ function CornerstoneImage({
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
-    errorImageId === imageId ? 'error' :
-    loadedImageId === imageId ? 'loaded' :
-    'loading';
+    errorImageId === imageId ? 'error' : loadedImageId === imageId ? 'loaded' : 'loading';
 
   const isContentInSync = loadedImageId === imageId && loadedContentKey === contentKey;
 
@@ -760,7 +783,7 @@ function CornerstoneImage({
         await enabledDeferredRef.current!.promise;
         if (cancelled) return;
 
-        const image = await cornerstone.loadImage(imageId);
+        const image = await loadCornerstoneImage(imageId);
         if (cancelled) return;
 
         const viewport = cornerstone.getDefaultViewportForImage(element, image);
@@ -805,10 +828,7 @@ function CornerstoneImage({
   }, []);
 
   return (
-    <div
-      className="w-full h-full relative"
-      style={{ transform: appliedImageTransform, filter: appliedImageFilter }}
-    >
+    <div className="w-full h-full relative" style={{ transform: appliedImageTransform, filter: appliedImageFilter }}>
       <div
         ref={elementRef}
         className="w-full h-full"

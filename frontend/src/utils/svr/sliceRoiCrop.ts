@@ -15,6 +15,8 @@ export type CropSlice = {
 
   rowSpacingDsMm: number;
   colSpacingDsMm: number;
+  sliceThicknessMm?: number | null;
+  spacingBetweenSlicesMm?: number | null;
 };
 
 export function boundsCornersMm(bounds: BoundsMm): Vec3[] {
@@ -46,8 +48,9 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
     if (d > maxD) maxD = d;
   }
 
-  // Small tolerance to avoid dropping boundary slices due to float noise.
-  const tol = 1e-3;
+  const thicknessMm = slice.sliceThicknessMm ?? slice.spacingBetweenSlicesMm ?? 0;
+  // The physical slice slab, not just its center plane, contributes to the PSF.
+  const tol = 1e-3 + (Number.isFinite(thicknessMm) && thicknessMm > 0 ? thicknessMm / 2 : 0);
   if (planeD < minD - tol || planeD > maxD + tol) {
     return false;
   }
@@ -101,7 +104,7 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
   slice.ippMm = v3(
     slice.ippMm.x + slice.colDir.x * (r0 * slice.rowSpacingDsMm) + slice.rowDir.x * (c0 * slice.colSpacingDsMm),
     slice.ippMm.y + slice.colDir.y * (r0 * slice.rowSpacingDsMm) + slice.rowDir.y * (c0 * slice.colSpacingDsMm),
-    slice.ippMm.z + slice.colDir.z * (r0 * slice.rowSpacingDsMm) + slice.rowDir.z * (c0 * slice.colSpacingDsMm)
+    slice.ippMm.z + slice.colDir.z * (r0 * slice.rowSpacingDsMm) + slice.rowDir.z * (c0 * slice.colSpacingDsMm),
   );
 
   slice.dsRows = nextRows;

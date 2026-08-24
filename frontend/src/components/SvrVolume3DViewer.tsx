@@ -4,12 +4,10 @@ import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
-import {
-  computeSeedRange01,
-  regionGrow3D_v2,
-  type RegionGrow3DRoi,
-  type Vec3i,
-} from '../utils/segmentation/regionGrow3D_v2';
+import type { RegionGrow3DRoi, Vec3i } from '../utils/segmentation/regionGrow3D_v2';
+import { RegionGrow3DWorkerController } from '../utils/segmentation/regionGrow3DWorker';
+import { segmentationVolumeMm3 } from '../utils/segmentation/physicalMeasurements';
+import { TUMOR_MODEL_MANIFEST_EXAMPLE } from '../utils/segmentation/onnx/modelManifest';
 import { computeRoiCubeBoundsFromSliceDrag } from '../utils/segmentation/roiCube3d';
 import { resample2dAreaAverage } from '../utils/svr/resample2d';
 import { formatMiB } from '../utils/svr/svrUtils';
@@ -37,6 +35,7 @@ import {
   type VolumeTextureFormat,
 } from '../utils/svr/glRaymarch';
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
+import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../utils/localApi';
 import { clamp } from '../utils/math';
 
 // Render defaults
@@ -393,6 +392,13 @@ type RenderBuildState = {
 export type SvrVolume3DViewerProps = {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
+  volumeIdentity?: {
+    patientKey?: string;
+    studyUid?: string;
+    seriesUids: string[];
+    frameOfReferenceUid?: string;
+    datasetRevision?: number;
+  } | null;
   /**
    * Optional portal target used to render the Slice Inspector outside of the viewer layout
    * (e.g. inside the SVR generation panel).
@@ -405,6 +411,7 @@ export type SvrVolume3DViewerProps = {
 export function SvrVolume3DViewer({
   volume,
   labels: labelsOverride,
+  volumeIdentity,
   sliceInspectorPortalTarget,
 }: SvrVolume3DViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -424,7 +431,79 @@ export function SvrVolume3DViewer({
 
   // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
   const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
+  const [hydratedVolumeKey, setHydratedVolumeKey] = useState<string | null>(null);
+  const labelSourceRef = useRef<string | undefined>(undefined);
+  const labelCountsRef = useRef<{ data: Uint8Array; counts: Map<number, number> } | null>(null);
   const labels = labelsOverride ?? generatedLabels;
+
+  const volumeKey = useMemo(() => {
+    if (!volume || !volumeIdentity?.studyUid || volumeIdentity.seriesUids.length === 0) return null;
+    return JSON.stringify({
+      patient: volumeIdentity.patientKey ?? null,
+      study: volumeIdentity.studyUid,
+      series: [...volumeIdentity.seriesUids].sort(),
+      frame: volumeIdentity.frameOfReferenceUid ?? null,
+      dims: volume.dims,
+      spacing: volume.voxelSizeMm,
+      origin: volume.originMm,
+      revision: volumeIdentity.datasetRevision ?? null,
+    });
+  }, [volume, volumeIdentity]);
+
+  useEffect(() => {
+    if (!volume || !volumeKey) return;
+    let cancelled = false;
+    void getVolumeSegmentation(volumeKey)
+      .then((saved) => {
+        if (cancelled) return;
+        if (saved) {
+          const metadata = Array.isArray(saved.classMetadata)
+            ? (saved.classMetadata as SvrLabelVolume['meta'])
+            : BRATS_BASE_LABEL_META;
+          labelSourceRef.current = saved.modelKey;
+          setGeneratedLabels({ data: saved.labels, dims: saved.dims, meta: metadata });
+        }
+        setHydratedVolumeKey(volumeKey);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) console.error('[segmentation] Failed to restore saved 3D labels', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [volume, volumeKey]);
+
+  useEffect(() => {
+    if (!volume || !volumeIdentity || !volumeKey || hydratedVolumeKey !== volumeKey || labelsOverride) return;
+
+    if (!generatedLabels) {
+      void deleteVolumeSegmentation(volumeKey).catch((error: unknown) => {
+        console.error('[segmentation] Failed to remove saved 3D labels', error);
+      });
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void saveVolumeSegmentation({
+        volumeKey,
+        patientKey: volumeIdentity.patientKey,
+        studyUid: volumeIdentity.studyUid,
+        seriesUids: volumeIdentity.seriesUids,
+        frameOfReferenceUid: volumeIdentity.frameOfReferenceUid,
+        dims: generatedLabels.dims,
+        voxelSizeMm: volume.voxelSizeMm,
+        labels: generatedLabels.data,
+        classMetadata: generatedLabels.meta,
+        modelKey: labelSourceRef.current,
+        datasetRevision: volumeIdentity.datasetRevision,
+        updatedAt: Date.now(),
+      }).catch((error: unknown) => {
+        console.error('[segmentation] Failed to save 3D labels', error);
+      });
+    }, 200);
+
+    return () => window.clearTimeout(timer);
+  }, [generatedLabels, hydratedVolumeKey, labelsOverride, volume, volumeIdentity, volumeKey]);
 
   // The 256-entry label->RGBA palette depends only on the label *metadata*, which is a
   // stable object (BRATS_BASE_LABEL_META) across grow-preview ticks — only the voxel data
@@ -460,7 +539,11 @@ export function SvrVolume3DViewer({
   }, []);
 
   // ONNX model execution (offline; model cached in IndexedDB).
-  const onnx = useOnnxTumorSession(volume ?? null, setGeneratedLabels);
+  const onOnnxLabels = useCallback((nextLabels: SvrLabelVolume) => {
+    labelSourceRef.current = 'brats-tumor-v1';
+    setGeneratedLabels(nextLabels);
+  }, []);
+  const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels);
   const {
     status: onnxStatus,
     preflight: onnxPreflight,
@@ -469,7 +552,7 @@ export function SvrVolume3DViewer({
     setAllowUnsafeFullRes: setAllowUnsafeOnnxFullRes,
     fileInputRef: onnxFileInputRef,
     uploadClick: onnxUploadClick,
-    handleSelectedFile: onnxHandleSelectedFile,
+    handleSelectedFiles: onnxHandleSelectedFiles,
     clearModel: onnxClearModel,
     initSession: initOnnxSession,
     runSegmentation: runOnnxSegmentation,
@@ -513,6 +596,7 @@ export function SvrVolume3DViewer({
     running: false,
   }));
   const growAbortRef = useRef<AbortController | null>(null);
+  const growWorkerRef = useRef<RegionGrow3DWorkerController | null>(null);
   const growRunIdRef = useRef(0);
   const growAutoTimerRef = useRef<number | null>(null);
 
@@ -548,6 +632,8 @@ export function SvrVolume3DViewer({
     setGrowStatus({ running: false });
     growAbortRef.current?.abort();
     growAbortRef.current = null;
+    growWorkerRef.current?.dispose();
+    growWorkerRef.current = null;
     growRunIdRef.current++;
 
     if (growAutoTimerRef.current !== null) {
@@ -562,6 +648,8 @@ export function SvrVolume3DViewer({
     // effect (the hook owns that state since the extraction; the stale direct references
     // that used to live here didn't compile).
   }, [volume]);
+
+  useEffect(() => () => growWorkerRef.current?.dispose(), []);
 
   const hasLabels = useMemo(() => {
     if (!volume) return false;
@@ -579,26 +667,30 @@ export function SvrVolume3DViewer({
     if (!labels) return null;
     if (!hasLabels) return null;
 
-    const counts = new Map<number, number>();
     const data = labels.data;
+    let counts = labelCountsRef.current?.data === data ? labelCountsRef.current.counts : null;
 
-    for (let i = 0; i < data.length; i++) {
-      const id = data[i] ?? 0;
-      if (id === 0) continue;
-      counts.set(id, (counts.get(id) ?? 0) + 1);
+    if (!counts) {
+      counts = new Map<number, number>();
+      for (let i = 0; i < data.length; i++) {
+        const id = data[i] ?? 0;
+        if (id === 0) continue;
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+      labelCountsRef.current = { data, counts };
     }
 
-    const [vx, vy, vz] = volume.voxelSizeMm;
-    const voxelVolMm3 = Math.abs(vx * vy * vz);
+    const voxelVolMm3 = segmentationVolumeMm3(1, volume.voxelSizeMm) ?? 0;
 
     let totalCount = 0;
     for (const c of counts.values()) {
       totalCount += c;
     }
 
-    const totalMl = voxelVolMm3 > 0 ? (totalCount * voxelVolMm3) / 1000 : 0;
+    const totalMm3 = totalCount * voxelVolMm3;
+    const totalMl = totalMm3 / 1000;
 
-    return { counts, voxelVolMm3, totalCount, totalMl };
+    return { counts, voxelVolMm3, totalCount, totalMm3, totalMl };
   }, [hasLabels, labels, volume]);
 
   // Slice inspector (orthogonal slices).
@@ -1006,7 +1098,9 @@ export function SvrVolume3DViewer({
       const seedIdx = seed.z * strideZ + seed.y * nx + seed.x;
       const seedValue = volume.data[seedIdx] ?? 0;
 
-      const { min, max } = computeSeedRange01({ seedValue, tolerance });
+      const boundedTolerance = Math.max(0, tolerance);
+      const min = clamp(seedValue - boundedTolerance, 0, 1);
+      const max = clamp(seedValue + boundedTolerance, 0, 1);
 
       const maxVoxels = (() => {
         const rx = Math.abs(roiBounds.max.x - roiBounds.min.x) + 1;
@@ -1047,23 +1141,22 @@ export function SvrVolume3DViewer({
       const debugGrow3d =
         typeof localStorage !== 'undefined' && localStorage.getItem('miraviewer:debug-grow3d') === '1';
 
-      const growPromise = regionGrow3D_v2({
+      const worker = growWorkerRef.current ?? new RegionGrow3DWorkerController();
+      growWorkerRef.current = worker;
+      const growPromise = worker.run({
         volume: volume.data,
         dims: volume.dims,
         seed,
         min,
         max,
         roi,
-        opts: {
-          signal: controller.signal,
-          maxVoxels,
-          connectivity: 6,
-          yieldEvery,
-          debug: debugGrow3d,
-          onProgress: (p) => {
-            const prefix = isAuto ? 'Previewing…' : 'Growing…';
-            setGrowStatus((s) => (s.running ? { ...s, message: `${prefix} ${p.queued.toLocaleString()} voxels` } : s));
-          },
+        signal: controller.signal,
+        maxVoxels,
+        yieldEvery,
+        debug: debugGrow3d,
+        onProgress: (p) => {
+          const prefix = isAuto ? 'Previewing…' : 'Growing…';
+          setGrowStatus((s) => (s.running ? { ...s, message: `${prefix} ${p.queued.toLocaleString()} voxels` } : s));
         },
       });
 
@@ -1086,6 +1179,20 @@ export function SvrVolume3DViewer({
           let mxX = -Infinity;
           let mxY = -Infinity;
           let mxZ = -Infinity;
+          const trackedCounts = labelCountsRef.current?.data === o.workLabels ? labelCountsRef.current.counts : null;
+          const replaceLabel = (index: number, next: number) => {
+            const previous = o.workLabels[index] ?? 0;
+            if (previous === next) return;
+            if (trackedCounts && previous !== 0) {
+              const remaining = (trackedCounts.get(previous) ?? 0) - 1;
+              if (remaining > 0) trackedCounts.set(previous, remaining);
+              else trackedCounts.delete(previous);
+            }
+            if (trackedCounts && next !== 0) {
+              trackedCounts.set(next, (trackedCounts.get(next) ?? 0) + 1);
+            }
+            o.workLabels[index] = next;
+          };
           const trackIndex = (vi: number) => {
             const z = (vi / sliceVox) | 0;
             const rem = vi - z * sliceVox;
@@ -1105,7 +1212,7 @@ export function SvrVolume3DViewer({
             const vals = o.prevValues;
             for (let i = 0; i < prev.length; i++) {
               const vi = prev[i]!;
-              o.workLabels[vi] = vals[i] ?? 0;
+              replaceLabel(vi, vals[i] ?? 0);
               trackIndex(vi);
             }
           }
@@ -1116,7 +1223,7 @@ export function SvrVolume3DViewer({
           for (let i = 0; i < idx.length; i++) {
             const vi = idx[i]!;
             nextPrevValues[i] = o.workLabels[vi] ?? 0;
-            o.workLabels[vi] = targetLabel;
+            replaceLabel(vi, targetLabel);
             trackIndex(vi);
           }
           o.prevIndices = idx;
@@ -1126,6 +1233,7 @@ export function SvrVolume3DViewer({
             markLabelsDirty(o.workLabels, { x: mnX, y: mnY, z: mnZ }, { x: mxX, y: mxY, z: mxZ });
           }
 
+          labelSourceRef.current = undefined;
           setGeneratedLabels({ data: o.workLabels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
 
           setGrowStatus({
@@ -1825,6 +1933,7 @@ export function SvrVolume3DViewer({
       } as const;
 
       const rotMat = new Float32Array(9);
+      const invRotMat = new Float32Array(9);
 
       const axesCanvas = axesCanvasRef.current;
       const axesCtx = axesCanvas ? axesCanvas.getContext('2d') : null;
@@ -1897,11 +2006,18 @@ export function SvrVolume3DViewer({
 
         // Uniforms
         mat3FromQuat(rotationRef.current, rotMat);
-        // The shader wants the inverse (camera->object) rotation. For a rotation matrix the
-        // inverse is the transpose, and WebGL2 allows transpose=true here — so the shader
-        // gets its inverse without a per-fragment transpose() and the axes overlay below
-        // keeps using the forward rotation in rotMat.
-        gl.uniformMatrix3fv(u.invRot, true, rotMat);
+        // WebGL requires transpose=false. Supply the inverse explicitly while retaining
+        // the forward matrix for the physical-axis overlay.
+        invRotMat[0] = rotMat[0]!;
+        invRotMat[1] = rotMat[3]!;
+        invRotMat[2] = rotMat[6]!;
+        invRotMat[3] = rotMat[1]!;
+        invRotMat[4] = rotMat[4]!;
+        invRotMat[5] = rotMat[7]!;
+        invRotMat[6] = rotMat[2]!;
+        invRotMat[7] = rotMat[5]!;
+        invRotMat[8] = rotMat[8]!;
+        gl.uniformMatrix3fv(u.invRot, false, invRotMat);
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
         gl.uniform1f(u.zoom, zoom);
@@ -2256,7 +2372,8 @@ export function SvrVolume3DViewer({
 
   return (
     <div
-      className={`h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
+      data-controls-open={!controlsCollapsed}
+      className={`svr-volume-layout h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${
         controlsCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_minmax(320px,420px)]'
       }`}
     >
@@ -2268,7 +2385,9 @@ export function SvrVolume3DViewer({
             <button
               type="button"
               onClick={() => setControlsCollapsed((v) => !v)}
-              className="absolute right-2 top-2 z-20 p-1 rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
+              aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
+              aria-expanded={!controlsCollapsed}
+              className="absolute right-2 top-2 z-20 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
               title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
             >
               {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
@@ -2529,12 +2648,12 @@ export function SvrVolume3DViewer({
                   <input
                     ref={onnxFileInputRef}
                     type="file"
-                    accept={'.onnx'}
+                    accept=".onnx,.json"
+                    multiple
                     className="hidden"
                     onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) {
-                        onnxHandleSelectedFile(f);
+                      if (e.target.files?.length) {
+                        onnxHandleSelectedFiles(Array.from(e.target.files));
                       }
                       // Allow re-uploading the same file.
                       e.target.value = '';
@@ -2548,13 +2667,13 @@ export function SvrVolume3DViewer({
                       disabled={onnxStatus.loading}
                       className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                     >
-                      Upload
+                      Upload model + manifest
                     </button>
 
                     <button
                       type="button"
                       onClick={initOnnxSession}
-                      disabled={!onnxStatus.cached || onnxStatus.loading}
+                      disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
                       className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
                     >
                       Init
@@ -2566,6 +2685,7 @@ export function SvrVolume3DViewer({
                       disabled={
                         !volume ||
                         !onnxStatus.cached ||
+                        !onnxStatus.verified ||
                         onnxStatus.loading ||
                         !!(onnxPreflight?.blockedByDefault && !allowUnsafeOnnxFullRes)
                       }
@@ -2593,6 +2713,19 @@ export function SvrVolume3DViewer({
                       Clear model
                     </button>
                   </div>
+
+                  <details className="text-xs text-[var(--text-secondary)]">
+                    <summary className="cursor-pointer py-1 text-[var(--text-primary)]">
+                      Required verified model manifest (.json)
+                    </summary>
+                    <p className="mt-1">
+                      Select the ONNX model and its JSON sidecar together. The manifest must declare the model's exact
+                      SHA-256 hash, MR input, preprocessing, axes, and tumor class meanings.
+                    </p>
+                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-[var(--bg-primary)] p-2 text-xs">
+                      {JSON.stringify(TUMOR_MODEL_MANIFEST_EXAMPLE, null, 2)}
+                    </pre>
+                  </details>
 
                   {onnxPreflight?.blockedByDefault ? (
                     <div className="space-y-2">
@@ -2627,12 +2760,13 @@ export function SvrVolume3DViewer({
                       .filter((m) => m.id !== 0)
                       .map((m) => {
                         const count = labelMetrics?.counts.get(m.id) ?? 0;
-                        const ml = labelMetrics ? (count * labelMetrics.voxelVolMm3) / 1000 : 0;
+                        const mm3 = count * (labelMetrics?.voxelVolMm3 ?? 0);
+                        const ml = mm3 / 1000;
 
                         return (
                           <div
                             key={m.id}
-                            className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]"
+                            className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
                             title={`${m.name} (id ${m.id})`}
                           >
                             <span
@@ -2641,16 +2775,16 @@ export function SvrVolume3DViewer({
                             />
                             <span className="truncate">{m.name}</span>
                             <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
-                              {count.toLocaleString()} vox · {ml.toFixed(2)} mL
+                              {count.toLocaleString()} vox · {mm3.toFixed(1)} mm³ · {ml.toFixed(2)} mL
                             </span>
                           </div>
                         );
                       })}
 
                     {labelMetrics ? (
-                      <div className="pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                      <div className="pt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
                         Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
-                        {labelMetrics.totalMl.toFixed(2)} mL
+                        {labelMetrics.totalMm3.toFixed(1)} mm³ · {labelMetrics.totalMl.toFixed(2)} mL
                       </div>
                     ) : null}
                   </div>

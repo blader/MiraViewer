@@ -1,6 +1,6 @@
 import type { DicomInstance } from '../../db/schema';
 import type { Vec3 } from './vec3';
-import { cross, dot, normalize, v3 } from './vec3';
+import { cross, dot, norm, normalize, v3 } from './vec3';
 
 function parseMultiNumberString(value: string): number[] {
   // Multi-valued DICOM tags are typically separated by backslashes.
@@ -23,16 +23,18 @@ export function parseImageOrientationPatient(iop: string | undefined): SliceAxes
   const nums = parseMultiNumberString(iop);
   if (nums.length < 6) return null;
 
-  const rowDir = normalize(v3(nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0));
-  const colDir = normalize(v3(nums[3] ?? 0, nums[4] ?? 0, nums[5] ?? 0));
+  const rawRow = v3(nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0);
+  const rawCol = v3(nums[3] ?? 0, nums[4] ?? 0, nums[5] ?? 0);
+  if (norm(rawRow) < 1e-6 || norm(rawCol) < 1e-6) return null;
 
-  // Slice normal is row x col.
-  const normalDir = normalize(cross(rowDir, colDir));
+  const rowDir = normalize(rawRow);
+  const normalizedCol = normalize(rawCol);
+  const axisDot = dot(rowDir, normalizedCol);
+  if (!Number.isFinite(axisDot) || Math.abs(axisDot) > 1e-3) return null;
 
-  // If the DICOM is malformed (col/row not orthogonal), normal could be zero.
-  if (!Number.isFinite(normalDir.x) || !Number.isFinite(normalDir.y) || !Number.isFinite(normalDir.z)) {
-    return null;
-  }
+  const normalDir = normalize(cross(rowDir, normalizedCol));
+  if (norm(normalDir) < 1 - 1e-6) return null;
+  const colDir = normalize(cross(normalDir, rowDir));
 
   return { rowDir, colDir, normalDir };
 }
@@ -44,7 +46,9 @@ export function parseImagePositionPatient(ipp: string | undefined): Vec3 | null 
   return v3(nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0);
 }
 
-export function parsePixelSpacingMm(pixelSpacing: string | undefined): { rowSpacingMm: number; colSpacingMm: number } | null {
+export function parsePixelSpacingMm(
+  pixelSpacing: string | undefined,
+): { rowSpacingMm: number; colSpacingMm: number } | null {
   if (!pixelSpacing) return null;
   const nums = parseMultiNumberString(pixelSpacing);
   if (nums.length < 2) return null;
@@ -70,7 +74,30 @@ export type SliceGeometry = {
   colSpacingMm: number;
 };
 
-export function getSliceGeometryFromInstance(instance: Pick<DicomInstance, 'rows' | 'columns' | 'imagePositionPatient' | 'imageOrientationPatient' | 'pixelSpacing'>): SliceGeometry {
+/** DICOM IPP names a pixel center, so averaged destination pixels need a centered origin. */
+export function downsampledSliceOriginMm(
+  geometry: Pick<SliceGeometry, 'ippMm' | 'rowDir' | 'colDir' | 'rowSpacingMm' | 'colSpacingMm' | 'rows' | 'cols'>,
+  dsRows: number,
+  dsCols: number,
+): Vec3 {
+  if (!(dsRows > 0 && dsCols > 0 && geometry.rows > 0 && geometry.cols > 0)) {
+    throw new Error('Downsampled DICOM geometry requires positive source and destination dimensions');
+  }
+  const rowOffsetMm = ((geometry.rows / dsRows - 1) * geometry.rowSpacingMm) / 2;
+  const colOffsetMm = ((geometry.cols / dsCols - 1) * geometry.colSpacingMm) / 2;
+  return v3(
+    geometry.ippMm.x + geometry.colDir.x * rowOffsetMm + geometry.rowDir.x * colOffsetMm,
+    geometry.ippMm.y + geometry.colDir.y * rowOffsetMm + geometry.rowDir.y * colOffsetMm,
+    geometry.ippMm.z + geometry.colDir.z * rowOffsetMm + geometry.rowDir.z * colOffsetMm,
+  );
+}
+
+export function getSliceGeometryFromInstance(
+  instance: Pick<
+    DicomInstance,
+    'rows' | 'columns' | 'imagePositionPatient' | 'imageOrientationPatient' | 'pixelSpacing'
+  >,
+): SliceGeometry {
   const axes = parseImageOrientationPatient(instance.imageOrientationPatient);
   const ipp = parseImagePositionPatient(instance.imagePositionPatient);
   const spacing = parsePixelSpacingMm(instance.pixelSpacing);
@@ -115,17 +142,17 @@ export function sliceCornersMm(params: {
   const p10 = v3(
     ippMm.x + colDir.x * (rMax * rowSpacingMm),
     ippMm.y + colDir.y * (rMax * rowSpacingMm),
-    ippMm.z + colDir.z * (rMax * rowSpacingMm)
+    ippMm.z + colDir.z * (rMax * rowSpacingMm),
   );
   const p01 = v3(
     ippMm.x + rowDir.x * (cMax * colSpacingMm),
     ippMm.y + rowDir.y * (cMax * colSpacingMm),
-    ippMm.z + rowDir.z * (cMax * colSpacingMm)
+    ippMm.z + rowDir.z * (cMax * colSpacingMm),
   );
   const p11 = v3(
     p10.x + rowDir.x * (cMax * colSpacingMm),
     p10.y + rowDir.y * (cMax * colSpacingMm),
-    p10.z + rowDir.z * (cMax * colSpacingMm)
+    p10.z + rowDir.z * (cMax * colSpacingMm),
   );
 
   return [p00, p01, p10, p11];
@@ -135,11 +162,11 @@ function median(values: number[]): number | null {
   const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
   if (v.length === 0) return null;
   const mid = Math.floor(v.length / 2);
-  return v.length % 2 === 1 ? v[mid] ?? null : ((v[mid - 1] ?? 0) + (v[mid] ?? 0)) / 2;
+  return v.length % 2 === 1 ? (v[mid] ?? null) : ((v[mid - 1] ?? 0) + (v[mid] ?? 0)) / 2;
 }
 
 export function estimateSliceSpacingMm(
-  instances: Array<Pick<DicomInstance, 'imagePositionPatient' | 'imageOrientationPatient'>>
+  instances: Array<Pick<DicomInstance, 'imagePositionPatient' | 'imageOrientationPatient'>>,
 ): number | null {
   if (instances.length < 2) return null;
 

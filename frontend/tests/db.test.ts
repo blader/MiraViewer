@@ -22,6 +22,7 @@ describe('db', () => {
     expect(db.objectStoreNames.contains('series')).toBe(true);
     expect(db.objectStoreNames.contains('instances')).toBe(true);
     expect(db.objectStoreNames.contains('panel_settings')).toBe(true);
+    expect(db.objectStoreNames.contains('derived_alignment_frames')).toBe(true);
     db.close();
   });
 

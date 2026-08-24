@@ -5,6 +5,8 @@ import cornerstoneMath from 'cornerstone-math';
 import Hammer from 'hammerjs';
 import dicomParser from 'dicom-parser';
 import { getDB } from '../db/db';
+import { getDerivedAlignmentFrameByImageId } from './derivedAlignmentFrame';
+import { loadCornerstoneImage } from './decodedFrame';
 
 // Configure external dependencies
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
@@ -72,11 +74,49 @@ function miraDbLoader(imageId: string) {
   };
 }
 
+function miraDerivedLoader(imageId: string) {
+  return {
+    promise: (async () => {
+      const frame = getDerivedAlignmentFrameByImageId(imageId);
+      if (!frame) throw new Error('The derived registration frame is no longer available');
+      const source = await loadCornerstoneImage(frame.sourceImageId);
+      let minimum = Number.POSITIVE_INFINITY;
+      let maximum = Number.NEGATIVE_INFINITY;
+      for (const pixel of frame.pixels) {
+        if (!Number.isFinite(pixel)) continue;
+        minimum = Math.min(minimum, pixel);
+        maximum = Math.max(maximum, pixel);
+      }
+      if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) {
+        throw new Error('The derived registration frame contains no finite image samples');
+      }
+
+      return {
+        ...source,
+        imageId,
+        rows: frame.rows,
+        columns: frame.columns,
+        height: frame.rows,
+        width: frame.columns,
+        minPixelValue: minimum,
+        maxPixelValue: maximum,
+        windowCenter: (minimum + maximum) / 2,
+        windowWidth: Math.max(1, maximum - minimum),
+        slope: 1,
+        intercept: 0,
+        sizeInBytes: frame.pixels.byteLength,
+        getPixelData: () => frame.pixels,
+      };
+    })(),
+  };
+}
+
 export function initCornerstone() {
   if (initialized) return;
 
   // Register custom loader
   cornerstone.registerImageLoader('miradb', miraDbLoader);
+  cornerstone.registerImageLoader('miraderived', miraDerivedLoader);
 
   // Configure cache limits.
   // IMPORTANT: Cornerstone's global image cache can otherwise grow without bound.
@@ -101,9 +141,18 @@ export function initCornerstone() {
   // Initialize tools
   cornerstoneTools.init();
 
-  // Configure web worker (optional but recommended for performance)
-  // We might need to point to the worker files in public/ or node_modules
-  // For now, we'll try without explicit worker config or assume default locations
+  // The installed bundled WADO loader includes its JPEG-lossless worker and codecs. Start workers
+  // lazily and cap concurrency so compressed MRI decoding works offline without untracked assets.
+  cornerstoneWADOImageLoader.webWorkerManager?.initialize?.({
+    maxWebWorkers: Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1)),
+    startWebWorkersOnDemand: true,
+    taskConfiguration: {
+      decodeTask: {
+        initializeCodecsOnStartup: false,
+        strict: false,
+      },
+    },
+  });
 
   initialized = true;
 }

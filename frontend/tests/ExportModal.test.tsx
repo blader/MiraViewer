@@ -36,7 +36,7 @@ describe('ExportModal', () => {
       expect(screen.getByText(/2024-01-01/i)).toBeInTheDocument();
     });
 
-    const exportButton = screen.getByRole('button', { name: /export/i });
+    const exportButton = screen.getByRole('button', { name: /^export$/i });
     fireEvent.click(exportButton);
 
     await waitFor(() => {

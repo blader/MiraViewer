@@ -113,4 +113,24 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toMatch(/load.*timed out/i);
   });
+
+  test('reads modality-scaled source pixels without rendering or quantizing the display', async () => {
+    mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
+    mocks.loadImage.mockResolvedValue({
+      imageId: 'miradb:instance',
+      rows: 2,
+      columns: 2,
+      slope: 2,
+      intercept: -100,
+      getPixelData: () => new Uint16Array([100, 512, 1000, 4095]),
+    });
+
+    const container = document.createElement('div');
+    const result = await renderSliceToPixels(container, 'series', 0, 2);
+
+    expect(Array.from(result.pixels)).toEqual([100, 924, 1900, 8090]);
+    expect(result.renderTimedOut).toBe(false);
+    expect(result.timingMs.waitForRender).toBe(0);
+    expect(container.querySelector('canvas')).toBeNull();
+  });
 });

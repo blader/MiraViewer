@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
 import { Link2, Pencil, Sparkles } from 'lucide-react';
 import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
@@ -7,9 +7,12 @@ import { ImageControls } from '../ImageControls';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
-import { GroundTruthPolygonOverlay } from '../GroundTruthPolygonOverlay';
-import { TumorSavedSegmentationOverlay } from '../TumorSavedSegmentationOverlay';
-import { TumorSegmentationOverlay } from '../TumorSegmentationOverlaySeedGrow';
+import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
+import {
+  GroundTruthPolygonOverlay,
+  TumorSavedSegmentationOverlay,
+  TumorSegmentationOverlay,
+} from './LazyStudyOverlays';
 
 export type GridCellProps = {
   comboId: string;
@@ -48,6 +51,17 @@ export function GridCell({
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
+  const studyCellRef = useRef<HTMLDivElement | null>(null);
+  const nativeImageSize = useMemo(
+    () => ({ w: refData?.columns ?? 512, h: refData?.rows ?? 512 }),
+    [refData?.columns, refData?.rows],
+  );
+  const idx = refData ? getSliceIndex(refData.instance_count, progress, settings.offset) : 0;
+  const effectiveIdx = refData ? getEffectiveInstanceIndex(idx, refData.instance_count, settings.reverseSliceOrder) : 0;
+  const derivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
+    refData ? getDerivedAlignmentFrame(refData.series_uid, effectiveIdx) : null,
+  );
+  const nativeAnnotationsAvailable = derivedFrame === null;
 
   if (!refData) {
     return (
@@ -60,34 +74,36 @@ export function GridCell({
     );
   }
 
-  const idx = getSliceIndex(refData.instance_count, progress, settings.offset);
-  const effectiveIdx = getEffectiveInstanceIndex(idx, refData.instance_count, settings.reverseSliceOrder);
-
   return (
     <div
+      ref={studyCellRef}
       data-grid-cell-date={date}
-      className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
+      data-controls-visible={isHovered || tumorToolOpen || gtPolygonToolOpen}
+      className="study-cell relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
     >
       {/* Cell controls (shown on hover) */}
-      <div
-        className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
-          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-      >
+      <div className="study-controls absolute top-0 left-0 right-0 z-10 transition-opacity">
         <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => setShowSavedTumor((v) => !v)}
-              disabled={tumorToolOpen}
+              disabled={tumorToolOpen || !nativeAnnotationsAvailable}
+              aria-pressed={showSavedTumor}
               className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                tumorToolOpen
+                tumorToolOpen || !nativeAnnotationsAvailable
                   ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]'
                   : showSavedTumor
                     ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
                     : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
               }`}
-              title={tumorToolOpen ? 'Close segmentation tool to view saved tumor overlay' : 'Toggle saved tumor segmentation overlay'}
+              title={
+                !nativeAnnotationsAvailable
+                  ? 'Native annotations are unavailable on a derived alignment plane'
+                  : tumorToolOpen
+                    ? 'Close segmentation tool to view saved tumor overlay'
+                    : 'Toggle saved tumor segmentation overlay'
+              }
             >
               <Sparkles className="w-3.5 h-3.5" />
               Tumor
@@ -95,6 +111,8 @@ export function GridCell({
 
             <button
               type="button"
+              aria-pressed={gtPolygonToolOpen}
+              disabled={!nativeAnnotationsAvailable}
               onClick={() => {
                 setGtPolygonToolOpen((v) => {
                   const next = !v;
@@ -107,7 +125,11 @@ export function GridCell({
                   ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
                   : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
               }`}
-              title="Ground truth polygon tool (debug)"
+              title={
+                nativeAnnotationsAvailable
+                  ? 'Ground truth polygon tool (debug)'
+                  : 'Native annotations are unavailable on a derived alignment plane'
+              }
             >
               <Pencil className="w-3.5 h-3.5" />
               GT
@@ -128,9 +150,7 @@ export function GridCell({
 
       {/* Slice selector (shown on hover, bottom-right corner) */}
       <div
-        className={`absolute bottom-2 right-2 z-10 transition-opacity ${
-          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
+        className="study-controls absolute bottom-2 right-2 z-10 transition-opacity"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
@@ -153,6 +173,7 @@ export function GridCell({
       <div className="flex-1 min-h-0 bg-black relative">
         <DragRectActionOverlay
           className="absolute inset-0 cursor-crosshair"
+          imageSize={{ width: refData.columns ?? 512, height: refData.rows ?? 512 }}
           geometry={{
             panX: settings.panX,
             panY: settings.panY,
@@ -174,15 +195,24 @@ export function GridCell({
               minSizeSpace: 'base',
               disabled: overlayColumns.length < 2 || isAligning,
               onConfirm: (masks) => {
+                const bounds = studyCellRef.current?.getBoundingClientRect();
                 void startAlignAll(
                   {
                     date,
                     seriesUid: refData.series_uid,
                     sliceIndex: effectiveIdx,
                     sliceCount: refData.instance_count,
+                    patientKey: refData.patient_key,
+                    studyUid: refData.study_uid ?? refData.study_id,
+                    frameOfReferenceUid: refData.frame_of_reference_uid,
+                    imageSize: { width: refData.columns ?? 512, height: refData.rows ?? 512 },
+                    viewportSize:
+                      bounds && bounds.width > 0 && bounds.height > 0
+                        ? { width: bounds.width, height: bounds.height }
+                        : undefined,
                     settings,
                   },
-                  masks.base
+                  masks.base,
                 );
               },
             },
@@ -193,7 +223,7 @@ export function GridCell({
               icon: <Sparkles className="w-4 h-4" />,
               variant: 'secondary',
               minSizeSpace: 'screen',
-              disabled: isAligning,
+              disabled: isAligning || !nativeAnnotationsAvailable,
               onConfirm: (masks) => {
                 setTumorToolOpen(true);
                 setTumorSeedBoxToStart({
@@ -210,6 +240,7 @@ export function GridCell({
             ref={tumorViewerRef}
             studyId={refData.study_id}
             seriesUid={refData.series_uid}
+            interactionBlocked={isAligning}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
             reverseSliceOrder={settings.reverseSliceOrder}
@@ -234,40 +265,50 @@ export function GridCell({
             }}
           />
 
-          <TumorSavedSegmentationOverlay
-            enabled={showSavedTumor && !tumorToolOpen}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+          <Suspense fallback={null}>
+            {nativeAnnotationsAvailable && showSavedTumor && !tumorToolOpen ? (
+              <TumorSavedSegmentationOverlay
+                enabled
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+                imageSize={nativeImageSize}
+              />
+            ) : null}
 
-          <TumorSegmentationOverlay
-            enabled={tumorToolOpen}
-            onRequestClose={() => {
-              setTumorToolOpen(false);
-              setTumorSeedBoxToStart(null);
-            }}
-            seedBoxToStart={tumorSeedBoxToStart}
-            onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
-            viewerRef={tumorViewerRef}
-            comboId={comboId}
-            dateIso={date}
-            studyId={refData.study_id}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+            {nativeAnnotationsAvailable && tumorToolOpen ? (
+              <TumorSegmentationOverlay
+                enabled
+                onRequestClose={() => {
+                  setTumorToolOpen(false);
+                  setTumorSeedBoxToStart(null);
+                }}
+                seedBoxToStart={tumorSeedBoxToStart}
+                onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
+                viewerRef={tumorViewerRef}
+                comboId={comboId}
+                dateIso={date}
+                studyId={refData.study_id}
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+              />
+            ) : null}
 
-          <GroundTruthPolygonOverlay
-            enabled={gtPolygonToolOpen}
-            onRequestClose={() => setGtPolygonToolOpen(false)}
-            comboId={comboId}
-            dateIso={date}
-            studyId={refData.study_id}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+            {nativeAnnotationsAvailable && gtPolygonToolOpen ? (
+              <GroundTruthPolygonOverlay
+                enabled
+                onRequestClose={() => setGtPolygonToolOpen(false)}
+                comboId={comboId}
+                dateIso={date}
+                studyId={refData.study_id}
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+                imageSize={nativeImageSize}
+              />
+            ) : null}
+          </Suspense>
 
           {/* Date overlay (matches overlay view style) */}
           <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">

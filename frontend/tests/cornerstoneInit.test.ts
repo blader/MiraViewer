@@ -18,6 +18,7 @@ vi.mock('cornerstone-wado-image-loader', () => ({
   default: {
     external: {},
     wadouri: { fileManager: { add: vi.fn() } },
+    webWorkerManager: { initialize: vi.fn() },
   },
 }));
 
@@ -27,6 +28,7 @@ vi.mock('dicom-parser', () => ({ default: {} }));
 
 import cornerstone from 'cornerstone-core';
 import cornerstoneTools from 'cornerstone-tools';
+import cornerstoneWADOImageLoader from 'cornerstone-wado-image-loader';
 import { initCornerstone } from '../src/utils/cornerstoneInit';
 
 describe('cornerstoneInit', () => {
@@ -37,7 +39,16 @@ describe('cornerstoneInit', () => {
   it('registers image loader and initializes tools once', () => {
     initCornerstone();
     initCornerstone();
-    expect(cornerstone.registerImageLoader).toHaveBeenCalledTimes(1);
+    expect(cornerstone.registerImageLoader).toHaveBeenCalledTimes(2);
+    expect(cornerstone.registerImageLoader).toHaveBeenCalledWith('miradb', expect.any(Function));
+    expect(cornerstone.registerImageLoader).toHaveBeenCalledWith('miraderived', expect.any(Function));
     expect(cornerstoneTools.init).toHaveBeenCalledTimes(1);
+    expect(cornerstoneWADOImageLoader.webWorkerManager.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxWebWorkers: expect.any(Number),
+        startWebWorkersOnDemand: true,
+        taskConfiguration: { decodeTask: { initializeCodecsOnStartup: false, strict: false } },
+      }),
+    );
   });
 });

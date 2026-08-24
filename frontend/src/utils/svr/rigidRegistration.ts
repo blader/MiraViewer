@@ -243,7 +243,7 @@ export function applyRigidToSeriesSlices(params: {
  * @returns Extracted samples with positions
  */
 export function buildSeriesSamples(params: {
-  slices: LoadedSlice[];
+  slices: readonly SvrReconstructionSlice[];
   roiBounds: BoundsMm;
   maxSamples: number;
   signal?: AbortSignal;
@@ -272,15 +272,18 @@ export function buildSeriesSamples(params: {
     if (!s) continue;
 
     let usedThisSlice = 0;
+    // Stopping a row-major scan after its quota samples only the top of every
+    // slice. Choose a per-slice lattice that spans the complete field instead.
+    const sliceStride = Math.max(stride, Math.ceil(Math.sqrt((s.dsRows * s.dsCols) / perSliceTarget)));
 
-    for (let r = 0; r < s.dsRows; r += stride) {
+    for (let r = 0; r < s.dsRows; r += sliceStride) {
       const baseX = s.ippMm.x + s.colDir.x * (r * s.rowSpacingDsMm);
       const baseY = s.ippMm.y + s.colDir.y * (r * s.rowSpacingDsMm);
       const baseZ = s.ippMm.z + s.colDir.z * (r * s.rowSpacingDsMm);
 
       const rowBase = r * s.dsCols;
 
-      for (let c = 0; c < s.dsCols; c += stride) {
+      for (let c = 0; c < s.dsCols; c += sliceStride) {
         const v = s.pixels[rowBase + c] ?? 0;
         if (v <= 0) continue;
 
@@ -338,10 +341,18 @@ export function scoreNcc(params: {
   voxelSizeMm: number;
   centerMm: Vec3;
   rigid: RigidParams;
-}): { ncc: number; used: number } {
-  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid } = params;
+  /** Reconstructed voxel occupancy; unsupported zero-filled voxels are never anatomy. */
+  occupancy?: Uint8Array;
+  /** Minimum fraction of the fixed moving-sample domain retained by this transform. */
+  minimumCoverage?: number;
+  minimumSamples?: number;
+}): { ncc: number; rawNcc: number; used: number; coverage: number } {
+  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid, occupancy } = params;
 
-  if (samples.count <= 0) return { ncc: Number.NEGATIVE_INFINITY, used: 0 };
+  if (samples.count <= 0)
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used: 0, coverage: 0 };
+  if (occupancy && occupancy.length !== refVolume.length)
+    throw new Error('Registration occupancy does not match reference volume');
 
   const rot = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
   const tMm = v3(rigid.tx, rigid.ty, rigid.tz);
@@ -372,6 +383,7 @@ export function scoreNcc(params: {
     const vz = (p.z - originMm.z) * invVox;
 
     if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
+    if (occupancy && sampleTrilinear(occupancy, dims, vx, vy, vz) < 0.5) continue;
 
     const b = sampleTrilinear(refVolume, dims, vx, vy, vz);
 
@@ -384,9 +396,11 @@ export function scoreNcc(params: {
   }
 
   // Require minimum samples for reliable optimization
-  const MIN_SAMPLES_FOR_OPTIMIZATION = 512;
-  if (used < MIN_SAMPLES_FOR_OPTIMIZATION) {
-    return { ncc: Number.NEGATIVE_INFINITY, used };
+  const coverage = used / samples.count;
+  const minimumSamples = Math.max(1, Math.round(params.minimumSamples ?? 512));
+  const minimumCoverage = Math.max(0, Math.min(1, params.minimumCoverage ?? 0.6));
+  if (used < minimumSamples || coverage < minimumCoverage) {
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used, coverage };
   }
 
   const invN = 1 / used;
@@ -394,10 +408,77 @@ export function scoreNcc(params: {
   const varA = sumAA - sumA * sumA * invN;
   const varB = sumBB - sumB * sumB * invN;
 
-  const denom = Math.sqrt(Math.max(1e-12, varA * varB));
-  const ncc = denom > 0 ? cov / denom : Number.NEGATIVE_INFINITY;
+  // Pearson correlation is undefined when either supported signal is constant.
+  // Flooring its denominator manufactures a finite zero score, which allows a
+  // completely flat MRI volume to masquerade as a valid registration candidate.
+  if (varA <= Number.EPSILON * Math.max(1, sumAA) || varB <= Number.EPSILON * Math.max(1, sumBB)) {
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used, coverage };
+  }
 
-  return { ncc, used };
+  const rawNcc = cov / Math.sqrt(varA * varB);
+  // Compare every proposal against the same complete moving-sample domain.
+  // Missing anatomy contributes zero evidence instead of disappearing from the denominator.
+  const ncc = rawNcc * coverage;
+
+  return { ncc, rawNcc, used, coverage };
+}
+
+export type ReverseRegistrationDomain = {
+  samples: SeriesSamples;
+  refVolume: Float32Array;
+  dims: VolumeDims;
+  originMm: Vec3;
+  voxelSizeMm: number;
+  occupancy?: Uint8Array;
+};
+
+/** Invert a center-relative rigid transform without treating Euler angles as commutative. */
+export function invertRigidParams(rigid: RigidParams): RigidParams {
+  const rotation = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
+  const inverse: Mat3 = [
+    rotation[0],
+    rotation[3],
+    rotation[6],
+    rotation[1],
+    rotation[4],
+    rotation[7],
+    rotation[2],
+    rotation[5],
+    rotation[8],
+  ];
+  const ry = Math.asin(Math.max(-1, Math.min(1, -inverse[6])));
+  const singular = Math.abs(Math.cos(ry)) < 1e-8;
+  const rx = singular ? 0 : Math.atan2(inverse[7], inverse[8]);
+  const rz = singular ? Math.atan2(-inverse[1], inverse[4]) : Math.atan2(inverse[3], inverse[0]);
+  const translation = mat3MulVec3(inverse, -rigid.tx, -rigid.ty, -rigid.tz);
+  return { tx: translation.x, ty: translation.y, tz: translation.z, rx, ry, rz };
+}
+
+export function scoreBidirectionalNcc(
+  params: Parameters<typeof scoreNcc>[0] & { reverse: ReverseRegistrationDomain },
+): {
+  ncc: number;
+  used: number;
+  coverage: number;
+  forward: ReturnType<typeof scoreNcc>;
+  reverse: ReturnType<typeof scoreNcc>;
+} {
+  const { reverse, ...forwardParams } = params;
+  const forward = scoreNcc(forwardParams);
+  const backward = scoreNcc({
+    ...reverse,
+    centerMm: params.centerMm,
+    rigid: invertRigidParams(params.rigid),
+    minimumCoverage: params.minimumCoverage,
+    minimumSamples: params.minimumSamples,
+  });
+  return {
+    ncc: Math.min(forward.ncc, backward.ncc),
+    used: Math.min(forward.used, backward.used),
+    coverage: Math.min(forward.coverage, backward.coverage),
+    forward,
+    reverse: backward,
+  };
 }
 
 // ============================================================================
@@ -426,12 +507,31 @@ export async function optimizeRigidNcc(params: {
   voxelSizeMm: number;
   centerMm: Vec3;
   signal?: AbortSignal;
+  occupancy?: Uint8Array;
+  minimumCoverage?: number;
+  minimumSamples?: number;
+  initial?: RigidParams;
+  maxTranslationMm?: number;
+  maxRotationRad?: number;
+  reverse?: ReverseRegistrationDomain;
 }): Promise<{ best: RigidParams; bestScore: number; used: number; evals: number }> {
-  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, signal } = params;
+  const {
+    samples,
+    refVolume,
+    dims,
+    originMm,
+    voxelSizeMm,
+    centerMm,
+    signal,
+    occupancy,
+    minimumCoverage,
+    minimumSamples,
+    reverse,
+  } = params;
 
   // Search bounds - assumes coarse alignment got us "close"
-  const MAX_TRANS_MM = 20;
-  const MAX_ROT_RAD = (10 * Math.PI) / 180;
+  const MAX_TRANS_MM = params.maxTranslationMm ?? 20;
+  const MAX_ROT_RAD = params.maxRotationRad ?? (10 * Math.PI) / 180;
 
   // Multi-scale optimization stages (coarse to fine)
   const stages = [
@@ -440,8 +540,24 @@ export async function optimizeRigidNcc(params: {
     { transStepMm: 0.5, rotStepRad: (0.5 * Math.PI) / 180 },
   ];
 
-  const cur: RigidParams = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
-  const bestEval = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: cur });
+  const evaluate = (rigid: RigidParams) => {
+    const forward = {
+      samples,
+      refVolume,
+      dims,
+      originMm,
+      voxelSizeMm,
+      centerMm,
+      rigid,
+      occupancy,
+      minimumCoverage,
+      minimumSamples,
+    };
+    return reverse ? scoreBidirectionalNcc({ ...forward, reverse }) : scoreNcc(forward);
+  };
+
+  const cur: RigidParams = params.initial ? { ...params.initial } : { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+  const bestEval = evaluate(cur);
   let bestScore = bestEval.ncc;
   let bestUsed = bestEval.used;
   let evals = 1;
@@ -462,7 +578,7 @@ export async function optimizeRigidNcc(params: {
     probe.rz = cur.rz;
     probe[key] = value;
 
-    const e = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: probe });
+    const e = evaluate(probe);
     evals++;
     if (e.ncc > bestScore + 1e-4) {
       cur[key] = value;

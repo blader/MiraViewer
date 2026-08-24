@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { UploadModal } from '../src/components/UploadModal';
 
 vi.mock('../src/services/dicomIngestion', () => ({
+  isDicomCandidate: vi.fn((name: string) => !name.endsWith('.json')),
   processDicomFile: vi.fn().mockResolvedValue({ status: 'ingested', fileName: 'scan.dcm', sopInstanceUid: 'sop-uid' }),
   processFiles: vi.fn().mockResolvedValue({
     total: 1,
@@ -25,9 +26,9 @@ describe('UploadModal', () => {
   it('ingests selected DICOM files and calls onUploadComplete', async () => {
     const onClose = vi.fn();
     const onUploadComplete = vi.fn();
-    const { container } = render(<UploadModal onClose={onClose} onUploadComplete={onUploadComplete} />);
+    render(<UploadModal onClose={onClose} onUploadComplete={onUploadComplete} />);
 
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const input = document.body.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File([new Uint8Array([1])], 'scan.dcm', { type: 'application/dicom' });
     fireEvent.change(input, { target: { files: [file] } });
 
@@ -41,7 +42,7 @@ describe('UploadModal', () => {
   it('handles ZIP imports by expanding and ingesting entries', async () => {
     const onClose = vi.fn();
     const onUploadComplete = vi.fn();
-    const { container } = render(<UploadModal onClose={onClose} onUploadComplete={onUploadComplete} />);
+    render(<UploadModal onClose={onClose} onUploadComplete={onUploadComplete} />);
 
     const zip = new JSZip();
     zip.file('a.dcm', new Uint8Array([1]));
@@ -49,7 +50,7 @@ describe('UploadModal', () => {
     const blob = await zip.generateAsync({ type: 'blob' });
     const zipFile = new File([blob], 'scans.zip', { type: 'application/zip' });
 
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const input = document.body.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(input, { target: { files: [zipFile] } });
 
     const importButton = screen.getByRole('button', { name: /^import$/i });

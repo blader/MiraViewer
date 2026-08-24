@@ -14,6 +14,16 @@ export type MindDescriptor2D = {
   validCenters: Uint8Array;
 };
 
+/** Serial candidate scratch. Descriptor values are ephemeral until the next use of this scratch. */
+export type MindDescriptorScratch = {
+  size: number;
+  squaredDifferences: Float32Array;
+  horizontalConvolution: Float32Array;
+  patchDistances: Float32Array;
+  values: Float32Array;
+  validCenters: Uint8Array;
+};
+
 export type MindAgreement = {
   /** Fixed-reference-denominator agreement in [0, 1]; higher is better. */
   score: number;
@@ -40,10 +50,21 @@ const PATCH_RADIUS = 1;
 const CARDINAL_CHANNEL_COUNT = 4;
 const MIN_LOCAL_VARIATION = 1e-6;
 
-function defaultOffsets(): readonly MindOffset2D[] {
-  return Object.freeze(
-    DIRECTIONS.map(([dx, dy]) => Object.freeze({ dx, dy })),
-  );
+const DEFAULT_OFFSETS: readonly MindOffset2D[] = Object.freeze(DIRECTIONS.map(([dx, dy]) => Object.freeze({ dx, dy })));
+
+export function createMindDescriptorScratch(size: number): MindDescriptorScratch {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error('createMindDescriptorScratch: size must be a positive integer');
+  }
+  const centers = size * size;
+  return {
+    size,
+    squaredDifferences: new Float32Array(centers),
+    horizontalConvolution: new Float32Array(centers),
+    patchDistances: new Float32Array(centers * DEFAULT_OFFSETS.length),
+    values: new Float32Array(centers * DEFAULT_OFFSETS.length),
+    validCenters: new Uint8Array(centers),
+  };
 }
 
 function assertImageShape(pixels: Float32Array, size: number): void {
@@ -63,10 +84,7 @@ function finitePixel(pixels: Float32Array, index: number): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function descriptorFootprintRadius(
-  patchRadius: number,
-  offsets: readonly MindOffset2D[],
-): number {
+function descriptorFootprintRadius(patchRadius: number, offsets: readonly MindOffset2D[]): number {
   let maximumOffset = 0;
   for (const offset of offsets) {
     maximumOffset = Math.max(maximumOffset, Math.abs(offset.dx), Math.abs(offset.dy));
@@ -74,10 +92,7 @@ function descriptorFootprintRadius(
   return patchRadius + maximumOffset;
 }
 
-function assertDescriptorSelfConsistent(
-  descriptor: MindDescriptor2D,
-  label: string,
-): void {
+function assertDescriptorSelfConsistent(descriptor: MindDescriptor2D, label: string): void {
   if (
     !Number.isInteger(descriptor.size) ||
     descriptor.size <= 0 ||
@@ -98,10 +113,7 @@ function assertDescriptorSelfConsistent(
       throw new Error(`${label} descriptor layout is inconsistent`);
     }
   }
-  if (
-    descriptor.footprintRadius !==
-    descriptorFootprintRadius(descriptor.patchRadius, descriptor.offsets)
-  ) {
+  if (descriptor.footprintRadius !== descriptorFootprintRadius(descriptor.patchRadius, descriptor.offsets)) {
     throw new Error(`${label} descriptor layout is inconsistent`);
   }
 
@@ -127,26 +139,28 @@ function sameDescriptorLayout(a: MindDescriptor2D, b: MindDescriptor2D): boolean
     a.validCenters.length === a.size * a.size &&
     b.validCenters.length === b.size * b.size &&
     a.offsets.length === b.offsets.length &&
-    a.offsets.every(
-      (offset, index) =>
-        offset.dx === b.offsets[index]?.dx && offset.dy === b.offsets[index]?.dy,
-    )
+    a.offsets.every((offset, index) => offset.dx === b.offsets[index]?.dx && offset.dy === b.offsets[index]?.dy)
   );
 }
 
 export function computeMindDescriptor2D(
   pixels: Float32Array,
   size: number,
+  scratch?: MindDescriptorScratch,
 ): MindDescriptor2D {
   assertImageShape(pixels, size);
+  if (scratch && scratch.size !== size) {
+    throw new Error('computeMindDescriptor2D: scratch dimensions do not match the image');
+  }
 
-  const offsets = defaultOffsets();
+  const offsets = DEFAULT_OFFSETS;
   const channelCount = offsets.length;
   const centerCount = size * size;
   const footprintRadius = descriptorFootprintRadius(PATCH_RADIUS, offsets);
-  const squaredDifferences = new Float32Array(centerCount);
-  const horizontalConvolution = new Float32Array(centerCount);
-  const patchDistances = new Float32Array(centerCount * channelCount);
+  const squaredDifferences = scratch?.squaredDifferences ?? new Float32Array(centerCount);
+  const horizontalConvolution = scratch?.horizontalConvolution ?? new Float32Array(centerCount);
+  const patchDistances = scratch?.patchDistances ?? new Float32Array(centerCount * channelCount);
+  patchDistances.fill(0);
 
   for (let channel = 0; channel < channelCount; channel++) {
     const { dx, dy } = offsets[channel];
@@ -190,8 +204,10 @@ export function computeMindDescriptor2D(
     }
   }
 
-  const values = new Float32Array(centerCount * channelCount);
-  const validCenters = new Uint8Array(centerCount);
+  const values = scratch?.values ?? new Float32Array(centerCount * channelCount);
+  const validCenters = scratch?.validCenters ?? new Uint8Array(centerCount);
+  values.fill(0);
+  validCenters.fill(0);
   for (let y = footprintRadius; y < size - footprintRadius; y++) {
     const row = y * size;
     for (let x = footprintRadius; x < size - footprintRadius; x++) {
@@ -207,9 +223,7 @@ export function computeMindDescriptor2D(
       const outputOffset = index * channelCount;
       let maximumResponse = 0;
       for (let channel = 0; channel < channelCount; channel++) {
-        const response = Math.exp(
-          -patchDistances[channel * centerCount + index] / varianceScale,
-        );
+        const response = Math.exp(-patchDistances[channel * centerCount + index] / varianceScale);
         values[outputOffset + channel] = response;
         maximumResponse = Math.max(maximumResponse, response);
       }
@@ -249,21 +263,13 @@ export function scoreMindDescriptorAgreement(
 
   const centerCount = reference.size * reference.size;
   if (referenceWeights.length !== centerCount) {
-    throw new Error(
-      `reference weights length mismatch: expected ${centerCount}, got ${referenceWeights.length}`,
-    );
+    throw new Error(`reference weights length mismatch: expected ${centerCount}, got ${referenceWeights.length}`);
   }
   if (candidateValidity.length !== centerCount) {
-    throw new Error(
-      `candidate validity length mismatch: expected ${centerCount}, got ${candidateValidity.length}`,
-    );
+    throw new Error(`candidate validity length mismatch: expected ${centerCount}, got ${candidateValidity.length}`);
   }
 
-  const erodedValidity = erodeFractionalSupportSquare(
-    candidateValidity,
-    reference.size,
-    reference.footprintRadius,
-  );
+  const erodedValidity = erodeFractionalSupportSquare(candidateValidity, reference.size, reference.footprintRadius);
   let totalReferenceWeight = 0;
   let agreementSum = 0;
   let distanceSumObserved = 0;
@@ -284,8 +290,7 @@ export function scoreMindDescriptorAgreement(
     let distanceSum = 0;
     for (let channel = 0; channel < reference.channelCount; channel++) {
       distanceSum += Math.abs(
-        reference.values[descriptorOffset + channel] -
-          candidate.values[descriptorOffset + channel],
+        reference.values[descriptorOffset + channel] - candidate.values[descriptorOffset + channel],
       );
     }
     const channelDistance = distanceSum / reference.channelCount;
@@ -297,8 +302,7 @@ export function scoreMindDescriptorAgreement(
 
   return {
     score: totalReferenceWeight > 0 ? agreementSum / totalReferenceWeight : 0,
-    meanDistance:
-      coverageNumerator > 0 ? distanceSumObserved / coverageNumerator : 1,
+    meanDistance: coverageNumerator > 0 ? distanceSumObserved / coverageNumerator : 1,
     coverageNumerator,
   };
 }

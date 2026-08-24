@@ -35,7 +35,7 @@ import {
   buildSeriesSamples,
   mat3FromEulerXYZ,
   optimizeRigidNcc,
-  scoreNcc,
+  scoreBidirectionalNcc,
   type BoundsMm,
   type LoadedSlice,
 } from './rigidRegistration';
@@ -229,10 +229,12 @@ async function rigidAlignSeriesInRoi(params: {
       laplacianWeight: 0,
     };
 
+    const refOccupancy = new Uint8Array(scoreGrid.dims.nx * scoreGrid.dims.ny * scoreGrid.dims.nz);
     const refVol = await reconstructVolumeFromSlices({
       slices: otherSlices,
       grid: refGrid,
       options: refOptions,
+      occupancy: refOccupancy,
       hooks: {
         signal,
         yieldToMain,
@@ -242,16 +244,36 @@ async function rigidAlignSeriesInRoi(params: {
     // Extract samples from the moving series within the ROI bounds.
     const samples = buildSeriesSamples({ slices: movingSlices, roiBounds: roiBounds, maxSamples: 40_000, signal });
 
-    if (samples.count < 1024) {
+    const referenceSamples = buildSeriesSamples({ slices: otherSlices, roiBounds, maxSamples: 40_000, signal });
+
+    if (samples.count < 1024 || referenceSamples.count < 1024) {
       console.warn('[svr] ROI rigid alignment: too few samples inside ROI; skipping series', {
         seriesUid: uid,
         label: labelByUid.get(uid) ?? uid,
         samples: samples.count,
+        referenceSamples: referenceSamples.count,
       });
       continue;
     }
 
-    const before = scoreNcc({
+    const movingOccupancy = new Uint8Array(refOccupancy.length);
+    const movingVolume = await reconstructVolumeFromSlices({
+      slices: movingSlices,
+      grid: refGrid,
+      options: refOptions,
+      occupancy: movingOccupancy,
+      hooks: { signal, yieldToMain },
+    });
+    const reverse = {
+      samples: referenceSamples,
+      refVolume: movingVolume,
+      dims: scoreGrid.dims,
+      originMm: scoreGrid.originMm,
+      voxelSizeMm: scoreGrid.voxelSizeMm,
+      occupancy: movingOccupancy,
+    };
+
+    const before = scoreBidirectionalNcc({
       samples,
       refVolume: refVol,
       dims: scoreGrid.dims,
@@ -259,6 +281,8 @@ async function rigidAlignSeriesInRoi(params: {
       voxelSizeMm: scoreGrid.voxelSizeMm,
       centerMm,
       rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      occupancy: refOccupancy,
+      reverse,
     });
 
     const opt = await optimizeRigidNcc({
@@ -269,9 +293,11 @@ async function rigidAlignSeriesInRoi(params: {
       voxelSizeMm: scoreGrid.voxelSizeMm,
       centerMm,
       signal,
+      occupancy: refOccupancy,
+      reverse,
     });
 
-    const after = scoreNcc({
+    const after = scoreBidirectionalNcc({
       samples,
       refVolume: refVol,
       dims: scoreGrid.dims,
@@ -279,6 +305,8 @@ async function rigidAlignSeriesInRoi(params: {
       voxelSizeMm: scoreGrid.voxelSizeMm,
       centerMm,
       rigid: opt.best,
+      occupancy: refOccupancy,
+      reverse,
     });
 
     // Only apply if the score actually improved.
@@ -572,9 +600,9 @@ export async function computeSvrFromLoadedSlices(params: {
 
   // 2) Optional coarse inter-series alignment.
   //
-  // Note: roi-rigid builds on top of bounds-center as a cheap initial guess.
-  const wantsBoundsCenter =
-    svrParams.seriesRegistrationMode === 'bounds-center' || svrParams.seriesRegistrationMode === 'roi-rigid';
+  // Bounding-box centers are not anatomical landmarks: a valid partial-FOV
+  // acquisition must keep its DICOM position unless the user explicitly opts in.
+  const wantsBoundsCenter = svrParams.seriesRegistrationMode === 'bounds-center';
 
   if (wantsBoundsCenter) {
     onProgress?.({ phase: 'initializing', current: 52, total: 100, message: 'Coarse series alignment…' });
@@ -771,7 +799,7 @@ export async function computeSvrFromLoadedSlices(params: {
   // computed in the same coordinate frame we will use for the final reconstruction.
   if (svrParams.seriesRegistrationMode === 'roi-rigid') {
     if (!roi) {
-      console.info('[svr] roi-rigid requested but no ROI provided; falling back to bounds-center only');
+      console.info('[svr] roi-rigid requested without an ROI; preserving source DICOM geometry');
     } else {
       onProgress?.({ phase: 'initializing', current: 56, total: 100, message: 'ROI rigid alignment…' });
       await rigidAlignSeriesInRoi({

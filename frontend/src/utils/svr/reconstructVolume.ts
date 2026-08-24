@@ -3,8 +3,9 @@ import { getDB } from '../../db/db';
 import type { DicomInstance } from '../../db/schema';
 import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../../types/svr';
 import { getSortedSopInstanceUidsForSeries } from '../localApi';
+import { loadCornerstoneImage } from '../decodedFrame';
 import type { SliceGeometry } from './dicomGeometry';
-import { getSliceGeometryFromInstance } from './dicomGeometry';
+import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
 import { resample2dAreaAverage, resample2dLanczos3 } from './resample2d';
 import { dot } from './vec3';
@@ -111,7 +112,7 @@ async function loadSeriesSlices(params: {
 
     // Decode pixels via Cornerstone (uses our miradb: loader + codecs).
     const imageId = `miradb:${sopInstanceUid}`;
-    const image = await cornerstone.loadImage(imageId);
+    const image = await loadCornerstoneImage(imageId);
 
     const getPixelData = (image as unknown as { getPixelData?: () => ArrayLike<number> }).getPixelData;
     if (typeof getPixelData !== 'function') {
@@ -143,15 +144,6 @@ async function loadSeriesSlices(params: {
       }
     }
 
-    // Best-effort: drop the decoded DICOM image from Cornerstone's global image cache.
-    // SVR decoding loads many slices; letting them accumulate in the cache can cause large
-    // memory spikes and crashes, especially in power-user runs.
-    try {
-      cornerstone.imageCache?.removeImageLoadObject?.(imageId);
-    } catch {
-      // Ignore.
-    }
-
     // Sample intensities deterministically for robust global normalization.
     if (intensitySamples.length < maxIntensitySamples) {
       const stride = Math.max(1, Math.floor(down.length / perSliceTarget));
@@ -176,12 +168,13 @@ async function loadSeriesSlices(params: {
       colSpacingMm: geom.colSpacingMm,
       sliceThicknessMm,
       spacingBetweenSlicesMm,
-      ippMm: geom.ippMm,
+      ippMm: downsampledSliceOriginMm(geom, dsRows, dsCols),
       rowDir: geom.rowDir,
       colDir: geom.colDir,
       normalDir: geom.normalDir,
       rowSpacingDsMm,
       colSpacingDsMm,
+      frameOfReferenceUid: inst.frameOfReferenceUid,
     });
 
     if (i % 8 === 0) {

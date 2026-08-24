@@ -7,6 +7,7 @@ import { useGridLayout } from '../src/hooks/useGridLayout';
 import { usePanelSettings } from '../src/hooks/usePanelSettings';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { ComparisonData, SeriesRef } from '../src/types/api';
+import { savePanelSettings } from '../src/utils/localApi';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn().mockResolvedValue({}),
@@ -58,7 +59,7 @@ describe('useOverlayNavigation', () => {
   it('hydrates view mode, selected date, and play speed from storage', async () => {
     localStorage.setItem(
       'miraviewer:overlay-nav:v1',
-      JSON.stringify({ viewMode: 'overlay', overlayDate: '2024-02-01', playSpeed: 250 })
+      JSON.stringify({ viewMode: 'overlay', overlayDate: '2024-02-01', playSpeed: 250 }),
     );
 
     const ref1: SeriesRef = { study_id: 's1', series_uid: 'a', instance_count: 1 };
@@ -139,6 +140,30 @@ describe('useOverlayNavigation', () => {
     });
     expect(result.current.displayedOverlayIndex).toBe(2);
   });
+
+  it('blocks overlay keyboard shortcuts and playback while a modal owns interaction', () => {
+    const columns = [
+      { date: 'first', ref: { study_id: 'one', series_uid: 'one', instance_count: 2 } },
+      { date: 'second', ref: { study_id: 'two', series_uid: 'two', instance_count: 2 } },
+    ];
+    const { result, rerender } = renderHook(
+      ({ blocked }) => useOverlayNavigation(columns, { interactionBlocked: blocked }),
+      { initialProps: { blocked: false } },
+    );
+
+    act(() => {
+      result.current.setViewMode('overlay');
+      result.current.setIsPlaying(true);
+    });
+    rerender({ blocked: true });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    });
+
+    expect(result.current.overlayDateIndex).toBe(0);
+    expect(result.current.isPlaying).toBe(false);
+  });
 });
 
 describe('useWheelNavigation', () => {
@@ -197,6 +222,46 @@ describe('usePanelSettings', () => {
     });
     // If no errors, debounce path executed.
     expect(result.current.progress).toBe(0.4);
+    unmount();
+  });
+
+  it('exposes a failed durable settings write instead of reporting silent success', async () => {
+    vi.mocked(savePanelSettings).mockRejectedValueOnce(new Error('IndexedDB quota exceeded'));
+    const { result, unmount } = renderHook(() => usePanelSettings('seq-1', '2024-01-01'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.updatePanelSetting('2024-01-01', { brightness: 140 });
+      await Promise.resolve();
+    });
+
+    expect(result.current.persistenceError).toMatch(/quota exceeded/i);
+    unmount();
+  });
+
+  it('undoes incrementally arriving alignment results as one producing-run operation', async () => {
+    const { result, unmount } = renderHook(() => usePanelSettings('seq-1', '2024-01-01,2024-02-01'));
+    await act(async () => {});
+
+    act(() => {
+      result.current.batchUpdateSettings(
+        new Map([['2024-01-01', { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 }]]),
+        'alignment-run-1',
+      );
+    });
+    act(() => {
+      result.current.batchUpdateSettings(
+        new Map([['2024-02-01', { ...DEFAULT_PANEL_SETTINGS, zoom: 2 }]]),
+        'alignment-run-1',
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+    });
+
+    expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1);
+    expect(result.current.panelSettings.get('2024-02-01')?.zoom).toBe(1);
     unmount();
   });
 });

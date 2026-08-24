@@ -1,8 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import {
-  computeMindDescriptor2D,
-  scoreMindDescriptorAgreement,
-} from '../src/utils/mindDescriptor';
+import { computeMindDescriptor2D, scoreMindDescriptorAgreement } from '../src/utils/mindDescriptor';
 import {
   choosePerceptualWinner,
   normalizePerceptualSource,
@@ -66,10 +63,7 @@ function rankScale(
   };
 }
 
-function makeTenCandidateRankSet(
-  structuralPositions: readonly number[],
-  appearancePositions: readonly number[],
-) {
+function makeTenCandidateRankSet(structuralPositions: readonly number[], appearancePositions: readonly number[]) {
   return structuralPositions.map((structuralPosition, index) => {
     const structuralScore = structuralPosition / 9;
     const appearanceScore = (appearancePositions[index] ?? 0) / 9;
@@ -92,19 +86,29 @@ function makeTenCandidateRankSet(
 }
 
 describe('perceptual slice scoring', () => {
+  test('retains anatomical contrast after a signed modality intercept shifts every pixel below zero', () => {
+    const size = 32;
+    const labels = makeTissueLabelPhantom(size);
+    const positive = renderTissueContrast(labels, REFERENCE_CONTRAST);
+    const signed = Float32Array.from(positive, (value) => value * 500 - 1024);
+
+    const normalizedPositive = normalizePerceptualSource(positive, size);
+    const normalizedSigned = normalizePerceptualSource(signed, size);
+
+    expect(normalizedSigned.some((value) => value > 0)).toBe(true);
+    let maximumDifference = 0;
+    for (let index = 0; index < normalizedSigned.length; index++) {
+      maximumDifference = Math.max(maximumDifference, Math.abs(normalizedSigned[index] - normalizedPositive[index]));
+    }
+    expect(maximumDifference).toBeLessThan(1e-6);
+  });
+
   test.each([
-    [
-      'nonfunctional LUT',
-      (labels: Uint8Array) =>
-        renderTissueContrast(labels, NONFUNCTIONAL_CONTRAST),
-    ],
+    ['nonfunctional LUT', (labels: Uint8Array) => renderTissueContrast(labels, NONFUNCTIONAL_CONTRAST)],
     [
       'gamma remap',
       (labels: Uint8Array) =>
-        remapForeground(
-          renderTissueContrast(labels, REFERENCE_CONTRAST),
-          (value) => value ** 2.2,
-        ),
+        remapForeground(renderTissueContrast(labels, REFERENCE_CONTRAST), (value) => value ** 2.2),
     ],
     [
       'sigmoid remap',
@@ -114,52 +118,31 @@ describe('perceptual slice scoring', () => {
           (value) => 1 / (1 + Math.exp(-10 * (value - 0.5))),
         ),
     ],
-  ])(
-    'MIND preserves matching local structure under %s',
-    (_name, renderCandidate) => {
-      const size = 64;
-      const labels = makeTissueLabelPhantom(size);
-      const reference = normalizePerceptualSource(
-        renderTissueContrast(labels, REFERENCE_CONTRAST),
-        size,
-      );
-      const matching = normalizePerceptualSource(renderCandidate(labels), size);
-      const wrong = normalizePerceptualSource(
-        renderTissueContrast(
-          relocateInternalStructures(labels, size),
-          REFERENCE_CONTRAST,
-        ),
-        size,
-      );
-      const validity = new Float32Array(size * size).fill(1);
-      const prepared = preparePerceptualReference(reference, size, {
-        scales: [64, 32],
-      });
+  ])('MIND preserves matching local structure under %s', (_name, renderCandidate) => {
+    const size = 64;
+    const labels = makeTissueLabelPhantom(size);
+    const reference = normalizePerceptualSource(renderTissueContrast(labels, REFERENCE_CONTRAST), size);
+    const matching = normalizePerceptualSource(renderCandidate(labels), size);
+    const wrong = normalizePerceptualSource(
+      renderTissueContrast(relocateInternalStructures(labels, size), REFERENCE_CONTRAST),
+      size,
+    );
+    const validity = new Float32Array(size * size).fill(1);
+    const prepared = preparePerceptualReference(reference, size, {
+      scales: [64, 32],
+    });
 
-      const matchScore = scoreAlignedCandidate(
-        prepared,
-        matching,
-        validity,
-        size,
-      );
-      const wrongScore = scoreAlignedCandidate(prepared, wrong, validity, size);
+    const matchScore = scoreAlignedCandidate(prepared, matching, validity, size);
+    const wrongScore = scoreAlignedCandidate(prepared, wrong, validity, size);
 
-      expect(matchScore.perScale.map((scale) => scale.size)).toEqual([64, 32]);
-      expect(
-        matchScore.perScale.every(
-          (scale) =>
-            Number.isFinite(scale.mind) &&
-            Number.isFinite(scale.rawMindDistance),
-        ),
-      ).toBe(true);
-      expect(
-        matchScore.perScale.every(
-          (scale, index) =>
-            scale.mind > (wrongScore.perScale[index]?.mind ?? 1),
-        ),
-      ).toBe(true);
-    },
-  );
+    expect(matchScore.perScale.map((scale) => scale.size)).toEqual([64, 32]);
+    expect(
+      matchScore.perScale.every((scale) => Number.isFinite(scale.mind) && Number.isFinite(scale.rawMindDistance)),
+    ).toBe(true);
+    expect(matchScore.perScale.every((scale, index) => scale.mind > (wrongScore.perScale[index]?.mind ?? 1))).toBe(
+      true,
+    );
+  });
 
   test('matches direct MIND descriptor agreement at one scale', () => {
     const size = 32;
@@ -178,10 +161,7 @@ describe('perceptual slice scoring', () => {
     );
 
     expect(score.perScale[0].mind).toBeCloseTo(direct.score, 10);
-    expect(score.perScale[0].rawMindDistance).toBeCloseTo(
-      direct.meanDistance,
-      10,
-    );
+    expect(score.perScale[0].rawMindDistance).toBeCloseTo(direct.meanDistance, 10);
   });
 
   test('excluded high-contrast pathology cannot change the source-space normalization basis', () => {
@@ -396,18 +376,9 @@ describe('perceptual slice scoring', () => {
     const exact = scoreAlignedCandidate(prepared, reference, validity, size);
     const changedScore = scoreAlignedCandidate(prepared, changed, validity, size);
 
-    expect(changedScore.perScale[0].contrastStructure).toBeCloseTo(
-      exact.perScale[0].contrastStructure,
-      6,
-    );
-    expect(changedScore.perScale[0].lncc).toBeCloseTo(
-      exact.perScale[0].lncc,
-      6,
-    );
-    expect(changedScore.perScale[0].ngf).toBeCloseTo(
-      exact.perScale[0].ngf,
-      6,
-    );
+    expect(changedScore.perScale[0].contrastStructure).toBeCloseTo(exact.perScale[0].contrastStructure, 6);
+    expect(changedScore.perScale[0].lncc).toBeCloseTo(exact.perScale[0].lncc, 6);
+    expect(changedScore.perScale[0].ngf).toBeCloseTo(exact.perScale[0].ngf, 6);
   });
 
   test('dilates the exclusion beyond the MIND descriptor footprint', () => {
@@ -431,10 +402,7 @@ describe('perceptual slice scoring', () => {
     const exact = scoreAlignedCandidate(prepared, reference, validity, size);
     const changedScore = scoreAlignedCandidate(prepared, changed, validity, size);
 
-    expect(changedScore.perScale[0].mind).toBeCloseTo(
-      exact.perScale[0].mind,
-      6,
-    );
+    expect(changedScore.perScale[0].mind).toBeCloseTo(exact.perScale[0].mind, 6);
   });
 });
 
@@ -464,7 +432,7 @@ describe('rankFixedCandidateSet', () => {
           },
         },
       ],
-      1
+      1,
     );
 
     expect(ranked[0].appearanceRank).toBeCloseTo(1 / 3, 10);
@@ -514,9 +482,7 @@ describe('rankFixedCandidateSet', () => {
       5,
     );
 
-    expect(
-      ranked.find((candidate) => candidate.index === 4)?.perceptualRank,
-    ).toBeGreaterThan(
+    expect(ranked.find((candidate) => candidate.index === 4)?.perceptualRank).toBeGreaterThan(
       ranked.find((candidate) => candidate.index === 5)?.perceptualRank ?? 0,
     );
   });
@@ -608,11 +574,7 @@ describe('rankFixedCandidateSet', () => {
       5,
     );
 
-    expect(ranked.map((candidate) => candidate.perceptualRank)).toEqual([
-      1 / 3,
-      5 / 6,
-      1 / 3,
-    ]);
+    expect(ranked.map((candidate) => candidate.perceptualRank)).toEqual([1 / 3, 5 / 6, 1 / 3]);
     expect(
       ranked.every(
         (candidate) =>
@@ -627,17 +589,11 @@ describe('rankFixedCandidateSet', () => {
   test('enforces the 0.25 structure-lead boundary with ten unique midranks', () => {
     const appearancePositions = [1, 2, 3, 4, 0, 9, 5, 6, 7, 8];
     const clearStructure = rankFixedCandidateSet(
-      makeTenCandidateRankSet(
-        [0, 1, 2, 3, 7, 4, 5, 6, 8, 9],
-        appearancePositions,
-      ),
+      makeTenCandidateRankSet([0, 1, 2, 3, 7, 4, 5, 6, 8, 9], appearancePositions),
       5,
     );
     const closeStructure = rankFixedCandidateSet(
-      makeTenCandidateRankSet(
-        [0, 1, 2, 3, 5, 4, 6, 7, 8, 9],
-        appearancePositions,
-      ),
+      makeTenCandidateRankSet([0, 1, 2, 3, 5, 4, 6, 7, 8, 9], appearancePositions),
       4,
     );
 
@@ -654,16 +610,11 @@ describe('rankFixedCandidateSet', () => {
     expect(clear.perceptualRank).toBeCloseTo(0.61, 10);
     expect(appearanceFavored.perceptualRank).toBeCloseTo(0.55, 10);
     expect(clear.perceptualRank).toBeGreaterThan(appearanceFavored.perceptualRank);
-    expect(
-      choosePerceptualWinner([clear, appearanceFavored], 5).index,
-    ).toBe(4);
+    expect(choosePerceptualWinner([clear, appearanceFavored], 5).index).toBe(4);
     expect(
       clearStructure.every(
         (candidate) =>
-          candidate.mindActive &&
-          candidate.boundaryActive &&
-          candidate.structuralActive &&
-          candidate.appearanceActive,
+          candidate.mindActive && candidate.boundaryActive && candidate.structuralActive && candidate.appearanceActive,
       ),
     ).toBe(true);
 
@@ -675,12 +626,8 @@ describe('rankFixedCandidateSet', () => {
     expect(closeAppearanceFavored.appearanceRank).toBeCloseTo(0.95, 10);
     expect(close.perceptualRank).toBeCloseTo(0.45, 10);
     expect(closeAppearanceFavored.perceptualRank).toBeCloseTo(0.55, 10);
-    expect(closeAppearanceFavored.perceptualRank).toBeGreaterThan(
-      close.perceptualRank,
-    );
-    expect(
-      choosePerceptualWinner([close, closeAppearanceFavored], 4).index,
-    ).toBe(5);
+    expect(closeAppearanceFavored.perceptualRank).toBeGreaterThan(close.perceptualRank);
+    expect(choosePerceptualWinner([close, closeAppearanceFavored], 4).index).toBe(5);
   });
 
   test('balances structural families after averaging active scales within each family', () => {
@@ -719,10 +666,7 @@ describe('rankFixedCandidateSet', () => {
 
     expect(candidate.mindRank).toBeCloseTo((0.875 + 0.625 + 0.375) / 3, 10);
     expect(candidate.boundaryRank).toBeCloseTo(0.125, 10);
-    expect(candidate.structuralRank).toBeCloseTo(
-      (candidate.mindRank + candidate.boundaryRank) / 2,
-      10,
-    );
+    expect(candidate.structuralRank).toBeCloseTo((candidate.mindRank + candidate.boundaryRank) / 2, 10);
     expect(candidate.structuralRank).toBeCloseTo(0.375, 10);
     expect(candidate.mindActive).toBe(true);
     expect(candidate.boundaryActive).toBe(true);
@@ -766,8 +710,6 @@ describe('choosePerceptualWinner', () => {
   });
 
   test('rejects an empty fine-candidate universe', () => {
-    expect(() => choosePerceptualWinner([], 5)).toThrow(
-      'Align All produced no fine slice candidates',
-    );
+    expect(() => choosePerceptualWinner([], 5)).toThrow('Align All produced no fine slice candidates');
   });
 });

@@ -3,6 +3,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { useApplyAlignmentResults } from '../src/hooks/useApplyAlignmentResults';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { AlignmentResult, ComparisonData, PanelSettings } from '../src/types/api';
+import * as localApi from '../src/utils/localApi';
+import { clearDerivedAlignmentFrames } from '../src/utils/derivedAlignmentFrame';
 
 describe('useApplyAlignmentResults', () => {
   it('applies alignment results and preserves reverseSliceOrder (adjusting offset)', async () => {
@@ -60,7 +62,7 @@ describe('useApplyAlignmentResults', () => {
         data,
         selectedSeqId: seqId,
         batchUpdateSettings,
-      })
+      }),
     );
 
     await waitFor(() => {
@@ -135,7 +137,7 @@ describe('useApplyAlignmentResults', () => {
         }),
       {
         initialProps: { results: alignmentResults },
-      }
+      },
     );
 
     await waitFor(() => {
@@ -150,5 +152,129 @@ describe('useApplyAlignmentResults', () => {
     await waitFor(() => {
       expect(batchUpdateSettings).not.toHaveBeenCalled();
     });
+  });
+
+  it.each([
+    { label: 'a changed sequence', result: { sequenceId: 'different-sequence' } },
+    { label: 'a changed patient', result: { patientKey: 'patient-b' } },
+    { label: 'a replaced dataset', result: { datasetRevision: 8 } },
+    { label: 'a different target series', result: { seriesUid: 'different-series' } },
+    { label: 'an ambiguous registration', result: { outcome: 'ambiguous' as const } },
+    { label: 'insufficient physical overlap', result: { outcome: 'insufficient-overlap' as const } },
+  ])('does not apply stale or unsafe results from $label', ({ result }) => {
+    const date = '2024-01-01';
+    const sequenceId = 'sequence-a';
+    const data: ComparisonData = {
+      planes: ['Axial'],
+      dates: [date],
+      sequences: [],
+      selected_patient_key: 'patient-a',
+      dataset_revision: 7,
+      series_map: {
+        [sequenceId]: {
+          [date]: {
+            study_id: 'study-a',
+            series_uid: 'series-a',
+            instance_count: 10,
+            patient_key: 'patient-a',
+          },
+        },
+      },
+    };
+    const batchUpdateSettings = vi.fn();
+
+    renderHook(() =>
+      useApplyAlignmentResults({
+        isAligning: true,
+        alignmentResults: [
+          {
+            date,
+            seriesUid: 'series-a',
+            bestSliceIndex: 2,
+            nmiScore: 1,
+            computedSettings: DEFAULT_PANEL_SETTINGS,
+            slicesChecked: 10,
+            sequenceId,
+            patientKey: 'patient-a',
+            datasetRevision: 7,
+            outcome: 'aligned',
+            ...result,
+          },
+        ],
+        panelSettings: new Map(),
+        data,
+        selectedSeqId: sequenceId,
+        batchUpdateSettings,
+      }),
+    );
+
+    expect(batchUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it('surfaces verified-plane persistence errors instead of claiming aligned anatomy survives restart', async () => {
+    const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockRejectedValue(new Error('Storage quota exceeded'));
+    const date = 'target-date';
+    const sequenceId = 'target-sequence';
+    const reportPersistenceError = vi.fn();
+    const data: ComparisonData = {
+      planes: [],
+      dates: [date],
+      sequences: [],
+      selected_patient_key: 'patient-a',
+      dataset_revision: 7,
+      series_map: {
+        [sequenceId]: {
+          [date]: {
+            study_id: 'target-study',
+            study_uid: 'target-study',
+            series_uid: 'target-series',
+            instance_count: 3,
+            patient_key: 'patient-a',
+          },
+        },
+      },
+    };
+
+    renderHook(() =>
+      useApplyAlignmentResults({
+        isAligning: true,
+        alignmentResults: [
+          {
+            date,
+            seriesUid: 'target-series',
+            bestSliceIndex: 1,
+            nmiScore: 1,
+            computedSettings: DEFAULT_PANEL_SETTINGS,
+            slicesChecked: 3,
+            runId: 'verified-run',
+            patientKey: 'patient-a',
+            sequenceId,
+            datasetRevision: 7,
+            outcome: 'aligned',
+            derivedFrame: {
+              rows: 2,
+              columns: 2,
+              pixels: new Float32Array([1, 2, 3, 4]),
+              sourceImageId: 'miradb:target-sop',
+              targetStudyUid: 'target-study',
+              targetSopInstanceUid: 'target-sop',
+            },
+          },
+        ],
+        panelSettings: new Map(),
+        data,
+        selectedSeqId: sequenceId,
+        batchUpdateSettings: vi.fn(),
+        onPersistenceError: reportPersistenceError,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(reportPersistenceError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Storage quota exceeded' }),
+      );
+    });
+    save.mockRestore();
+    clearDerivedAlignmentFrames();
   });
 });

@@ -165,6 +165,64 @@ describe('DicomViewer', () => {
     expect(screen.queryByText('SSIM: 0.400000')).not.toBeInTheDocument();
   });
 
+  it('shares one debug keyboard listener across every mounted viewer', () => {
+    localStorage.setItem(DEBUG_ALIGNMENT_STORAGE_KEY, '1');
+    const addListener = vi.spyOn(window, 'addEventListener');
+    const removeListener = vi.spyOn(window, 'removeEventListener');
+    const view = render(
+      <>
+        <DicomViewer
+          studyId="study"
+          seriesUid="series"
+          instanceIndex={0}
+          instanceCount={1}
+          onInstanceChange={() => {}}
+          imageUrlOverride="first.png"
+        />
+        <DicomViewer
+          studyId="study"
+          seriesUid="another-series"
+          instanceIndex={0}
+          instanceCount={1}
+          onInstanceChange={() => {}}
+          imageUrlOverride="second.png"
+        />
+      </>,
+    );
+
+    expect(addListener.mock.calls.filter(([type]) => type === 'keydown')).toHaveLength(1);
+    expect(addListener.mock.calls.filter(([type]) => type === 'keyup')).toHaveLength(1);
+
+    view.unmount();
+
+    expect(removeListener.mock.calls.filter(([type]) => type === 'keydown')).toHaveLength(1);
+    expect(removeListener.mock.calls.filter(([type]) => type === 'keyup')).toHaveLength(1);
+    addListener.mockRestore();
+    removeListener.mockRestore();
+  });
+
+  it('ignores diagnostic shortcuts while focus belongs to an input', () => {
+    localStorage.setItem(DEBUG_ALIGNMENT_STORAGE_KEY, '1');
+    recordProductionViewerSliceScore();
+    render(
+      <>
+        <input aria-label="Clinical notes" />
+        <DicomViewer
+          studyId="study"
+          seriesUid="series"
+          instanceIndex={0}
+          instanceCount={1}
+          onInstanceChange={() => {}}
+          imageUrlOverride="test.png"
+        />
+      </>,
+    );
+
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Clinical notes' }), { key: 'z' });
+
+    expect(screen.queryByText('MIND: 0.870000')).not.toBeInTheDocument();
+  });
+
   it('shows flat for explicitly inactive rank families and omits absent final-affine rows', () => {
     localStorage.setItem(DEBUG_ALIGNMENT_STORAGE_KEY, '1');
     recordProductionViewerSliceScore({
@@ -250,7 +308,7 @@ describe('DicomViewer', () => {
         instanceCount={1}
         onInstanceChange={() => {}}
         imageUrlOverride="test.png"
-      />
+      />,
     );
 
     const img = await screen.findByRole('img');
@@ -265,7 +323,7 @@ describe('DicomViewer', () => {
         instanceIndex={0}
         instanceCount={1}
         onInstanceChange={() => {}}
-      />
+      />,
     );
 
     await waitFor(() => {
@@ -286,7 +344,7 @@ describe('DicomViewer', () => {
         onInstanceChange={onInstanceChange}
         onZoomChange={onZoomChange}
         imageUrlOverride="test.png"
-      />
+      />,
     );
 
     const img = await screen.findByRole('img');
@@ -295,6 +353,40 @@ describe('DicomViewer', () => {
 
     expect(ev.defaultPrevented).toBe(true);
     expect(onZoomChange).not.toHaveBeenCalled();
+    expect(onInstanceChange).toHaveBeenCalledWith(1);
+  });
+
+  it('blocks direct slice and zoom wheel gestures while alignment owns the displayed image', async () => {
+    const onZoomChange = vi.fn();
+    const onInstanceChange = vi.fn();
+    const props = {
+      studyId: 'study',
+      seriesUid: 'series',
+      instanceIndex: 0,
+      instanceCount: 3,
+      onInstanceChange,
+      onZoomChange,
+      imageUrlOverride: 'test.png',
+    };
+    const { rerender } = render(<DicomViewer {...props} interactionBlocked />);
+    const image = await screen.findByRole('img');
+
+    const blockedSlice = new WheelEvent('wheel', { deltaY: 100, cancelable: true, bubbles: true });
+    const blockedZoom = new WheelEvent('wheel', {
+      deltaY: -100,
+      metaKey: true,
+      cancelable: true,
+      bubbles: true,
+    });
+    image.dispatchEvent(blockedSlice);
+    image.dispatchEvent(blockedZoom);
+
+    expect(onInstanceChange).not.toHaveBeenCalled();
+    expect(onZoomChange).not.toHaveBeenCalled();
+    expect(blockedSlice.defaultPrevented).toBe(false);
+
+    rerender(<DicomViewer {...props} interactionBlocked={false} />);
+    image.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true, bubbles: true }));
     expect(onInstanceChange).toHaveBeenCalledWith(1);
   });
 
@@ -311,7 +403,7 @@ describe('DicomViewer', () => {
         onZoomChange={onZoomChange}
         imageUrlOverride="test.png"
         zoom={1}
-      />
+      />,
     );
 
     const img = await screen.findByRole('img');
@@ -341,7 +433,7 @@ describe('DicomViewer', () => {
         contrast={100}
         zoom={1}
         rotation={0}
-      />
+      />,
     );
 
     await waitFor(() => {
@@ -367,7 +459,7 @@ describe('DicomViewer', () => {
         contrast={120}
         zoom={2}
         rotation={45}
-      />
+      />,
     );
 
     // The previous image should keep the previous filter/transform until the new image loads.

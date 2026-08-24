@@ -1,7 +1,12 @@
 import dicomParser from 'dicom-parser';
-import { getDB } from '../db/db';
+import { assertStorageHeadroom, DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation } from '../db/db';
 import type { DicomStudy, DicomSeries, DicomInstance } from '../db/schema';
 import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
+import {
+  parseImageOrientationPatient,
+  parseImagePositionPatient,
+  parsePixelSpacingMm,
+} from '../utils/svr/dicomGeometry';
 
 export type DicomIngestResult =
   | { status: 'ingested'; fileName: string; sopInstanceUid: string }
@@ -11,7 +16,12 @@ export type DicomIngestResult =
       fileName: string;
       reason: 'non-dicom-file' | 'non-displayable' | 'missing-uids' | 'secondary-capture';
     }
-  | { status: 'error'; fileName: string; reason: 'parse-error' | 'db-error'; message: string };
+  | {
+      status: 'error';
+      fileName: string;
+      reason: 'parse-error' | 'db-error' | 'unsupported-multiframe';
+      message: string;
+    };
 
 export type ProcessFilesResult = {
   total: number;
@@ -74,52 +84,44 @@ function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   // We therefore try dicom-parser's typed accessors first, and fall back to
   // string parsing only if needed.
 
-  const vr = dataSet.elements?.[tag]?.vr;
+  const knownVr =
+    tag === 'x00280010' || tag === 'x00280011'
+      ? 'US'
+      : tag === 'x00200011' || tag === 'x00200013' || tag === 'x00280008'
+        ? 'IS'
+        : undefined;
+  const vr = dataSet.elements?.[tag]?.vr ?? knownVr;
+  const accessors: Record<string, (() => number | undefined) | undefined> = {
+    DS: () => dataSet.floatString(tag, 0),
+    IS: () => dataSet.intString(tag, 0),
+    US: () => dataSet.uint16(tag, 0),
+    SS: () => dataSet.int16(tag, 0),
+    UL: () => dataSet.uint32(tag, 0),
+    SL: () => dataSet.int32(tag, 0),
+    FL: () => dataSet.float(tag, 0),
+    FD: () => dataSet.double(tag, 0),
+  };
+  const preferred = vr ? accessors[vr] : undefined;
+  const candidates = preferred
+    ? [preferred, accessors.DS, accessors.IS]
+    : [accessors.DS, accessors.IS, accessors.US, accessors.SS, accessors.UL, accessors.SL, accessors.FL, accessors.FD];
 
-  const fromTypedAccessor = (): number | undefined => {
-    switch (vr) {
-      case 'DS':
-        return dataSet.floatString(tag, 0);
-      case 'IS':
-        return dataSet.intString(tag, 0);
-      case 'US':
-        return dataSet.uint16(tag, 0);
-      case 'SS':
-        return dataSet.int16(tag, 0);
-      case 'UL':
-        return dataSet.uint32(tag, 0);
-      case 'SL':
-        return dataSet.int32(tag, 0);
-      case 'FL':
-        return dataSet.float(tag, 0);
-      case 'FD':
-        return dataSet.double(tag, 0);
-      default:
-        return undefined;
+  for (const read of candidates) {
+    if (!read) continue;
+    try {
+      const value = read();
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    } catch {
+      // Malformed optional values must not abort an otherwise valid import.
     }
-  };
-
-  const fromCommonAccessors = (): number | undefined => {
-    // If VR is missing (common in implicit VR transfer syntaxes), try the
-    // most common numeric accessors in a safe order.
-    return (
-      dataSet.floatString(tag, 0) ??
-      dataSet.intString(tag, 0) ??
-      dataSet.uint16(tag, 0) ??
-      dataSet.int16(tag, 0) ??
-      dataSet.uint32(tag, 0) ??
-      dataSet.int32(tag, 0) ??
-      dataSet.float(tag, 0) ??
-      dataSet.double(tag, 0)
-    );
-  };
-
-  const n = fromTypedAccessor() ?? fromCommonAccessors();
-  if (typeof n === 'number' && Number.isFinite(n)) {
-    return n;
   }
 
-  const str = dataSet.string(tag, 0);
+  let str: string | undefined;
+  try {
+    str = dataSet.string(tag, 0);
+  } catch {
+    return 0;
+  }
   if (!str) return 0;
 
   // Handle multi-value strings by taking the first value.
@@ -132,37 +134,13 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function parseMultiNumberString(value: string): number[] {
-  // Multi-valued DICOM tags are typically separated by backslashes.
-  // Some exporters may use spaces/commas; accept those as well.
-  return value
-    .split(/[\\,\s]+/)
-    .filter(Boolean)
-    .map((s) => Number.parseFloat(s))
-    .filter((n) => Number.isFinite(n));
-}
-
 function inferPlaneFromImageOrientationPatient(iop: string): string | undefined {
-  // ImageOrientationPatient (0020,0037) is 6 values: row cosines (3) + column cosines (3).
-  // The slice normal is row x col. Dominant axis of the normal indicates plane.
-  const nums = parseMultiNumberString(iop);
-  if (nums.length < 6) return undefined;
+  const axes = parseImageOrientationPatient(iop);
+  if (!axes) return undefined;
 
-  const r0 = nums[0] ?? 0;
-  const r1 = nums[1] ?? 0;
-  const r2 = nums[2] ?? 0;
-  const c0 = nums[3] ?? 0;
-  const c1 = nums[4] ?? 0;
-  const c2 = nums[5] ?? 0;
-
-  // Cross product r x c
-  const nx = r1 * c2 - r2 * c1;
-  const ny = r2 * c0 - r0 * c2;
-  const nz = r0 * c1 - r1 * c0;
-
-  const ax = Math.abs(nx);
-  const ay = Math.abs(ny);
-  const az = Math.abs(nz);
+  const ax = Math.abs(axes.normalDir.x);
+  const ay = Math.abs(axes.normalDir.y);
+  const az = Math.abs(axes.normalDir.z);
 
   // In DICOM patient coordinates:
   // - Normal ~ X (L/R) => sagittal slices
@@ -173,12 +151,23 @@ function inferPlaneFromImageOrientationPatient(iop: string): string | undefined 
   return 'Axial';
 }
 
+function physicalSlicePosition(orientation: string, position: string): number | undefined {
+  const axes = parseImageOrientationPatient(orientation);
+  const point = parseImagePositionPatient(position);
+  if (!axes || !point) return undefined;
+  const projection = axes.normalDir.x * point.x + axes.normalDir.y * point.y + axes.normalDir.z * point.z;
+  return Number.isFinite(projection) ? projection : undefined;
+}
+
 // DICOM Tags
 const TAGS = {
   PatientName: 'x00100010',
   PatientID: 'x00100020',
+  PatientIDIssuer: 'x00100021',
   StudyInstanceUID: 'x0020000d',
   StudyDate: 'x00080020',
+  StudyTime: 'x00080030',
+  AcquisitionTime: 'x00080032',
   StudyDescription: 'x00081030',
   AccessionNumber: 'x00080050',
   Modality: 'x00080060',
@@ -193,6 +182,8 @@ const TAGS = {
   SOPClassUID: 'x00080016',
   SOPInstanceUID: 'x00080018',
   InstanceNumber: 'x00200013',
+  FrameOfReferenceUID: 'x00200052',
+  NumberOfFrames: 'x00280008',
 
   Rows: 'x00280010',
   Columns: 'x00280011',
@@ -208,12 +199,40 @@ const TAGS = {
 
 // Common non-DICOM file extensions to skip
 const SKIP_EXTENSIONS = new Set([
-  '.txt', '.md', '.json', '.xml', '.html', '.htm', '.css', '.js',
-  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.pdf',
-  '.zip', '.tar', '.gz', '.rar', '.7z',
-  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-  '.log', '.csv', '.ini', '.cfg', '.conf',
-  '.ds_store', '.gitignore', '.gitkeep',
+  '.txt',
+  '.md',
+  '.json',
+  '.xml',
+  '.html',
+  '.htm',
+  '.css',
+  '.js',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.gif',
+  '.bmp',
+  '.tiff',
+  '.pdf',
+  '.zip',
+  '.tar',
+  '.gz',
+  '.rar',
+  '.7z',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.log',
+  '.csv',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.ds_store',
+  '.gitignore',
+  '.gitkeep',
 ]);
 
 function shouldSkipFile(filename: string): boolean {
@@ -229,6 +248,10 @@ function shouldSkipFile(filename: string): boolean {
   if (ext && SKIP_EXTENSIONS.has(ext)) return true;
 
   return false;
+}
+
+export function isDicomCandidate(filename: string): boolean {
+  return !shouldSkipFile(filename);
 }
 
 export async function processDicomFile(file: File): Promise<DicomIngestResult> {
@@ -252,13 +275,13 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
       byteArray[128] === 0x44 && // D
       byteArray[129] === 0x49 && // I
       byteArray[130] === 0x43 && // C
-      byteArray[131] === 0x4D // M
+      byteArray[131] === 0x4d // M
     );
 
     // Parse DICOM
     dataSet = dicomParser.parseDicom(byteArray);
   } catch (err) {
-    console.error('Error parsing DICOM file:', file.name, err);
+    console.error('Failed to parse a DICOM image:', err);
     return { status: 'error', fileName, reason: 'parse-error', message: toErrorMessage(err) };
   }
 
@@ -266,6 +289,16 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   // We do this before writing anything to IndexedDB.
   if (!hasDisplayablePixelData(dataSet)) {
     return { status: 'skipped', fileName, reason: 'non-displayable' };
+  }
+
+  const numberOfFrames = Math.max(1, Math.round(getNumber(dataSet, TAGS.NumberOfFrames)));
+  if (numberOfFrames > 1) {
+    return {
+      status: 'error',
+      fileName,
+      reason: 'unsupported-multiframe',
+      message: `Enhanced multi-frame DICOM (${numberOfFrames} frames) is not supported yet; no incomplete series was imported.`,
+    };
   }
 
   // Secondary Capture (SOPClassUID=1.2.840.10008.5.1.4.1.1.7*) is commonly included in
@@ -283,7 +316,7 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const instanceUid = getText(dataSet, TAGS.SOPInstanceUID);
 
   if (!studyUid || !seriesUid || !instanceUid) {
-    console.warn('Missing UIDs in DICOM file:', file.name);
+    console.warn('A DICOM image is missing required examination identifiers');
     return { status: 'skipped', fileName, reason: 'missing-uids' };
   }
 
@@ -291,9 +324,11 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const study: DicomStudy = {
     studyInstanceUid: studyUid,
     studyDate: getText(dataSet, TAGS.StudyDate),
+    studyTime: getText(dataSet, TAGS.StudyTime) || undefined,
     studyDescription: getText(dataSet, TAGS.StudyDescription) || 'No Description',
     patientName: getText(dataSet, TAGS.PatientName),
     patientId: getText(dataSet, TAGS.PatientID),
+    patientIdIssuer: getText(dataSet, TAGS.PatientIDIssuer) || undefined,
     modality: getText(dataSet, TAGS.Modality),
     accessionNumber: getText(dataSet, TAGS.AccessionNumber),
   };
@@ -308,7 +343,37 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
   // Fallback: derive plane from orientation if text parsing didn't find it.
   const iop = getText(dataSet, TAGS.ImageOrientationPatient);
+  const imagePosition = getText(dataSet, TAGS.ImagePositionPatient);
+  const pixelSpacing = getText(dataSet, TAGS.PixelSpacing);
+  if (iop && !parseImageOrientationPatient(iop)) {
+    return {
+      status: 'error',
+      fileName,
+      reason: 'parse-error',
+      message: 'Invalid DICOM image orientation; the frame cannot be positioned safely.',
+    };
+  }
+  if (imagePosition && !parseImagePositionPatient(imagePosition)) {
+    return {
+      status: 'error',
+      fileName,
+      reason: 'parse-error',
+      message: 'Invalid DICOM image position; the frame cannot be positioned safely.',
+    };
+  }
+  if (pixelSpacing && !parsePixelSpacingMm(pixelSpacing)) {
+    return {
+      status: 'error',
+      fileName,
+      reason: 'parse-error',
+      message: 'Invalid DICOM pixel spacing; the frame cannot be calibrated safely.',
+    };
+  }
+  const frameOfReferenceUid = getText(dataSet, TAGS.FrameOfReferenceUID) || undefined;
+  const acquisitionTime = getText(dataSet, TAGS.AcquisitionTime) || undefined;
   const planeFromOrientation = iop ? inferPlaneFromImageOrientationPatient(iop) : undefined;
+  const rows = getNumber(dataSet, TAGS.Rows);
+  const columns = getNumber(dataSet, TAGS.Columns);
 
   const series: DicomSeries = {
     seriesInstanceUid: seriesUid,
@@ -319,16 +384,20 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
     protocolName: protocolName || undefined,
     sequenceName: sequenceName || undefined,
+    frameOfReferenceUid,
+    acquisitionTime,
+    rows,
+    columns,
+    pixelSpacing: pixelSpacing || undefined,
+    imageOrientationPatient: iop || undefined,
 
-    plane: parsedSeries.plane ?? planeFromOrientation,
+    plane: planeFromOrientation ?? parsedSeries.plane,
     weight: parsedSeries.weight,
     sequenceType: parsedSeries.sequenceType,
   };
 
   // Extract Instance Info
   // Handle multi-value strings for arrays
-  const pixelSpacing = getText(dataSet, TAGS.PixelSpacing); // "row\\col"
-
   // Window Center/Width can be multi-value. `getNumber()` takes the first value.
   const wc = getNumber(dataSet, TAGS.WindowCenter);
   const ww = getNumber(dataSet, TAGS.WindowWidth);
@@ -341,11 +410,15 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     seriesInstanceUid: seriesUid,
     studyInstanceUid: studyUid,
     instanceNumber: getNumber(dataSet, TAGS.InstanceNumber),
-    rows: getNumber(dataSet, TAGS.Rows),
-    columns: getNumber(dataSet, TAGS.Columns),
+    frameOfReferenceUid,
+    acquisitionTime,
+    numberOfFrames,
+    physicalSlicePosition: physicalSlicePosition(iop, imagePosition),
+    rows,
+    columns,
     sliceLocation: getNumber(dataSet, TAGS.SliceLocation),
-    imagePositionPatient: getText(dataSet, TAGS.ImagePositionPatient),
-    imageOrientationPatient: getText(dataSet, TAGS.ImageOrientationPatient),
+    imagePositionPatient: imagePosition,
+    imageOrientationPatient: iop,
     pixelSpacing: pixelSpacing,
     sliceThickness: sliceThickness > 0 ? sliceThickness : undefined,
     spacingBetweenSlices: spacingBetweenSlices > 0 ? spacingBetweenSlices : undefined,
@@ -355,46 +428,89 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
   try {
     const db = await getDB();
-
-    // Duplicate protection: if an instance with this SOPInstanceUID already exists,
-    // don't store it again. This makes uploads idempotent and avoids wasting space.
-    //
-    // Note: Use getKey() so we don't read the whole value (which includes a Blob).
-    const existingKey = await db.getKey('instances', instanceUid);
-    if (existingKey) {
-      // Defensive: make sure study/series exist (these are small records).
-      const hasStudy = await db.getKey('studies', studyUid);
-      if (!hasStudy) await db.put('studies', study);
-
-      const hasSeries = await db.getKey('series', seriesUid);
-      if (!hasSeries) await db.put('series', series);
-
-      return { status: 'duplicate', fileName, sopInstanceUid: instanceUid };
-    }
-
-    // New instance: store study/series + the instance Blob.
-    // We use put() which acts as upsert.
     const instance: DicomInstance = {
       ...instanceBase,
       // Store as Blob to maximize IndexedDB compatibility across browsers.
       fileBlob: new Blob([file], { type: file.type || 'application/dicom' }),
     };
 
-    await db.put('studies', study);
-    await db.put('series', series);
-    await db.put('instances', instance);
+    const tx = db.transaction(['studies', 'series', 'instances', 'app_state'], 'readwrite');
+    const studyStore = tx.objectStore('studies');
+    const seriesStore = tx.objectStore('series');
+    const instanceStore = tx.objectStore('instances');
+    const existingInstance = await instanceStore.get(instanceUid);
+    if (existingInstance) {
+      if (existingInstance.seriesInstanceUid !== seriesUid || existingInstance.studyInstanceUid !== studyUid) {
+        await tx.done;
+        throw new Error('A DICOM instance UID already belongs to a different examination');
+      }
+      await tx.done;
+      return { status: 'duplicate', fileName, sopInstanceUid: instanceUid };
+    }
+
+    const existingStudy = await studyStore.get(studyUid);
+    if (existingStudy?.patientId && study.patientId && existingStudy.patientId !== study.patientId) {
+      await tx.done;
+      throw new Error('A study UID cannot contain more than one patient identity');
+    }
+    if (
+      existingStudy?.patientIdIssuer &&
+      study.patientIdIssuer &&
+      existingStudy.patientIdIssuer !== study.patientIdIssuer
+    ) {
+      await tx.done;
+      throw new Error('A study UID cannot contain more than one patient-identifier issuer');
+    }
+    const existingSeries = await seriesStore.get(seriesUid);
+    if (existingSeries && existingSeries.studyInstanceUid !== studyUid) {
+      await tx.done;
+      throw new Error('A series UID cannot belong to a different examination');
+    }
+    if (
+      existingSeries?.frameOfReferenceUid &&
+      frameOfReferenceUid &&
+      existingSeries.frameOfReferenceUid !== frameOfReferenceUid
+    ) {
+      await tx.done;
+      throw new Error('A series cannot mix incompatible spatial frames of reference');
+    }
+    if (existingSeries?.imageOrientationPatient && iop) {
+      const expectedAxes = parseImageOrientationPatient(existingSeries.imageOrientationPatient);
+      const actualAxes = parseImageOrientationPatient(iop);
+      if (expectedAxes && actualAxes) {
+        const similarity =
+          expectedAxes.normalDir.x * actualAxes.normalDir.x +
+          expectedAxes.normalDir.y * actualAxes.normalDir.y +
+          expectedAxes.normalDir.z * actualAxes.normalDir.z;
+        if (similarity < 0.999) {
+          await tx.done;
+          throw new Error('A series cannot mix incompatible slice orientations');
+        }
+      }
+    }
+
+    await studyStore.put(existingStudy ? { ...study, ...existingStudy } : study);
+    await seriesStore.put(existingSeries ? { ...series, ...existingSeries } : series);
+    await instanceStore.put(instance);
+    const stateStore = tx.objectStore('app_state');
+    const revision = await stateStore.get(DATASET_REVISION_STATE_KEY);
+    const nextRevision = (typeof revision?.value === 'number' ? revision.value : 0) + 1;
+    await stateStore.put({ key: DATASET_REVISION_STATE_KEY, value: nextRevision });
+    await tx.done;
+    notifyDatasetMutation(seriesUid);
 
     return { status: 'ingested', fileName, sopInstanceUid: instanceUid };
   } catch (err) {
-    console.error('Error writing DICOM to IndexedDB:', file.name, err);
+    console.error('Failed to write a DICOM image to local storage:', err);
     return { status: 'error', fileName, reason: 'db-error', message: toErrorMessage(err) };
   }
 }
 
 export async function processFiles(
   files: File[],
-  onProgress?: (current: number, total: number) => void
+  onProgress?: (current: number, total: number) => void,
 ): Promise<ProcessFilesResult> {
+  await assertStorageHeadroom(files.reduce((total, file) => total + file.size, 0));
   const result: ProcessFilesResult = {
     total: files.length,
     ingested: 0,
@@ -406,7 +522,12 @@ export async function processFiles(
 
   let count = 0;
   for (const file of files) {
-    const r = await processDicomFile(file);
+    let r: DicomIngestResult;
+    try {
+      r = await processDicomFile(file);
+    } catch (error) {
+      r = { status: 'error', fileName: basename(file.name), reason: 'parse-error', message: toErrorMessage(error) };
+    }
     if (r.status === 'ingested') result.ingested += 1;
     else if (r.status === 'duplicate') result.duplicates += 1;
     else if (r.status === 'skipped') result.skipped += 1;

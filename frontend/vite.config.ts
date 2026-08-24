@@ -20,10 +20,15 @@ export default defineConfig(() => {
             src: 'node_modules/@itk-wasm/elastix/dist/pipelines/*.{js,wasm,wasm.zst}',
             dest: 'pipelines/',
           },
-          // onnxruntime-web dynamically loads helper .mjs modules + .wasm binaries at runtime.
-          // We vendor these into the output so segmentation can run fully offline.
+          // The production loader imports ort.all.bundle.min.mjs. Its complete dynamic
+          // closure is the JSEP helper and its WASM binary; other ORT entrypoints and
+          // asyncify/base binaries are unused and add over 50 MB to every offline build.
           {
-            src: 'node_modules/onnxruntime-web/dist/ort*.{mjs,wasm}',
+            src: [
+              'node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs',
+              'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs',
+              'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm',
+            ],
             dest: 'onnxruntime/',
           },
         ],
@@ -56,8 +61,8 @@ export default defineConfig(() => {
       strictPort: true,
       // Cross-origin isolation unlocks multithreaded WASM for ONNX inference (see
       // ortLoader.ts, which keys off crossOriginIsolated). Safe here because every runtime
-      // asset (ORT, ITK pipelines, DICOM data) is same-origin; the offline ZIP build is
-      // served without these headers and falls back to single-threaded inference.
+      // asset (ORT, ITK pipelines, DICOM data) is same-origin. The offline launcher sends
+      // the same headers; unisolated custom hosts safely fall back to one WASM thread.
       headers: {
         'Cross-Origin-Opener-Policy': 'same-origin',
         'Cross-Origin-Embedder-Policy': 'require-corp',

@@ -41,8 +41,10 @@ function getUtcDateMs(date: string) {
 }
 
 export function useOverlayNavigation(
-  overlayColumns: { date: string; ref?: SeriesRef }[]
+  overlayColumns: { date: string; ref?: SeriesRef }[],
+  options: { interactionBlocked?: boolean } = {},
 ) {
+  const { interactionBlocked = false } = options;
   const persistedRef = useRef<PersistedOverlayNav>(readPersistedOverlayNav());
 
   const persist = useCallback((update: PersistedOverlayNav) => {
@@ -64,6 +66,15 @@ export function useOverlayNavigation(
 
   // Track spacebar held state for compare feature
   const [spaceHeld, setSpaceHeld] = useState(false);
+
+  useEffect(() => {
+    if (!interactionBlocked) return;
+    const timer = window.setTimeout(() => {
+      setSpaceHeld(false);
+      setIsPlaying(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [interactionBlocked]);
 
   const setViewMode = useCallback((next: 'grid' | 'overlay' | 'svr3d') => {
     setViewModeState(next);
@@ -102,7 +113,7 @@ export function useOverlayNavigation(
         return clamped;
       });
     },
-    [maxOverlayIndex]
+    [maxOverlayIndex],
   );
 
   // Read-only, clamped indices (avoid setState in effects when columns shrink).
@@ -136,9 +147,7 @@ export function useOverlayNavigation(
     }
   }, [overlayColumns, safeOverlayDateIndex]);
   const safePreviousOverlayDateIndex =
-    previousOverlayDateIndex === null
-      ? null
-      : Math.max(0, Math.min(maxOverlayIndex, previousOverlayDateIndex));
+    previousOverlayDateIndex === null ? null : Math.max(0, Math.min(maxOverlayIndex, previousOverlayDateIndex));
 
   // Space-hold compare behavior:
   // - Prefer the actual navigation history (previousOverlayDateIndex)
@@ -177,7 +186,7 @@ export function useOverlayNavigation(
       ? safePreviousOverlayDateIndex
       : fallbackCompareIndex;
 
-  const displayedOverlayIndex = spaceHeld ? compareTargetIndex : safeOverlayDateIndex;
+  const displayedOverlayIndex = spaceHeld && !interactionBlocked ? compareTargetIndex : safeOverlayDateIndex;
 
   // Persist the currently-selected date (not the displayed compare date).
   useEffect(() => {
@@ -193,20 +202,26 @@ export function useOverlayNavigation(
 
   // Auto-play effect for overlay mode
   useEffect(() => {
-    if (!isPlaying || viewMode !== 'overlay' || overlayColumns.length < 2) return;
+    if (interactionBlocked || !isPlaying || viewMode !== 'overlay' || overlayColumns.length < 2) return;
     const interval = setInterval(() => {
       setOverlayDateIndex((prev) => (prev + 1) % overlayColumns.length);
     }, playSpeed);
     return () => clearInterval(interval);
-  }, [isPlaying, viewMode, overlayColumns.length, playSpeed, setOverlayDateIndex]);
-  
+  }, [interactionBlocked, isPlaying, viewMode, overlayColumns.length, playSpeed, setOverlayDateIndex]);
+
   // Keyboard shortcuts for overlay mode
   useEffect(() => {
-    if (viewMode !== 'overlay') return;
+    if (interactionBlocked || viewMode !== 'overlay') return;
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore if focus is on an input, select, or textarea
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA') {
+      const target = e.target instanceof HTMLElement ? e.target : document.body;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'SELECT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('[role="dialog"], [aria-modal="true"]')
+      ) {
         return;
       }
 
@@ -220,11 +235,11 @@ export function useOverlayNavigation(
       }
       // Arrow keys for prev/next
       if (e.key === 'ArrowLeft') {
-        setOverlayDateIndex(prev => Math.max(0, prev - 1));
+        setOverlayDateIndex((prev) => Math.max(0, prev - 1));
         setIsPlaying(false);
       }
       if (e.key === 'ArrowRight') {
-        setOverlayDateIndex(prev => Math.min(overlayColumns.length - 1, prev + 1));
+        setOverlayDateIndex((prev) => Math.min(overlayColumns.length - 1, prev + 1));
         setIsPlaying(false);
       }
       // Space: hold to show comparison target (history previous; otherwise nearest adjacent date)
@@ -237,7 +252,7 @@ export function useOverlayNavigation(
         target.blur();
       }
     };
-    
+
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === ' ') {
         setSpaceHeld(false);
@@ -247,7 +262,7 @@ export function useOverlayNavigation(
     const handleBlur = () => {
       setSpaceHeld(false);
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur);
@@ -256,7 +271,7 @@ export function useOverlayNavigation(
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [viewMode, overlayColumns.length, setOverlayDateIndex]);
+  }, [interactionBlocked, viewMode, overlayColumns.length, setOverlayDateIndex]);
 
   return {
     viewMode,
@@ -267,7 +282,7 @@ export function useOverlayNavigation(
     // when the user holds Space.
     compareTargetIndex,
     displayedOverlayIndex,
-    isPlaying,
+    isPlaying: interactionBlocked ? false : isPlaying,
     setIsPlaying,
     playSpeed,
     setPlaySpeed,

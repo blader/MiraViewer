@@ -255,4 +255,22 @@ describe('svr/computeCore', () => {
       }),
     ).rejects.toThrow('SVR cancelled');
   });
+
+  it('preserves correctly positioned partial-FOV series under the default ROI-rigid mode without an ROI', async () => {
+    const slices = makeAllSlices();
+    const partial = slices.filter((slice) => slice.seriesUid === 's-ax').slice(0, 3);
+    const reference = slices.filter((slice) => slice.seriesUid === 's-cor');
+    const original = partial.map((slice) => ({ ...slice.ippMm }));
+
+    await computeSvrFromLoadedSlices({
+      allSlices: [...reference, ...partial],
+      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+      intensitySamplesBySeries: new Map(),
+      seriesMeta: SERIES_META,
+      svrParams: { ...SVR_PARAMS, seriesRegistrationMode: 'roi-rigid', roi: null, iterations: 0 },
+      debug: false,
+    });
+
+    expect(partial.map((slice) => slice.ippMm)).toEqual(original);
+  });
 });

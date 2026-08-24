@@ -1,9 +1,11 @@
 export interface DicomStudy {
   studyInstanceUid: string;
   studyDate: string; // YYYYMMDD
+  studyTime?: string;
   studyDescription: string;
   patientName: string;
   patientId: string;
+  patientIdIssuer?: string;
   modality: string;
   accessionNumber?: string;
 }
@@ -136,6 +138,8 @@ export interface TumorSegmentationRow {
   meta?: {
     areaPx?: number;
     areaNorm?: number;
+    coordinateSpace?: 'image-normalized' | 'viewer-normalized';
+    imageSize?: { w: number; h: number };
 
     /** Viewer transform at the time this polygon was saved (used to re-project overlays). */
     viewTransform?: ViewerTransform;
@@ -163,6 +167,8 @@ export interface TumorGroundTruthRow {
 
   /** Manually drawn polygon points in normalized viewer coordinates. */
   polygon: TumorPolygon;
+  coordinateSpace?: 'image-normalized' | 'viewer-normalized';
+  imageSize?: { w: number; h: number };
 
   /** Viewer transform at the time this polygon was saved (used to re-project overlays). */
   viewTransform?: ViewerTransform;
@@ -184,6 +190,12 @@ export interface DicomSeries {
   // Additional naming fields (often more informative than SeriesDescription alone)
   protocolName?: string;
   sequenceName?: string;
+  frameOfReferenceUid?: string;
+  acquisitionTime?: string;
+  rows?: number;
+  columns?: number;
+  pixelSpacing?: string;
+  imageOrientationPatient?: string;
 
   // Derived/Parsed fields
   plane?: string; // Axial, Coronal, Sagittal
@@ -196,7 +208,12 @@ export interface DicomInstance {
   seriesInstanceUid: string;
   studyInstanceUid: string;
   instanceNumber: number;
-  
+  frameOfReferenceUid?: string;
+  acquisitionTime?: string;
+  numberOfFrames?: number;
+  /** Signed patient-space distance along this frame's validated slice normal. */
+  physicalSlicePosition?: number;
+
   // Image metadata
   rows: number;
   columns: number;
@@ -206,32 +223,94 @@ export interface DicomInstance {
   pixelSpacing?: string; // [row, col] as string
   sliceThickness?: number;
   spacingBetweenSlices?: number;
-  
+
   // Windowing
   windowCenter?: number;
   windowWidth?: number;
-  
+
   // The raw DICOM file
   fileBlob: Blob;
 }
 
 export interface PanelSettingsRow {
   comboId: string;
-  settings: Record<string, {
-    offset: number;
-    reverseSliceOrder: boolean;
-    zoom: number;
-    rotation: number;
-    brightness: number;
-    contrast: number;
-    panX: number;
-    panY: number;
-    affine00: number;
-    affine01: number;
-    affine10: number;
-    affine11: number;
-    progress: number;
-  }>;
+  settings: Record<
+    string,
+    {
+      offset: number;
+      reverseSliceOrder: boolean;
+      zoom: number;
+      rotation: number;
+      brightness: number;
+      contrast: number;
+      panX: number;
+      panY: number;
+      affine00: number;
+      affine01: number;
+      affine10: number;
+      affine11: number;
+      progress: number;
+    }
+  >;
+}
+
+export interface AppStateRow {
+  key: string;
+  value: unknown;
+}
+
+/** Durable voxel labels bound to the exact reconstruction geometry that created them. */
+export interface VolumeSegmentationRow {
+  volumeKey: string;
+  patientKey?: string;
+  studyUid?: string;
+  seriesUids?: string[];
+  frameOfReferenceUid?: string;
+  dims: [number, number, number];
+  voxelSizeMm?: [number, number, number];
+  labels: Uint8Array;
+  classMetadata?: unknown;
+  modelKey?: string;
+  datasetRevision?: number;
+  updatedAt: number;
+}
+
+/** A registered reference-plane image that remains bound to both source examinations. */
+export interface DerivedAlignmentFrameRow {
+  id: string;
+  patientKey: string;
+  datasetRevision: number;
+  sequenceId: string;
+  targetStudyUid: string;
+  targetSeriesUid: string;
+  targetSopInstanceUid?: string;
+  targetFrameIndex: number;
+  referenceStudyUid?: string;
+  referenceSeriesUid?: string;
+  referenceSopInstanceUid?: string;
+  referenceFrameIndex?: number;
+  referenceImagePositionPatient?: string;
+  referenceImageOrientationPatient?: string;
+  referencePixelSpacing?: string;
+  referenceRows?: number;
+  referenceColumns?: number;
+  referenceFrameOfReferenceUid?: string;
+  targetFrameOfReferenceUid?: string;
+  frameOfReferenceUid?: string;
+  sourceFrameOfReferenceUid?: string;
+  rows: number;
+  columns: number;
+  pixels: Float32Array;
+  sourceImageId: string;
+  transform?: number[];
+  centerMm?: [number, number, number];
+  coverage?: number;
+  score?: number;
+  margin?: number;
+  nativeSliceSpacingMm?: number;
+  sourceFrameCount?: number;
+  runId?: string;
+  createdAt: number;
 }
 
 export interface MiraDB {
@@ -254,6 +333,7 @@ export interface MiraDB {
        * Key: [seriesInstanceUid, instanceNumber, sopInstanceUid]
        */
       'by-series-instanceNumber-uid': [string, number, string];
+      'by-series-physicalPosition-uid': [string, number, string];
     };
   };
   panel_settings: {
@@ -277,6 +357,26 @@ export interface MiraDB {
       'by-series': string;
       'by-sop': string;
       'by-combo-date': [string, string];
+    };
+  };
+
+  app_state: {
+    key: string;
+    value: AppStateRow;
+  };
+
+  volume_segmentations: {
+    key: string;
+    value: VolumeSegmentationRow;
+    indexes: { 'by-study': string };
+  };
+
+  derived_alignment_frames: {
+    key: string;
+    value: DerivedAlignmentFrameRow;
+    indexes: {
+      'by-patient': string;
+      'by-created-at': number;
     };
   };
 }

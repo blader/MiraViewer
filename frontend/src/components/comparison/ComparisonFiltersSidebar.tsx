@@ -30,20 +30,29 @@ export function ComparisonFiltersSidebar({
   return (
     <>
       <div
-        className={`flex-shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${
+        id="comparison-filters-panel"
+        role="complementary"
+        aria-label="Scan filters"
+        data-open={open}
+        data-side="left"
+        inert={!open}
+        className={`comparison-sidebar flex-shrink-0 bg-[var(--bg-secondary)] border-r border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${
           open ? 'w-64' : 'w-0'
         }`}
       >
-        <div className="w-64 h-full overflow-y-auto p-4 space-y-6">
+        <div className="comparison-sidebar-content w-64 h-full overflow-y-auto p-4 space-y-6">
           {/* Plane selector */}
           <div>
             <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center gap-2">
-              <Layers className="w-4 h-4" />Plane
+              <Layers className="w-4 h-4" />
+              Plane
             </div>
             <div className="grid grid-cols-2 gap-1">
               {availablePlanes.map((p) => (
                 <button
                   key={p}
+                  type="button"
+                  aria-pressed={selectedPlane === p}
                   onClick={() => onSelectPlane(p)}
                   className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate ${
                     selectedPlane === p
@@ -61,31 +70,30 @@ export function ComparisonFiltersSidebar({
           <div>
             <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3">Sequence</div>
             <div className="grid grid-cols-2 gap-1">
-              {sequencesForPlane
-                .filter((seq) => formatSequenceLabel(seq) !== 'Unknown')
-                .map((seq) => {
-                  const hasData = sequencesWithDataForDates.has(seq.id);
-                  const isSelected = selectedSeqId === seq.id;
+              {sequencesForPlane.map((seq) => {
+                const hasData = sequencesWithDataForDates.has(seq.id);
+                const isSelected = selectedSeqId === seq.id;
 
-                  return (
-                    <button
-                      key={seq.id}
-                      type="button"
-                      onClick={() => onSelectSequence(seq.id)}
-                      className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${
-                        isSelected
-                          ? hasData
-                            ? 'bg-[var(--accent)] text-white'
-                            : 'bg-[var(--accent)] text-white opacity-50'
-                          : hasData
-                            ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                            : 'text-[var(--text-tertiary)] opacity-50'
-                      }`}
-                    >
-                      {formatSequenceLabel(seq)}
-                    </button>
-                  );
-                })}
+                return (
+                  <button
+                    key={seq.id}
+                    type="button"
+                    aria-pressed={isSelected}
+                    onClick={() => onSelectSequence(seq.id)}
+                    className={`text-left px-2 py-1.5 rounded-lg text-sm transition-colors truncate cursor-pointer ${
+                      isSelected
+                        ? hasData
+                          ? 'bg-[var(--accent)] text-white'
+                          : 'bg-[var(--accent)] text-white opacity-50'
+                        : hasData
+                          ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                          : 'text-[var(--text-tertiary)] opacity-50'
+                    }`}
+                  >
+                    {formatSequenceLabel(seq) === 'Unknown' ? 'Unclassified' : formatSequenceLabel(seq)}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -93,8 +101,12 @@ export function ComparisonFiltersSidebar({
 
       {/* Left sidebar toggle (compact) */}
       <button
+        type="button"
         onClick={onToggleOpen}
-        className="absolute left-2 top-1/2 -translate-y-1/2 z-20 p-1 rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
+        aria-label={open ? 'Hide scan filters' : 'Show scan filters'}
+        aria-expanded={open}
+        aria-controls="comparison-filters-panel"
+        className="absolute left-2 top-1/2 -translate-y-1/2 z-40 min-h-9 min-w-9 inline-flex items-center justify-center rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
         title={open ? 'Hide filters' : 'Show filters'}
       >
         {open ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}

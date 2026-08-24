@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../types/svr';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
@@ -25,87 +25,109 @@ export function useSvrReconstruction() {
   });
 
   const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef(0);
   const lastProgressUpdateMsRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      runIdRef.current++;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    },
+    [],
+  );
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
   }, []);
 
   const clear = useCallback(() => {
+    runIdRef.current++;
+    abortRef.current?.abort();
+    abortRef.current = null;
     setState({ isRunning: false, progress: null, result: null, error: null });
   }, []);
 
-  const run = useCallback(async (selectedSeries: SvrSelectedSeries[], params?: Partial<SvrParams>): Promise<SvrRunOutcome> => {
-    abortRef.current?.abort();
+  const run = useCallback(
+    async (selectedSeries: SvrSelectedSeries[], params?: Partial<SvrParams>): Promise<SvrRunOutcome> => {
+      abortRef.current?.abort();
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+      const controller = new AbortController();
+      const runId = ++runIdRef.current;
+      abortRef.current = controller;
 
-    const svrParams: SvrParams = { ...DEFAULT_SVR_PARAMS, ...(params || {}) };
-
-    setState({
-      isRunning: true,
-      progress: { phase: 'idle', current: 0, total: 100, message: 'Starting…' },
-      result: null,
-      error: null,
-    });
-
-    lastProgressUpdateMsRef.current = 0;
-
-    const started = performance.now();
-
-    try {
-      const result = await reconstructVolumeMultiPlane({
-        selectedSeries,
-        svrParams,
-        signal: controller.signal,
-        onProgress: (p) => {
-          const now = Date.now();
-          const isFinal = p.current >= p.total;
-
-          // Avoid spamming React renders.
-          if (!isFinal && now - lastProgressUpdateMsRef.current < 100) {
-            return;
-          }
-          lastProgressUpdateMsRef.current = now;
-
-          setState((s) => ({
-            ...s,
-            progress: p,
-          }));
-        },
-      });
+      const svrParams: SvrParams = { ...DEFAULT_SVR_PARAMS, ...(params || {}) };
 
       setState({
-        isRunning: false,
-        progress: { phase: 'finalizing', current: 100, total: 100, message: 'Done' },
-        result,
+        isRunning: true,
+        progress: { phase: 'idle', current: 0, total: 100, message: 'Starting…' },
+        result: null,
         error: null,
       });
 
-      return {
-        result,
-        error: null,
-        durationMs: performance.now() - started,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setState({
-        isRunning: false,
-        progress: null,
-        result: null,
-        error: msg,
-      });
+      lastProgressUpdateMsRef.current = 0;
 
-      return {
-        result: null,
-        error: msg,
-        durationMs: performance.now() - started,
-      };
-    } finally {
-      abortRef.current = null;
-    }
-  }, []);
+      const started = performance.now();
+
+      try {
+        const result = await reconstructVolumeMultiPlane({
+          selectedSeries,
+          svrParams,
+          signal: controller.signal,
+          onProgress: (p) => {
+            if (runIdRef.current !== runId || controller.signal.aborted) return;
+            const now = Date.now();
+            const isFinal = p.current >= p.total;
+
+            // Avoid spamming React renders.
+            if (!isFinal && now - lastProgressUpdateMsRef.current < 100) {
+              return;
+            }
+            lastProgressUpdateMsRef.current = now;
+
+            setState((s) => ({
+              ...s,
+              progress: p,
+            }));
+          },
+        });
+
+        if (runIdRef.current === runId && !controller.signal.aborted) {
+          setState({
+            isRunning: false,
+            progress: { phase: 'finalizing', current: 100, total: 100, message: 'Done' },
+            result,
+            error: null,
+          });
+        }
+
+        return {
+          result,
+          error: null,
+          durationMs: performance.now() - started,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (runIdRef.current === runId) {
+          setState({
+            isRunning: false,
+            progress: null,
+            result: null,
+            error: controller.signal.aborted ? null : msg,
+          });
+        }
+
+        return {
+          result: null,
+          error: msg,
+          durationMs: performance.now() - started,
+        };
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    },
+    [],
+  );
 
   return {
     ...state,

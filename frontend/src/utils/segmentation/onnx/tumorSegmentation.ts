@@ -10,6 +10,36 @@ export type TumorOnnxSegmentationResult = {
   logitsDims: readonly number[];
 };
 
+function assertSupportedModelMetadata(
+  session: Ort.InferenceSession,
+  expectedSpatial: readonly [number, number, number],
+  expectedClasses: number,
+): void {
+  const [nx, ny, nz] = expectedSpatial;
+  const validate = (
+    metadata: Ort.InferenceSession.ValueMetadata | undefined,
+    expectedShape: readonly number[],
+    label: string,
+  ) => {
+    if (!metadata) return;
+    if (!metadata.isTensor || metadata.type !== 'float32') {
+      throw new Error(`Unsupported ONNX ${label}: expected a float32 tensor`);
+    }
+    if (metadata.shape.length !== expectedShape.length) {
+      throw new Error(`Unsupported ONNX ${label} layout: expected ${expectedShape.length} tensor dimensions`);
+    }
+    for (let i = 0; i < expectedShape.length; i++) {
+      const actual = metadata.shape[i];
+      if (typeof actual === 'number' && actual > 0 && actual !== expectedShape[i]) {
+        throw new Error(`Unsupported ONNX ${label} shape at axis ${i}: expected ${expectedShape[i]}, got ${actual}`);
+      }
+    }
+  };
+
+  validate(session.inputMetadata?.[0], [1, 1, nz, ny, nx], 'input');
+  validate(session.outputMetadata?.[0], [1, expectedClasses, nz, ny, nx], 'output');
+}
+
 export async function runTumorSegmentationOnnx(params: {
   session: Ort.InferenceSession;
   volume: Float32Array;
@@ -35,6 +65,14 @@ export async function runTumorSegmentationOnnx(params: {
     throw new Error('ONNX session has no outputs');
   }
 
+  const labelMap = params.labelMap ?? [
+    BRATS_LABEL_ID.BACKGROUND,
+    BRATS_LABEL_ID.NCR_NET,
+    BRATS_LABEL_ID.EDEMA,
+    BRATS_LABEL_ID.ENHANCING,
+  ];
+  assertSupportedModelMetadata(session, dims, labelMap.length);
+
   // ORT expects NCHW-like layout for 3D conv models: [N, C, Z, Y, X].
   // Our Float32Array is already in X-fastest order, so [Z,Y,X] is consistent.
   const inputTensor = new ort.Tensor('float32', volume, [1, 1, nz, ny, nx]);
@@ -49,28 +87,21 @@ export async function runTumorSegmentationOnnx(params: {
     throw new Error(`Unsupported logits tensor type: ${logitsTensor.type}`);
   }
 
-  const labelMap = params.labelMap ?? [
-    BRATS_LABEL_ID.BACKGROUND,
-    BRATS_LABEL_ID.NCR_NET,
-    BRATS_LABEL_ID.EDEMA,
-    BRATS_LABEL_ID.ENHANCING,
-  ];
-
-  const { labels, spatialDims } = logitsToLabels({
-    logits: { data: logitsTensor.data as Float32Array, dims: logitsTensor.dims },
-    labelMap,
-  });
-
-  // The logits tensor is the largest transient allocation in the app (classes × nvox × 4
-  // bytes — over a GiB at full resolution). Argmax is done, so release it now: capture the
-  // dims we still need, then dispose, which frees GPU-backed storage immediately on the
-  // WebGPU provider (the WASM path holds plain JS memory that the GC reclaims once this
-  // function's scope dies).
   const logitsDims = logitsTensor.dims;
+  let labels: Uint8Array;
+  let spatialDims: [number, number, number];
   try {
-    (logitsTensor as { dispose?: () => void }).dispose?.();
-  } catch {
-    // Best-effort: CPU-located tensors may not support (or need) explicit disposal.
+    ({ labels, spatialDims } = logitsToLabels({
+      logits: { data: logitsTensor.data as Float32Array, dims: logitsDims },
+      labelMap,
+    }));
+  } finally {
+    // Release GPU-backed logits even when an incompatible model is rejected.
+    try {
+      (logitsTensor as { dispose?: () => void }).dispose?.();
+    } catch {
+      // CPU-located tensors do not necessarily expose explicit disposal.
+    }
   }
 
   // Sanity check that the model output matches the current SVR volume.
@@ -79,10 +110,11 @@ export async function runTumorSegmentationOnnx(params: {
     throw new Error(`Model output spatial size mismatch (expected ${expected}, got ${labels.length}).`);
   }
 
-  // NOTE: spatialDims is [X,Y,Z] for convenience. This should match the SVR dims.
   if (spatialDims[0] !== nx || spatialDims[1] !== ny || spatialDims[2] !== nz) {
-    // Don't fail hard: some models output in a different orientation; callers can add remapping later.
-    console.warn('[onnx] Output dims differ from SVR volume dims', { spatialDims, svrDims: dims });
+    throw new Error(
+      `Model output spatial axes do not match the reconstructed volume ` +
+        `(expected ${nx}×${ny}×${nz}, got ${spatialDims.join('×')}).`,
+    );
   }
 
   return { labels, logitsDims };

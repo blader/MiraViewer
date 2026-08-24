@@ -534,6 +534,22 @@ export function Svr3DView({
 
   const selectedSeries = useMemo(() => selectedGroup?.series ?? [], [selectedGroup]);
 
+  const volumeIdentity = useMemo(() => {
+    if (selectedSeries.length === 0) return null;
+    const seriesUids = selectedSeries.map((series) => series.seriesUid);
+    const matchingReference = Object.values(data.series_map)
+      .map((byDate) => (dateIso ? byDate[dateIso] : undefined))
+      .find((ref) => ref && seriesUids.includes(ref.series_uid));
+
+    return {
+      patientKey: data.selected_patient_key ?? matchingReference?.patient_key,
+      studyUid: matchingReference?.study_uid ?? selectedSeries[0]?.studyId,
+      seriesUids,
+      frameOfReferenceUid: matchingReference?.frame_of_reference_uid,
+      datasetRevision: data.dataset_revision,
+    };
+  }, [data.dataset_revision, data.selected_patient_key, data.series_map, dateIso, selectedSeries]);
+
   // ROI-first flow: pick a ROI on an input slice, then run SVR restricted to that cube.
   const [roiSeriesUid, setRoiSeriesUid] = useState<string | null>(null);
 
@@ -737,7 +753,8 @@ export function Svr3DView({
   return (
     <div className="flex-1 flex overflow-hidden bg-[var(--bg-secondary)]">
       <div
-        className={`flex-1 grid gap-4 p-4 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(320px,420px)_minmax(0,1fr)]'}`}
+        data-generation-open={!generationCollapsed}
+        className={`svr-generation-layout flex-1 grid gap-4 p-4 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(320px,420px)_minmax(0,1fr)]'}`}
       >
         {generationCollapsed ? null : (
           <div className="space-y-3 overflow-auto pr-1">
@@ -1101,6 +1118,7 @@ export function Svr3DView({
 
           <SvrVolume3DViewer
             volume={result ? result.volume : null}
+            volumeIdentity={volumeIdentity}
             sliceInspectorPortalTarget={sliceInspectorPortalTarget}
           />
         </div>

@@ -50,8 +50,8 @@ describe('exportBackup', () => {
     const files = Object.keys(zip.files);
 
     expect(files).toContain('export.json');
-    // study folder should exist
-    expect(files.some((f) => f.includes('20240101_Test Study/'))).toBe(true);
+    // UID-addressed folders cannot collide when human descriptions repeat.
+    expect(files.some((f) => f.includes('studies/study-1/series/series-1/'))).toBe(true);
     // DICOM file should exist
     expect(files.some((f) => f.endsWith('.dcm'))).toBe(true);
   });
