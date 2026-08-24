@@ -12,22 +12,12 @@ function basePatientIdentity(study: DicomStudy): string {
  * patient names are conservatively isolated by examination rather than merged.
  */
 export function getPatientIdentityKey(study: DicomStudy, studies: readonly DicomStudy[]): string {
-  const base = basePatientIdentity(study);
-  if (!study.patientId.trim()) return base;
-
-  const names = new Set<string>();
-  for (const candidate of studies) {
-    if (basePatientIdentity(candidate) !== base) continue;
-    const name = candidate.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
-    if (name) names.add(name);
-    if (names.size > 1) return `${base}#${study.studyInstanceUid}`;
-  }
-  return base;
+  return getPatientIdentityKeys(studies).get(study.studyInstanceUid) ?? basePatientIdentity(study);
 }
 
 /** Resolve every conservative patient identity without rescanning the full study set per examination. */
 export function getPatientIdentityKeys(studies: readonly DicomStudy[]): ReadonlyMap<string, string> {
-  const namesByIdentity = new Map<string, Set<string>>();
+  const namesByIdentity = new Map<string, string | null>();
   const identityByStudy = new Map<string, string>();
 
   for (const study of studies) {
@@ -37,17 +27,14 @@ export function getPatientIdentityKeys(studies: readonly DicomStudy[]): Readonly
 
     const normalizedName = study.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
     if (!normalizedName) continue;
-    let names = namesByIdentity.get(identity);
-    if (!names) {
-      names = new Set<string>();
-      namesByIdentity.set(identity, names);
-    }
-    names.add(normalizedName);
+    const existingName = namesByIdentity.get(identity);
+    if (existingName === undefined) namesByIdentity.set(identity, normalizedName);
+    else if (existingName !== normalizedName) namesByIdentity.set(identity, null);
   }
 
   for (const study of studies) {
     const identity = identityByStudy.get(study.studyInstanceUid)!;
-    if ((namesByIdentity.get(identity)?.size ?? 0) > 1) {
+    if (namesByIdentity.get(identity) === null) {
       identityByStudy.set(study.studyInstanceUid, `${identity}#${study.studyInstanceUid}`);
     }
   }

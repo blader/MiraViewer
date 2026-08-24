@@ -93,6 +93,40 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     });
   });
 
+  it('keeps anisotropic geometry, source pixels, and unsupported anatomy consistent in every inspection plane', async () => {
+    const volume: SvrVolume = {
+      ...observedVolume,
+      data: Float32Array.from({ length: 24 }, (_, index) => (index + 1) / 25),
+      observedSupport: Uint8Array.from({ length: 24 }, (_, index) => (index === 8 ? 0 : 1)),
+      dims: [2, 3, 4],
+      voxelSizeMm: [0.5, 2, 3],
+      originMm: [10, -4, 20],
+    };
+    const context = {
+      createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
+      putImageData: vi.fn(),
+    };
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(((id: string) =>
+      id === '2d' ? context : null) as typeof HTMLCanvasElement.prototype.getContext);
+    render(<SvrVolume3DViewer volume={volume} />);
+
+    for (const [plane, maxSlice, aspectRatio, position, firstPixel, unsupportedPixel, unsupportedColor] of [
+      ['axial', 3, '1 / 6', '(10.50, -2.00, 23.00)', 71, 2, [108, 71, 27]],
+      ['coronal', 2, '1 / 12', '(10.50, -2.00, 26.00)', 31, 2, [108, 71, 27]],
+      ['sagittal', 1, '6 / 12', '(10.00, -2.00, 26.00)', 10, 4, [46, 34, 20]],
+    ] as const) {
+      fireEvent.change(screen.getByRole('combobox', { name: /plane/i }), { target: { value: plane } });
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(position));
+      expect(screen.getByRole('slider', { name: /slice/i })).toHaveAttribute('max', String(maxSlice));
+      expect(screen.getByRole('img', { name: new RegExp(plane) })).toHaveStyle({ aspectRatio });
+
+      const image = context.putImageData.mock.lastCall?.[0] as ImageData;
+      expect(Array.from(image.data.slice(0, 4))).toEqual([firstPixel, firstPixel, firstPixel, 255]);
+      const unsupported = image.data.slice(unsupportedPixel * 4, unsupportedPixel * 4 + 4);
+      expect(Array.from(unsupported)).toEqual([...unsupportedColor, 255]);
+    }
+  });
+
   it('preserves observed zero-valued anatomy and applies larger coarse-pointer control targets', async () => {
     render(<SvrVolume3DViewer volume={{ ...observedVolume, observedSupport: new Uint8Array([1, 0, 1, 1]) }} />);
 

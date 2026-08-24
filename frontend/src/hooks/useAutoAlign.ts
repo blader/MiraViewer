@@ -341,6 +341,13 @@ export function useAutoAlign() {
               operationOutputGrid.fieldOfViewMm[1] / ALIGNMENT_IMAGE_SIZE,
             ]
           : undefined;
+        const resultIdentity = {
+          runId,
+          patientKey: reference.patientKey,
+          sequenceId: reference.sequenceId,
+          referenceSeriesUid: reference.seriesUid,
+          datasetRevision: reference.datasetRevision,
+        };
 
         const terminalResult = (
           date: string,
@@ -354,11 +361,7 @@ export function useAutoAlign() {
           nmiScore: 0,
           computedSettings: reference.settings,
           slicesChecked: 0,
-          runId,
-          patientKey: reference.patientKey,
-          sequenceId: reference.sequenceId,
-          referenceSeriesUid: reference.seriesUid,
-          datasetRevision: reference.datasetRevision,
+          ...resultIdentity,
           outcome,
           message,
         });
@@ -514,8 +517,11 @@ export function useAutoAlign() {
               'The derived presentation does not match its verified physical output grid',
             );
           }
+          const { pixels, valid, rows, cols, targetToReference, centerMm, diagnostics, nativeRefinement, provenance } =
+            registration;
+          const { tx, ty, tz, rx, ry, rz } = targetToReference;
           let requiredRegionSupport: number | undefined;
-          if (registration.valid && reference.exclusionMask) {
+          if (valid && reference.exclusionMask) {
             const protectedRegion = rasterizeImageExclusion(
               reference.exclusionMask,
               operationOutputGrid.rows,
@@ -526,7 +532,7 @@ export function useAutoAlign() {
             for (let index = 0; index < (protectedRegion?.length ?? 0); index++) {
               if (!protectedRegion?.[index]) continue;
               required++;
-              if (registration.valid[index]) supported++;
+              if (valid[index]) supported++;
             }
             if (required > 0) {
               requiredRegionSupport = supported / required;
@@ -540,31 +546,18 @@ export function useAutoAlign() {
           }
 
           const bestSliceIndex = selectPhysicalTargetSlice(referenceManifest, targetManifest, reference.sliceIndex, {
-            rigid: registration.targetToReference,
-            centerMm: registration.centerMm,
+            rigid: targetToReference,
+            centerMm,
             outputGrid: operationOutputGrid,
           });
           const nativeFrame = targetManifest.frames[bestSliceIndex];
           if (!nativeFrame) {
             return physicalFailure('incompatible-geometry', 'Registered frame has no native source identity');
           }
-          const resampled = registration.valid
-            ? resample2dAreaAverageWithValidity(
-                registration.pixels,
-                registration.valid,
-                registration.rows,
-                registration.cols,
-                ALIGNMENT_IMAGE_SIZE,
-                ALIGNMENT_IMAGE_SIZE,
-              )
+          const resampled = valid
+            ? resample2dAreaAverageWithValidity(pixels, valid, rows, cols, ALIGNMENT_IMAGE_SIZE, ALIGNMENT_IMAGE_SIZE)
             : {
-                pixels: resample2dAreaAverage(
-                  registration.pixels,
-                  registration.rows,
-                  registration.cols,
-                  ALIGNMENT_IMAGE_SIZE,
-                  ALIGNMENT_IMAGE_SIZE,
-                ),
+                pixels: resample2dAreaAverage(pixels, rows, cols, ALIGNMENT_IMAGE_SIZE, ALIGNMENT_IMAGE_SIZE),
                 validity: undefined,
               };
           const normalized = normalizePerceptualSource(resampled.pixels, ALIGNMENT_IMAGE_SIZE, {
@@ -592,9 +585,7 @@ export function useAutoAlign() {
             currentProgress,
             reference.settings,
           );
-          const nativeRivalEvidence = registration.nativeRefinement?.optimizedAlternativeCount
-            ? registration.nativeRefinement
-            : undefined;
+          const nativeRivalEvidence = nativeRefinement?.optimizedAlternativeCount ? nativeRefinement : undefined;
 
           return {
             date,
@@ -602,56 +593,40 @@ export function useAutoAlign() {
             bestSliceIndex,
             nmiScore: quality.nmi,
             computedSettings,
-            slicesChecked: registration.diagnostics.presentationSourceFrameCount ?? prepared.targetSourceIndices.length,
-            runId,
+            slicesChecked: diagnostics.presentationSourceFrameCount ?? prepared.targetSourceIndices.length,
+            ...resultIdentity,
             patientKey: referenceManifest.patientKey,
-            sequenceId: reference.sequenceId,
-            referenceSeriesUid: reference.seriesUid,
-            datasetRevision: reference.datasetRevision,
             outcome: 'aligned',
             outputGrid: operationOutputGrid,
             evidence: {
-              structuralScore: registration.nativeRefinement?.score ?? registration.score,
-              runnerUpGap: nativeRivalEvidence?.scoreMargin ?? registration.diagnostics.scoreMargin,
+              structuralScore: nativeRefinement?.score ?? registration.score,
+              runnerUpGap: nativeRivalEvidence?.scoreMargin ?? diagnostics.scoreMargin,
               coverage: registration.coverage,
               geometryMode: 'registered-3d',
               planeAngleDegrees: drift.angleDegrees,
               maximumNativePlaneDriftMm: drift.maximumThroughPlaneDriftMm,
-              presentationSliceSpacingMm: registration.diagnostics.presentationSliceSpacingMm,
-              presentationSourceFrameCount: registration.diagnostics.presentationSourceFrameCount,
-              forwardAnatomicalSupport:
-                registration.nativeRefinement?.forwardCoverage ?? registration.diagnostics.retainedSampleFraction,
-              reverseAnatomicalSupport:
-                registration.nativeRefinement?.reverseCoverage ??
-                registration.diagnostics.reverseRetainedSampleFraction,
+              presentationSliceSpacingMm: diagnostics.presentationSliceSpacingMm,
+              presentationSourceFrameCount: diagnostics.presentationSourceFrameCount,
+              forwardAnatomicalSupport: nativeRefinement?.forwardCoverage ?? diagnostics.retainedSampleFraction,
+              reverseAnatomicalSupport: nativeRefinement?.reverseCoverage ?? diagnostics.reverseRetainedSampleFraction,
               outputPlaneSupport: registration.coverage,
               requiredRegionSupport,
-              effectiveSampleCount:
-                registration.nativeRefinement?.sampleCount ?? registration.diagnostics.effectiveSampleCount,
-              heldOutSampleCount: registration.nativeRefinement?.heldOutSampleCount,
-              effectiveIndependentSamples: registration.nativeRefinement?.effectiveIndependentSamples,
-              heldOutEffectiveIndependentSamples: registration.nativeRefinement?.heldOutEffectiveIndependentSamples,
+              effectiveSampleCount: nativeRefinement?.sampleCount ?? diagnostics.effectiveSampleCount,
+              heldOutSampleCount: nativeRefinement?.heldOutSampleCount,
+              effectiveIndependentSamples: nativeRefinement?.effectiveIndependentSamples,
+              heldOutEffectiveIndependentSamples: nativeRefinement?.heldOutEffectiveIndependentSamples,
               minimumDistinguishableScoreMargin:
-                nativeRivalEvidence?.minimumDistinguishableScoreMargin ??
-                registration.diagnostics.minimumDistinguishableScoreMargin,
-              inverseConsistencyError: registration.diagnostics.inverseConsistencyErrorMm,
+                nativeRivalEvidence?.minimumDistinguishableScoreMargin ?? diagnostics.minimumDistinguishableScoreMargin,
+              inverseConsistencyError: diagnostics.inverseConsistencyErrorMm,
               outputGridFingerprint: outputGridFingerprint(operationOutputGrid),
-              translationMm: [
-                registration.targetToReference.tx,
-                registration.targetToReference.ty,
-                registration.targetToReference.tz,
-              ],
-              rotationDegrees: [
-                (registration.targetToReference.rx * 180) / Math.PI,
-                (registration.targetToReference.ry * 180) / Math.PI,
-                (registration.targetToReference.rz * 180) / Math.PI,
-              ],
+              translationMm: [tx, ty, tz],
+              rotationDegrees: [(rx * 180) / Math.PI, (ry * 180) / Math.PI, (rz * 180) / Math.PI],
             },
             derivedFrame: {
-              pixels: registration.pixels,
-              ...(registration.valid ? { valid: registration.valid } : {}),
-              rows: registration.rows,
-              columns: registration.cols,
+              pixels,
+              ...(valid ? { valid } : {}),
+              rows,
+              columns: cols,
               outputGrid: operationOutputGrid,
               ...(registration.contributingSourceSopInstanceUids
                 ? { contributingSourceSopInstanceUids: registration.contributingSourceSopInstanceUids }
@@ -668,19 +643,12 @@ export function useAutoAlign() {
               referenceColumns: referenceFrame?.columns,
               targetStudyUid: targetManifest.studyUid,
               targetSopInstanceUid: nativeFrame.sopInstanceUid,
-              referenceFrameOfReferenceUid: registration.provenance.referenceFrameOfReferenceUid,
-              targetFrameOfReferenceUid: registration.provenance.targetFrameOfReferenceUid,
-              rigidTransform: [
-                registration.targetToReference.tx,
-                registration.targetToReference.ty,
-                registration.targetToReference.tz,
-                registration.targetToReference.rx,
-                registration.targetToReference.ry,
-                registration.targetToReference.rz,
-              ],
-              rotationCenterMm: [registration.centerMm.x, registration.centerMm.y, registration.centerMm.z],
-              nativeSliceSpacingMm: registration.diagnostics.presentationSliceSpacingMm,
-              sourceFrameCount: registration.diagnostics.presentationSourceFrameCount,
+              referenceFrameOfReferenceUid: provenance.referenceFrameOfReferenceUid,
+              targetFrameOfReferenceUid: provenance.targetFrameOfReferenceUid,
+              rigidTransform: [tx, ty, tz, rx, ry, rz],
+              rotationCenterMm: [centerMm.x, centerMm.y, centerMm.z],
+              nativeSliceSpacingMm: diagnostics.presentationSliceSpacingMm,
+              sourceFrameCount: diagnostics.presentationSourceFrameCount,
             },
           };
         };
@@ -1200,6 +1168,7 @@ export function useAutoAlign() {
             });
             const recordCandidateDebug = (candidate: RankedCandidate, stage: 'coarse' | 'fine', selected: boolean) => {
               const stageSnapshot = buildStageSnapshot(candidate, stage);
+              const { universeId, phasePeak, retentionReason: stageRetentionReason, ...stageMetrics } = stageSnapshot;
               const stageHistory = stage === 'coarse' ? { coarseStage: stageSnapshot } : { fineStage: stageSnapshot };
               const metrics: Parameters<typeof recordAlignmentSliceScore>[2] = {
                 ssim: averageMetric(candidate.components, 'contrastStructure'),
@@ -1209,30 +1178,14 @@ export function useAutoAlign() {
                 mind: averageMetric(candidate.components, 'mind'),
                 rawMindDistance: averageRawMindDistance(candidate.components),
                 census: candidate.boundaryRank,
-                phase: candidate.phase.peak,
+                phase: phasePeak,
                 mi: candidate.components.coverage,
                 nmi: candidate.phase.peakToSidelobeRatio,
                 score: candidate.perceptualRank,
                 stage,
-                distanceFromSeed: candidate.index - seedIdx,
-                rigidSeed: seedTransform,
-                coverage: candidate.components.coverage,
-                mindRank: candidate.mindRank,
-                appearanceRank: candidate.appearanceRank,
-                boundaryRank: candidate.boundaryRank,
-                structuralRank: candidate.structuralRank,
-                perceptualRank: candidate.perceptualRank,
-                mindActive: candidate.mindActive,
-                appearanceActive: candidate.appearanceActive,
-                boundaryActive: candidate.boundaryActive,
-                structuralActive: candidate.structuralActive,
-                phaseInput: 'structural-edge-energy',
-                correctionX: candidate.phase.correctionX,
-                correctionY: candidate.phase.correctionY,
-                phasePeakToSidelobeRatio: candidate.phase.peakToSidelobeRatio,
+                ...stageMetrics,
                 retainedForFine: shortlist.fineIndices.includes(candidate.index),
                 selected,
-                perScale: candidate.components.perScale,
                 ...stageHistory,
               };
               recordAlignmentSliceScore(seriesRef.series_uid, candidate.index, metrics);
@@ -1267,8 +1220,8 @@ export function useAutoAlign() {
                       (candidate.phase.correctionY * (stage === 'coarse' ? COARSE_IMAGE_SIZE : ALIGNMENT_IMAGE_SIZE)) /
                       candidate.phase.sampleGridSize,
                   },
-                  universeId: stageSnapshot.universeId,
-                  retentionReason: stageSnapshot.retentionReason,
+                  universeId,
+                  retentionReason: stageRetentionReason,
                   selected,
                 },
                 debugAlignment,
@@ -1503,27 +1456,26 @@ export function useAutoAlign() {
               }
               const proposal = selectedByKind.get(kind);
               if (!proposal) continue;
+              const proposalMetrics = {
+                mindScore: proposal.mindScore,
+                ngfScore: proposal.ngfScore,
+                structuralScore: proposal.structuralScore,
+                deformationMagnitude: proposal.deformationMagnitude,
+                bidirectionalCoverage: proposal.bidirectionalCoverage,
+              };
               if (!proposal.eligible) {
                 finalAffineProposals.push({
                   kind,
                   status: 'rejected',
                   rejectionReason: proposal.rejectionReason,
-                  mindScore: proposal.mindScore,
-                  ngfScore: proposal.ngfScore,
-                  structuralScore: proposal.structuralScore,
-                  deformationMagnitude: proposal.deformationMagnitude,
-                  bidirectionalCoverage: proposal.bidirectionalCoverage,
+                  ...proposalMetrics,
                 });
                 continue;
               }
               finalAffineProposals.push({
                 kind,
                 status: kind === selectedProposal.kind ? 'selected' : 'eligible',
-                mindScore: proposal.mindScore,
-                ngfScore: proposal.ngfScore,
-                structuralScore: proposal.structuralScore,
-                deformationMagnitude: proposal.deformationMagnitude,
-                bidirectionalCoverage: proposal.bidirectionalCoverage,
+                ...proposalMetrics,
               });
             }
             const seedProposal = finalAffineSelection.proposals.find((proposal) => proposal.kind === 'seed-only');
@@ -1664,11 +1616,8 @@ export function useAutoAlign() {
               nmiScore: selectedQuality.nmi,
               computedSettings,
               slicesChecked,
-              runId,
+              ...resultIdentity,
               patientKey: reference.patientKey ?? seriesRef.patient_key,
-              sequenceId: reference.sequenceId,
-              referenceSeriesUid: reference.seriesUid,
-              datasetRevision: reference.datasetRevision,
               outcome: 'aligned',
               evidence: {
                 structuralScore: sliceEvidence.structuralScore,

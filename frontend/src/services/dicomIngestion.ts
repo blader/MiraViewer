@@ -489,13 +489,19 @@ function databaseError(fileName: string, error: unknown): DicomIngestResult {
   return { status: 'error', fileName, reason: 'db-error', message };
 }
 
-function sameOwnership(
+function persistedOwnershipResult(
   existing: Pick<DicomInstance, 'seriesInstanceUid' | 'studyInstanceUid'>,
   next: PreparedDicom | ProbedDicom,
-) {
-  return (
+): DicomIngestResult {
+  if (
     existing.seriesInstanceUid === next.instance.seriesInstanceUid &&
     existing.studyInstanceUid === next.instance.studyInstanceUid
+  ) {
+    return { status: 'duplicate', fileName: next.fileName, sopInstanceUid: next.instance.sopInstanceUid };
+  }
+  return databaseError(
+    next.fileName,
+    new DicomAdmissionError('A DICOM instance UID already belongs to a different examination'),
   );
 }
 
@@ -695,12 +701,7 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
     const candidate = candidates[index];
     const existing = ownership.get(candidate.instance.sopInstanceUid);
     if (existing) {
-      results[index] = sameOwnership(existing, candidate)
-        ? { status: 'duplicate', fileName: candidate.fileName, sopInstanceUid: candidate.instance.sopInstanceUid }
-        : databaseError(
-            candidate.fileName,
-            new DicomAdmissionError('A DICOM instance UID already belongs to a different examination'),
-          );
+      results[index] = persistedOwnershipResult(existing, candidate);
       continue;
     }
     const first = incoming.get(candidate.instance.sopInstanceUid);
@@ -733,12 +734,7 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       const instanceUid = candidate.instance.sopInstanceUid;
       const existingInstance = stagedInstances.get(instanceUid) ?? (await instances.get(instanceUid));
       if (existingInstance) {
-        results[index] = sameOwnership(existingInstance, candidate)
-          ? { status: 'duplicate', fileName: candidate.fileName, sopInstanceUid: instanceUid }
-          : databaseError(
-              candidate.fileName,
-              new DicomAdmissionError('A DICOM instance UID already belongs to a different examination'),
-            );
+        results[index] = persistedOwnershipResult(existingInstance, candidate);
         continue;
       }
 
@@ -896,19 +892,8 @@ export async function processFiles(
         if (candidate.status !== 'probed') continue;
         const existing = ownership.get(candidate.instance.sopInstanceUid);
         if (existing) {
-          if (sameOwnership(existing, candidate)) {
-            duplicatesFound += 1;
-            pending[index] = {
-              status: 'duplicate',
-              fileName: candidate.fileName,
-              sopInstanceUid: candidate.instance.sopInstanceUid,
-            };
-          } else {
-            pending[index] = databaseError(
-              candidate.fileName,
-              new DicomAdmissionError('A DICOM instance UID already belongs to a different examination'),
-            );
-          }
+          pending[index] = persistedOwnershipResult(existing, candidate);
+          if (pending[index].status === 'duplicate') duplicatesFound += 1;
         } else {
           pending[index] = await prepareDicomFile(candidate.file);
         }

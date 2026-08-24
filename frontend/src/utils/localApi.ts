@@ -1,5 +1,5 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY, subscribeDatasetMutations } from '../db/db';
-import { getPatientIdentityKey, getPatientIdentityKeys } from '../db/patientIdentity';
+import { getPatientIdentityKeys } from '../db/patientIdentity';
 import type {
   DicomInstance,
   DicomSeries,
@@ -85,7 +85,7 @@ function labelCombo(plane?: string, weight?: string, sequence?: string): string 
   return [plane, weight, sequence].filter(Boolean).join(' ') || 'Unknown';
 }
 
-async function getInstanceCountsBySeries(series: readonly DicomSeries[]): Promise<Record<string, number>> {
+export async function getImageCounts(series: readonly DicomSeries[]): Promise<Record<string, number>> {
   const instanceCounts: Record<string, number> = {};
   if (series.length === 0) return instanceCounts;
 
@@ -124,7 +124,7 @@ export async function getStudies() {
     seriesByStudy[s.studyInstanceUid].push(s);
   });
 
-  const instanceCountsBySeries = await getInstanceCountsBySeries(allSeries);
+  const instanceCountsBySeries = await getImageCounts(allSeries);
 
   return studies
     .map((study) => {
@@ -218,7 +218,7 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
   const selectedSeries = allSeries.filter((series) => studyByUid.has(series.studyInstanceUid));
 
   // Instance counts without loading instance Blob payloads.
-  const instanceCounts = await getInstanceCountsBySeries(selectedSeries);
+  const instanceCounts = await getImageCounts(selectedSeries);
 
   const planes = new Set<string>();
   const dates = new Set<string>();
@@ -786,8 +786,9 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
   assertValidDerivedAlignmentFrameShape(frame);
   const db = await getDB();
   const studies = await db.getAll('studies');
+  const patientIdentityKeys = getPatientIdentityKeys(studies);
   const targetStudy = studies.find((study) => study.studyInstanceUid === frame.targetStudyUid);
-  if (!targetStudy || getPatientIdentityKey(targetStudy, studies) !== frame.patientKey) {
+  if (!targetStudy || patientIdentityKeys.get(targetStudy.studyInstanceUid) !== frame.patientKey) {
     throw new Error('A derived alignment frame belongs to a missing or different patient');
   }
   const targetSeries = await db.get('series', frame.targetSeriesUid);
@@ -820,7 +821,7 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
       throw new Error('A derived alignment frame has an incompatible reference examination');
     }
     const referenceStudy = studies.find((study) => study.studyInstanceUid === referenceSeries.studyInstanceUid);
-    if (!referenceStudy || getPatientIdentityKey(referenceStudy, studies) !== frame.patientKey) {
+    if (!referenceStudy || patientIdentityKeys.get(referenceStudy.studyInstanceUid) !== frame.patientKey) {
       throw new Error('A derived alignment frame reference belongs to a different patient');
     }
     if (

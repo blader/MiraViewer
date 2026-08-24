@@ -262,11 +262,34 @@ async function decodeManifestSlices(
   return output;
 }
 
-function normalizeLongitudinalPreparation(options: PrepareLongitudinalOptions): {
+function normalizeLongitudinalPreparation(
+  referenceManifest: SeriesFrameManifest,
+  referenceSliceIndex: number,
+  options: PrepareLongitudinalOptions,
+  targetManifest: SeriesFrameManifest = referenceManifest,
+): {
   maxDimension: number;
   maxSlices: number;
   outputMaxDimension: number;
 } {
+  if (
+    !Number.isInteger(referenceSliceIndex) ||
+    referenceSliceIndex < 0 ||
+    referenceSliceIndex >= referenceManifest.frames.length
+  ) {
+    throw new Error('The selected reference frame is outside its physically ordered manifest');
+  }
+  if (referenceManifest.frames.length < 2 || targetManifest.frames.length < 2) {
+    throw new Error('Longitudinal registration requires at least two frames in each physical stack');
+  }
+  if (options.outputGrid) {
+    validateOutputGridReference(
+      options.outputGrid,
+      referenceManifest.frames[referenceSliceIndex]!,
+      referenceManifest.frameOfReferenceUid,
+    );
+  }
+
   const maxDimension = Math.max(8, Math.min(128, Math.round(options.maxDimension ?? 128)));
   return {
     maxDimension,
@@ -291,25 +314,7 @@ export async function prepareLongitudinalReferenceInput(
   options: PrepareLongitudinalOptions = {},
 ): Promise<PreparedLongitudinalReferenceInput> {
   assertNotAborted(options.signal);
-  if (
-    !Number.isInteger(referenceSliceIndex) ||
-    referenceSliceIndex < 0 ||
-    referenceSliceIndex >= referenceManifest.frames.length
-  ) {
-    throw new Error('The selected reference frame is outside its physically ordered manifest');
-  }
-  if (referenceManifest.frames.length < 2) {
-    throw new Error('Longitudinal registration requires at least two frames in each physical stack');
-  }
-  if (options.outputGrid) {
-    validateOutputGridReference(
-      options.outputGrid,
-      referenceManifest.frames[referenceSliceIndex]!,
-      referenceManifest.frameOfReferenceUid,
-    );
-  }
-
-  const bounds = normalizeLongitudinalPreparation(options);
+  const bounds = normalizeLongitudinalPreparation(referenceManifest, referenceSliceIndex, options);
   const referenceSourceIndices = selectPhysicallySpacedIndices(
     referenceManifest,
     bounds.maxSlices,
@@ -353,25 +358,7 @@ export async function prepareLongitudinalRegistrationInput(
   if (referenceManifest.patientKey !== targetManifest.patientKey) {
     throw new Error('Longitudinal registration requires reference and target frames from the same patient');
   }
-  if (
-    !Number.isInteger(referenceSliceIndex) ||
-    referenceSliceIndex < 0 ||
-    referenceSliceIndex >= referenceManifest.frames.length
-  ) {
-    throw new Error('The selected reference frame is outside its physically ordered manifest');
-  }
-  if (referenceManifest.frames.length < 2 || targetManifest.frames.length < 2) {
-    throw new Error('Longitudinal registration requires at least two frames in each physical stack');
-  }
-  if (options.outputGrid) {
-    validateOutputGridReference(
-      options.outputGrid,
-      referenceManifest.frames[referenceSliceIndex]!,
-      referenceManifest.frameOfReferenceUid,
-    );
-  }
-
-  const bounds = normalizeLongitudinalPreparation(options);
+  const bounds = normalizeLongitudinalPreparation(referenceManifest, referenceSliceIndex, options, targetManifest);
   const preparedReference =
     options.preparedReference ??
     (await prepareLongitudinalReferenceInput(referenceManifest, referenceSliceIndex, options));

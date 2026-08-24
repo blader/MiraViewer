@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import type { SvrLabelVolume, SvrVolume } from '../types/svr';
+import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META, BRATS_LABEL_ID, type BratsBaseLabelId } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
 import type { RegionGrow3DRoi, Vec3i } from '../utils/segmentation/regionGrow3D_v2';
@@ -55,6 +55,12 @@ const COARSE_POINTER_CONTROL_TARGETS =
 
 const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
 const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
+const INSPECTOR_AXES = {
+  axial: { slice: 'z', row: 'y', column: 'x' },
+  coronal: { slice: 'y', row: 'z', column: 'x' },
+  // sagittal
+  sagittal: { slice: 'x', row: 'z', column: 'y' },
+} as const satisfies Record<SvrRoiPlane, Record<'slice' | 'row' | 'column', keyof Vec3i>>;
 
 type GlLabelState = {
   gl: WebGL2RenderingContext;
@@ -786,8 +792,9 @@ export function SvrVolume3DViewer({
 
   // Slice inspector (orthogonal slices).
   const sliceCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [inspectPlane, setInspectPlane] = useState<'axial' | 'coronal' | 'sagittal'>('axial');
+  const [inspectPlane, setInspectPlane] = useState<SvrRoiPlane>('axial');
   const [inspectIndex, setInspectIndex] = useState(0);
+  const inspectorAxes = INSPECTOR_AXES[inspectPlane];
 
   // Render-on-demand + interaction-time quality scaling.
   //
@@ -1064,34 +1071,28 @@ export function SvrVolume3DViewer({
         maxIndex: 0,
         srcRows: 1,
         srcCols: 1,
+        sliceStride: 0,
+        rowStride: 0,
+        columnStride: 0,
+        aspectRatio: undefined,
       };
     }
 
     const [nx, ny, nz] = volume.dims;
-
-    if (inspectPlane === 'axial') {
-      return {
-        maxIndex: Math.max(0, nz - 1),
-        srcRows: ny,
-        srcCols: nx,
-      };
-    }
-
-    if (inspectPlane === 'coronal') {
-      return {
-        maxIndex: Math.max(0, ny - 1),
-        srcRows: nz,
-        srcCols: nx,
-      };
-    }
-
-    // sagittal
+    const dimensions = { x: nx, y: ny, z: nz };
+    const strides = { x: 1, y: nx, z: nx * ny };
+    const [vx, vy, vz] = volume.voxelSizeMm;
+    const physicalLengths = { x: nx * vx, y: ny * vy, z: nz * vz };
     return {
-      maxIndex: Math.max(0, nx - 1),
-      srcRows: nz,
-      srcCols: ny,
+      maxIndex: Math.max(0, dimensions[inspectorAxes.slice] - 1),
+      srcRows: dimensions[inspectorAxes.row],
+      srcCols: dimensions[inspectorAxes.column],
+      sliceStride: strides[inspectorAxes.slice],
+      rowStride: strides[inspectorAxes.row],
+      columnStride: strides[inspectorAxes.column],
+      aspectRatio: `${physicalLengths[inspectorAxes.column]} / ${physicalLengths[inspectorAxes.row]}`,
     };
-  }, [inspectPlane, volume]);
+  }, [inspectorAxes, volume]);
 
   // The selected slice and existing ROI seed already own inspection position. Derive
   // its patient-space coordinate instead of introducing a competing cursor authority.
@@ -1105,9 +1106,7 @@ export function SvrVolume3DViewer({
       z: clamp(seedVoxel?.z ?? Math.floor(nz / 2), 0, nz - 1),
     };
     const slice = Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex));
-    if (inspectPlane === 'axial') voxel.z = slice;
-    else if (inspectPlane === 'coronal') voxel.y = slice;
-    else voxel.x = slice;
+    voxel[inspectorAxes.slice] = slice;
 
     const index = voxel.z * nx * ny + voxel.y * nx + voxel.x;
     return {
@@ -1118,7 +1117,7 @@ export function SvrVolume3DViewer({
         volume.originMm[2] + voxel.z * volume.voxelSizeMm[2],
       ] as const,
     };
-  }, [inspectIndex, inspectPlane, inspectorInfo.maxIndex, seedVoxel, volume]);
+  }, [inspectIndex, inspectorAxes, inspectorInfo.maxIndex, seedVoxel, volume]);
 
   // Default the inspector to the mid-slice when the volume or plane changes.
   useEffect(() => {
@@ -1143,19 +1142,15 @@ export function SvrVolume3DViewer({
 
       const sx = Math.round(clamp(u, 0, 1) * Math.max(0, srcCols - 1));
       const sy = Math.round(clamp(v, 0, 1) * Math.max(0, srcRows - 1));
-
-      if (inspectPlane === 'axial') {
-        return { x: sx, y: sy, z: sliceIdx };
-      }
-
-      if (inspectPlane === 'coronal') {
-        return { x: sx, y: sliceIdx, z: sy };
-      }
-
       // sagittal
-      return { x: sliceIdx, y: sx, z: sy };
+      // and the other planes share this canonical pointer-to-voxel mapping.
+      const voxel = {} as Vec3i;
+      voxel[inspectorAxes.column] = sx;
+      voxel[inspectorAxes.row] = sy;
+      voxel[inspectorAxes.slice] = sliceIdx;
+      return voxel;
     },
-    [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume],
+    [inspectIndex, inspectorAxes, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume],
   );
 
   const computeRoiBoundsFromSliceVoxels = useCallback(
@@ -1563,7 +1558,6 @@ export function SvrVolume3DViewer({
   const inspectorSlice = useMemo(() => {
     if (!volume) return null;
 
-    const [nx, ny, nz] = volume.dims;
     const data = volume.data;
     const observedSupport = volume.observedSupport;
 
@@ -1573,41 +1567,15 @@ export function SvrVolume3DViewer({
     const srcCols = inspectorInfo.srcCols;
 
     const src = new Float32Array(srcRows * srcCols);
-
-    const strideY = nx;
-    const strideZ = nx * ny;
-
-    if (inspectPlane === 'axial') {
-      const z = idx;
-      const zBase = z * strideZ;
-      for (let y = 0; y < ny; y++) {
-        const inBase = zBase + y * strideY;
-        const outBase = y * nx;
-        for (let x = 0; x < nx; x++) {
-          const sourceIndex = inBase + x;
-          src[outBase + x] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
-        }
-      }
-    } else if (inspectPlane === 'coronal') {
-      const y = idx;
-      for (let z = 0; z < nz; z++) {
-        const inBase = z * strideZ + y * strideY;
-        const outBase = z * nx;
-        for (let x = 0; x < nx; x++) {
-          const sourceIndex = inBase + x;
-          src[outBase + x] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
-        }
-      }
-    } else {
-      // sagittal
-      const x = idx;
-      for (let z = 0; z < nz; z++) {
-        const zBase = z * strideZ;
-        const outBase = z * ny;
-        for (let y = 0; y < ny; y++) {
-          const sourceIndex = zBase + y * strideY + x;
-          src[outBase + y] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
-        }
+    // sagittal
+    // and the other planes share their precomputed slice, row, and column strides.
+    const sliceBase = idx * inspectorInfo.sliceStride;
+    for (let row = 0; row < srcRows; row++) {
+      const sourceBase = sliceBase + row * inspectorInfo.rowStride;
+      const destinationBase = row * srcCols;
+      for (let column = 0; column < srcCols; column++) {
+        const sourceIndex = sourceBase + column * inspectorInfo.columnStride;
+        src[destinationBase + column] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
       }
     }
 
@@ -1621,7 +1589,7 @@ export function SvrVolume3DViewer({
     const down = resample2dAreaAverage(src, srcRows, srcCols, dsRows, dsCols);
 
     return { down, idx, srcRows, srcCols, dsRows, dsCols };
-  }, [inspectIndex, inspectPlane, inspectorInfo.maxIndex, inspectorInfo.srcCols, inspectorInfo.srcRows, volume]);
+  }, [inspectIndex, inspectorInfo, volume]);
 
   // Composite the cached inspector slice with the label overlay and UI decorations
   // (seed crosshair, ROI boxes) onto the 2D canvas.
@@ -1632,10 +1600,6 @@ export function SvrVolume3DViewer({
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
-    const [nx, ny] = volume.dims;
-    const strideY = nx;
-    const strideZ = nx * ny;
 
     const { down, idx, srcRows, srcCols, dsRows, dsCols } = inspectorSlice;
 
@@ -1663,26 +1627,10 @@ export function SvrVolume3DViewer({
         const srcX = dsCols > 1 ? Math.round((px / (dsCols - 1)) * (srcCols - 1)) : 0;
         const srcY = dsRows > 1 ? Math.round((py / (dsRows - 1)) * (srcRows - 1)) : 0;
 
-        let vx = 0;
-        let vy = 0;
-        let vz = 0;
-
-        if (inspectPlane === 'axial') {
-          vx = srcX;
-          vy = srcY;
-          vz = idx;
-        } else if (inspectPlane === 'coronal') {
-          vx = srcX;
-          vy = idx;
-          vz = srcY;
-        } else {
-          // sagittal
-          vx = idx;
-          vy = srcX;
-          vz = srcY;
-        }
-
-        const sourceIndex = vz * strideZ + vy * strideY + vx;
+        // sagittal
+        // and the other planes reuse the indices from their extracted source pixels.
+        const sourceIndex =
+          idx * inspectorInfo.sliceStride + srcY * inspectorInfo.rowStride + srcX * inspectorInfo.columnStride;
         if (volume.observedSupport && !volume.observedSupport[sourceIndex]) {
           // Amber cross-hatching is evidence provenance, not invented dark tissue.
           const stripe = ((px + py) & 7) < 2;
@@ -1716,16 +1664,11 @@ export function SvrVolume3DViewer({
 
     // Draw a small crosshair for the current seed (if it lies on the current inspector slice).
     if (seedVoxel) {
-      const isOnSlice =
-        inspectPlane === 'axial'
-          ? seedVoxel.z === idx
-          : inspectPlane === 'coronal'
-            ? seedVoxel.y === idx
-            : seedVoxel.x === idx;
+      const isOnSlice = seedVoxel[inspectorAxes.slice] === idx;
 
       if (isOnSlice) {
-        const seedCol = inspectPlane === 'axial' ? seedVoxel.x : inspectPlane === 'coronal' ? seedVoxel.x : seedVoxel.y;
-        const seedRow = inspectPlane === 'axial' ? seedVoxel.y : inspectPlane === 'coronal' ? seedVoxel.z : seedVoxel.z;
+        const seedCol = seedVoxel[inspectorAxes.column];
+        const seedRow = seedVoxel[inspectorAxes.row];
 
         const cx = srcCols > 1 ? (seedCol / (srcCols - 1)) * (dsCols - 1) : 0;
         const cy = srcRows > 1 ? (seedRow / (srcRows - 1)) * (dsRows - 1) : 0;
@@ -1750,33 +1693,12 @@ export function SvrVolume3DViewer({
       const toCanvasX = (col: number) => (srcCols > 1 ? (col / (srcCols - 1)) * (dsCols - 1) : 0);
       const toCanvasY = (row: number) => (srcRows > 1 ? (row / (srcRows - 1)) * (dsRows - 1) : 0);
 
-      let col0 = 0;
-      let col1 = 0;
-      let row0 = 0;
-      let row1 = 0;
-
-      if (inspectPlane === 'axial') {
-        col0 = bounds.min.x;
-        col1 = bounds.max.x;
-        row0 = bounds.min.y;
-        row1 = bounds.max.y;
-      } else if (inspectPlane === 'coronal') {
-        col0 = bounds.min.x;
-        col1 = bounds.max.x;
-        row0 = bounds.min.z;
-        row1 = bounds.max.z;
-      } else {
-        // sagittal
-        col0 = bounds.min.y;
-        col1 = bounds.max.y;
-        row0 = bounds.min.z;
-        row1 = bounds.max.z;
-      }
-
-      const x0 = toCanvasX(col0);
-      const x1 = toCanvasX(col1);
-      const y0 = toCanvasY(row0);
-      const y1 = toCanvasY(row1);
+      // sagittal
+      // and the other planes project ROI corners through their canonical axes.
+      const x0 = toCanvasX(bounds.min[inspectorAxes.column]);
+      const x1 = toCanvasX(bounds.max[inspectorAxes.column]);
+      const y0 = toCanvasY(bounds.min[inspectorAxes.row]);
+      const y1 = toCanvasY(bounds.max[inspectorAxes.row]);
 
       const left = Math.min(x0, x1);
       const right = Math.max(x0, x1);
@@ -1801,13 +1723,7 @@ export function SvrVolume3DViewer({
     };
 
     const roiIntersectsCurrentSlice = (bounds: { min: Vec3i; max: Vec3i }): boolean => {
-      if (inspectPlane === 'axial') {
-        return idx >= bounds.min.z && idx <= bounds.max.z;
-      }
-      if (inspectPlane === 'coronal') {
-        return idx >= bounds.min.y && idx <= bounds.max.y;
-      }
-      return idx >= bounds.min.x && idx <= bounds.max.x;
+      return idx >= bounds.min[inspectorAxes.slice] && idx <= bounds.max[inspectorAxes.slice];
     };
 
     if (growRoiBounds && roiIntersectsCurrentSlice(growRoiBounds)) {
@@ -1828,7 +1744,8 @@ export function SvrVolume3DViewer({
     growRoiBounds,
     growRoiDraftBounds,
     hasLabels,
-    inspectPlane,
+    inspectorAxes,
+    inspectorInfo,
     inspectorSlice,
     labelMix,
     labelPalette,
@@ -2499,44 +2416,29 @@ export function SvrVolume3DViewer({
 
   const onViewerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLCanvasElement>) => {
-      switch (event.key) {
-        case 'ArrowLeft':
-        case 'ArrowRight':
-        case 'ArrowUp':
-        case 'ArrowDown': {
-          const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
-          const axis = horizontal ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
-          const angle = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -Math.PI / 36 : Math.PI / 36;
-          rotationRef.current = quatNormalize(quatMultiply(quatFromAxisAngle(axis, angle), rotationRef.current));
-          markInteraction();
-          break;
-        }
-        case '+':
-        case '=':
-        case '-':
-          setZoom((current) => clamp(event.key === '-' ? current / 1.15 : current * 1.15, 0.6, 10));
-          markInteraction();
-          break;
-        case '0':
-          resetView();
-          break;
-        case '1':
-        case '2':
-        case '3':
-          setInspectPlane(event.key === '1' ? 'axial' : event.key === '2' ? 'coronal' : 'sagittal');
-          break;
-        case '[':
-          setInspectIndex((current) => Math.max(0, current - 1));
-          break;
-        case ']':
-          setInspectIndex((current) => Math.min(inspectorInfo.maxIndex, current + 1));
-          break;
-        case 'Escape':
-          dragRef.current = null;
-          if (growStatus.running) cancelSeedGrow();
-          break;
-        default:
-          return;
+      const { key } = event;
+      if (key === 'ArrowLeft' || key === 'ArrowRight' || key === 'ArrowUp' || key === 'ArrowDown') {
+        const horizontal = key === 'ArrowLeft' || key === 'ArrowRight';
+        const axis = horizontal ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+        const angle = key === 'ArrowLeft' || key === 'ArrowUp' ? -Math.PI / 36 : Math.PI / 36;
+        rotationRef.current = quatNormalize(quatMultiply(quatFromAxisAngle(axis, angle), rotationRef.current));
+        markInteraction();
+      } else if (key === '+' || key === '=' || key === '-') {
+        setZoom((current) => clamp(key === '-' ? current / 1.15 : current * 1.15, 0.6, 10));
+        markInteraction();
+      } else if (key === '0') {
+        resetView();
+      } else if (key === '1' || key === '2' || key === '3') {
+        setInspectPlane(key === '1' ? 'axial' : key === '2' ? 'coronal' : 'sagittal');
+      } else if (key === '[' || key === ']') {
+        setInspectIndex((current) =>
+          key === '[' ? Math.max(0, current - 1) : Math.min(inspectorInfo.maxIndex, current + 1),
+        );
+      } else if (key === 'Escape') {
+        dragRef.current = null;
+        if (growStatus.running) cancelSeedGrow();
+      } else {
+        return;
       }
 
       event.preventDefault();
@@ -2544,15 +2446,6 @@ export function SvrVolume3DViewer({
     },
     [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView],
   );
-
-  const inspectorPhysicalAspectRatio = useMemo(() => {
-    if (!volume) return undefined;
-    const [nx, ny, nz] = volume.dims;
-    const [vx, vy, vz] = volume.voxelSizeMm;
-    if (inspectPlane === 'axial') return `${nx * vx} / ${ny * vy}`;
-    if (inspectPlane === 'coronal') return `${nx * vx} / ${nz * vz}`;
-    return `${ny * vy} / ${nz * vz}`;
-  }, [inspectPlane, volume]);
 
   const sliceInspectorCard = (
     <div
@@ -2567,7 +2460,7 @@ export function SvrVolume3DViewer({
             Plane
             <select
               value={inspectPlane}
-              onChange={(e) => setInspectPlane(e.target.value as 'axial' | 'coronal' | 'sagittal')}
+              onChange={(e) => setInspectPlane(e.target.value as SvrRoiPlane)}
               className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
               disabled={!volume}
             >
@@ -2630,7 +2523,7 @@ export function SvrVolume3DViewer({
             aria-label={`${inspectPlane} reconstructed slice ${Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}`}
             tabIndex={volume ? 0 : -1}
             style={{
-              aspectRatio: inspectorPhysicalAspectRatio,
+              aspectRatio: inspectorInfo.aspectRatio,
               cursor: volume ? 'crosshair' : 'default',
             }}
             onPointerDown={onSliceInspectorPointerDown}

@@ -105,6 +105,18 @@ const target: SeriesRef = {
   frame_of_reference_uid: 'frame-b',
 };
 
+async function runPhysicalAlignment(
+  series: Record<string, SeriesRef> = { 'target-examination': target },
+  options: Parameters<ReturnType<typeof useAutoAlign>['alignAllDates']>[4] = {},
+  align = renderHook(() => useAutoAlign()).result.current.alignAllDates,
+) {
+  let results: Awaited<ReturnType<typeof align>> = [];
+  await act(async () => {
+    results = await align(reference, Object.keys(series), series, 0.5, options);
+  });
+  return results;
+}
+
 describe('physically registered longitudinal auto-alignment', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -149,17 +161,7 @@ describe('physically registered longitudinal auto-alignment', () => {
   });
 
   it('uses rigid 3D reslicing, preserves lesion exclusion, and exposes verified derived-plane provenance', async () => {
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(mocks.register3d).toHaveBeenCalledTimes(1);
     expect(mocks.densify).toHaveBeenCalledTimes(1);
@@ -192,18 +194,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       rows: 256,
       cols: 256,
     });
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-        { outputMode: 'fixed-256' },
-      );
-    });
+    const results = await runPhysicalAlignment(undefined, { outputMode: 'fixed-256' });
 
     expect(mocks.prepare.mock.calls[0]?.[3]).toMatchObject({
       outputGrid: expect.objectContaining({ mode: 'fixed-256', rows: 256, columns: 256 }),
@@ -237,18 +228,7 @@ describe('physically registered longitudinal auto-alignment', () => {
   });
 
   it('refuses a derived presentation whose returned dimensions disagree with the operation output lattice', async () => {
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-        { outputMode: 'fixed-256' },
-      );
-    });
+    const results = await runPhysicalAlignment(undefined, { outputMode: 'fixed-256' });
 
     expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
     expect(results[0]?.derivedFrame).toBeUndefined();
@@ -272,17 +252,7 @@ describe('physically registered longitudinal auto-alignment', () => {
         inverseConsistencyErrorMm: 0.12,
       },
     });
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({
       outcome: 'aligned',
@@ -310,11 +280,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       structuredClone(input.referenceExclusionMask, { transfer: [input.referenceExclusionMask.buffer] });
       return successfulRegistration;
     });
-    const { result } = renderHook(() => useAutoAlign());
-
-    await act(async () => {
-      await result.current.alignAllDates(reference, ['target-examination'], { 'target-examination': target }, 0.5);
-    });
+    await runPhysicalAlignment();
 
     const nativeRefinementMask = mocks.densify.mock.calls[0]?.[3]?.referenceExclusionMask as Uint8Array;
     expect(nativeRefinementMask.byteLength).toBe(16);
@@ -341,17 +307,7 @@ describe('physically registered longitudinal auto-alignment', () => {
         evaluations: 40,
       },
     }));
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(mocks.register3d.mock.calls[0]?.[0]).toMatchObject({ deferPresentationValidation: true });
     expect(results[0]).toMatchObject({
@@ -390,17 +346,7 @@ describe('physically registered longitudinal auto-alignment', () => {
         evaluations: 40,
       },
     }));
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({
       outcome: 'aligned',
@@ -423,15 +369,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       const pixels = Float32Array.from(initialRegistration.pixels);
       pixels[15] = invalidValue;
       mocks.register3d.mockResolvedValue({ ...initialRegistration, pixels, valid: validity });
-      let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-      await act(async () => {
-        results = await result.current.alignAllDates(
-          reference,
-          ['target-examination'],
-          { 'target-examination': target },
-          0.5,
-        );
-      });
+      const results = await runPhysicalAlignment(undefined, undefined, result.current.alignAllDates);
       return results[0]!;
     };
 
@@ -450,17 +388,7 @@ describe('physically registered longitudinal auto-alignment', () => {
     const validity = new Uint8Array(16).fill(1);
     validity[0] = 0;
     mocks.register3d.mockResolvedValue({ ...initialRegistration, valid: validity, coverage: 15 / 16 });
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({ outcome: 'insufficient-overlap', message: expect.stringMatching(/lesion/i) });
     expect(results[0]?.derivedFrame).toBeUndefined();
@@ -470,17 +398,7 @@ describe('physically registered longitudinal auto-alignment', () => {
     mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
       manifest(seriesUid, seriesUid === 'reference-series' ? 'patient-a' : 'patient-b'),
     );
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
     expect(mocks.register3d).not.toHaveBeenCalled();
@@ -501,16 +419,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       maximumThroughPlaneDriftMm: 2.4,
       frameRelationship: 'same',
     });
-    const { result } = renderHook(() => useAutoAlign());
-
-    await act(async () => {
-      await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } },
-        0.5,
-      );
-    });
+    await runPhysicalAlignment({ 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } });
 
     expect(mocks.register3d).toHaveBeenCalledTimes(1);
   });
@@ -532,16 +441,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       movingToFixed: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
       quality: { mi: 1, nmi: 1 },
     });
-    const { result } = renderHook(() => useAutoAlign());
-
-    await act(async () => {
-      await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } },
-        0.5,
-      );
-    });
+    await runPhysicalAlignment({ 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } });
 
     expect(mocks.register2d.mock.calls[0]?.[3]).toMatchObject({
       fixedPixelSpacing: [(4 * 0.4) / 256, (4 * 0.8) / 256],
@@ -555,17 +455,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       reason: 'insufficient-coverage',
       message: 'The selected plane lies outside the target volume',
     });
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({ outcome: 'insufficient-overlap' });
     expect(results[0]?.derivedFrame).toBeUndefined();
@@ -579,17 +469,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       reason: 'insufficient-coverage',
       message: 'The registered reference plane requires more native frames than its safe memory budget',
     });
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({ outcome: 'insufficient-overlap' });
     expect(results[0]?.derivedFrame).toBeUndefined();
@@ -604,17 +484,7 @@ describe('physically registered longitudinal auto-alignment', () => {
         reason,
         message: 'Distinct rigid poses do not have distinguishable anatomical evidence',
       });
-      const { result } = renderHook(() => useAutoAlign());
-      let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-      await act(async () => {
-        results = await result.current.alignAllDates(
-          reference,
-          ['target-examination'],
-          { 'target-examination': target },
-          0.5,
-        );
-      });
+      const results = await runPhysicalAlignment();
 
       expect(results[0]).toMatchObject({ outcome: 'ambiguous' });
       expect(results[0]?.derivedFrame).toBeUndefined();
@@ -630,17 +500,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       .mockResolvedValueOnce(successfulRegistration);
     const first = { ...target, series_uid: 'first-target-series' };
     const second = { ...target, series_uid: 'second-target-series' };
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['first-examination', 'second-examination'],
-        { 'first-examination': first, 'second-examination': second },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment({ 'first-examination': first, 'second-examination': second });
 
     expect(results.map((item) => item.outcome)).toEqual(['failed', 'aligned']);
     expect(results[1]?.seriesUid).toBe('second-target-series');
@@ -658,17 +518,7 @@ describe('physically registered longitudinal auto-alignment', () => {
       geometryReliable: false,
       ordering: 'instance-number',
     }));
-    const { result } = renderHook(() => useAutoAlign());
-    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
-
-    await act(async () => {
-      results = await result.current.alignAllDates(
-        reference,
-        ['target-examination'],
-        { 'target-examination': target },
-        0.5,
-      );
-    });
+    const results = await runPhysicalAlignment();
 
     expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
     expect(mocks.register3d).not.toHaveBeenCalled();

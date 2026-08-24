@@ -20,7 +20,7 @@ import type {
 } from '../db/schema';
 import { isOwnedStorageKey } from '../utils/storageKeys';
 import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
-import { assertValidDerivedAlignmentFrameShape, MAX_DERIVED_ALIGNMENT_FRAMES } from '../utils/localApi';
+import { assertValidDerivedAlignmentFrameShape, getImageCounts, MAX_DERIVED_ALIGNMENT_FRAMES } from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
@@ -162,9 +162,7 @@ export async function exportStudiesToZip(
   const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
 
   const instances: SnapshotInstance[] = [];
-  const totalInstances = (
-    await Promise.all(series.map((item) => db.countFromIndex('instances', 'by-series', item.seriesInstanceUid)))
-  ).reduce((count, next) => count + next, 0);
+  const totalInstances = Object.values(await getImageCounts(series)).reduce((count, next) => count + next, 0);
   let collected = 0;
 
   for (const item of series) {

@@ -80,11 +80,12 @@ type IntakeProgress = {
 };
 
 type IntakeOperation = {
-  id: number;
   controller: AbortController;
   committing: boolean;
   committed?: ProcessFilesProgress;
   total?: number;
+  pendingProgress?: IntakeProgress;
+  progressTimer?: number;
 };
 
 const MAX_DIRECTORY_DEPTH = 48;
@@ -167,18 +168,15 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   const backupInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const operationRef = useRef<IntakeOperation | null>(null);
-  const nextOperationId = useRef(0);
-  const progressTimerRef = useRef<number | null>(null);
-  const pendingProgressRef = useRef<IntakeProgress | null>(null);
-  const lastProgressAtRef = useRef(0);
 
   useEffect(() => subscribeStorageHealth(setStorageHealth), []);
 
   useEffect(
     () => () => {
-      operationRef.current?.controller.abort();
+      const operation = operationRef.current;
+      operation?.controller.abort();
+      if (operation?.progressTimer !== undefined) window.clearTimeout(operation.progressTimer);
       operationRef.current = null;
-      if (progressTimerRef.current !== null) window.clearTimeout(progressTimerRef.current);
     },
     [],
   );
@@ -193,7 +191,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
 
   const beginOperation = (nextPhase: IntakePhase): IntakeOperation | null => {
     if (operationRef.current) return null;
-    const operation = { id: ++nextOperationId.current, controller: new AbortController(), committing: false };
+    const operation = { controller: new AbortController(), committing: false };
     operationRef.current = operation;
     setPhase(nextPhase);
     setErrorMessage(null);
@@ -202,44 +200,26 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   };
 
   const publishProgress = (operation: IntakeOperation, next: IntakeProgress, immediate = false): void => {
-    if (operationRef.current?.id !== operation.id) return;
-    pendingProgressRef.current = next;
-    const now = performance.now();
-    if (immediate || now - lastProgressAtRef.current >= PROGRESS_INTERVAL_MS) {
-      if (progressTimerRef.current !== null) {
-        window.clearTimeout(progressTimerRef.current);
-        progressTimerRef.current = null;
-      }
-      lastProgressAtRef.current = now;
-      setProgress(next);
-      return;
-    }
-    if (progressTimerRef.current !== null) return;
-    progressTimerRef.current = window.setTimeout(
-      () => {
-        progressTimerRef.current = null;
-        if (operationRef.current?.id === operation.id && pendingProgressRef.current) {
-          lastProgressAtRef.current = performance.now();
-          setProgress(pendingProgressRef.current);
-        }
-      },
-      PROGRESS_INTERVAL_MS - (now - lastProgressAtRef.current),
-    );
+    if (operationRef.current !== operation) return;
+    operation.pendingProgress = next;
+    if (!immediate && operation.progressTimer !== undefined) return;
+    if (operation.progressTimer !== undefined) window.clearTimeout(operation.progressTimer);
+    setProgress(next);
+    operation.pendingProgress = undefined;
+    operation.progressTimer = window.setTimeout(() => {
+      operation.progressTimer = undefined;
+      if (operation.pendingProgress) publishProgress(operation, operation.pendingProgress, true);
+    }, PROGRESS_INTERVAL_MS);
   };
 
   const endOperation = (operation: IntakeOperation): void => {
-    if (operationRef.current?.id !== operation.id) return;
+    if (operationRef.current !== operation) return;
     operationRef.current = null;
-    if (progressTimerRef.current !== null) {
-      window.clearTimeout(progressTimerRef.current);
-      progressTimerRef.current = null;
-    }
+    if (operation.progressTimer !== undefined) window.clearTimeout(operation.progressTimer);
   };
 
-  const isCurrentOperation = (operation: IntakeOperation): boolean => operationRef.current?.id === operation.id;
-
   const reportFailure = (operation: IntakeOperation, error: unknown): void => {
-    if (operationRef.current?.id !== operation.id) return;
+    if (operationRef.current !== operation) return;
     const canceled = isAbortError(error) || operation.controller.signal.aborted;
     if (operation.committed && operation.committed.ingested > 0) {
       const { ingested, duplicates, skipped, errors } = operation.committed;
@@ -341,7 +321,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       throwIfAborted(operation.controller.signal);
       const manifest = await readSnapshotManifest(archive.zip, { signal: operation.controller.signal });
       throwIfAborted(operation.controller.signal);
-      if (operationRef.current?.id !== operation.id) return;
+      if (operationRef.current !== operation) return;
       const entries = archive.entries.filter((entry) => isDicomCandidate(entry.name));
       if (!manifest && entries.length === 0) {
         throw new Error('This archive contains no files that could be DICOM images.');
@@ -385,7 +365,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       }
       throwIfAborted(operation.controller.signal);
       if (imageCount === 0) throw new Error('The selected folder contains no files that could be DICOM images.');
-      if (operationRef.current?.id !== operation.id) return;
+      if (operationRef.current !== operation) return;
       setSource({
         kind: 'folder',
         label: directory.name || 'Selected acquisition folder',
@@ -474,7 +454,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   };
 
   const handleUpload = async (): Promise<void> => {
-    if (!source || operationRef.current || (source.kind === 'complete-backup' && !restoreConfirmed)) return;
+    if (!source || (source.kind === 'complete-backup' && !restoreConfirmed)) return;
     const operation = beginOperation(source.kind === 'complete-backup' ? 'restoring' : 'importing');
     if (!operation) return;
     operation.total = source.imageCount;
@@ -500,7 +480,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
           {
             signal: operation.controller.signal,
             onCommitStart: () => {
-              if (operationRef.current?.id !== operation.id) return;
+              if (operationRef.current !== operation) return;
               operation.committing = true;
               setPhase('finishing');
               publishProgress(
@@ -567,7 +547,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         }
       }
 
-      if (!isCurrentOperation(operation)) return;
+      if (operationRef.current !== operation) return;
       setSummary(result);
       if (result.cancelled || (operation.controller.signal.aborted && !operation.committing)) {
         setPhase('canceled');
@@ -589,7 +569,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         try {
           await onUploadComplete?.();
         } catch {
-          if (isCurrentOperation(operation)) {
+          if (operationRef.current === operation) {
             setErrorMessage(
               'Images were saved, but the viewer could not refresh. Close and reopen the app to see them.',
             );

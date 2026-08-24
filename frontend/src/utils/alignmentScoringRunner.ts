@@ -126,49 +126,45 @@ export async function createAlignmentScoringRunner(
     });
   };
 
-  const fine = Float32Array.from(config.referenceFinePixels);
-  const coarse = Float32Array.from(config.referenceCoarsePixels);
-  const fineValidity = config.referenceFineValidity ? Float32Array.from(config.referenceFineValidity) : undefined;
-  const coarseValidity = config.referenceCoarseValidity ? Float32Array.from(config.referenceCoarseValidity) : undefined;
-  const referenceTransfers: Transferable[] = [fine.buffer, coarse.buffer];
-  if (fineValidity) referenceTransfers.push(fineValidity.buffer);
-  if (coarseValidity) referenceTransfers.push(coarseValidity.buffer);
+  const referenceConfig = { ...config };
+  const referenceTransfers: Transferable[] = [];
+  for (const field of [
+    'referenceFinePixels',
+    'referenceCoarsePixels',
+    'referenceFineValidity',
+    'referenceCoarseValidity',
+  ] as const) {
+    const source = config[field];
+    if (!source) continue;
+    const copy = Float32Array.from(source);
+    referenceConfig[field] = copy;
+    referenceTransfers.push(copy.buffer);
+  }
   try {
-    await request(
-      {
-        kind: 'initialize',
-        config: {
-          ...config,
-          referenceFinePixels: fine,
-          referenceCoarsePixels: coarse,
-          ...(fineValidity ? { referenceFineValidity: fineValidity } : {}),
-          ...(coarseValidity ? { referenceCoarseValidity: coarseValidity } : {}),
-        },
-      },
-      referenceTransfers,
-    );
+    await request({ kind: 'initialize', config: referenceConfig }, referenceTransfers);
   } catch (error) {
     close();
     throw error;
   }
 
+  const scoreCandidate = async (
+    kind: 'coarse' | 'fine',
+    pixels: Float32Array,
+    seed: GridSeedTransform,
+    validity?: Float32Array,
+    phase?: PhaseCorrection,
+  ) => {
+    const response = await request(
+      { kind, pixels, seed, ...(phase ? { phase } : {}), ...(validity ? { validity } : {}) },
+      [pixels.buffer, ...(validity ? [validity.buffer] : [])],
+    );
+    if (response.kind !== 'result') throw new Error(`Alignment scoring worker returned an invalid ${kind} result`);
+    return response.result;
+  };
+
   return {
-    scoreCoarse: async (pixels, seed, validity) => {
-      const response = await request(
-        { kind: 'coarse', pixels, seed, ...(validity ? { validity } : {}) },
-        validity ? [pixels.buffer, validity.buffer] : [pixels.buffer],
-      );
-      if (response.kind !== 'result') throw new Error('Alignment scoring worker returned an invalid coarse result');
-      return response.result;
-    },
-    scoreFine: async (pixels, seed, phase, validity) => {
-      const response = await request(
-        { kind: 'fine', pixels, seed, phase, ...(validity ? { validity } : {}) },
-        validity ? [pixels.buffer, validity.buffer] : [pixels.buffer],
-      );
-      if (response.kind !== 'result') throw new Error('Alignment scoring worker returned an invalid fine result');
-      return response.result;
-    },
+    scoreCoarse: (pixels, seed, validity) => scoreCandidate('coarse', pixels, seed, validity),
+    scoreFine: (pixels, seed, phase, validity) => scoreCandidate('fine', pixels, seed, validity, phase),
     scoreFinal: async (input) => {
       // The selected native pixels remain needed for display statistics after worker scoring.
       const movingPixels = Float32Array.from(input.movingPixels);
