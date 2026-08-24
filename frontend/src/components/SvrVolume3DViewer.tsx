@@ -505,21 +505,17 @@ export function SvrVolume3DViewer({
     if (!observedSupport || !volume) return null;
     if (observedSupport.length !== volume.data.length) return { valid: false, count: 0, total: volume.data.length };
 
+    const total = observedSupport.length;
     const knownCount = volume.supportedVoxelCount;
-    if (
-      typeof knownCount === 'number' &&
-      Number.isInteger(knownCount) &&
-      knownCount >= 0 &&
-      knownCount <= observedSupport.length
-    ) {
-      return { valid: true, count: knownCount, total: observedSupport.length };
+    if (typeof knownCount === 'number' && Number.isInteger(knownCount) && knownCount >= 0 && knownCount <= total) {
+      return { valid: true, count: knownCount, total };
     }
 
     let count = 0;
-    for (let index = 0; index < observedSupport.length; index++) {
+    for (let index = 0; index < total; index++) {
       if (observedSupport[index]) count++;
     }
-    return { valid: true, count, total: observedSupport.length };
+    return { valid: true, count, total };
   }, [volume]);
 
   const volumeKey = useMemo(() => {
@@ -1039,14 +1035,6 @@ export function SvrVolume3DViewer({
       e.stopPropagation();
     };
 
-    canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
-  }, [markInteraction]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
     const handleContextLost = (event: Event) => {
       event.preventDefault();
       contextLostRef.current = true;
@@ -1060,13 +1048,15 @@ export function SvrVolume3DViewer({
       setContextEpoch((epoch) => epoch + 1);
     };
 
+    canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('webglcontextlost', handleContextLost);
     canvas.addEventListener('webglcontextrestored', handleContextRestored);
     return () => {
+      canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
     };
-  }, []);
+  }, [markInteraction]);
 
   const inspectorInfo = useMemo(() => {
     if (!volume) {
@@ -1939,7 +1929,6 @@ export function SvrVolume3DViewer({
 
       // Prefer float textures for fidelity, but honor the GPU-budgeted plan (which may request u8).
       let fmt: VolumeTextureFormat;
-      let uploadedData: ArrayBufferView;
 
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -1968,8 +1957,7 @@ export function SvrVolume3DViewer({
 
       if (renderTex.kind === 'u8') {
         fmt = fallback;
-        uploadedData = renderTex.data;
-        if (!tryUpload(fallback, uploadedData)) {
+        if (!tryUpload(fallback, renderTex.data)) {
           throw new Error('The GPU could not upload the 8-bit reconstructed volume.');
         }
       } else {
@@ -1977,24 +1965,19 @@ export function SvrVolume3DViewer({
         // The float render volume uploads as R16F (half bandwidth/memory of R32F, and
         // linearly filterable in core WebGL2). The Uint16Array of half bits is transient:
         // nothing retains it after texImage3D copies it to the GPU.
-        uploadedData = preparedRender?.halfFloatBits ?? float32ToFloat16Bits(renderTex.data as Float32Array);
+        const halfFloatBits = preparedRender?.halfFloatBits ?? float32ToFloat16Bits(renderTex.data as Float32Array);
+        let uploadedHalfFloat = false;
 
         try {
-          const ok = tryUpload(primary, uploadedData);
-          if (!ok) {
-            // Fall back to 8-bit normalized.
-            const u8 = toUint8Volume(renderTex.data as Float32Array);
-            fmt = fallback;
-            uploadedData = u8;
-            if (!tryUpload(fallback, uploadedData)) {
-              throw new Error('The GPU could not upload either half-float or 8-bit volume textures.');
-            }
-          }
+          uploadedHalfFloat = tryUpload(primary, halfFloatBits);
         } catch {
-          const u8 = toUint8Volume(renderTex.data as Float32Array);
+          uploadedHalfFloat = false;
+        }
+
+        if (!uploadedHalfFloat) {
+          // Fall back to 8-bit normalized.
           fmt = fallback;
-          uploadedData = u8;
-          if (!tryUpload(fallback, uploadedData)) {
+          if (!tryUpload(fallback, toUint8Volume(renderTex.data as Float32Array))) {
             throw new Error('The GPU could not upload either half-float or 8-bit volume textures.');
           }
         }
@@ -2516,46 +2499,31 @@ export function SvrVolume3DViewer({
 
   const onViewerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLCanvasElement>) => {
-      let handled = true;
       switch (event.key) {
         case 'ArrowLeft':
-        case 'ArrowRight': {
-          const angle = event.key === 'ArrowLeft' ? -Math.PI / 36 : Math.PI / 36;
-          rotationRef.current = quatNormalize(
-            quatMultiply(quatFromAxisAngle({ x: 0, y: 1, z: 0 }, angle), rotationRef.current),
-          );
-          markInteraction();
-          break;
-        }
+        case 'ArrowRight':
         case 'ArrowUp':
         case 'ArrowDown': {
-          const angle = event.key === 'ArrowUp' ? -Math.PI / 36 : Math.PI / 36;
-          rotationRef.current = quatNormalize(
-            quatMultiply(quatFromAxisAngle({ x: 1, y: 0, z: 0 }, angle), rotationRef.current),
-          );
+          const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+          const axis = horizontal ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+          const angle = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -Math.PI / 36 : Math.PI / 36;
+          rotationRef.current = quatNormalize(quatMultiply(quatFromAxisAngle(axis, angle), rotationRef.current));
           markInteraction();
           break;
         }
         case '+':
         case '=':
-          setZoom((current) => clamp(current * 1.15, 0.6, 10));
-          markInteraction();
-          break;
         case '-':
-          setZoom((current) => clamp(current / 1.15, 0.6, 10));
+          setZoom((current) => clamp(event.key === '-' ? current / 1.15 : current * 1.15, 0.6, 10));
           markInteraction();
           break;
         case '0':
           resetView();
           break;
         case '1':
-          setInspectPlane('axial');
-          break;
         case '2':
-          setInspectPlane('coronal');
-          break;
         case '3':
-          setInspectPlane('sagittal');
+          setInspectPlane(event.key === '1' ? 'axial' : event.key === '2' ? 'coronal' : 'sagittal');
           break;
         case '[':
           setInspectIndex((current) => Math.max(0, current - 1));
@@ -2568,13 +2536,11 @@ export function SvrVolume3DViewer({
           if (growStatus.running) cancelSeedGrow();
           break;
         default:
-          handled = false;
+          return;
       }
 
-      if (handled) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
+      event.preventDefault();
+      event.stopPropagation();
     },
     [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView],
   );

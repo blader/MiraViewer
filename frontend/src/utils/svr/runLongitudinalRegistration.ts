@@ -104,28 +104,17 @@ async function runLongitudinalWorker(
 
     const { signal: _inputSignal, ...options } = input;
     void _inputSignal;
-    const transfer: Transferable[] = [];
-    const seen = new Set<ArrayBuffer>();
     const sourceSlices =
       request.type === 'run'
         ? [...request.options.referenceSlices, ...request.options.targetSlices]
         : [...request.options.targetSlices, ...(request.options.nativeReferenceSlices ?? [])];
+    const transfer = new Set<ArrayBuffer>();
     for (const slice of sourceSlices) {
-      for (const view of [slice.pixels, slice.valid]) {
-        if (!view) continue;
-        const buffer = view.buffer as ArrayBuffer;
-        if (!seen.has(buffer)) {
-          seen.add(buffer);
-          transfer.push(buffer);
-        }
-      }
+      transfer.add(slice.pixels.buffer as ArrayBuffer);
+      if (slice.valid) transfer.add(slice.valid.buffer as ArrayBuffer);
     }
     if (request.options.referenceExclusionMask) {
-      const buffer = request.options.referenceExclusionMask.buffer as ArrayBuffer;
-      if (!seen.has(buffer)) {
-        seen.add(buffer);
-        transfer.push(buffer);
-      }
+      transfer.add(request.options.referenceExclusionMask.buffer as ArrayBuffer);
     }
 
     try {
@@ -133,7 +122,7 @@ async function runLongitudinalWorker(
         request.type === 'run'
           ? { type: 'run', options: options as LongitudinalWorkerOptions }
           : { type: 'reslice', options: options as Omit<DenseLongitudinalResliceOptions, 'signal'> };
-      worker.postMessage(message, transfer);
+      worker.postMessage(message, Array.from(transfer));
     } catch (error) {
       settle(
         failed(

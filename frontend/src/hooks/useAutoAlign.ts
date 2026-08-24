@@ -202,6 +202,10 @@ export function useAutoAlign() {
       const setStateForCurrentRun = (nextState: Parameters<typeof setState>[0]) => {
         if (abortControllerRef.current === alignmentAbortController) setState(nextState);
       };
+      const publishResult = (result: AlignmentResult) => {
+        results.push(result);
+        setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+      };
 
       setStateForCurrentRun({
         isAligning: true,
@@ -361,20 +365,15 @@ export function useAutoAlign() {
 
         const alignPhysicalTarget = async (date: string, seriesRef: SeriesRef): Promise<AlignmentResult | null> => {
           if (!referenceManifest || seriesRef.instance_count < 2 || referenceManifest.frames.length < 2) return null;
+          const physicalFailure = (outcome: NonNullable<AlignmentResult['outcome']>, message: string) =>
+            terminalResult(date, seriesRef, outcome, message);
           const targetManifest = await getSeriesFrameManifest(seriesRef.series_uid);
           targetManifests.set(seriesRef.series_uid, targetManifest);
           if (targetManifest.patientKey !== referenceManifest.patientKey) {
-            return terminalResult(
-              date,
-              seriesRef,
-              'incompatible-geometry',
-              'Reference and target belong to different patients',
-            );
+            return physicalFailure('incompatible-geometry', 'Reference and target belong to different patients');
           }
           if (!referenceManifest.geometryReliable || !targetManifest.geometryReliable) {
-            return terminalResult(
-              date,
-              seriesRef,
+            return physicalFailure(
               'incompatible-geometry',
               'Reliable patient-space position and orientation are required for safe longitudinal registration',
             );
@@ -404,9 +403,7 @@ export function useAutoAlign() {
             drift.frameRelationship !== 'same' || drift.maximumThroughPlaneDriftMm > Math.max(0.01, centerSpacing / 2);
           if (!requiresReslice) return null;
           if (!operationOutputGrid) {
-            return terminalResult(
-              date,
-              seriesRef,
+            return physicalFailure(
               'incompatible-geometry',
               'The selected reference frame cannot define a reliable physical output grid',
             );
@@ -444,12 +441,7 @@ export function useAutoAlign() {
           );
           const selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
           if (!selectedReference) {
-            return terminalResult(
-              date,
-              seriesRef,
-              'incompatible-geometry',
-              'Selected physical reference frame is unavailable',
-            );
+            return physicalFailure('incompatible-geometry', 'Selected physical reference frame is unavailable');
           }
           const exclusion = rasterizeImageExclusion(
             reference.exclusionMask,
@@ -486,7 +478,7 @@ export function useAutoAlign() {
                     : failed.reason === 'cancelled'
                       ? 'cancelled'
                       : 'failed';
-            return terminalResult(date, seriesRef, outcome, failed.message);
+            return physicalFailure(outcome, failed.message);
           };
           if (!coarseRegistration.ok) return rejectRegistration(coarseRegistration);
 
@@ -517,9 +509,7 @@ export function useAutoAlign() {
             registration.cols !== operationOutputGrid.columns ||
             registration.pixels.length !== operationOutputGrid.rows * operationOutputGrid.columns
           ) {
-            return terminalResult(
-              date,
-              seriesRef,
+            return physicalFailure(
               'incompatible-geometry',
               'The derived presentation does not match its verified physical output grid',
             );
@@ -541,9 +531,7 @@ export function useAutoAlign() {
             if (required > 0) {
               requiredRegionSupport = supported / required;
               if (supported < required) {
-                return terminalResult(
-                  date,
-                  seriesRef,
+                return physicalFailure(
                   'insufficient-overlap',
                   'Acquired target anatomy does not fully support the selected lesion region',
                 );
@@ -558,12 +546,7 @@ export function useAutoAlign() {
           });
           const nativeFrame = targetManifest.frames[bestSliceIndex];
           if (!nativeFrame) {
-            return terminalResult(
-              date,
-              seriesRef,
-              'incompatible-geometry',
-              'Registered frame has no native source identity',
-            );
+            return physicalFailure('incompatible-geometry', 'Registered frame has no native source identity');
           }
           const resampled = registration.valid
             ? resample2dAreaAverageWithValidity(
@@ -737,8 +720,7 @@ export function useAutoAlign() {
             }
             if (physicalResult) {
               ensureNotAborted();
-              results.push(physicalResult);
-              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              publishResult(physicalResult);
               /**
                * Yield to the main thread to keep UI responsive during alignment.
                */
@@ -1164,8 +1146,7 @@ export function useAutoAlign() {
                 coverage: winningCandidate.components.coverage,
                 geometryMode: referenceManifest ? 'physical-2d' : 'fallback-2d',
               };
-              results.push(ambiguous);
-              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              publishResult(ambiguous);
               continue;
             }
             if (sliceEvidence.outcome === 'insufficient-overlap') {
@@ -1175,8 +1156,7 @@ export function useAutoAlign() {
                 'insufficient-overlap',
                 'The candidate does not retain enough supported reference anatomy for a safe alignment',
               );
-              results.push(insufficient);
-              setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              publishResult(insufficient);
               continue;
             }
 
@@ -1699,18 +1679,13 @@ export function useAutoAlign() {
             };
 
             ensureNotAborted();
-            results.push(result);
-
-            setStateForCurrentRun((s) => ({
-              ...s,
-              results: [...results],
-            }));
+            publishResult(result);
 
             await yieldToMain();
           } catch (error) {
             ensureNotAborted();
             sharedWebWorker = undefined;
-            results.push(
+            publishResult(
               terminalResult(
                 date,
                 seriesRef,
@@ -1718,7 +1693,6 @@ export function useAutoAlign() {
                 error instanceof Error ? error.message : 'Alignment failed for this examination',
               ),
             );
-            setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
           }
         }
 

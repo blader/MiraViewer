@@ -19,7 +19,6 @@ import type {
   SvrComputeResult,
   SvrComputeWorkerRequest,
   SvrComputeWorkerResponse,
-  SvrSeriesMeta,
 } from './svrComputeCore';
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
 import { assertNotAborted, yieldToMain } from './svrUtils';
@@ -463,21 +462,9 @@ function runSvrComputeInWorker(params: {
       }
 
       if (msg.type === 'done') {
-        settle(() =>
-          resolve({
-            volume: msg.volume,
-            observedSupport: msg.observedSupport,
-            supportedVoxelCount: msg.supportedVoxelCount,
-            acquiredOrientationCount: msg.acquiredOrientationCount,
-            effectiveResolutionMm: msg.effectiveResolutionMm,
-            sliceProfileSource: msg.sliceProfileSource,
-            reconstructionFingerprint: msg.reconstructionFingerprint,
-            dims: msg.dims,
-            originMm: msg.originMm,
-            voxelSizeMm: msg.voxelSizeMm,
-            bounds: msg.bounds,
-          }),
-        );
+        const { type: _type, ...result } = msg;
+        void _type;
+        settle(() => resolve(result));
         return;
       }
 
@@ -682,9 +669,9 @@ export async function reconstructVolumeMultiPlane(params: {
   // thread. Decoding (above) needs cornerstone/IndexedDB, so it stays on the
   // main thread ahead of the boundary.
   //
-  // Only the clone-safe subset of series metadata crosses the boundary;
-  // SvrSelectedSeries itself stays main-side (the compute phase only needs
-  // uids/labels/counts, and a narrow payload is clone-safe by construction).
+  // Only clone-safe pixel evidence and source identity cross the boundary;
+  // SvrSelectedSeries display metadata stays main-side (the compute phase needs
+  // physical slices, not free-text labels or duplicate source counts).
   let residentCacheBytes = 0;
   try {
     const cacheSize = cornerstone.imageCache?.getCacheInfo?.()?.cacheSizeInBytes;
@@ -695,18 +682,11 @@ export async function reconstructVolumeMultiPlane(params: {
     // Some supported hosts do not expose Cornerstone's optional cache telemetry.
   }
 
-  const seriesMeta: SvrSeriesMeta[] = selectedSeries.map((s) => ({
-    seriesUid: s.seriesUid,
-    label: s.label,
-    instanceCount: s.instanceCount,
-  }));
-
   const computed = await runSvrComputePhase({
     payload: {
       allSlices,
       intensitySamples,
       intensitySamplesBySeries,
-      seriesMeta,
       svrParams,
       residentCacheBytes,
       debug,

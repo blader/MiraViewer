@@ -163,12 +163,6 @@ function makeAllSlices(): LoadedSlice[] {
   ];
 }
 
-const SERIES_META = [
-  { seriesUid: 's-ax', label: 'AX', instanceCount: 6 },
-  { seriesUid: 's-cor', label: 'COR', instanceCount: 6 },
-  { seriesUid: 's-sag', label: 'SAG', instanceCount: 6 },
-];
-
 // Intensity samples chosen so the robust percentile window is exactly [0, 1]:
 // 1st percentile of 100 zeros + 100 ones is 0, 99th is 1, so the [0,1]-valued
 // phantom pixels pass through normalization bit-identically. This lets the
@@ -441,7 +435,6 @@ describe('svr/computeCore', () => {
       allSlices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: SVR_PARAMS,
       debug: false,
     });
@@ -489,7 +482,6 @@ describe('svr/computeCore', () => {
         allSlices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta: SERIES_META,
         svrParams: { ...SVR_PARAMS, iterations: 0 },
         residentCacheBytes: SVR_MEMORY_BUDGET_BYTES - 1_000,
         debug: false,
@@ -511,7 +503,6 @@ describe('svr/computeCore', () => {
       allSlices: makeAllSlices(),
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'none', roi },
       residentCacheBytes,
       debug: false,
@@ -525,7 +516,6 @@ describe('svr/computeCore', () => {
         allSlices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta: SERIES_META,
         svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'roi-rigid', roi },
         residentCacheBytes,
         onProgress: (event) => progress.push(event.message),
@@ -548,7 +538,6 @@ describe('svr/computeCore', () => {
         allSlices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta: SERIES_META,
         svrParams: SVR_PARAMS,
         debug: false,
       }),
@@ -565,7 +554,6 @@ describe('svr/computeCore', () => {
       allSlices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: { ...SVR_PARAMS, iterations: 0 },
       debug: false,
     });
@@ -589,7 +577,6 @@ describe('svr/computeCore', () => {
       allSlices: [slice],
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META.slice(0, 1),
       svrParams: { ...SVR_PARAMS, targetVoxelSizeMm: 0.5, iterations: 0 },
       debug: false,
     });
@@ -611,7 +598,6 @@ describe('svr/computeCore', () => {
       allSlices: slices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META.slice(0, 1),
       svrParams: { ...SVR_PARAMS, iterations: 0 },
       debug: false,
     });
@@ -626,7 +612,6 @@ describe('svr/computeCore', () => {
         allSlices: slices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta: SERIES_META,
         svrParams: { ...SVR_PARAMS, iterations },
         debug: false,
       });
@@ -700,7 +685,6 @@ describe('svr/computeCore', () => {
       allSlices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: { ...SVR_PARAMS, multiResolution: true, multiResolutionFactor: 2, multiResolutionCoarseIterations: 1 },
       debug: false,
     });
@@ -725,7 +709,6 @@ describe('svr/computeCore', () => {
       allSlices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: {
         ...SVR_PARAMS,
         roi: {
@@ -765,7 +748,6 @@ describe('svr/computeCore', () => {
       allSlices: [slice],
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META.slice(0, 1),
       svrParams: { ...SVR_PARAMS, iterations: 0 },
       debug: false,
     });
@@ -787,7 +769,6 @@ describe('svr/computeCore', () => {
         allSlices: makeAllSlices(),
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta: SERIES_META,
         svrParams: SVR_PARAMS,
         signal: controller.signal,
         debug: false,
@@ -805,7 +786,6 @@ describe('svr/computeCore', () => {
       allSlices: [...reference, ...partial],
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
       intensitySamplesBySeries: new Map(),
-      seriesMeta: SERIES_META,
       svrParams: { ...SVR_PARAMS, seriesRegistrationMode: 'roi-rigid', roi: null, iterations: 0 },
       debug: false,
     });
@@ -818,7 +798,7 @@ describe('svr/computeCore', () => {
     const byOriginalUid = new Map([
       ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
       ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
-      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789'],
+      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789_PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987'],
     ]);
     for (const slice of allSlices) {
       const originalUid = slice.seriesUid;
@@ -827,11 +807,6 @@ describe('svr/computeCore', () => {
       slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
       if (originalUid === 's-cor') slice.ippMm.x += 40;
     }
-    const seriesMeta = SERIES_META.map((series) => ({
-      ...series,
-      seriesUid: byOriginalUid.get(series.seriesUid)!,
-      label: 'PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987',
-    }));
     const spies = [
       vi.spyOn(console, 'info').mockImplementation(() => {}),
       vi.spyOn(console, 'warn').mockImplementation(() => {}),
@@ -844,7 +819,6 @@ describe('svr/computeCore', () => {
         allSlices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta,
         svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'bounds-center' },
         onProgress: (event) => progress.push(event.message),
         debug: true,
@@ -864,18 +838,13 @@ describe('svr/computeCore', () => {
     const byOriginalUid = new Map([
       ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
       ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
-      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789'],
+      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789_PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987'],
     ]);
     for (const slice of allSlices) {
       slice.seriesUid = byOriginalUid.get(slice.seriesUid)!;
       slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
       slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
     }
-    const seriesMeta = SERIES_META.map((series) => ({
-      ...series,
-      seriesUid: byOriginalUid.get(series.seriesUid)!,
-      label: 'PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987',
-    }));
     const spies = [
       vi.spyOn(console, 'info').mockImplementation(() => {}),
       vi.spyOn(console, 'warn').mockImplementation(() => {}),
@@ -888,7 +857,6 @@ describe('svr/computeCore', () => {
         allSlices,
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
         intensitySamplesBySeries: new Map(),
-        seriesMeta,
         svrParams: {
           ...SVR_PARAMS,
           iterations: 0,

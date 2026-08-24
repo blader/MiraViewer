@@ -19,7 +19,7 @@
  * numeric behavior is a hard invariant of that move.
  */
 
-import type { SvrParams, SvrProgress, SvrRoi, SvrSelectedSeries } from '../../types/svr';
+import type { SvrParams, SvrProgress, SvrRoi } from '../../types/svr';
 import { sliceCornersMm } from './dicomGeometry';
 import type { VolumeDims } from './trilinear';
 import type { SvrReconstructionGrid, SvrReconstructionOptions } from './reconstructionCore';
@@ -47,14 +47,6 @@ import {
 } from './rigidRegistration';
 import { assertNotAborted, formatMiB, quantileSorted, yieldToMain } from './svrUtils';
 
-/**
- * The slim, structured-cloneable subset of series metadata the compute phase
- * actually needs (labels for log/progress messages, instance counts for
- * sanity). We deliberately do not ship the whole SvrSelectedSeries across the
- * worker boundary so the payload stays minimal and clone-safe by construction.
- */
-export type SvrSeriesMeta = Pick<SvrSelectedSeries, 'seriesUid' | 'label' | 'instanceCount'>;
-
 /** Compute-phase output. The caller (main thread) turns this into an SvrResult. */
 export type SvrComputeResult = {
   volume: Float32Array;
@@ -75,12 +67,16 @@ export type SvrComputeResult = {
  * Worker protocol (defined here, next to the payload types, so both the
  * worker entry and the main-thread dispatcher type-check against the same
  * source of truth without the main bundle importing the worker module).
+ *
+ * The slim, structured-cloneable source evidence the compute phase actually
+ * needs already lives in its slice payload. We deliberately do not ship full
+ * SvrSelectedSeries metadata or free-text display labels across the worker
+ * boundary, so the payload stays minimal, private, and clone-safe.
  */
 export type SvrComputePayload = {
   allSlices: LoadedSlice[];
   intensitySamples: number[];
   intensitySamplesBySeries: Map<string, number[]>;
-  seriesMeta: SvrSeriesMeta[];
   svrParams: SvrParams;
   debug: boolean;
   /** Decoded-frame cache retained on the main thread while this worker owns its source copies. */
@@ -95,20 +91,7 @@ export type SvrComputeWorkerRequest =
 
 export type SvrComputeWorkerResponse =
   | { type: 'progress'; progress: SvrProgress }
-  | {
-      type: 'done';
-      volume: Float32Array;
-      observedSupport: Uint8Array;
-      supportedVoxelCount: number;
-      acquiredOrientationCount: number;
-      effectiveResolutionMm?: [number, number, number];
-      sliceProfileSource: 'declared' | 'mixed' | 'unknown';
-      reconstructionFingerprint: string;
-      dims: VolumeDims;
-      originMm: Vec3;
-      voxelSizeMm: number;
-      bounds: BoundsMm;
-    }
+  | ({ type: 'done' } & SvrComputeResult)
   | { type: 'error'; message: string };
 
 function boundsFromRoi(roi: SvrRoi): BoundsMm {
@@ -239,6 +222,11 @@ function fingerprintReconstruction(params: {
       second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
     }
   };
+  const updateVector = (vector: Vec3): void => {
+    update(vector.x);
+    update(vector.y);
+    update(vector.z);
+  };
 
   update(params.slices.length);
   for (const slice of params.slices) {
@@ -247,18 +235,10 @@ function fingerprintReconstruction(params: {
     update(slice.frameOfReferenceUid);
     update(slice.dsRows);
     update(slice.dsCols);
-    update(slice.ippMm.x);
-    update(slice.ippMm.y);
-    update(slice.ippMm.z);
-    update(slice.rowDir.x);
-    update(slice.rowDir.y);
-    update(slice.rowDir.z);
-    update(slice.colDir.x);
-    update(slice.colDir.y);
-    update(slice.colDir.z);
-    update(slice.normalDir.x);
-    update(slice.normalDir.y);
-    update(slice.normalDir.z);
+    updateVector(slice.ippMm);
+    updateVector(slice.rowDir);
+    updateVector(slice.colDir);
+    updateVector(slice.normalDir);
     update(slice.rowSpacingDsMm);
     update(slice.colSpacingDsMm);
     update(slice.sliceThicknessMm);
@@ -269,9 +249,7 @@ function fingerprintReconstruction(params: {
   update(params.grid.dims.nx);
   update(params.grid.dims.ny);
   update(params.grid.dims.nz);
-  update(params.grid.originMm.x);
-  update(params.grid.originMm.y);
-  update(params.grid.originMm.z);
+  updateVector(params.grid.originMm);
   update(params.grid.voxelSizeMm);
   update(params.supportedVoxelCount);
   update(params.svrParams.targetVoxelSizeMm);
@@ -648,17 +626,9 @@ function chooseOutputGrid(params: { bounds: { min: Vec3; max: Vec3 }; voxelSizeM
  * array once the solver no longer needs it, releasing the decoded pixel
  * buffers for GC before the caller allocates previews/result structures.
  */
-export async function computeSvrFromLoadedSlices(params: {
-  allSlices: LoadedSlice[];
-  intensitySamples: number[];
-  intensitySamplesBySeries: Map<string, number[]>;
-  seriesMeta: SvrSeriesMeta[];
-  svrParams: SvrParams;
-  signal?: AbortSignal;
-  onProgress?: (p: SvrProgress) => void;
-  debug: boolean;
-  residentCacheBytes?: number;
-}): Promise<SvrComputeResult> {
+export async function computeSvrFromLoadedSlices(
+  params: SvrComputePayload & { signal?: AbortSignal; onProgress?: (p: SvrProgress) => void },
+): Promise<SvrComputeResult> {
   const { allSlices, intensitySamples, intensitySamplesBySeries, svrParams, signal, onProgress, debug } = params;
 
   assertNotAborted(signal);

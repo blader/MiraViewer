@@ -75,10 +75,7 @@ export class RegionGrow3DWorkerController {
           const pending = this.pending;
           if (pending)
             this.finish(pending, () => pending.reject(new Error(event.message || '3D segmentation failed.')));
-          this.worker?.terminate();
-          this.worker = null;
-          this.volume = null;
-          this.observedSupport = undefined;
+          this.dispose();
         };
         // Do not transfer: the renderer still owns and reads its original volume.
         this.worker.postMessage({

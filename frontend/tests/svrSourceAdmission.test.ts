@@ -128,6 +128,22 @@ function reconstruct(selectedSeries: SvrSelectedSeries[], onProgress?: (progress
   return reconstructVolumeMultiPlane({ selectedSeries, svrParams: params, onProgress });
 }
 
+function syntheticComputeResult(reconstructionFingerprint: string, intensity = 1): computeCore.SvrComputeResult {
+  return {
+    volume: new Float32Array([intensity]),
+    observedSupport: new Uint8Array([1]),
+    supportedVoxelCount: 1,
+    acquiredOrientationCount: 2,
+    effectiveResolutionMm: [1, 1, 1],
+    sliceProfileSource: 'declared',
+    reconstructionFingerprint,
+    dims: { nx: 1, ny: 1, nz: 1 },
+    originMm: { x: 0, y: 0, z: 0 },
+    voxelSizeMm: 1,
+    bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+  };
+}
+
 describe('SVR canonical source admission and acquired support', () => {
   beforeEach(() => {
     images.clear();
@@ -421,19 +437,7 @@ describe('SVR canonical source admission and acquired support', () => {
     vi.spyOn(computeCore, 'computeSvrFromLoadedSlices').mockImplementation(async (input) => {
       masks = input.allSlices.map((slice) => Array.from(slice.valid ?? []));
       samples = [...input.intensitySamples];
-      return {
-        volume: new Float32Array([1]),
-        observedSupport: new Uint8Array([1]),
-        supportedVoxelCount: 1,
-        acquiredOrientationCount: 2,
-        effectiveResolutionMm: [1, 1, 1],
-        sliceProfileSource: 'declared',
-        reconstructionFingerprint: 'synthetic-acquisition',
-        dims: { nx: 1, ny: 1, nz: 1 },
-        originMm: { x: 0, y: 0, z: 0 },
-        voxelSizeMm: 1,
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
-      };
+      return syntheticComputeResult('synthetic-acquisition');
     });
 
     const result = await reconstruct([axial, coronal]);
@@ -479,19 +483,7 @@ describe('SVR canonical source admission and acquired support', () => {
           pixels: Array.from(slice.pixels),
         });
       }
-      return {
-        volume: new Float32Array([1]),
-        observedSupport: new Uint8Array([1]),
-        supportedVoxelCount: 1,
-        acquiredOrientationCount: 2,
-        effectiveResolutionMm: [1, 1, 1],
-        sliceProfileSource: 'declared',
-        reconstructionFingerprint: 'synthetic-fractional-acquisition',
-        dims: { nx: 1, ny: 1, nz: 1 },
-        originMm: { x: 0, y: 0, z: 0 },
-        voxelSizeMm: 1,
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
-      };
+      return syntheticComputeResult('synthetic-fractional-acquisition');
     });
 
     await reconstructVolumeMultiPlane({
@@ -520,7 +512,7 @@ describe('SVR canonical source admission and acquired support', () => {
     await expect(reconstruct([axial, paddingOnly])).rejects.toThrow(/no acquired image pixels/i);
   });
 
-  it('transfers acquired-support buffers alongside pixel buffers and preserves worker result support', async () => {
+  it('transfers acquired-support buffers without free-text series metadata and preserves worker result support', async () => {
     const axial = await seedSeries({ seriesUid: 'worker-axial' });
     const coronal = await seedSeries({ seriesUid: 'worker-coronal', orientation: 'coronal' });
     cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 96 * 1024 * 1024 });
@@ -540,25 +532,13 @@ describe('SVR canonical source admission and acquired support', () => {
         transfer?: Transferable[],
       ): void {
         if (message.type !== 'run') return;
+        expect(message.payload).not.toHaveProperty('seriesMeta');
         transferred = transfer ?? [];
         sourceMasks = message.payload!.allSlices.map((slice) => slice.valid!);
         residentCacheBytes = message.payload!.residentCacheBytes;
         queueMicrotask(() => {
           this.onmessage?.({
-            data: {
-              type: 'done',
-              volume: new Float32Array([0.75]),
-              observedSupport: new Uint8Array([1]),
-              supportedVoxelCount: 1,
-              acquiredOrientationCount: 2,
-              effectiveResolutionMm: [1, 1, 1],
-              sliceProfileSource: 'declared',
-              reconstructionFingerprint: 'synthetic-worker-acquisition',
-              dims: { nx: 1, ny: 1, nz: 1 },
-              originMm: { x: 0, y: 0, z: 0 },
-              voxelSizeMm: 1,
-              bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
-            },
+            data: { type: 'done', ...syntheticComputeResult('synthetic-worker-acquisition', 0.75) },
           } as MessageEvent);
         });
       }

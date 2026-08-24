@@ -710,21 +710,16 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
   ) {
     throw new Error('A derived alignment frame has invalid contributing source-image provenance');
   }
-  if (
-    frame.transform &&
-    (!Array.isArray(frame.transform) ||
-      frame.transform.length !== 6 ||
-      frame.transform.some((value) => !Number.isFinite(value)))
-  ) {
-    throw new Error('A derived alignment frame has an invalid rigid transform');
-  }
-  if (
-    frame.centerMm &&
-    (!Array.isArray(frame.centerMm) ||
-      frame.centerMm.length !== 3 ||
-      frame.centerMm.some((value) => !Number.isFinite(value)))
-  ) {
-    throw new Error('A derived alignment frame has an invalid rigid-rotation center');
+  for (const [values, length, label] of [
+    [frame.transform, 6, 'rigid transform'],
+    [frame.centerMm, 3, 'rigid-rotation center'],
+  ] as const) {
+    if (
+      values &&
+      (!Array.isArray(values) || values.length !== length || values.some((value) => !Number.isFinite(value)))
+    ) {
+      throw new Error(`A derived alignment frame has an invalid ${label}`);
+    }
   }
   for (const quality of [frame.coverage, frame.score, frame.margin]) {
     if (quality !== undefined && !Number.isFinite(quality)) {

@@ -437,8 +437,14 @@ function countIndependentOrientations(manifests: SeriesFrameManifest[]): number 
   return normals.length;
 }
 
-function estimateSourceMemoryBytes(manifests: SeriesFrameManifest[], params: SvrParams, roi: SvrRoi | null): number {
+/** Native Cornerstone-decoded source pixels coexist with the transferred SVR slice copies. */
+function estimateSourceMemory(
+  manifests: SeriesFrameManifest[],
+  params: SvrParams,
+  roi: SvrRoi | null,
+): { sourceBytes: number; decodedSourceCacheBytes: number } {
   let sourceBytes = 0;
+  let selectedNativeBytes = 0;
 
   for (const manifest of manifests) {
     const frame = manifest.frames[0];
@@ -456,26 +462,13 @@ function estimateSourceMemoryBytes(manifests: SeriesFrameManifest[], params: Svr
     });
 
     // Float32 intensity and the authoritative byte-per-pixel acquired mask.
-    const admittedFrames = filterSvrManifestFramesForRoi(manifest, roi, params).frames.length;
-    sourceBytes += sampled.dsRows * sampled.dsCols * admittedFrames * 5;
-  }
+    const admittedFrames = filterSvrManifestFramesForRoi(manifest, roi, params).frames;
+    sourceBytes += sampled.dsRows * sampled.dsCols * admittedFrames.length * 5;
 
-  return sourceBytes;
-}
-
-/** Native Cornerstone-decoded source pixels coexist with the transferred SVR slice copies. */
-function estimateDecodedSourceCacheBytes(
-  manifests: SeriesFrameManifest[],
-  params: SvrParams,
-  roi: SvrRoi | null,
-): number {
-  let selectedNativeBytes = 0;
-
-  for (const manifest of manifests) {
-    for (const frame of filterSvrManifestFramesForRoi(manifest, roi, params).frames) {
+    for (const admittedFrame of admittedFrames) {
       // Some source modalities promote signed values or modality-scaled pixels
       // to Float32. Count that worst-case resident representation explicitly.
-      selectedNativeBytes += frame.rows * frame.columns * Float32Array.BYTES_PER_ELEMENT;
+      selectedNativeBytes += admittedFrame.rows * admittedFrame.columns * Float32Array.BYTES_PER_ELEMENT;
     }
   }
 
@@ -484,10 +477,14 @@ function estimateDecodedSourceCacheBytes(
     const existingBytes = Math.max(0, Number(cache?.cacheSizeInBytes) || 0);
     const maximumBytes = Number(cache?.maximumSizeInBytes);
     const projectedBytes = existingBytes + selectedNativeBytes;
-    return Number.isFinite(maximumBytes) && maximumBytes > 0 ? Math.min(maximumBytes, projectedBytes) : projectedBytes;
+    return {
+      sourceBytes,
+      decodedSourceCacheBytes:
+        Number.isFinite(maximumBytes) && maximumBytes > 0 ? Math.min(maximumBytes, projectedBytes) : projectedBytes,
+    };
   } catch {
     // Missing cache telemetry never makes the selected native frames free.
-    return selectedNativeBytes;
+    return { sourceBytes, decodedSourceCacheBytes: selectedNativeBytes };
   }
 }
 
@@ -508,17 +505,12 @@ function estimateReconstructionVoxelCount(
           typeof frame.sliceThickness === 'number' && Number.isFinite(frame.sliceThickness) && frame.sliceThickness > 0
             ? frame.sliceThickness / 2
             : 0;
-        const halfExtent = [
-          Math.abs(geometry.colDir.x) * geometry.rowSpacingMm * 0.5 +
-            Math.abs(geometry.rowDir.x) * geometry.colSpacingMm * 0.5 +
-            Math.abs(geometry.normalDir.x) * halfThickness,
-          Math.abs(geometry.colDir.y) * geometry.rowSpacingMm * 0.5 +
-            Math.abs(geometry.rowDir.y) * geometry.colSpacingMm * 0.5 +
-            Math.abs(geometry.normalDir.y) * halfThickness,
-          Math.abs(geometry.colDir.z) * geometry.rowSpacingMm * 0.5 +
-            Math.abs(geometry.rowDir.z) * geometry.colSpacingMm * 0.5 +
-            Math.abs(geometry.normalDir.z) * halfThickness,
-        ];
+        const halfExtent = (['x', 'y', 'z'] as const).map(
+          (axis) =>
+            Math.abs(geometry.colDir[axis]) * geometry.rowSpacingMm * 0.5 +
+            Math.abs(geometry.rowDir[axis]) * geometry.colSpacingMm * 0.5 +
+            Math.abs(geometry.normalDir[axis]) * halfThickness,
+        );
 
         for (const corner of sliceCornersMm(geometry)) {
           const coordinates = [corner.x, corner.y, corner.z];
@@ -756,10 +748,7 @@ export function Svr3DView({
           }
         }
 
-        const frameIdentities = new Set(
-          manifests.map((manifest) => manifest.frameOfReferenceUid).filter((frame): frame is string => Boolean(frame)),
-        );
-        if (frameIdentities.size > 1) {
+        if (manifests.some((manifest) => manifest.frameOfReferenceUid !== reference.frameOfReferenceUid)) {
           throw new Error('These acquisitions use incompatible spatial coordinate frames.');
         }
 
@@ -930,6 +919,15 @@ export function Svr3DView({
     return roiSliceIndex >= 0 ? clampInt(roiSliceIndex, 0, roiSeriesCount - 1) : dflt;
   }, [roiSeriesCount, roiSliceIndex]);
 
+  const stepRoiSlice = useCallback(
+    (delta: number) => {
+      if (!roiSeriesSopUids?.length) return;
+      const current = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
+      setRoiSliceIndex(clampInt(current + delta, 0, roiSeriesSopUids.length - 1));
+    },
+    [effectiveRoiSliceIndex, roiSeriesSopUids, roiSliceIndex],
+  );
+
   const roiSopInstanceUid = roiSeriesSopUids ? (roiSeriesSopUids[effectiveRoiSliceIndex] ?? null) : null;
 
   useEffect(() => {
@@ -982,16 +980,11 @@ export function Svr3DView({
 
   const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
-  const sourceMemoryBytes = useMemo(
-    () =>
-      currentReadiness?.manifests.length ? estimateSourceMemoryBytes(currentReadiness.manifests, params, roiWorld) : 0,
-    [currentReadiness, params, roiWorld],
-  );
-  const decodedSourceCacheBytes = useMemo(
+  const { sourceBytes: sourceMemoryBytes, decodedSourceCacheBytes } = useMemo(
     () =>
       currentReadiness?.manifests.length
-        ? estimateDecodedSourceCacheBytes(currentReadiness.manifests, params, roiWorld)
-        : 0,
+        ? estimateSourceMemory(currentReadiness.manifests, params, roiWorld)
+        : { sourceBytes: 0, decodedSourceCacheBytes: 0 },
     [currentReadiness, params, roiWorld],
   );
   const memoryPlan = useMemo(() => {
@@ -1321,11 +1314,7 @@ export function Svr3DView({
                       type="button"
                       aria-label="Previous acquired source slice"
                       disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                      onClick={() => {
-                        if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                        const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                        setRoiSliceIndex(clampInt(cur - 1, 0, roiSeriesSopUids.length - 1));
-                      }}
+                      onClick={() => stepRoiSlice(-1)}
                       className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                     >
                       ◀
@@ -1335,11 +1324,7 @@ export function Svr3DView({
                       type="button"
                       aria-label="Next acquired source slice"
                       disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                      onClick={() => {
-                        if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                        const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                        setRoiSliceIndex(clampInt(cur + 1, 0, roiSeriesSopUids.length - 1));
-                      }}
+                      onClick={() => stepRoiSlice(1)}
                       className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
                     >
                       ▶
@@ -1354,11 +1339,7 @@ export function Svr3DView({
                   roiRect={roiRect}
                   setRoiRect={setRoiRect}
                   roiDragRef={roiDragRef}
-                  onSliceDelta={(delta) => {
-                    if (!roiSeriesSopUids || roiSeriesSopUids.length === 0) return;
-                    const cur = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
-                    setRoiSliceIndex(clampInt(cur + delta, 0, roiSeriesSopUids.length - 1));
-                  }}
+                  onSliceDelta={stepRoiSlice}
                   onRoiFinalized={(roi) => {
                     setRoiWorld(roi);
                   }}
@@ -1590,10 +1571,7 @@ export function Svr3DView({
                           roiRect={roiRect}
                           setRoiRect={setRoiRect}
                           roiDragRef={roiDragRef}
-                          onSliceDelta={(delta) => {
-                            if (!roiSeriesSopUids?.length) return;
-                            setRoiSliceIndex(clampInt(effectiveRoiSliceIndex + delta, 0, roiSeriesSopUids.length - 1));
-                          }}
+                          onSliceDelta={stepRoiSlice}
                           onRoiFinalized={setRoiWorld}
                         />
                         <p className="mt-2 text-center text-xs text-[var(--text-secondary)]">

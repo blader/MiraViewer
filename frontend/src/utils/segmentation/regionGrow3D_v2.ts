@@ -328,16 +328,7 @@ export async function regionGrow3D_v2(params: {
     }
 
     if (roiParsed.mode === 'hard' || roiMarginVoxels <= 0) {
-      return {
-        ...roiParsed,
-        roi: roiParsed,
-        minX: roiParsed.minX,
-        maxX: roiParsed.maxX,
-        minY: roiParsed.minY,
-        maxY: roiParsed.maxY,
-        minZ: roiParsed.minZ,
-        maxZ: roiParsed.maxZ,
-      };
+      return { ...roiParsed, roi: roiParsed };
     }
 
     return {
