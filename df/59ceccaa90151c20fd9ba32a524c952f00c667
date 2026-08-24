@@ -1,0 +1,53 @@
+frontend/src/services/exportBackup.ts
+  s_3b5c6669968514::t_98728e884f6d4f 281-282
+  s_3b5c6669968514::t_4283481dc67562 99-107,130,151,163,170,274,284,287
+frontend/src/hooks/useOverlayNavigation.ts
+  s_3b5c6669968514::t_89f8695cc0eeb8 48-49,57,61
+frontend/src/utils/decodedFrame.ts
+  s_3b5c6669968514::t_a8d4b6086c7a3f 3,29-30,56,68-69
+frontend/src/hooks/useAutoAlign.ts
+  s_3b5c6669968514::t_a8d4b6086c7a3f 164,216,1076,1109-1110,1148,1151,1153-1155,1157,1381
+frontend/src/db/db.ts
+  s_3b5c6669968514::t_177f547969dcb8 199,203-206,209
+  s_3b5c6669968514::t_bf63b001b243da 200-202
+frontend/src/utils/localApi.ts
+  s_3b5c6669968514::t_74dc33e043e64b 20-21,244,254
+frontend/src/services/dicomIngestion.ts
+  s_3b5c6669968514::t_612133df609828 79-89,105,107-108,110,112,201-212,324-336
+frontend/src/components/GroundTruthPolygonOverlay.tsx
+  s_3b5c6669968514::t_89f8695cc0eeb8 17,83-84,87-90,92-93
+frontend/src/components/TumorSavedSegmentationOverlay.tsx
+  s_3b5c6669968514::t_89f8695cc0eeb8 9,76-77,80-83,85-86
+frontend/src/db/schema.ts
+  s_3b5c6669968514::t_2f41c71664adac 239
+frontend/src/utils/svr/reconstructVolume.ts
+  s_3b5c6669968514::t_a8d4b6086c7a3f 6,23,117-122
+frontend/src/hooks/useComparisonData.ts
+  s_3b5c6669968514::t_c135d31c61ebb3 10,14-15,43
+  s_3b5c6669968514::t_4201f34db3086a 18-19
+frontend/tests/decodedFrame.test.ts
+  s_3b5c6669968514::t_a8d4b6086c7a3f 63-72,74,76-79
+frontend/src/utils/viewTransform.ts
+  s_3b5c6669968514::t_c135d31c61ebb3 195-196
+  s_3b5c6669968514::t_89f8695cc0eeb8 172-194,197-198
+frontend/tests/comparisonAccessibility.test.tsx
+  s_3b5c6669968514::t_8e8ec3fba7c788 94-95
+frontend/src/utils/derivedAlignmentFrame.ts
+  s_3b5c6669968514::t_177f547969dcb8 60,62,71-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "df59ceccaa90151c20fd9ba32a524c952f00c667",
+  "prompts": {},
+  "sessions": {
+    "s_3b5c6669968514": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a03288-9171-7d80-a354-d88b234dab01",
+        "model": "solstice-alpha"
+      },
+      "human_author": "Siqi Chen <blader@gmail.com>"
+    }
+  }
+}
