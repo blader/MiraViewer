@@ -18,8 +18,10 @@ import {
   scoreBidirectionalNcc,
   invertRigidParams,
   buildSeriesSamples,
+  optimizeRigidNcc,
 } from '../src/utils/svr/rigidRegistration';
 import type { SeriesSamples, BoundsMm } from '../src/utils/svr/rigidRegistration';
+import { sampleTrilinear } from '../src/utils/svr/trilinear';
 import { v3 } from '../src/utils/svr/vec3';
 
 describe('svr/rigidRegistration', () => {
@@ -438,6 +440,72 @@ describe('svr/rigidRegistration', () => {
     let highestRow = 0;
     for (let index = 0; index < samples.count; index++) highestRow = Math.max(highestRow, samples.pos[index * 3 + 1]!);
     expect(highestRow).toBeGreaterThanOrEqual(18);
+  });
+
+  it('uses acquired validity rather than intensity to include zero and negative registration samples', () => {
+    const samples = buildSeriesSamples({
+      slices: [
+        {
+          pixels: new Float32Array([-2, 0, 5, 999]),
+          valid: new Uint8Array([1, 1, 1, 0]),
+          dsRows: 2,
+          dsCols: 2,
+          ippMm: v3(0, 0, 0),
+          rowDir: v3(1, 0, 0),
+          colDir: v3(0, 1, 0),
+          normalDir: v3(0, 0, 1),
+          rowSpacingDsMm: 1,
+          colSpacingDsMm: 1,
+          sliceThicknessMm: 1,
+          spacingBetweenSlicesMm: 1,
+        },
+      ],
+      roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
+      maxSamples: 10,
+    });
+
+    expect(samples.count).toBe(3);
+    expect(Array.from(samples.obs)).toEqual([-2, 0, 5]);
+  });
+
+  it('refines physically supported rigid translations below the former half-millimeter floor', async () => {
+    const dims = { nx: 24, ny: 24, nz: 24 };
+    const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+    for (let z = 0; z < dims.nz; z++) {
+      for (let y = 0; y < dims.ny; y++) {
+        for (let x = 0; x < dims.nx; x++) {
+          volume[x + y * dims.nx + z * dims.nx * dims.ny] =
+            Math.sin(x * 0.63 + z * 0.11) + Math.cos(y * 0.51 - x * 0.09) + Math.sin(z * 0.43);
+        }
+      }
+    }
+
+    const observed: number[] = [];
+    const positions: number[] = [];
+    for (let z = 4; z <= 19; z++) {
+      for (let y = 4; y <= 19; y++) {
+        for (let x = 4; x <= 19; x++) {
+          observed.push(sampleTrilinear(volume, dims, x + 0.2, y - 0.15, z + 0.1));
+          positions.push(x, y, z);
+        }
+      }
+    }
+
+    const result = await optimizeRigidNcc({
+      samples: { obs: Float32Array.from(observed), pos: Float32Array.from(positions), count: observed.length },
+      refVolume: volume,
+      dims,
+      originMm: v3(0, 0, 0),
+      voxelSizeMm: 1,
+      centerMm: v3(12, 12, 12),
+      maxTranslationMm: 2,
+      maxRotationRad: 0,
+      finestTranslationStepMm: 0.05,
+    });
+
+    expect(result.best.tx).toBeCloseTo(0.2, 1);
+    expect(result.best.ty).toBeCloseTo(-0.15, 1);
+    expect(result.best.tz).toBeCloseTo(0.1, 1);
   });
 
   it('inverts center-relative 3D rigid transforms without assuming commuting rotations', () => {

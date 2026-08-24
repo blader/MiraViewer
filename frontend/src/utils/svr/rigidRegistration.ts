@@ -284,8 +284,9 @@ export function buildSeriesSamples(params: {
       const rowBase = r * s.dsCols;
 
       for (let c = 0; c < s.dsCols; c += sliceStride) {
-        const v = s.pixels[rowBase + c] ?? 0;
-        if (v <= 0) continue;
+        const index = rowBase + c;
+        const v = s.pixels[index];
+        if ((s.valid && !s.valid[index]) || v === undefined || !Number.isFinite(v)) continue;
 
         const wx = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
         const wy = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
@@ -513,6 +514,10 @@ export async function optimizeRigidNcc(params: {
   initial?: RigidParams;
   maxTranslationMm?: number;
   maxRotationRad?: number;
+  /** Smallest physically justified translation probe; defaults to one tenth of a voxel. */
+  finestTranslationStepMm?: number;
+  /** Smallest physically justified rotation probe; defaults to the translation step at the sample radius. */
+  finestRotationStepRad?: number;
   reverse?: ReverseRegistrationDomain;
 }): Promise<{ best: RigidParams; bestScore: number; used: number; evals: number }> {
   const {
@@ -533,12 +538,34 @@ export async function optimizeRigidNcc(params: {
   const MAX_TRANS_MM = params.maxTranslationMm ?? 20;
   const MAX_ROT_RAD = params.maxRotationRad ?? (10 * Math.PI) / 180;
 
-  // Multi-scale optimization stages (coarse to fine)
+  let sampleRadiusMm = voxelSizeMm;
+  for (let index = 0; index < samples.count; index++) {
+    sampleRadiusMm = Math.max(
+      sampleRadiusMm,
+      Math.hypot(
+        samples.pos[index * 3]! - centerMm.x,
+        samples.pos[index * 3 + 1]! - centerMm.y,
+        samples.pos[index * 3 + 2]! - centerMm.z,
+      ),
+    );
+  }
+  const finestTranslationStepMm = Math.max(0.025, Math.min(0.5, params.finestTranslationStepMm ?? voxelSizeMm / 10));
+  const finestRotationStepRad = Math.max(
+    (0.025 * Math.PI) / 180,
+    Math.min((0.5 * Math.PI) / 180, params.finestRotationStepRad ?? finestTranslationStepMm / sampleRadiusMm),
+  );
   const stages = [
     { transStepMm: 2.0, rotStepRad: (2 * Math.PI) / 180 },
     { transStepMm: 1.0, rotStepRad: (1 * Math.PI) / 180 },
     { transStepMm: 0.5, rotStepRad: (0.5 * Math.PI) / 180 },
   ];
+  let translationStepMm = 0.5;
+  let rotationStepRad = (0.5 * Math.PI) / 180;
+  while (translationStepMm > finestTranslationStepMm || rotationStepRad > finestRotationStepRad) {
+    translationStepMm = Math.max(finestTranslationStepMm, translationStepMm / 2);
+    rotationStepRad = Math.max(finestRotationStepRad, rotationStepRad / 2);
+    stages.push({ transStepMm: translationStepMm, rotStepRad: rotationStepRad });
+  }
 
   const evaluate = (rigid: RigidParams) => {
     const forward = {
@@ -580,7 +607,7 @@ export async function optimizeRigidNcc(params: {
 
     const e = evaluate(probe);
     evals++;
-    if (e.ncc > bestScore + 1e-4) {
+    if (e.ncc > bestScore + 1e-7) {
       cur[key] = value;
       bestScore = e.ncc;
       bestUsed = e.used;

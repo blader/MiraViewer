@@ -11,6 +11,7 @@ import {
 const mocks = vi.hoisted(() => ({
   getSeriesFrameManifest: vi.fn(),
   prepare: vi.fn(),
+  prepareReference: vi.fn(),
   planeDrift: vi.fn(),
   register3d: vi.fn(),
   densify: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock('../src/utils/elastixRegistration', () => ({
 
 vi.mock('../src/utils/svr/longitudinalFrames', () => ({
   densifyLongitudinalRegistration: mocks.densify,
+  prepareLongitudinalReferenceInput: mocks.prepareReference,
   prepareLongitudinalRegistrationInput: mocks.prepare,
   measureLongitudinalPlaneDrift: mocks.planeDrift,
 }));
@@ -122,6 +124,11 @@ describe('physically registered longitudinal auto-alignment', () => {
       maximumThroughPlaneDriftMm: 34,
       frameRelationship: 'different',
     });
+    mocks.prepareReference.mockResolvedValue({
+      referenceSlices: [{ dsRows: 4, dsCols: 4, pixels: new Float32Array(16) }],
+      referenceSliceIndex: 0,
+      referenceSourceIndices: [1],
+    });
     mocks.prepare.mockResolvedValue({
       referenceSlices: [{ dsRows: 4, dsCols: 4, pixels: new Float32Array(16) }],
       targetSlices: [{ dsRows: 4, dsCols: 4, pixels: new Float32Array(16) }],
@@ -184,6 +191,289 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(mocks.closeScorer).toHaveBeenCalledTimes(1);
   });
 
+  it('binds the selected physical output lattice to preparation, both registration stages, and durable provenance', async () => {
+    const initialRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    mocks.register3d.mockResolvedValue({
+      ...initialRegistration,
+      pixels: Float32Array.from({ length: 256 * 256 }, (_, index) => (index % 256) + 1),
+      rows: 256,
+      cols: 256,
+    });
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+        { outputMode: 'fixed-256' },
+      );
+    });
+
+    expect(mocks.prepare.mock.calls[0]?.[3]).toMatchObject({
+      outputGrid: expect.objectContaining({ mode: 'fixed-256', rows: 256, columns: 256 }),
+      outputMaxDimension: 256,
+    });
+    expect(mocks.register3d.mock.calls[0]?.[0]).toMatchObject({
+      outputGrid: expect.objectContaining({
+        mode: 'fixed-256',
+        rows: 256,
+        columns: 256,
+        rowSpacingMm: 4 / 256,
+        columnSpacingMm: 4 / 256,
+      }),
+    });
+    expect(mocks.densify.mock.calls[0]?.[3]).toMatchObject({
+      outputGrid: expect.objectContaining({ mode: 'fixed-256', rows: 256, columns: 256 }),
+      maxDimension: 256,
+      referenceManifest: expect.objectContaining({ seriesUid: 'reference-series' }),
+      referenceSliceIndex: 1,
+      referenceExclusionMask: expect.any(Uint8Array),
+    });
+    expect(results[0]).toMatchObject({
+      outcome: 'aligned',
+      outputGrid: expect.objectContaining({ mode: 'fixed-256', rows: 256, columns: 256 }),
+      derivedFrame: {
+        rows: 256,
+        columns: 256,
+        outputGrid: expect.objectContaining({ mode: 'fixed-256', rowSpacingMm: 4 / 256 }),
+      },
+    });
+  });
+
+  it('refuses a derived presentation whose returned dimensions disagree with the operation output lattice', async () => {
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+        { outputMode: 'fixed-256' },
+      );
+    });
+
+    expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
+    expect(results[0]?.derivedFrame).toBeUndefined();
+  });
+
+  it('retains valid-support, optimized-pose evidence, and every contributing native source image', async () => {
+    const initialRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    const validity = new Uint8Array(16).fill(1);
+    validity[15] = 0;
+    mocks.register3d.mockResolvedValue({
+      ...initialRegistration,
+      valid: validity,
+      targetToReference: { tx: 0.2, ty: -0.1, tz: 0.05, rx: 0.01, ry: -0.02, rz: 0.03 },
+      contributingSourceSopInstanceUids: ['target-series-0', 'target-series-1', 'target-series-2'],
+      diagnostics: {
+        ...initialRegistration.diagnostics,
+        retainedSampleFraction: 0.91,
+        reverseRetainedSampleFraction: 0.88,
+        effectiveSampleCount: 744,
+        inverseConsistencyErrorMm: 0.12,
+      },
+    });
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+      );
+    });
+
+    expect(results[0]).toMatchObject({
+      outcome: 'aligned',
+      evidence: {
+        forwardAnatomicalSupport: 0.91,
+        reverseAnatomicalSupport: 0.88,
+        outputPlaneSupport: 0.96,
+        effectiveSampleCount: 744,
+        inverseConsistencyError: 0.12,
+        translationMm: [0.2, -0.1, 0.05],
+      },
+      derivedFrame: {
+        valid: validity,
+        contributingSourceSopInstanceUids: ['target-series-0', 'target-series-1', 'target-series-2'],
+      },
+    });
+    expect(results[0]?.evidence?.outputGridFingerprint).toEqual(expect.any(String));
+    expect(results[0]?.evidence?.rotationDegrees?.[0]).toBeCloseTo(0.01 * (180 / Math.PI));
+  });
+
+  it('preserves lesion exclusion for native refinement after the coarse worker transfers its mask', async () => {
+    const successfulRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    mocks.register3d.mockImplementation(async (input: { referenceExclusionMask: Uint8Array }) => {
+      structuredClone(input.referenceExclusionMask, { transfer: [input.referenceExclusionMask.buffer] });
+      return successfulRegistration;
+    });
+    const { result } = renderHook(() => useAutoAlign());
+
+    await act(async () => {
+      await result.current.alignAllDates(reference, ['target-examination'], { 'target-examination': target }, 0.5);
+    });
+
+    const nativeRefinementMask = mocks.densify.mock.calls[0]?.[3]?.referenceExclusionMask as Uint8Array;
+    expect(nativeRefinementMask.byteLength).toBe(16);
+    expect(nativeRefinementMask[0]).toBe(1);
+  });
+
+  it('publishes the validated native-slab pose instead of the superseded coarse-volume pose', async () => {
+    mocks.densify.mockImplementation(async (_manifest, _reference, registration) => ({
+      ...registration,
+      targetToReference: { tx: 0.125, ty: -0.075, tz: 0.05, rx: 0, ry: 0, rz: 0.001 },
+      nativeRefinement: {
+        score: 0.94,
+        forwardCoverage: 0.97,
+        reverseCoverage: 0.96,
+        sampleCount: 816,
+        heldOutSampleCount: 120,
+        effectiveIndependentSamples: 204,
+        heldOutEffectiveIndependentSamples: 98,
+        optimizedAlternativeCount: 1,
+        scoreMargin: 0.041,
+        minimumDistinguishableScoreMargin: 0.012,
+        translationStepMm: 0.1,
+        rotationStepRadians: 0.001,
+        evaluations: 40,
+      },
+    }));
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+      );
+    });
+
+    expect(mocks.register3d.mock.calls[0]?.[0]).toMatchObject({ deferPresentationValidation: true });
+    expect(results[0]).toMatchObject({
+      outcome: 'aligned',
+      evidence: {
+        structuralScore: 0.94,
+        runnerUpGap: 0.041,
+        forwardAnatomicalSupport: 0.97,
+        reverseAnatomicalSupport: 0.96,
+        effectiveSampleCount: 816,
+        heldOutSampleCount: 120,
+        effectiveIndependentSamples: 204,
+        heldOutEffectiveIndependentSamples: 98,
+        minimumDistinguishableScoreMargin: 0.012,
+        translationMm: [0.125, -0.075, 0.05],
+      },
+      derivedFrame: { rigidTransform: [0.125, -0.075, 0.05, 0, 0, 0.001] },
+    });
+  });
+
+  it('retains the optimized coarse rival when native refinement needs only its unambiguous winner', async () => {
+    mocks.densify.mockImplementation(async (_manifest, _reference, registration) => ({
+      ...registration,
+      nativeRefinement: {
+        score: 0.94,
+        forwardCoverage: 0.97,
+        reverseCoverage: 0.96,
+        sampleCount: 816,
+        effectiveIndependentSamples: 204,
+        heldOutEffectiveIndependentSamples: 98,
+        optimizedAlternativeCount: 0,
+        scoreMargin: 0,
+        minimumDistinguishableScoreMargin: 0.012,
+        translationStepMm: 0.1,
+        rotationStepRadians: 0.001,
+        evaluations: 40,
+      },
+    }));
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+      );
+    });
+
+    expect(results[0]).toMatchObject({
+      outcome: 'aligned',
+      evidence: {
+        structuralScore: 0.94,
+        runnerUpGap: 0.023,
+        minimumDistinguishableScoreMargin: 0.006,
+      },
+    });
+  });
+
+  it('keeps unsupported derived-plane values out of normalization, image quality, and display matching', async () => {
+    const initialRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    const validity = new Uint8Array(16).fill(1);
+    validity[15] = 0;
+    const { result } = renderHook(() => useAutoAlign());
+
+    const alignWithInvalidValue = async (invalidValue: number) => {
+      const pixels = Float32Array.from(initialRegistration.pixels);
+      pixels[15] = invalidValue;
+      mocks.register3d.mockResolvedValue({ ...initialRegistration, pixels, valid: validity });
+      let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+      await act(async () => {
+        results = await result.current.alignAllDates(
+          reference,
+          ['target-examination'],
+          { 'target-examination': target },
+          0.5,
+        );
+      });
+      return results[0]!;
+    };
+
+    const negativePadding = await alignWithInvalidValue(-100_000);
+    const positivePadding = await alignWithInvalidValue(100_000);
+
+    expect(negativePadding.outcome).toBe('aligned');
+    expect(positivePadding.nmiScore).toBeCloseTo(negativePadding.nmiScore, 8);
+    expect(positivePadding.computedSettings.brightness).toBe(negativePadding.computedSettings.brightness);
+    expect(positivePadding.computedSettings.contrast).toBe(negativePadding.computedSettings.contrast);
+  });
+
+  it('refuses an otherwise supported derived plane when acquired anatomy is missing inside the lesion region', async () => {
+    const initialRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    const validity = new Uint8Array(16).fill(1);
+    validity[0] = 0;
+    mocks.register3d.mockResolvedValue({ ...initialRegistration, valid: validity, coverage: 15 / 16 });
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      results = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+      );
+    });
+
+    expect(results[0]).toMatchObject({ outcome: 'insufficient-overlap', message: expect.stringMatching(/lesion/i) });
+    expect(results[0]?.derivedFrame).toBeUndefined();
+  });
+
   it('abstains when a physically incompatible target belongs to a different patient', async () => {
     mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
       manifest(seriesUid, seriesUid === 'reference-series' ? 'patient-a' : 'patient-b'),
@@ -202,6 +492,69 @@ describe('physically registered longitudinal auto-alignment', () => {
 
     expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
     expect(mocks.register3d).not.toHaveBeenCalled();
+  });
+
+  it('routes on local target acquired-center spacing instead of the unrelated reference slice thickness', async () => {
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => {
+      const source = manifest(seriesUid, 'patient-a', 'shared-frame');
+      const spacing = seriesUid === 'reference-series' ? 8 : 4;
+      return {
+        ...source,
+        sliceSpacingMm: spacing,
+        frames: source.frames.map((frame) => ({ ...frame, spacingBetweenSlices: spacing, sliceThickness: spacing })),
+      };
+    });
+    mocks.planeDrift.mockReturnValue({
+      angleDegrees: 1,
+      maximumThroughPlaneDriftMm: 2.4,
+      frameRelationship: 'same',
+    });
+    const { result } = renderHook(() => useAutoAlign());
+
+    await act(async () => {
+      await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } },
+        0.5,
+      );
+    });
+
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+  });
+
+  it('calibrates same-frame rigid registration with independent reference and target physical analysis spacings', async () => {
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => {
+      const source = manifest(seriesUid, 'patient-a', 'shared-frame');
+      const spacing = seriesUid === 'reference-series' ? '0.4\\0.8' : '0.5\\1.2';
+      return { ...source, frames: source.frames.map((frame) => ({ ...frame, pixelSpacing: spacing })) };
+    });
+    mocks.planeDrift.mockReturnValue({
+      angleDegrees: 0,
+      maximumThroughPlaneDriftMm: 0,
+      frameRelationship: 'same',
+    });
+    mocks.register2d.mockResolvedValue({
+      A: { m00: 1, m01: 0, m10: 0, m11: 1 },
+      translatePx: { x: 0, y: 0 },
+      movingToFixed: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
+      quality: { mi: 1, nmi: 1 },
+    });
+    const { result } = renderHook(() => useAutoAlign());
+
+    await act(async () => {
+      await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } },
+        0.5,
+      );
+    });
+
+    expect(mocks.register2d.mock.calls[0]?.[3]).toMatchObject({
+      fixedPixelSpacing: [(4 * 0.4) / 256, (4 * 0.8) / 256],
+      movingPixelSpacing: [(4 * 0.5) / 256, (4 * 1.2) / 256],
+    });
   });
 
   it('reports insufficient physical support without applying an invented native-plane transform', async () => {
@@ -300,6 +653,11 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(results.map((item) => item.outcome)).toEqual(['failed', 'aligned']);
     expect(results[1]?.seriesUid).toBe('second-target-series');
     expect(mocks.register3d).toHaveBeenCalledTimes(2);
+    expect(mocks.prepareReference).toHaveBeenCalledTimes(1);
+    expect(mocks.prepare).toHaveBeenCalledTimes(2);
+    expect(mocks.prepare.mock.calls[0]?.[3]?.preparedReference).toBe(
+      mocks.prepare.mock.calls[1]?.[3]?.preparedReference,
+    );
   });
 
   it('refuses instance-number-only geometry instead of inventing a physical mapping', async () => {
@@ -322,6 +680,7 @@ describe('physically registered longitudinal auto-alignment', () => {
 
     expect(results[0]).toMatchObject({ outcome: 'incompatible-geometry' });
     expect(mocks.register3d).not.toHaveBeenCalled();
+    expect(mocks.prepareReference).not.toHaveBeenCalled();
   });
 
   it('does not discard a safely aligned plane when its informational result banner is dismissed', () => {

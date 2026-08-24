@@ -555,6 +555,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             {derivedFrame.nativeSliceSpacingMm
               ? ` · ${derivedFrame.nativeSliceSpacingMm.toFixed(1)} mm native slices`
               : ''}
+            {derivedFrame.outputGrid &&
+            (derivedFrame.outputGrid.rows > derivedFrame.outputGrid.sourceRows ||
+              derivedFrame.outputGrid.columns > derivedFrame.outputGrid.sourceColumns)
+              ? ` · ${derivedFrame.outputGrid.rows} × ${derivedFrame.outputGrid.columns} interpolated from ${derivedFrame.outputGrid.sourceRows} × ${derivedFrame.outputGrid.sourceColumns} acquisition`
+              : ''}
           </div>
         ) : null}
 

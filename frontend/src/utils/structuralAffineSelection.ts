@@ -11,9 +11,9 @@ import {
   normalizePerceptualSource,
   preparePerceptualReference,
   scoreAlignedCandidate,
+  warpPerceptualCandidateWithValidity,
   type PerceptualComponents,
 } from './perceptualSliceSimilarity';
-import { warpGrayscaleAffineWithValidity } from './warpAffine';
 
 const MAX_RESIDUAL_DISPLACEMENT_FRACTION = 0.125;
 const FINAL_AFFINE_SCORE_EPSILON = 1e-6;
@@ -198,20 +198,33 @@ function validateGeometry(
 
 export function selectFinalAffineProposal(options: {
   normalizedReference: Float32Array;
+  referenceValidity?: Float32Array;
   movingPixels: Float32Array;
+  movingValidity?: Float32Array;
   size: number;
   scales: readonly number[];
   winningWarp: WarpTransform;
   fixedExclusionRect?: ExclusionMask;
   optimizerProposals: readonly OptimizerFinalAffineProposal[];
 }): FinalAffineSelection {
-  const { normalizedReference, movingPixels, size, scales, winningWarp, fixedExclusionRect, optimizerProposals } =
-    options;
+  const {
+    normalizedReference,
+    referenceValidity,
+    movingPixels,
+    movingValidity,
+    size,
+    scales,
+    winningWarp,
+    fixedExclusionRect,
+    optimizerProposals,
+  } = options;
   if (!Number.isInteger(size) || size <= 0) {
     throw new Error('selectFinalAffineProposal: size must be a positive integer');
   }
   assertSquare(normalizedReference, size, 'selectFinalAffineProposal normalizedReference');
   assertSquare(movingPixels, size, 'selectFinalAffineProposal movingPixels');
+  if (referenceValidity) assertSquare(referenceValidity, size, 'selectFinalAffineProposal referenceValidity');
+  if (movingValidity) assertSquare(movingValidity, size, 'selectFinalAffineProposal movingValidity');
   validateOptimizerProposals(optimizerProposals);
 
   const scaleSizes = [...new Set(scales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
@@ -235,13 +248,16 @@ export function selectFinalAffineProposal(options: {
   const preparedFixedReference = preparePerceptualReference(normalizedReference, size, {
     scales: scaleSizes,
     exclusionRect: fixedScoringExclusionRect,
+    validity: referenceValidity,
   });
   const normalizedMoving = normalizePerceptualSource(movingPixels, size, {
     exclusionRect: sourceExclusionRect,
+    validity: movingValidity,
   });
   const preparedMovingSource = preparePerceptualReference(normalizedMoving, size, {
     scales: scaleSizes,
     exclusionRect: sourceExclusionRect,
+    validity: movingValidity,
   });
   const scoringScratch = createPerceptualScoringScratch();
 
@@ -255,10 +271,11 @@ export function selectFinalAffineProposal(options: {
   const validatedOptimizers = optimizerProposals.map((proposal) => validateGeometry(proposal, winningWarp, size));
 
   const scoreProposal = (proposal: GeometricallyAdmissibleProposal): ScoredFinalAffineProposal => {
-    const forwardWarp = warpGrayscaleAffineWithValidity(
+    const forwardWarp = warpPerceptualCandidateWithValidity(
       normalizedMoving,
       size,
       centeredWarp(proposal.totalMovingToFixed, size),
+      movingValidity,
     );
     const forward = scoreAlignedCandidate(
       preparedFixedReference,
@@ -272,7 +289,12 @@ export function selectFinalAffineProposal(options: {
     const structuralScore = (mindScore + ngfScore) / 2;
 
     const fixedToMoving = invertStandardAffine2D(proposal.totalMovingToFixed);
-    const reverseWarp = warpGrayscaleAffineWithValidity(normalizedReference, size, centeredWarp(fixedToMoving, size));
+    const reverseWarp = warpPerceptualCandidateWithValidity(
+      normalizedReference,
+      size,
+      centeredWarp(fixedToMoving, size),
+      referenceValidity,
+    );
     const sourceCoverage = scoreAlignedCandidate(
       preparedMovingSource,
       reverseWarp.pixels,

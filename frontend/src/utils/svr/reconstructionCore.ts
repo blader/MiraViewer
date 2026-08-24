@@ -29,6 +29,8 @@ export type SvrReconstructionGrid = {
 export type SvrReconstructionSlice = {
   // Downsampled pixel grid (normalized to [0,1])
   pixels: Float32Array;
+  /** Acquired-pixel support; when absent, every finite pixel is valid. */
+  valid?: Uint8Array;
   dsRows: number;
   dsCols: number;
 
@@ -46,6 +48,8 @@ export type SvrReconstructionSlice = {
   spacingBetweenSlicesMm: number | null;
   /** DICOM patient-space compatibility authority; absent means unverified. */
   frameOfReferenceUid?: string;
+  /** Optional native-image identity retained for derived-plane provenance. */
+  sopInstanceUid?: string;
 };
 
 export type SvrCoreHooks = {
@@ -209,6 +213,9 @@ export async function reconstructVolumeFromSlices(params: {
     assertNotAborted(hooks?.signal);
     const s = slices[sIdx];
     if (!s) continue;
+    if (s.valid && s.valid.length !== s.pixels.length) {
+      throw new Error('SVR acquired-pixel support does not match its image dimensions');
+    }
 
     const psf = psfBySlice[sIdx];
 
@@ -220,8 +227,9 @@ export async function reconstructVolumeFromSlices(params: {
       const rowBase = r * s.dsCols;
 
       for (let c = 0; c < s.dsCols; c++) {
-        const obs = s.pixels[rowBase + c] ?? 0;
-        if (obs <= 0) continue;
+        const index = rowBase + c;
+        const obs = s.pixels[index];
+        if ((s.valid && !s.valid[index]) || obs === undefined || !Number.isFinite(obs)) continue;
 
         const wx0 = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
         const wy0 = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
@@ -344,8 +352,9 @@ export async function refineVolumeInPlace(params: {
         const rowBase = r * s.dsCols;
 
         for (let c = 0; c < s.dsCols; c++) {
-          const obs = s.pixels[rowBase + c] ?? 0;
-          if (obs <= 0) continue;
+          const index = rowBase + c;
+          const obs = s.pixels[index];
+          if ((s.valid && !s.valid[index]) || obs === undefined || !Number.isFinite(obs)) continue;
 
           const wx0 = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
           const wy0 = baseY + s.rowDir.y * (c * s.colSpacingDsMm);

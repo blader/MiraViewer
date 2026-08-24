@@ -40,7 +40,7 @@ self.onmessage = async (event: MessageEvent<LongitudinalWorkerRequest>) => {
     if (activeController !== controller) return;
     const message: LongitudinalWorkerResponse = { type: 'done', result };
     if (result.ok) {
-      self.postMessage(message, { transfer: [result.pixels.buffer] });
+      self.postMessage(message, { transfer: [result.pixels.buffer, result.valid.buffer] });
     } else {
       self.postMessage(message);
     }

@@ -49,6 +49,21 @@ describe('absolute anatomical alignment confidence', () => {
     expect(evidence.runnerUpGap).toBeCloseTo(0.135);
   });
 
+  it('rejects almost unrelated anatomy even when its physically distinct rival is marginally worse', () => {
+    const ranked = rankFixedCandidateSet([candidate(0, 0.02, { ngf: 0.02 }), candidate(4, 0.0195, { ngf: 0.0195 })], 0);
+    const evidence = assessSliceAlignmentEvidence({
+      winner: ranked[0]!,
+      candidates: ranked,
+      normalizedReference: texturedReference,
+      imageSize: 256,
+      sliceSpacingMm: 1,
+    });
+
+    expect(evidence.structuralScore).toBeCloseTo(0.02);
+    expect(evidence.runnerUpGap).toBeGreaterThan(evidence.minimumDistinguishableGap);
+    expect(evidence.outcome).toBe('ambiguous');
+  });
+
   it('rejects insufficient supported coverage before comparing deceptive appearance ranks', () => {
     const ranked = rankFixedCandidateSet([candidate(4, 0.55), candidate(8, 0.95, { coverage: 0.54 })], 4);
     expect(
@@ -98,6 +113,29 @@ describe('absolute anatomical alignment confidence', () => {
       normalizedReference: reference,
       imageSize: 256,
       exclusionMask: { x: 100 / 256, y: 100 / 256, width: 40 / 256, height: 40 / 256 },
+    });
+
+    expect(evidence.referenceIntensityVariance).toBe(0);
+    expect(evidence.outcome).toBe('ambiguous');
+  });
+
+  it('does not accept invalid padding as informative reference anatomy', () => {
+    const ranked = rankFixedCandidateSet([candidate(2, 0.5), candidate(8, 0.9)], 2);
+    const reference = new Float32Array(256 * 256).fill(0.5);
+    const referenceValidity = new Uint8Array(reference.length).fill(1);
+    for (let y = 100; y < 140; y++) {
+      for (let x = 100; x < 140; x++) {
+        reference[y * 256 + x] = 100;
+        referenceValidity[y * 256 + x] = 0;
+      }
+    }
+
+    const evidence = assessSliceAlignmentEvidence({
+      winner: ranked[1]!,
+      candidates: ranked,
+      normalizedReference: reference,
+      referenceValidity,
+      imageSize: 256,
     });
 
     expect(evidence.referenceIntensityVariance).toBe(0);

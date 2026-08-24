@@ -15,6 +15,7 @@ import type {
 import { OWNED_EXACT_STORAGE_KEYS, OWNED_STORAGE_KEY_PREFIX } from '../utils/storageKeys';
 import { getAllModelRecords, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { assertValidDerivedAlignmentFrameShape } from '../utils/localApi';
+import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
 
@@ -33,7 +34,10 @@ type SnapshotFile = {
 
 type SnapshotInstance = Omit<DicomInstance, 'fileBlob'> & { file: SnapshotFile };
 type SnapshotVolume = Omit<VolumeSegmentationRow, 'labels'> & { file: SnapshotFile };
-type SnapshotDerivedFrame = Omit<DerivedAlignmentFrameRow, 'pixels'> & { file: SnapshotFile };
+type SnapshotDerivedFrame = Omit<DerivedAlignmentFrameRow, 'pixels' | 'valid'> & {
+  file: SnapshotFile;
+  validFile?: SnapshotFile;
+};
 type SnapshotModel = { key: string; savedAtMs: number; file: SnapshotFile };
 
 type SnapshotManifest = {
@@ -158,10 +162,13 @@ export async function exportStudiesToZip(
     if (selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
     if (row.referenceStudyUid && !selectedStudies.has(row.referenceStudyUid)) continue;
     if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
-    const { pixels, ...metadata } = row;
+    const { pixels, valid, ...metadata } = row;
     const path = `derived-frames/${encodeURIComponent(row.id)}.f32`;
     const file = await addSnapshotFile(path, pixels, true);
-    derivedAlignmentFrames.push({ ...metadata, file });
+    const validFile = valid
+      ? await addSnapshotFile(`derived-frames/${encodeURIComponent(row.id)}.valid`, valid, true)
+      : undefined;
+    derivedAlignmentFrames.push({ ...metadata, file, ...(validFile && { validFile }) });
   }
 
   const models: SnapshotModel[] = [];
@@ -323,7 +330,7 @@ export async function restoreSnapshot(
   const derivedFrames: DerivedAlignmentFrameRow[] = [];
   const derivedFrameIds = new Set<string>();
   for (const metadata of manifest.records.derivedAlignmentFrames ?? []) {
-    const { file, ...frame } = metadata;
+    const { file, validFile, ...frame } = metadata;
     const target = seriesByUid.get(frame.targetSeriesUid);
     const targetInstance = frame.targetSopInstanceUid ? instancesByUid.get(frame.targetSopInstanceUid) : undefined;
     const reference = frame.referenceSeriesUid ? seriesByUid.get(frame.referenceSeriesUid) : undefined;
@@ -341,6 +348,9 @@ export async function restoreSnapshot(
       orderedInstancesForSeries(frame.targetSeriesUid)[frame.targetFrameIndex]?.sopInstanceUid !==
         frame.targetSopInstanceUid ||
       frame.sourceImageId !== `miradb:${frame.targetSopInstanceUid}` ||
+      frame.contributingSourceSopInstanceUids?.some(
+        (uid) => instancesByUid.get(uid)?.seriesInstanceUid !== frame.targetSeriesUid,
+      ) ||
       (frame.referenceStudyUid && !studyUids.has(frame.referenceStudyUid)) ||
       (frame.referenceSeriesUid && !reference) ||
       (frame.referenceStudyUid && reference?.studyInstanceUid !== frame.referenceStudyUid) ||
@@ -365,13 +375,20 @@ export async function restoreSnapshot(
     ) {
       throw new Error('The backup contains a derived alignment frame without matching patient-space sources.');
     }
+    if (frame.outputGrid) {
+      if (!referenceInstance) {
+        throw new Error('The backup contains a physical output grid without its native reference image.');
+      }
+      validateOutputGridReference(frame.outputGrid, referenceInstance, reference?.frameOfReferenceUid);
+    }
     derivedFrameIds.add(frame.id);
     const bytes = await toArrayBuffer(await readVerifiedFile(zip, file));
     if (bytes.byteLength !== frame.rows * frame.columns * Float32Array.BYTES_PER_ELEMENT) {
       throw new Error('A saved derived alignment frame does not match its pixel geometry.');
     }
     const pixels = new Float32Array(bytes);
-    const derivedFrame = { ...frame, pixels };
+    const valid = validFile ? new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, validFile))) : undefined;
+    const derivedFrame = { ...frame, pixels, ...(valid && { valid }) };
     assertValidDerivedAlignmentFrameShape(derivedFrame);
     derivedFrames.push(derivedFrame);
   }

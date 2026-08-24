@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   registerRigid: vi.fn(),
   registerAffine: vi.fn(),
   coverage: 1,
+  padded: false,
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
@@ -20,9 +21,15 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
     } else {
       pixels[0] = index;
     }
+    const validity = new Float32Array(size * size).fill(1);
+    if (mocks.padded) {
+      pixels[1] = seriesUid === 'reference-series' ? 100_000 : -100_000;
+      validity[1] = 0;
+    }
     const imageId = `miradb:${seriesUid}-${index}`;
     return {
       pixels,
+      validity,
       imageId,
       expectedImageId: imageId,
       renderedImageId: imageId,
@@ -88,6 +95,7 @@ describe('auto-alignment fail-closed clinical evidence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.coverage = 1;
+    mocks.padded = false;
     mocks.registerRigid.mockImplementation(async (_fixed: Float32Array, moving: Float32Array) => ({
       movingToFixed: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
       A: { m00: 1, m01: 0, m10: 0, m11: 1 },
@@ -141,5 +149,18 @@ describe('auto-alignment fail-closed clinical evidence', () => {
     expect(firstMoving[center]).toBeLessThan(1);
     expect(mocks.registerRigid.mock.calls[0]![3]).not.toHaveProperty('exclusionRect');
     expect(mocks.registerRigid.mock.calls[1]![3]).toMatchObject({ exclusionRect: mask });
+  });
+
+  it('never exposes invalid fixed or moving padding to the initial rigid optimizer', async () => {
+    mocks.padded = true;
+
+    await run();
+
+    const firstFixed = mocks.registerRigid.mock.calls[0]![0] as Float32Array;
+    const firstMoving = mocks.registerRigid.mock.calls[0]![1] as Float32Array;
+    expect(firstFixed[1]).toBeGreaterThanOrEqual(0);
+    expect(firstFixed[1]).toBeLessThan(2);
+    expect(firstMoving[1]).toBeGreaterThanOrEqual(0);
+    expect(firstMoving[1]).toBeLessThan(2);
   });
 });

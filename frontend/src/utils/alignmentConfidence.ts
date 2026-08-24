@@ -11,14 +11,23 @@ export type SliceAlignmentEvidence = {
 
 const MINIMUM_SUPPORTED_COVERAGE = 0.55;
 const MINIMUM_REFERENCE_INTENSITY_VARIANCE = 1e-6;
+const MINIMUM_ABSOLUTE_STRUCTURAL_AGREEMENT = 0.35;
 
 function absoluteStructuralScore(components: PerceptualComponents): number {
   if (components.perScale.length === 0) return 0;
   return components.perScale.reduce((sum, scale) => sum + (scale.mind + scale.ngf) / 2, 0) / components.perScale.length;
 }
 
-function intensityVariance(pixels: Float32Array, imageSize: number, exclusionMask?: ExclusionMask): number {
-  let count = 0;
+function intensityVariance(
+  pixels: Float32Array,
+  imageSize: number,
+  exclusionMask?: ExclusionMask,
+  validity?: Float32Array | Uint8Array,
+): { variance: number; supportedPixelCount: number } {
+  if (validity && validity.length !== pixels.length) {
+    throw new Error('Alignment confidence validity does not match reference image dimensions');
+  }
+  let supportedPixelCount = 0;
   let mean = 0;
   let squaredDeviation = 0;
   for (let index = 0; index < pixels.length; index++) {
@@ -36,12 +45,17 @@ function intensityVariance(pixels: Float32Array, imageSize: number, exclusionMas
     }
     const value = pixels[index]!;
     if (!Number.isFinite(value)) continue;
-    count++;
+    const support = validity ? Math.max(0, Math.min(1, validity[index] ?? 0)) : 1;
+    if (!(support > 0)) continue;
+    supportedPixelCount += support;
     const difference = value - mean;
-    mean += difference / count;
-    squaredDeviation += difference * (value - mean);
+    mean += (difference * support) / supportedPixelCount;
+    squaredDeviation += support * difference * (value - mean);
   }
-  return count > 1 ? squaredDeviation / (count - 1) : 0;
+  return {
+    variance: supportedPixelCount > 1 ? squaredDeviation / (supportedPixelCount - 1) : 0,
+    supportedPixelCount,
+  };
 }
 
 /**
@@ -55,15 +69,21 @@ export function assessSliceAlignmentEvidence<T extends PerceptualCandidate>(opti
   winner: RankedPerceptualCandidate<T>;
   candidates: readonly RankedPerceptualCandidate<T>[];
   normalizedReference: Float32Array;
+  referenceValidity?: Float32Array | Uint8Array;
   imageSize: number;
   sliceSpacingMm?: number;
   exclusionMask?: ExclusionMask;
 }): SliceAlignmentEvidence {
   const { winner, candidates, normalizedReference, imageSize } = options;
   const structuralScore = absoluteStructuralScore(winner.components);
-  const referenceIntensityVariance = intensityVariance(normalizedReference, imageSize, options.exclusionMask);
+  const { variance: referenceIntensityVariance, supportedPixelCount } = intensityVariance(
+    normalizedReference,
+    imageSize,
+    options.exclusionMask,
+    options.referenceValidity,
+  );
   const coverage = Math.max(0, Math.min(1, winner.components.coverage));
-  const minimumDistinguishableGap = Math.max(1e-4, 0.05 / Math.sqrt(Math.max(1, coverage * imageSize * imageSize)));
+  const minimumDistinguishableGap = Math.max(1e-4, 0.05 / Math.sqrt(Math.max(1, coverage * supportedPixelCount)));
   const sliceSpacingMm = options.sliceSpacingMm && options.sliceSpacingMm > 0 ? options.sliceSpacingMm : 1;
   const distinctSliceDistance = Math.max(1, Math.ceil(2 / sliceSpacingMm));
   const physicallyDistinctRivals = candidates.filter(
@@ -90,6 +110,7 @@ export function assessSliceAlignmentEvidence<T extends PerceptualCandidate>(opti
       ? winner.components.perScale.some((scale) => (scale.rawNgf ?? 2 * scale.ngf - 1) > 0.02)
       : winner.mindActive || winner.boundaryActive;
   const outcome =
+    structuralScore < MINIMUM_ABSOLUTE_STRUCTURAL_AGREEMENT ||
     referenceIntensityVariance <= MINIMUM_REFERENCE_INTENSITY_VARIANCE ||
     !hasStructuralEvidence ||
     (physicallyDistinctRivals.length > 0 && runnerUpGap <= minimumDistinguishableGap)

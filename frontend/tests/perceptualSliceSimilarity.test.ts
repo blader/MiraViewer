@@ -103,6 +103,56 @@ describe('perceptual slice scoring', () => {
     expect(maximumDifference).toBeLessThan(1e-6);
   });
 
+  test('preserves anatomical support and normalized values under positive and negative modality intercepts', () => {
+    const original = Float32Array.from([0, 0, 0, 0, 0, 50, 100, 0, 0, 150, 200, 0, 0, 0, 0, 0]);
+    const normalized = normalizePerceptualSource(original, 4);
+
+    for (const intercept of [-1000, 1000]) {
+      const shifted = normalizePerceptualSource(
+        Float32Array.from(original, (value) => value + intercept),
+        4,
+      );
+      expect(Array.from(shifted, (value) => value > 0)).toEqual(Array.from(normalized, (value) => value > 0));
+      for (let index = 0; index < normalized.length; index++) {
+        expect(shifted[index]).toBeCloseTo(normalized[index]!, 5);
+      }
+    }
+  });
+
+  test('does not allow explicitly invalid pixels to determine foreground or robust intensity percentiles', () => {
+    const validity = Float32Array.from([0, 1, 1, 1]);
+    const baseline = normalizePerceptualSource(Float32Array.from([0, 100, 150, 200]), 2, { validity });
+    const changedPadding = normalizePerceptualSource(Float32Array.from([-2000, 100, 150, 200]), 2, { validity });
+
+    expect(baseline[0]).toBe(0);
+    expect(changedPadding[0]).toBe(0);
+    for (let index = 1; index < baseline.length; index++) {
+      expect(changedPadding[index]).toBeCloseTo(baseline[index]!, 5);
+    }
+  });
+
+  test('omits invalid reference footprints from structural descriptors and fixed-domain coverage', () => {
+    const size = 64;
+    const validity = new Float32Array(size * size).fill(1);
+    for (let y = 28; y < 36; y++) {
+      for (let x = 28; x < 36; x++) validity[y * size + x] = 0;
+    }
+    const reference = normalizePerceptualSource(
+      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
+      size,
+      { validity },
+    );
+    const prepared = preparePerceptualReference(reference, size, { scales: [64, 32], validity });
+
+    expect(prepared.scales[0]!.weights[32 * size + 32]).toBe(0);
+    expect(prepared.scales[0]!.weights[27 * size + 32]).toBe(0);
+    expect(prepared.scales.every((scale) => scale.totalWeight > 0)).toBe(true);
+
+    const premultipliedCandidate = Float32Array.from(reference, (value, index) => value * validity[index]!);
+    const score = scoreAlignedCandidate(prepared, premultipliedCandidate, validity, size);
+    expect(score.coverage).toBeGreaterThan(0.99);
+  });
+
   test.each([
     ['nonfunctional LUT', (labels: Uint8Array) => renderTissueContrast(labels, NONFUNCTIONAL_CONTRAST)],
     [

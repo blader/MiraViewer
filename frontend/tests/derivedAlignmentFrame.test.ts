@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentResult } from '../src/types/api';
 import type { DerivedAlignmentFrameRow } from '../src/db/schema';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 
 const storage = vi.hoisted(() => ({
   load: vi.fn<(patientKey: string, datasetRevision?: number) => Promise<DerivedAlignmentFrameRow[]>>(),
@@ -24,6 +25,15 @@ import {
 } from '../src/utils/derivedAlignmentFrame';
 
 function result(outcome: AlignmentResult['outcome'] = 'aligned'): AlignmentResult {
+  const outputGrid = buildOutputPlaneGrid({
+    sopInstanceUid: 'reference-frame',
+    frameOfReferenceUid: 'reference-frame-space',
+    rows: 2,
+    columns: 2,
+    imagePositionPatient: '0\\0\\0',
+    imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+    pixelSpacing: '0.4\\0.8',
+  });
   return {
     date: 'study-column',
     seriesUid: 'target-series',
@@ -36,9 +46,11 @@ function result(outcome: AlignmentResult['outcome'] = 'aligned'): AlignmentResul
     sequenceId: 'verified-sequence',
     datasetRevision: 7,
     referenceSeriesUid: 'reference-series',
+    outputGrid,
     outcome,
     derivedFrame: {
       pixels: new Float32Array([1, 2, 3, 4]),
+      valid: new Uint8Array([1, 0, 1, 1]),
       rows: 2,
       columns: 2,
       sourceImageId: 'miradb:native-frame',
@@ -51,6 +63,8 @@ function result(outcome: AlignmentResult['outcome'] = 'aligned'): AlignmentResul
       targetFrameOfReferenceUid: 'target-frame-space',
       nativeSliceSpacingMm: 1,
       sourceFrameCount: 5,
+      outputGrid,
+      contributingSourceSopInstanceUids: ['native-frame'],
     },
   };
 }
@@ -101,8 +115,11 @@ describe('verified derived alignment frame cache', () => {
         targetFrameOfReferenceUid: 'target-frame-space',
         nativeSliceSpacingMm: 1,
         sourceFrameCount: 5,
+        outputGrid: expect.objectContaining({ rowSpacingMm: 0.4, columnSpacingMm: 0.8 }),
+        contributingSourceSopInstanceUids: ['native-frame'],
       }),
     );
+    expect(Array.from(storage.save.mock.calls[0]![0].valid!)).toEqual([1, 0, 1, 1]);
   });
 
   it('restores only the active verified patient revision, sequence, and visible target series', async () => {
@@ -121,7 +138,10 @@ describe('verified derived alignment frame cache', () => {
       imageId: 'miraderived:verified-run:target-series:12',
       nativeSliceSpacingMm: 1,
       sourceFrameCount: 5,
+      outputGrid: expect.objectContaining({ rowSpacingMm: 0.4, columnSpacingMm: 0.8 }),
+      contributingSourceSopInstanceUids: ['native-frame'],
     });
+    expect(Array.from(getDerivedAlignmentFrame('target-series', 12)!.valid!)).toEqual([1, 0, 1, 1]);
     expect(getDerivedAlignmentFrame('target-series', 11)).toBeNull();
     expect(getDerivedAlignmentFrame('unrelated-series', 12)).toBeNull();
   });

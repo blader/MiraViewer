@@ -54,6 +54,23 @@ describe('svr/longitudinal registration worker ownership', () => {
     expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
 
+  it('transfers each explicit acquired-support buffer exactly once alongside its source pixels', async () => {
+    vi.stubGlobal('Worker', MockWorker);
+    const options = input();
+    options.referenceSlices[0]!.valid = new Uint8Array([1, 0, 1, 1]);
+    const pending = runLongitudinalRegistration(options);
+    const worker = MockWorker.instances[0]!;
+
+    expect(worker.postMessage.mock.calls[0]![1]).toEqual([
+      options.referenceSlices[0]!.pixels.buffer,
+      options.referenceSlices[0]!.valid.buffer,
+    ]);
+
+    const result = { ok: false as const, reason: 'insufficient-coverage' as const, message: 'No overlap' };
+    worker.onmessage?.({ data: { type: 'done', result } } as MessageEvent<LongitudinalWorkerResponse>);
+    await expect(pending).resolves.toEqual(result);
+  });
+
   it('aborts and terminates an active worker without waiting for its compute loop', async () => {
     vi.stubGlobal('Worker', MockWorker);
     const controller = new AbortController();
@@ -120,5 +137,34 @@ describe('svr/longitudinal registration worker ownership', () => {
 
     await expect(pending).resolves.toEqual(result);
     expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('transfers native reference support and the undetached dense exclusion exactly once', async () => {
+    vi.stubGlobal('Worker', MockWorker);
+    const source = input();
+    const nativeReference = { ...source.referenceSlices[0]!, valid: new Uint8Array([1, 1, 0, 1]) };
+    const exclusion = new Uint8Array([0, 1, 0, 0]);
+    const { pixels: _pixels, ...referencePlane } = source.referenceSlices[0]!;
+    void _pixels;
+    const pending = runLongitudinalDenseReslice({
+      targetSlices: source.targetSlices,
+      referencePlane,
+      nativeReferenceSlices: [nativeReference],
+      nativeReferenceSliceIndex: 0,
+      referenceExclusionMask: exclusion,
+      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      centerMm: { x: 0, y: 0, z: 0 },
+    });
+    const worker = MockWorker.instances[0]!;
+
+    expect(worker.postMessage.mock.calls[0]![1]).toEqual([
+      source.targetSlices[0]!.pixels.buffer,
+      nativeReference.valid.buffer,
+      exclusion.buffer,
+    ]);
+
+    const result = { ok: false as const, reason: 'insufficient-coverage' as const, message: 'No overlap' };
+    worker.onmessage?.({ data: { type: 'done', result } } as MessageEvent<LongitudinalWorkerResponse>);
+    await expect(pending).resolves.toEqual(result);
   });
 });

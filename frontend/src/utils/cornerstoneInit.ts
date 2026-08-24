@@ -38,7 +38,14 @@ function miraDbLoader(imageId: string) {
 
     try {
       // Delegate to the WADO URI loader and await its result.
-      return await cornerstone.loadImage(fileImageId);
+      const image = await cornerstone.loadImage(fileImageId);
+      if (instance.pixelPaddingValue !== undefined) {
+        Object.assign(image, {
+          pixelPaddingValue: instance.pixelPaddingValue,
+          pixelPaddingRangeLimit: instance.pixelPaddingRangeLimit,
+        });
+      }
+      return image;
     } finally {
       // Best-effort cleanup:
       // - Remove the inner fileImageId from Cornerstone's image cache (the outer `miradb:`
@@ -82,7 +89,9 @@ function miraDerivedLoader(imageId: string) {
       const source = await loadCornerstoneImage(frame.sourceImageId);
       let minimum = Number.POSITIVE_INFINITY;
       let maximum = Number.NEGATIVE_INFINITY;
-      for (const pixel of frame.pixels) {
+      for (let index = 0; index < frame.pixels.length; index++) {
+        if (frame.valid && !frame.valid[index]) continue;
+        const pixel = frame.pixels[index]!;
         if (!Number.isFinite(pixel)) continue;
         minimum = Math.min(minimum, pixel);
         maximum = Math.max(maximum, pixel);
@@ -98,6 +107,12 @@ function miraDerivedLoader(imageId: string) {
         columns: frame.columns,
         height: frame.rows,
         width: frame.columns,
+        ...(frame.outputGrid && {
+          rowPixelSpacing: frame.outputGrid.rowSpacingMm,
+          columnPixelSpacing: frame.outputGrid.columnSpacingMm,
+          imagePositionPatient: frame.outputGrid.originMm,
+          imageOrientationPatient: [...frame.outputGrid.rowDirection, ...frame.outputGrid.columnDirection],
+        }),
         minPixelValue: minimum,
         maxPixelValue: maximum,
         windowCenter: (minimum + maximum) / 2,

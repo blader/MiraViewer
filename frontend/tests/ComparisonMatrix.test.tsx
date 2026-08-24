@@ -1,7 +1,8 @@
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { ComparisonMatrix } from '../src/components/ComparisonMatrix';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { COMPARISON_UI_STORAGE_KEY } from '../src/utils/storageKeys';
 
 vi.mock('../src/hooks/useComparisonData', () => ({
   useComparisonData: () => ({
@@ -78,6 +79,10 @@ vi.mock('../src/components/DicomViewer', () => ({
 }));
 
 describe('ComparisonMatrix', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it('renders header menu actions', () => {
     render(<ComparisonMatrix />);
 
@@ -89,5 +94,38 @@ describe('ComparisonMatrix', () => {
     expect(screen.getByText(/import \(dicom zip\)/i)).toBeInTheDocument();
     expect(screen.getByText(/export backup \(zip\)/i)).toBeInTheDocument();
     expect(screen.getByTestId('dicom-viewer')).toBeInTheDocument();
+  });
+
+  it('defaults aligned output to reference resolution and persists an explicitly selected physical preset', () => {
+    render(<ComparisonMatrix />);
+
+    const resolution = screen.getByRole('combobox', { name: /alignment output resolution/i });
+    expect(resolution).toHaveValue('native');
+    expect(screen.getByRole('option', { name: /reference resolution/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /1024.*1024/i })).toBeInTheDocument();
+
+    fireEvent.change(resolution, { target: { value: 'fixed-1024' } });
+
+    expect(resolution).toHaveValue('fixed-1024');
+    expect(screen.getByText(/interpolated display pixels do not add acquired mri detail/i)).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(COMPARISON_UI_STORAGE_KEY) ?? '{}')).toMatchObject({
+      alignmentOutputMode: 'fixed-1024',
+    });
+  });
+
+  it('discards an unrecognized persisted output preset without changing established sidebar preferences', () => {
+    localStorage.setItem(
+      COMPARISON_UI_STORAGE_KEY,
+      JSON.stringify({ sidebarOpen: true, rightSidebarOpen: false, alignmentOutputMode: 'untrusted-grid' }),
+    );
+
+    render(<ComparisonMatrix />);
+
+    expect(screen.getByRole('combobox', { name: /alignment output resolution/i })).toHaveValue('native');
+    expect(JSON.parse(localStorage.getItem(COMPARISON_UI_STORAGE_KEY) ?? '{}')).toMatchObject({
+      sidebarOpen: true,
+      rightSidebarOpen: false,
+      alignmentOutputMode: 'native',
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
 import type { SequenceCombo } from '../../types/api';
 import { formatSequenceLabel } from '../../utils/clinicalData';
+import type { OutputGridMode } from '../../utils/outputPlaneGrid';
 
 type ComparisonFiltersSidebarProps = {
   open: boolean;
@@ -14,6 +15,10 @@ type ComparisonFiltersSidebarProps = {
   sequencesWithDataForDates: Set<string>;
   selectedSeqId: string | null;
   onSelectSequence: (seqId: string) => void;
+
+  alignmentOutputMode: OutputGridMode;
+  onAlignmentOutputModeChange: (mode: OutputGridMode) => void;
+  alignmentInProgress?: boolean;
 };
 
 export function ComparisonFiltersSidebar({
@@ -26,6 +31,9 @@ export function ComparisonFiltersSidebar({
   sequencesWithDataForDates,
   selectedSeqId,
   onSelectSequence,
+  alignmentOutputMode,
+  onAlignmentOutputModeChange,
+  alignmentInProgress = false,
 }: ComparisonFiltersSidebarProps) {
   return (
     <>
@@ -95,6 +103,35 @@ export function ComparisonFiltersSidebar({
                 );
               })}
             </div>
+          </div>
+
+          <div className="border-t border-[var(--border-color)] pt-5">
+            <label
+              htmlFor="alignment-output-resolution"
+              className="mb-2 block text-xs uppercase font-semibold text-[var(--text-secondary)]"
+            >
+              Aligned output
+            </label>
+            <select
+              id="alignment-output-resolution"
+              aria-label="Alignment output resolution"
+              value={alignmentOutputMode}
+              disabled={alignmentInProgress}
+              onChange={(event) => onAlignmentOutputModeChange(event.target.value as OutputGridMode)}
+              className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-2 text-xs text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="native">Reference resolution</option>
+              <option value="fixed-256">256 × 256 pixels</option>
+              <option value="fixed-512">512 × 512 pixels</option>
+              <option value="fixed-1024">1024 × 1024 pixels</option>
+              <option value="longest-edge">Preserve aspect ratio · 512 px</option>
+              <option value="isotropic">Equal physical pixel spacing</option>
+            </select>
+            {alignmentOutputMode !== 'native' ? (
+              <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-tertiary)]">
+                Interpolated display pixels do not add acquired MRI detail.
+              </p>
+            ) : null}
           </div>
         </div>
       </div>

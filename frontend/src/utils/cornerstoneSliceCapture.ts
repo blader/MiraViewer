@@ -1,7 +1,7 @@
 import { ALIGNMENT_IMAGE_SIZE } from './imageCapture';
 import { getImageIdForInstance } from './localApi';
 import { nowMs } from './math';
-import { loadCornerstoneImage, resampleDecodedImage } from './decodedFrame';
+import { decodeImageWithValidity, loadCornerstoneImage } from './decodedFrame';
 
 const IMAGE_ID_LOOKUP_TIMEOUT_MS = 10_000;
 const IMAGE_LOAD_TIMEOUT_MS = 30_000;
@@ -57,6 +57,8 @@ export function createPixelCaptureScratch(targetSize: number): PixelCaptureScrat
 
 export type RenderedSlice = {
   pixels: Float32Array;
+  /** Native acquired-footprint support, independent of modality intensity or canvas background. */
+  validity?: Float32Array;
   imageId: string;
   expectedImageId: string;
   renderedImageId: string | null;
@@ -123,15 +125,15 @@ export async function renderSliceToPixels(
   const expectedImageId = (image as unknown as { imageId?: string }).imageId || imageId;
   const tCapture0 = nowMs();
   const decoded = image as unknown as { rows?: number; columns?: number; height?: number; width?: number };
-  const pixels = resampleDecodedImage(
-    image as unknown as Parameters<typeof resampleDecodedImage>[0],
+  const captured = decodeImageWithValidity(
+    image as unknown as Parameters<typeof decodeImageWithValidity>[0],
     targetSize,
     targetSize,
   );
   const tCapture1 = nowMs();
 
   return {
-    pixels,
+    ...captured,
     imageId,
     expectedImageId,
     renderedImageId: expectedImageId,

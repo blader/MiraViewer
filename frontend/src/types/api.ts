@@ -1,3 +1,5 @@
+import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Comparison view types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +163,7 @@ export interface AlignmentResult {
   sequenceId?: string;
   referenceSeriesUid?: string;
   datasetRevision?: number;
+  outputGrid?: OutputPlaneGrid;
   outcome?: 'aligned' | 'ambiguous' | 'insufficient-overlap' | 'incompatible-geometry' | 'failed' | 'cancelled';
   message?: string;
   /** Explicit evidence, never a claim of clinical correctness probability. */
@@ -174,10 +177,24 @@ export interface AlignmentResult {
     /** Actual acquired through-plane spacing and contiguous native frames used by the derived presentation. */
     presentationSliceSpacingMm?: number;
     presentationSourceFrameCount?: number;
+    forwardAnatomicalSupport?: number;
+    reverseAnatomicalSupport?: number;
+    outputPlaneSupport?: number;
+    requiredRegionSupport?: number;
+    effectiveSampleCount?: number;
+    heldOutSampleCount?: number;
+    effectiveIndependentSamples?: number;
+    heldOutEffectiveIndependentSamples?: number;
+    minimumDistinguishableScoreMargin?: number;
+    inverseConsistencyError?: number;
+    outputGridFingerprint?: string;
+    translationMm?: [number, number, number];
+    rotationDegrees?: [number, number, number];
   };
   /** Verified rigidly resliced frame, explicitly identified as derived presentation. */
   derivedFrame?: {
     pixels: Float32Array;
+    valid?: Uint8Array;
     rows: number;
     columns: number;
     sourceImageId: string;
@@ -198,6 +215,8 @@ export interface AlignmentResult {
     rotationCenterMm?: [number, number, number];
     nativeSliceSpacingMm?: number;
     sourceFrameCount?: number;
+    outputGrid?: OutputPlaneGrid;
+    contributingSourceSopInstanceUids?: string[];
   };
 }
 

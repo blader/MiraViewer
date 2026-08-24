@@ -32,10 +32,7 @@ function requireScored(
 }
 
 function baseOptions(size = 64) {
-  const fixed = normalizePerceptualSource(
-    renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
-    size,
-  );
+  const fixed = normalizePerceptualSource(renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST), size);
   return {
     normalizedReference: fixed,
     movingPixels: fixed,
@@ -55,12 +52,7 @@ function makeInsetAnatomy(size: number, lesionValue: number): Float32Array {
     const normalizedY = (y + 0.5) / size;
     for (let x = 0; x < size; x++) {
       const normalizedX = (x + 0.5) / size;
-      if (
-        normalizedX < 0.25 ||
-        normalizedX >= 0.75 ||
-        normalizedY < 0.25 ||
-        normalizedY >= 0.75
-      ) {
+      if (normalizedX < 0.25 || normalizedX >= 0.75 || normalizedY < 0.25 || normalizedY >= 0.75) {
         continue;
       }
 
@@ -147,6 +139,34 @@ describe('selectFinalAffineProposal', () => {
     expect(selection.selected.kind).toBe('seed-only');
   });
 
+  test('excludes acquired padding from final affine normalization and paired structural coverage', () => {
+    const size = 64;
+    const validity = new Float32Array(size * size).fill(1);
+    const source = renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST);
+    for (let y = 26; y < 38; y++) {
+      for (let x = 26; x < 38; x++) validity[y * size + x] = 0;
+    }
+    const normalizedReference = normalizePerceptualSource(source, size, { validity });
+    const makeMoving = (padding: number) =>
+      Float32Array.from(source, (value, index) => (validity[index] ? value : padding));
+    const options = {
+      normalizedReference,
+      referenceValidity: validity,
+      movingValidity: validity,
+      size,
+      scales: [64, 32],
+      winningWarp: { A: IDENTITY_RESIDUAL.A, translateX: 0, translateY: 0 },
+      optimizerProposals: [],
+    };
+
+    const low = selectFinalAffineProposal({ ...options, movingPixels: makeMoving(-20_000) });
+    const high = selectFinalAffineProposal({ ...options, movingPixels: makeMoving(20_000) });
+
+    expect(low.selected.structuralScore).toBeCloseTo(high.selected.structuralScore, 6);
+    expect(low.selected.bidirectionalCoverage).toBeCloseTo(1, 6);
+    expect(high.selected.bidirectionalCoverage).toBeCloseTo(1, 6);
+  });
+
   test('source-domain coverage rejects zoom that hides anatomy with full forward validity', () => {
     const options = baseOptions();
     const selection = selectFinalAffineProposal({
@@ -182,18 +202,9 @@ describe('selectFinalAffineProposal', () => {
         b: { x: 0, y: 0 },
       },
     ],
-    [
-      'singular',
-      { A: { m00: 1, m01: 0, m10: 0, m11: 0 }, b: { x: 0, y: 0 } },
-    ],
-    [
-      'orientation-reversing',
-      { A: { m00: -1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
-    ],
-    [
-      'excessive-displacement',
-      { A: { m00: 1, m01: 0.4, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
-    ],
+    ['singular', { A: { m00: 1, m01: 0, m10: 0, m11: 0 }, b: { x: 0, y: 0 } }],
+    ['orientation-reversing', { A: { m00: -1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } }],
+    ['excessive-displacement', { A: { m00: 1, m01: 0.4, m10: 0, m11: 1 }, b: { x: 0, y: 0 } }],
   ] as const)('rejects %s optimizer residuals', (reason, residualMovingToFixed) => {
     const options = baseOptions();
     const selection = selectFinalAffineProposal({

@@ -9,8 +9,15 @@ import type { PhaseCorrection } from './phaseCorrelation';
 
 type ScoringRequest =
   | { kind: 'initialize'; requestId: number; config: AlignmentScoringConfiguration }
-  | { kind: 'coarse'; requestId: number; pixels: Float32Array; seed: GridSeedTransform }
-  | { kind: 'fine'; requestId: number; pixels: Float32Array; seed: GridSeedTransform; phase: PhaseCorrection }
+  | { kind: 'coarse'; requestId: number; pixels: Float32Array; seed: GridSeedTransform; validity?: Float32Array }
+  | {
+      kind: 'fine';
+      requestId: number;
+      pixels: Float32Array;
+      seed: GridSeedTransform;
+      phase: PhaseCorrection;
+      validity?: Float32Array;
+    }
   | { kind: 'final'; requestId: number; input: AlignmentFinalScoringInput };
 
 let engine: AlignmentScoringEngine | null = null;
@@ -34,8 +41,8 @@ self.onmessage = (event: MessageEvent<ScoringRequest>) => {
     }
     const result: AlignmentScoredCandidate =
       request.kind === 'coarse'
-        ? engine.scoreCoarse(request.pixels, request.seed)
-        : engine.scoreFine(request.pixels, request.seed, request.phase);
+        ? engine.scoreCoarse(request.pixels, request.seed, request.validity)
+        : engine.scoreFine(request.pixels, request.seed, request.phase, request.validity);
     self.postMessage({ kind: 'result', requestId: request.requestId, result });
   } catch (error) {
     self.postMessage({

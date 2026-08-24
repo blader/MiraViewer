@@ -1,5 +1,10 @@
 import type { ExclusionMask } from '../types/api';
-import { buildSoftForegroundSupportSquare, computeGradientMagnitudeL1Square } from './imageFeatures';
+import type { WarpTransform } from './alignmentTransform';
+import {
+  buildSoftForegroundSupportSquare,
+  computeGradientMagnitudeL1Square,
+  erodeFractionalSupportSquare,
+} from './imageFeatures';
 import {
   computeMindDescriptor2D,
   createMindDescriptorScratch,
@@ -7,7 +12,8 @@ import {
   type MindDescriptor2D,
   type MindDescriptorScratch,
 } from './mindDescriptor';
-import { resample2dAreaAverage } from './svr/resample2d';
+import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from './svr/resample2d';
+import { warpGrayscaleAffineWithValidity } from './warpAffine';
 
 const HISTOGRAM_BINS = 1024;
 const CHANNEL_RANGE_EPSILON = 1e-6;
@@ -65,11 +71,14 @@ export function createPerceptualScoringScratch(): PerceptualScoringScratch {
 export type PreparePerceptualReferenceOptions = {
   scales?: number[];
   exclusionRect?: ExclusionMask;
+  validity?: Float32Array | Uint8Array;
 };
 
 export type NormalizePerceptualSourceOptions = {
   /** Source-space region omitted only from the robust intensity-basis histogram. */
   exclusionRect?: ExclusionMask;
+  /** Explicit acquired-pixel support, independent of modality intensity and display values. */
+  validity?: Float32Array | Uint8Array;
 };
 
 export type PerceptualCandidate = {
@@ -131,12 +140,17 @@ export function normalizePerceptualSource(
 ): Float32Array {
   assertSquare(pixels, size, 'normalizePerceptualSource');
 
+  const validity = options.validity;
+  if (validity && validity.length !== pixels.length) {
+    throw new Error('normalizePerceptualSource: validity does not match source image dimensions');
+  }
   const exclusion = options.exclusionRect;
   const exclusionX0 = exclusion ? Math.max(0, Math.floor(exclusion.x * size)) : 0;
   const exclusionY0 = exclusion ? Math.max(0, Math.floor(exclusion.y * size)) : 0;
   const exclusionX1 = exclusion ? Math.min(size, Math.ceil((exclusion.x + exclusion.width) * size)) : 0;
   const exclusionY1 = exclusion ? Math.min(size, Math.ceil((exclusion.y + exclusion.height) * size)) : 0;
   const includedInBasis = (index: number) => {
+    if (validity && (!(validity[index]! > 0) || !Number.isFinite(validity[index]))) return false;
     if (!exclusion) return true;
     const x = index % size;
     const y = Math.floor(index / size);
@@ -160,7 +174,7 @@ export function normalizePerceptualSource(
 
   // Signed pixel buffers and modality intercepts can put the entire image below zero.
   // Translate its native background before robust foreground estimation; display windows never enter.
-  const background = minimum < 0 ? minimum : 0;
+  const background = minimum;
   const shiftedMaximum = maximum - background;
 
   // Rendered MRI backgrounds are normally exactly zero. The tiny relative floor keeps interpolation
@@ -201,7 +215,7 @@ export function normalizePerceptualSource(
 
   for (let i = 0; i < pixels.length; i++) {
     const value = pixels[i] ?? 0;
-    if (!Number.isFinite(value) || value <= foregroundFloor) continue;
+    if ((validity && !(validity[i]! > 0)) || !Number.isFinite(value) || value <= foregroundFloor) continue;
     const normalized = robustRange > 1e-8 ? clamp01((value - low) / robustRange) : 1;
     // Keep low-valued foreground distinct from the zero-valued canvas used by warps.
     output[i] = 0.05 + 0.95 * normalized;
@@ -336,6 +350,7 @@ function buildReferenceWeights(
   size: number,
   exclusionRect: ExclusionMask | undefined,
   safeBorder: number,
+  validity?: Float32Array,
 ): Float32Array {
   const support = buildSoftForegroundSupportSquare(reference, size);
   const gradients = computeGradientMagnitudeL1Square(reference, size);
@@ -364,7 +379,9 @@ function buildReferenceWeights(
         3 * (gradients[index] ?? 0) + 5 * Math.sqrt(Math.max(0, variance[index] ?? 0)),
       );
       // The floor gives target-only boundaries a cost. Foreground and reference structure remain dominant.
-      weights[index] = Math.min(1.5, 0.1 + 0.45 * (support[index] ?? 0) + 0.95 * structuralSignal);
+      weights[index] =
+        Math.min(1.5, 0.1 + 0.45 * (support[index] ?? 0) + 0.95 * structuralSignal) *
+        (validity ? clamp01(validity[index] ?? 0) : 1);
     }
   }
   return weights;
@@ -376,6 +393,9 @@ export function preparePerceptualReference(
   options: PreparePerceptualReferenceOptions = {},
 ): PreparedPerceptualReference {
   assertSquare(normalizedReference, size, 'preparePerceptualReference');
+  if (options.validity && options.validity.length !== normalizedReference.length) {
+    throw new Error('preparePerceptualReference: validity does not match reference image dimensions');
+  }
   const requestedScales = options.scales ?? [256, 128, 64];
   const scaleSizes = [...new Set(requestedScales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
     (a, b) => b - a,
@@ -383,13 +403,24 @@ export function preparePerceptualReference(
   if (scaleSizes.length === 0) scaleSizes.push(size);
 
   const scales = scaleSizes.map((scaleSize): PreparedPerceptualScale => {
-    const reference =
-      scaleSize === size
-        ? Float32Array.from(normalizedReference)
-        : resample2dAreaAverage(normalizedReference, size, size, scaleSize, scaleSize);
+    const scaled = options.validity
+      ? scaleSize === size
+        ? { pixels: Float32Array.from(normalizedReference), validity: Float32Array.from(options.validity) }
+        : resample2dAreaAverageWithValidity(normalizedReference, options.validity, size, size, scaleSize, scaleSize)
+      : {
+          pixels:
+            scaleSize === size
+              ? Float32Array.from(normalizedReference)
+              : resample2dAreaAverage(normalizedReference, size, size, scaleSize, scaleSize),
+          validity: undefined,
+        };
+    const reference = scaled.pixels;
     const mind = computeMindDescriptor2D(reference, scaleSize);
     const safeBorder = Math.max(LOCAL_RADIUS + 1, mind.footprintRadius);
-    const weights = buildReferenceWeights(reference, scaleSize, options.exclusionRect, safeBorder);
+    const descriptorValidity = scaled.validity
+      ? erodeFractionalSupportSquare(scaled.validity, scaleSize, safeBorder)
+      : undefined;
+    const weights = buildReferenceWeights(reference, scaleSize, options.exclusionRect, safeBorder, descriptorValidity);
     const gradients = computeCentralGradients(reference, scaleSize);
     let totalWeight = 0;
     for (let i = 0; i < weights.length; i++) totalWeight += weights[i] ?? 0;
@@ -617,6 +648,22 @@ export function scoreAlignedCandidate(
   return {
     coverage: totalReferenceWeight > 0 ? clamp01(weightedCoverageNumerator / totalReferenceWeight) : 0,
     perScale,
+  };
+}
+
+/** Compose acquired-pixel support with geometric support without double-weighting intensity. */
+export function warpPerceptualCandidateWithValidity(
+  normalized: Float32Array,
+  size: number,
+  warp: WarpTransform,
+  acquiredValidity?: Float32Array,
+): { pixels: Float32Array; validity: Float32Array } {
+  if (!acquiredValidity) return warpGrayscaleAffineWithValidity(normalized, size, warp);
+  assertSquare(acquiredValidity, size, 'warpPerceptualCandidateWithValidity validity');
+  const premultiplied = Float32Array.from(normalized, (value, index) => value * clamp01(acquiredValidity[index] ?? 0));
+  return {
+    pixels: warpGrayscaleAffineWithValidity(premultiplied, size, warp).pixels,
+    validity: warpGrayscaleAffineWithValidity(acquiredValidity, size, warp).pixels,
   };
 }
 

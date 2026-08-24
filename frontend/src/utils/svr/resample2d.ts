@@ -3,7 +3,7 @@ export function resample2dAreaAverage(
   srcRows: number,
   srcCols: number,
   dstRows: number,
-  dstCols: number
+  dstCols: number,
 ): Float32Array {
   const outRows = Math.max(0, Math.floor(dstRows));
   const outCols = Math.max(0, Math.floor(dstCols));
@@ -84,6 +84,39 @@ export function resample2dAreaAverage(
   return out;
 }
 
+/** Keep acquired intensity and fractional native-pixel support independent while area filtering. */
+export function resample2dAreaAverageWithValidity(
+  source: ArrayLike<number>,
+  sourceValidity: ArrayLike<number>,
+  sourceRows: number,
+  sourceColumns: number,
+  targetRows: number,
+  targetColumns: number,
+): { pixels: Float32Array; validity: Float32Array } {
+  const pixelCount = sourceRows * sourceColumns;
+  if (source.length < pixelCount || sourceValidity.length < pixelCount) {
+    throw new Error('Validity-aware resampling requires matching native pixel and support buffers');
+  }
+
+  const weighted = new Float32Array(pixelCount);
+  const nativeValidity = new Float32Array(pixelCount);
+  for (let index = 0; index < pixelCount; index++) {
+    const value = source[index]!;
+    const support = sourceValidity[index]!;
+    if (!Number.isFinite(value) || !Number.isFinite(support) || support <= 0) continue;
+    nativeValidity[index] = Math.min(1, support);
+    weighted[index] = value * nativeValidity[index]!;
+  }
+
+  const pixels = resample2dAreaAverage(weighted, sourceRows, sourceColumns, targetRows, targetColumns);
+  const validity = resample2dAreaAverage(nativeValidity, sourceRows, sourceColumns, targetRows, targetColumns);
+  for (let index = 0; index < pixels.length; index++) {
+    const support = validity[index]!;
+    pixels[index] = support > 1e-6 ? pixels[index]! / support : 0;
+  }
+  return { pixels, validity };
+}
+
 function sinc(x: number): number {
   if (x === 0) return 1;
   const px = Math.PI * x;
@@ -157,7 +190,7 @@ export function resample2dLanczos3(
   srcRows: number,
   srcCols: number,
   dstRows: number,
-  dstCols: number
+  dstCols: number,
 ): Float32Array {
   const outRows = Math.max(0, Math.floor(dstRows));
   const outCols = Math.max(0, Math.floor(dstCols));

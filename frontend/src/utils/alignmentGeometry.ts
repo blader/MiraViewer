@@ -1,10 +1,11 @@
 import type { ExclusionMask } from '../types/api';
 import type { SeriesFrameManifest } from './localApi';
+import { outputGridPixelToWorld, type OutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
-import { applyRigidToPoint, mat3FromEulerXYZ, type RigidParams } from './svr/rigidRegistration';
+import { applyRigidToPoint, invertRigidParams, mat3FromEulerXYZ, type RigidParams } from './svr/rigidRegistration';
 import { dot, v3, type Vec3 } from './svr/vec3';
 
-type RegisteredPose = { rigid: RigidParams; centerMm: Vec3 };
+type RegisteredPose = { rigid: RigidParams; centerMm: Vec3; outputGrid?: OutputPlaneGrid };
 
 function frameCenter(manifest: SeriesFrameManifest, index: number): Vec3 {
   const frame = manifest.frames[index];
@@ -37,28 +38,31 @@ export function selectPhysicalTargetSlice(
     return Math.round(fraction * Math.max(0, target.frames.length - 1));
   }
 
-  const geometry = getSliceGeometryFromInstance(referenceFrame);
-  const referenceCenter = frameCenter(reference, referenceIndex);
-  const rotation = registeredPose
-    ? mat3FromEulerXYZ(registeredPose.rigid.rx, registeredPose.rigid.ry, registeredPose.rigid.rz)
-    : null;
+  let referenceCenter = registeredPose?.outputGrid
+    ? outputGridPixelToWorld(
+        registeredPose.outputGrid,
+        (registeredPose.outputGrid.rows - 1) / 2,
+        (registeredPose.outputGrid.columns - 1) / 2,
+      )
+    : frameCenter(reference, referenceIndex);
+  if (registeredPose) {
+    const inverse = invertRigidParams(registeredPose.rigid);
+    referenceCenter = applyRigidToPoint(
+      referenceCenter,
+      registeredPose.centerMm,
+      mat3FromEulerXYZ(inverse.rx, inverse.ry, inverse.rz),
+      v3(inverse.tx, inverse.ty, inverse.tz),
+    );
+  }
   let winner = 0;
   let nearestDistance = Number.POSITIVE_INFINITY;
 
   for (let index = 0; index < target.frames.length; index++) {
-    let targetCenter = frameCenter(target, index);
-    if (registeredPose && rotation) {
-      targetCenter = applyRigidToPoint(
-        targetCenter,
-        registeredPose.centerMm,
-        rotation,
-        v3(registeredPose.rigid.tx, registeredPose.rigid.ty, registeredPose.rigid.tz),
-      );
-    }
+    const geometry = getSliceGeometryFromInstance(target.frames[index]!);
     const delta = v3(
-      targetCenter.x - referenceCenter.x,
-      targetCenter.y - referenceCenter.y,
-      targetCenter.z - referenceCenter.z,
+      referenceCenter.x - geometry.ippMm.x,
+      referenceCenter.y - geometry.ippMm.y,
+      referenceCenter.z - geometry.ippMm.z,
     );
     const throughPlaneDistance = Math.abs(dot(delta, geometry.normalDir));
     if (throughPlaneDistance < nearestDistance) {

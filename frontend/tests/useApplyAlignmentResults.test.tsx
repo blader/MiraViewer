@@ -5,6 +5,7 @@ import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { AlignmentResult, ComparisonData, PanelSettings } from '../src/types/api';
 import * as localApi from '../src/utils/localApi';
 import { clearDerivedAlignmentFrames } from '../src/utils/derivedAlignmentFrame';
+import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 
 describe('useApplyAlignmentResults', () => {
   it('applies alignment results and preserves reverseSliceOrder (adjusting offset)', async () => {
@@ -199,6 +200,87 @@ describe('useApplyAlignmentResults', () => {
             datasetRevision: 7,
             outcome: 'aligned',
             ...result,
+          },
+        ],
+        panelSettings: new Map(),
+        data,
+        selectedSeqId: sequenceId,
+        batchUpdateSettings,
+      }),
+    );
+
+    expect(batchUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'missing-derived-grid',
+    'mismatched-derived-grid',
+    'mismatched-pixel-lattice',
+    'mismatched-validity-mask',
+  ] as const)('does not apply an aligned result whose verified output authority is %s', (failure) => {
+    const date = '2024-01-01';
+    const sequenceId = 'sequence-a';
+    const grid = buildOutputPlaneGrid({
+      rows: 2,
+      columns: 2,
+      imagePositionPatient: '0\\0\\0',
+      imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+      pixelSpacing: '1\\1',
+      sopInstanceUid: 'reference-sop',
+    });
+    const mismatchedGrid = buildOutputPlaneGrid({
+      rows: 2,
+      columns: 2,
+      imagePositionPatient: '4\\0\\0',
+      imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+      pixelSpacing: '1\\1',
+      sopInstanceUid: 'different-reference-sop',
+    });
+    const data: ComparisonData = {
+      planes: ['Axial'],
+      dates: [date],
+      sequences: [],
+      selected_patient_key: 'patient-a',
+      dataset_revision: 7,
+      series_map: {
+        [sequenceId]: {
+          [date]: {
+            study_id: 'study-a',
+            series_uid: 'series-a',
+            instance_count: 10,
+            patient_key: 'patient-a',
+          },
+        },
+      },
+    };
+    const batchUpdateSettings = vi.fn();
+
+    renderHook(() =>
+      useApplyAlignmentResults({
+        isAligning: true,
+        alignmentResults: [
+          {
+            date,
+            seriesUid: 'series-a',
+            bestSliceIndex: 2,
+            nmiScore: 1,
+            computedSettings: DEFAULT_PANEL_SETTINGS,
+            slicesChecked: 10,
+            patientKey: 'patient-a',
+            sequenceId,
+            datasetRevision: 7,
+            outcome: 'aligned',
+            outputGrid: grid,
+            derivedFrame: {
+              pixels: new Float32Array([1, 2, 3, 4]),
+              rows: failure === 'mismatched-pixel-lattice' ? 1 : 2,
+              columns: 2,
+              sourceImageId: 'miradb:target-sop',
+              ...(failure === 'mismatched-validity-mask' ? { valid: new Uint8Array([1, 0]) } : {}),
+              ...(failure === 'missing-derived-grid'
+                ? {}
+                : { outputGrid: failure === 'mismatched-derived-grid' ? mismatchedGrid : grid }),
+            },
           },
         ],
         panelSettings: new Map(),

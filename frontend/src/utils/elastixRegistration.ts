@@ -185,12 +185,19 @@ function assertSquareSize(pixels: Float32Array, size: number, label: string) {
   }
 }
 
-function makeItkFloat32ScalarImage(pixels: Float32Array, size: number, name: string): Image {
+type ImagePixelSpacing = readonly [rowMm: number, columnMm: number];
+
+function makeItkFloat32ScalarImage(
+  pixels: Float32Array,
+  size: number,
+  name: string,
+  pixelSpacing: ImagePixelSpacing = [1, 1],
+): Image {
   const imageType = new ImageType(2, FloatTypes.Float32, PixelTypes.Scalar, 1);
   const img = new Image(imageType);
   img.name = name;
   img.size = [size, size];
-  img.spacing = [1, 1];
+  img.spacing = [pixelSpacing[1], pixelSpacing[0]];
   img.origin = [0, 0];
   img.direction = new Float64Array([1, 0, 0, 1]);
   img.data = pixels;
@@ -249,7 +256,28 @@ type Register2DOptions = {
   webWorker?: Worker;
   exclusionRect?: NormalizedRect;
   signal?: AbortSignal;
+  /** Physical [row, column] spacing of each square analysis-image sample. */
+  fixedPixelSpacing?: ImagePixelSpacing;
+  movingPixelSpacing?: ImagePixelSpacing;
 };
+
+function physicalTransformToPixelSpace(
+  transform: StandardAffine2D,
+  fixedSpacing: ImagePixelSpacing,
+  movingSpacing: ImagePixelSpacing,
+): StandardAffine2D {
+  const [fixedRow, fixedColumn] = fixedSpacing;
+  const [movingRow, movingColumn] = movingSpacing;
+  return {
+    A: {
+      m00: (transform.A.m00 * movingColumn) / fixedColumn,
+      m01: (transform.A.m01 * movingRow) / fixedColumn,
+      m10: (transform.A.m10 * movingColumn) / fixedRow,
+      m11: (transform.A.m11 * movingRow) / fixedRow,
+    },
+    b: { x: transform.b.x / fixedColumn, y: transform.b.y / fixedRow },
+  };
+}
 
 let cachedWorkerPromise: Promise<Worker> | null = null;
 let cachedWorkerInstance: Worker | null = null;
@@ -338,6 +366,11 @@ async function register2DWithElastix(
 ): Promise<Elastix2DRegistrationResult> {
   assertSquareSize(fixedPixels, size, 'fixedPixels');
   assertSquareSize(movingPixels, size, 'movingPixels');
+  const fixedSpacing = opts?.fixedPixelSpacing ?? [1, 1];
+  const movingSpacing = opts?.movingPixelSpacing ?? [1, 1];
+  if ([...fixedSpacing, ...movingSpacing].some((spacing) => !Number.isFinite(spacing) || spacing <= 0)) {
+    throw new Error('Physical image registration requires finite positive row and column pixel spacing');
+  }
 
   const numberOfResolutions = opts?.numberOfResolutions ?? 3;
 
@@ -391,8 +424,8 @@ async function register2DWithElastix(
       });
     }
 
-    const fixed = makeItkFloat32ScalarImage(fixedPixelsForReg, size, 'fixed');
-    const moving = makeItkFloat32ScalarImage(movingPixelsForReg, size, 'moving');
+    const fixed = makeItkFloat32ScalarImage(fixedPixelsForReg, size, 'fixed', fixedSpacing);
+    const moving = makeItkFloat32ScalarImage(movingPixelsForReg, size, 'moving', movingSpacing);
 
     const parameterMap = await withAbort(
       getParameterMap(kind, webWorker, numberOfResolutions),
@@ -507,7 +540,10 @@ async function register2DWithElastix(
     // When an initial transform is provided, the resulting object can include a *chain* of
     // transforms. We must compose the chain to recover the effective mapping.
     const standardChain = parseTransformParameterObjectToStandardAffines(result.transformParameterObject);
-    const candidatesStd = buildElastixTransformCandidatesStd(standardChain);
+    const candidatesStd = buildElastixTransformCandidatesStd(standardChain).map((candidate) => ({
+      ...candidate,
+      std: physicalTransformToPixelSpace(candidate.std, fixedSpacing, movingSpacing),
+    }));
 
     // We intentionally avoid hard-coding whether the parameter object represents fixed->moving
     // or moving->fixed. Instead, we compare candidates against elastix's returned resample.

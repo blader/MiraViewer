@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DicomViewer } from '../src/components/DicomViewer';
 import { DEBUG_ALIGNMENT_STORAGE_KEY } from '../src/utils/debugAlignment';
@@ -8,6 +8,9 @@ import {
   type AlignmentSliceScoreMetrics,
 } from '../src/utils/alignmentSliceScoreStore';
 import { getImageIdForInstance } from '../src/utils/localApi';
+import { clearDerivedAlignmentFrames, setDerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
+import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
+import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 
 vi.mock('../src/utils/localApi', () => ({
   getImageIdForInstance: vi.fn().mockResolvedValue('miradb:inst-1'),
@@ -92,6 +95,7 @@ function renderViewer() {
 // Mock getBoundingClientRect to return non-zero dimensions
 beforeEach(() => {
   vi.clearAllMocks();
+  act(() => clearDerivedAlignmentFrames());
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
   resetAlignmentSliceScoreStore({
     referenceSeriesUid: 'reference-series',
@@ -112,6 +116,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  act(() => clearDerivedAlignmentFrames());
   fireEvent.keyUp(window, { key: 'z' });
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
   resetAlignmentSliceScoreStore({
@@ -329,6 +334,57 @@ describe('DicomViewer', () => {
     await waitFor(() => {
       expect(cornerstone.loadImage).toHaveBeenCalled();
     });
+  });
+
+  it('labels an upsampled derived plane with its actual acquired and presented dimensions', async () => {
+    const outputGrid = buildOutputPlaneGrid(
+      {
+        rows: 2,
+        columns: 2,
+        imagePositionPatient: '0\\0\\0',
+        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+        pixelSpacing: '1\\1',
+        sopInstanceUid: 'reference-sop',
+      },
+      { mode: 'fixed-256' },
+    );
+    act(() =>
+      setDerivedAlignmentFrame({
+        date: '2025-01-01',
+        seriesUid: 'series',
+        bestSliceIndex: 0,
+        nmiScore: 1,
+        computedSettings: DEFAULT_PANEL_SETTINGS,
+        slicesChecked: 1,
+        runId: 'verified-run',
+        outcome: 'aligned',
+        outputGrid,
+        derivedFrame: {
+          pixels: new Float32Array(256 * 256),
+          rows: 256,
+          columns: 256,
+          sourceImageId: 'miradb:inst-1',
+          outputGrid,
+        },
+      }),
+    );
+
+    let unmountViewer: (() => void) | undefined;
+    await act(async () => {
+      ({ unmount: unmountViewer } = render(
+        <DicomViewer
+          studyId="study"
+          seriesUid="series"
+          instanceIndex={0}
+          instanceCount={1}
+          onInstanceChange={() => {}}
+        />,
+      ));
+    });
+
+    expect(screen.getByText(/256 × 256 interpolated from 2 × 2 acquisition/i)).toBeInTheDocument();
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalled());
+    unmountViewer?.();
   });
 
   it('uses plain wheel events for slice navigation when zoom is available', async () => {

@@ -12,7 +12,7 @@ import {
   type RenderedSlice,
 } from '../utils/cornerstoneSliceCapture';
 import { clamp, nowMs } from '../utils/math';
-import { fillInvalidWarpWithValidMean, warpGrayscaleAffineWithValidity } from '../utils/warpAffine';
+import { fillInvalidWarpWithValidMean } from '../utils/warpAffine';
 import { buildStructuralPhaseImageSquare, inpaintExclusionRectSquare } from '../utils/imageFeatures';
 import { affineAboutOriginToStandard, composeStandardAffine2D, standardToAffineAboutOrigin } from '../utils/affine2d';
 import {
@@ -32,6 +32,7 @@ import {
   choosePerceptualWinner,
   normalizePerceptualSource,
   rankFixedCandidateSet,
+  warpPerceptualCandidateWithValidity,
   type PerceptualComponents,
 } from '../utils/perceptualSliceSimilarity';
 import {
@@ -48,12 +49,21 @@ import { rasterizeImageExclusion, selectPhysicalTargetSlice } from '../utils/ali
 import { clearDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 import { getSeriesFrameManifest, type SeriesFrameManifest } from '../utils/localApi';
 import {
+  buildOutputPlaneGrid,
+  outputGridFingerprint,
+  type OutputGridMode,
+  type OutputPlaneGrid,
+} from '../utils/outputPlaneGrid';
+import {
   densifyLongitudinalRegistration,
   measureLongitudinalPlaneDrift,
+  prepareLongitudinalReferenceInput,
   prepareLongitudinalRegistrationInput,
+  type PreparedLongitudinalReferenceInput,
 } from '../utils/svr/longitudinalFrames';
 import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
-import { resample2dAreaAverage } from '../utils/svr/resample2d';
+import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
+import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from '../utils/svr/resample2d';
 
 const COARSE_IMAGE_SIZE = 128;
 const PHASE_SAMPLE_SIZE = 128;
@@ -136,6 +146,21 @@ function applyBrightnessContrastToPixels(pixels: Float32Array, brightness: numbe
   }
   return out;
 }
+
+function supportedRegistrationPixels(pixels: Float32Array, validity?: Float32Array): Float32Array {
+  if (!validity) return pixels;
+  const supportedPixels = Float32Array.from(
+    pixels,
+    (value, index) => value * Math.max(0, Math.min(1, validity[index] ?? 0)),
+  );
+  return fillInvalidWarpWithValidMean({ pixels: supportedPixels, validity });
+}
+
+function supportedHistogramStats(pixels: Float32Array, validity?: Float32Array) {
+  if (!validity) return computeHistogramStats(pixels);
+  return computeHistogramStats(Float32Array.from(pixels.filter((_value, index) => (validity[index] ?? 0) > 1e-6)));
+}
+
 export interface AutoAlignState {
   isAligning: boolean;
   progress: AlignmentProgress | null;
@@ -178,6 +203,7 @@ export function useAutoAlign() {
       targetDates: string[],
       seriesMap: Record<string, SeriesRef>,
       currentProgress: number,
+      options: { outputMode?: OutputGridMode } = {},
     ): Promise<AlignmentResult[]> => {
       abortControllerRef.current?.abort();
       const alignmentAbortController = new AbortController();
@@ -285,6 +311,7 @@ export function useAutoAlign() {
             renderTimedOut: referenceRender.renderTimedOut,
           });
         const referencePixels = referenceRender.pixels;
+        const referenceRegistrationPixels = supportedRegistrationPixels(referencePixels, referenceRender.validity);
 
         // Normalize once in reference source space. Candidate normalization is likewise performed
         // before any seed/phase warp, so overlap cannot change a slice's intensity basis.
@@ -293,6 +320,7 @@ export function useAutoAlign() {
           : undefined;
         const normalizedReferenceFine = normalizePerceptualSource(referencePixels, ALIGNMENT_IMAGE_SIZE, {
           exclusionRect: fineNormalizationExclusion,
+          validity: referenceRender.validity,
         });
         const referenceCoarseRender = await renderVerifiedSlice(
           reference.seriesUid,
@@ -305,6 +333,8 @@ export function useAutoAlign() {
           {
             referenceFinePixels: referencePixels,
             referenceCoarsePixels: referencePixelsCoarse,
+            referenceFineValidity: referenceRender.validity,
+            referenceCoarseValidity: referenceCoarseRender.validity,
             fineSize: ALIGNMENT_IMAGE_SIZE,
             coarseSize: COARSE_IMAGE_SIZE,
             fineScales: [...FINE_PERCEPTUAL_SCALES],
@@ -339,10 +369,25 @@ export function useAutoAlign() {
           reference.settings.brightness,
           reference.settings.contrast,
         );
-        const referenceDisplayedStats = computeHistogramStats(referenceDisplayedPixels);
+        const referenceDisplayedStats = supportedHistogramStats(referenceDisplayedPixels, referenceRender.validity);
         const referenceManifest: SeriesFrameManifest | null =
           reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null;
         const targetManifests = new Map<string, SeriesFrameManifest>();
+        let preparedPhysicalReference: Promise<PreparedLongitudinalReferenceInput> | undefined;
+        const selectedReferenceFrame = referenceManifest?.frames[reference.sliceIndex];
+        const operationOutputGrid: OutputPlaneGrid | null =
+          referenceManifest?.geometryReliable && selectedReferenceFrame
+            ? buildOutputPlaneGrid(selectedReferenceFrame, {
+                mode: options.outputMode ?? 'native',
+                frameOfReferenceUid: referenceManifest.frameOfReferenceUid,
+              })
+            : null;
+        const referenceAnalysisPixelSpacing: [number, number] | undefined = operationOutputGrid
+          ? [
+              operationOutputGrid.fieldOfViewMm[0] / ALIGNMENT_IMAGE_SIZE,
+              operationOutputGrid.fieldOfViewMm[1] / ALIGNMENT_IMAGE_SIZE,
+            ]
+          : undefined;
 
         const terminalResult = (
           date: string,
@@ -386,12 +431,37 @@ export function useAutoAlign() {
             );
           }
 
-          const drift = measureLongitudinalPlaneDrift(referenceManifest, targetManifest);
+          const drift = measureLongitudinalPlaneDrift(referenceManifest, targetManifest, {
+            referenceSliceIndex: reference.sliceIndex,
+            ...(operationOutputGrid ? { outputGrid: operationOutputGrid } : {}),
+          });
           const referenceFrame = referenceManifest.frames[reference.sliceIndex];
-          const centerSpacing = referenceFrame?.spacingBetweenSlices ?? referenceFrame?.sliceThickness ?? 1;
+          const targetAnchor = Math.min(
+            targetManifest.frames.length - 1,
+            Math.round(
+              (reference.sliceIndex / Math.max(1, referenceManifest.frames.length - 1)) *
+                Math.max(0, targetManifest.frames.length - 1),
+            ),
+          );
+          const targetFrame = targetManifest.frames[targetAnchor];
+          const centerSpacing =
+            targetManifest.sliceSpacingMm ??
+            targetFrame?.spacingBetweenSlices ??
+            targetFrame?.sliceThickness ??
+            referenceFrame?.spacingBetweenSlices ??
+            referenceFrame?.sliceThickness ??
+            1;
           const requiresReslice =
             drift.frameRelationship !== 'same' || drift.maximumThroughPlaneDriftMm > Math.max(0.01, centerSpacing / 2);
           if (!requiresReslice) return null;
+          if (!operationOutputGrid) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'The selected reference frame cannot define a reliable physical output grid',
+            );
+          }
 
           setStateForCurrentRun((state) => ({
             ...state,
@@ -400,11 +470,28 @@ export function useAutoAlign() {
               : null,
           }));
 
+          const preparationOptions = {
+            signal: alignmentAbortController.signal,
+            maxDimension: 96,
+            outputMaxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
+            maxSlices: 48,
+            outputGrid: operationOutputGrid,
+          };
+          preparedPhysicalReference ??= prepareLongitudinalReferenceInput(
+            referenceManifest,
+            reference.sliceIndex,
+            preparationOptions,
+          );
+          const preparedReference = await preparedPhysicalReference;
+          ensureNotAborted();
           const prepared = await prepareLongitudinalRegistrationInput(
             referenceManifest,
             targetManifest,
             reference.sliceIndex,
-            { signal: alignmentAbortController.signal, maxDimension: 96, outputMaxDimension: 512, maxSlices: 48 },
+            {
+              ...preparationOptions,
+              preparedReference,
+            },
           );
           const selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
           if (!selectedReference) {
@@ -420,6 +507,8 @@ export function useAutoAlign() {
             selectedReference.dsRows,
             selectedReference.dsCols,
           );
+          // The coarse worker takes ownership of its mask; native refinement needs its own live copy.
+          const nativeRefinementExclusion = exclusion ? Uint8Array.from(exclusion) : undefined;
           const coarseRegistration = await runLongitudinalRegistration(
             {
               referenceSlices: prepared.referenceSlices,
@@ -429,6 +518,8 @@ export function useAutoAlign() {
               maxDimension: 96,
               maxSamples: 12_000,
               minCoverage: 0.55,
+              deferPresentationValidation: true,
+              outputGrid: operationOutputGrid,
               signal: alignmentAbortController.signal,
             },
             alignmentAbortController.signal,
@@ -460,18 +551,61 @@ export function useAutoAlign() {
             {
               signal: alignmentAbortController.signal,
               maxSlices: 96,
-              maxDimension: 512,
+              maxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
               minCoverage: 0.55,
+              outputGrid: operationOutputGrid,
+              referenceManifest,
+              referenceSliceIndex: reference.sliceIndex,
+              referenceExclusionMask: nativeRefinementExclusion,
             },
           );
           ensureNotAborted();
           if (!registration.ok) {
             return rejectRegistration(registration);
           }
+          if (
+            registration.rows !== operationOutputGrid.rows ||
+            registration.cols !== operationOutputGrid.columns ||
+            registration.pixels.length !== operationOutputGrid.rows * operationOutputGrid.columns
+          ) {
+            return terminalResult(
+              date,
+              seriesRef,
+              'incompatible-geometry',
+              'The derived presentation does not match its verified physical output grid',
+            );
+          }
+          let requiredRegionSupport: number | undefined;
+          if (registration.valid && reference.exclusionMask) {
+            const protectedRegion = rasterizeImageExclusion(
+              reference.exclusionMask,
+              operationOutputGrid.rows,
+              operationOutputGrid.columns,
+            );
+            let required = 0;
+            let supported = 0;
+            for (let index = 0; index < (protectedRegion?.length ?? 0); index++) {
+              if (!protectedRegion?.[index]) continue;
+              required++;
+              if (registration.valid[index]) supported++;
+            }
+            if (required > 0) {
+              requiredRegionSupport = supported / required;
+              if (supported < required) {
+                return terminalResult(
+                  date,
+                  seriesRef,
+                  'insufficient-overlap',
+                  'Acquired target anatomy does not fully support the selected lesion region',
+                );
+              }
+            }
+          }
 
           const bestSliceIndex = selectPhysicalTargetSlice(referenceManifest, targetManifest, reference.sliceIndex, {
             rigid: registration.targetToReference,
             centerMm: registration.centerMm,
+            outputGrid: operationOutputGrid,
           });
           const nativeFrame = targetManifest.frames[bestSliceIndex];
           if (!nativeFrame) {
@@ -482,30 +616,53 @@ export function useAutoAlign() {
               'Registered frame has no native source identity',
             );
           }
-          const resampled = resample2dAreaAverage(
-            registration.pixels,
-            registration.rows,
-            registration.cols,
-            ALIGNMENT_IMAGE_SIZE,
-            ALIGNMENT_IMAGE_SIZE,
-          );
-          const normalized = normalizePerceptualSource(resampled, ALIGNMENT_IMAGE_SIZE, {
+          const resampled = registration.valid
+            ? resample2dAreaAverageWithValidity(
+                registration.pixels,
+                registration.valid,
+                registration.rows,
+                registration.cols,
+                ALIGNMENT_IMAGE_SIZE,
+                ALIGNMENT_IMAGE_SIZE,
+              )
+            : {
+                pixels: resample2dAreaAverage(
+                  registration.pixels,
+                  registration.rows,
+                  registration.cols,
+                  ALIGNMENT_IMAGE_SIZE,
+                  ALIGNMENT_IMAGE_SIZE,
+                ),
+                validity: undefined,
+              };
+          const normalized = normalizePerceptualSource(resampled.pixels, ALIGNMENT_IMAGE_SIZE, {
             exclusionRect: fineNormalizationExclusion,
+            validity: resampled.validity,
           });
+          const comparisonSupport =
+            resampled.validity || referenceRender.validity
+              ? Uint8Array.from(normalized, (_value, index) =>
+                  (resampled.validity?.[index] ?? 1) > 1e-6 && (referenceRender.validity?.[index] ?? 1) > 1e-6 ? 1 : 0,
+                )
+              : undefined;
           const quality = computeMutualInformation(normalizedReferenceFine, normalized, {
             bins: 64,
+            inclusionMask: comparisonSupport,
             exclusionRect: reference.exclusionMask,
             imageWidth: ALIGNMENT_IMAGE_SIZE,
             imageHeight: ALIGNMENT_IMAGE_SIZE,
           });
           const computedSettings = computeAlignedSettings(
             referenceDisplayedStats,
-            computeHistogramStats(normalized),
+            supportedHistogramStats(normalized, resampled.validity),
             bestSliceIndex,
             seriesRef.instance_count,
             currentProgress,
             reference.settings,
           );
+          const nativeRivalEvidence = registration.nativeRefinement?.optimizedAlternativeCount
+            ? registration.nativeRefinement
+            : undefined;
 
           return {
             date,
@@ -520,20 +677,53 @@ export function useAutoAlign() {
             referenceSeriesUid: reference.seriesUid,
             datasetRevision: reference.datasetRevision,
             outcome: 'aligned',
+            outputGrid: operationOutputGrid,
             evidence: {
-              structuralScore: registration.score,
-              runnerUpGap: registration.diagnostics.scoreMargin,
+              structuralScore: registration.nativeRefinement?.score ?? registration.score,
+              runnerUpGap: nativeRivalEvidence?.scoreMargin ?? registration.diagnostics.scoreMargin,
               coverage: registration.coverage,
               geometryMode: 'registered-3d',
               planeAngleDegrees: drift.angleDegrees,
               maximumNativePlaneDriftMm: drift.maximumThroughPlaneDriftMm,
               presentationSliceSpacingMm: registration.diagnostics.presentationSliceSpacingMm,
               presentationSourceFrameCount: registration.diagnostics.presentationSourceFrameCount,
+              forwardAnatomicalSupport:
+                registration.nativeRefinement?.forwardCoverage ?? registration.diagnostics.retainedSampleFraction,
+              reverseAnatomicalSupport:
+                registration.nativeRefinement?.reverseCoverage ??
+                registration.diagnostics.reverseRetainedSampleFraction,
+              outputPlaneSupport: registration.coverage,
+              requiredRegionSupport,
+              effectiveSampleCount:
+                registration.nativeRefinement?.sampleCount ?? registration.diagnostics.effectiveSampleCount,
+              heldOutSampleCount: registration.nativeRefinement?.heldOutSampleCount,
+              effectiveIndependentSamples: registration.nativeRefinement?.effectiveIndependentSamples,
+              heldOutEffectiveIndependentSamples: registration.nativeRefinement?.heldOutEffectiveIndependentSamples,
+              minimumDistinguishableScoreMargin:
+                nativeRivalEvidence?.minimumDistinguishableScoreMargin ??
+                registration.diagnostics.minimumDistinguishableScoreMargin,
+              inverseConsistencyError: registration.diagnostics.inverseConsistencyErrorMm,
+              outputGridFingerprint: outputGridFingerprint(operationOutputGrid),
+              translationMm: [
+                registration.targetToReference.tx,
+                registration.targetToReference.ty,
+                registration.targetToReference.tz,
+              ],
+              rotationDegrees: [
+                (registration.targetToReference.rx * 180) / Math.PI,
+                (registration.targetToReference.ry * 180) / Math.PI,
+                (registration.targetToReference.rz * 180) / Math.PI,
+              ],
             },
             derivedFrame: {
               pixels: registration.pixels,
+              ...(registration.valid ? { valid: registration.valid } : {}),
               rows: registration.rows,
               columns: registration.cols,
+              outputGrid: operationOutputGrid,
+              ...(registration.contributingSourceSopInstanceUids
+                ? { contributingSourceSopInstanceUids: registration.contributingSourceSopInstanceUids }
+                : {}),
               sourceImageId: `miradb:${nativeFrame.sopInstanceUid}`,
               referenceStudyUid: referenceManifest.studyUid,
               referenceSeriesUid: referenceManifest.seriesUid,
@@ -722,6 +912,14 @@ export function useAutoAlign() {
               SEED_REGISTRATION_IMAGE_SIZE,
               captureScratchFull,
             );
+            const seedFrame = targetManifest?.frames[seedIdx];
+            const seedGeometry = seedFrame ? getSliceGeometryFromInstance(seedFrame) : null;
+            const movingAnalysisPixelSpacing: [number, number] | undefined = seedGeometry
+              ? [
+                  (seedGeometry.rows * seedGeometry.rowSpacingMm) / SEED_REGISTRATION_IMAGE_SIZE,
+                  (seedGeometry.cols * seedGeometry.colSpacingMm) / SEED_REGISTRATION_IMAGE_SIZE,
+                ]
+              : undefined;
 
             // Keep the ITK/Elastix runtime out of first paint and physical 3D-only comparisons.
             // Native import caching gives the whole alignment run one shared registration module.
@@ -734,20 +932,26 @@ export function useAutoAlign() {
             // image after the first rigid estimate establishes that coordinate relationship.
             const initialFixedPixels = reference.exclusionMask
               ? inpaintExclusionRectSquare(
-                  referencePixels,
+                  referenceRegistrationPixels,
                   SEED_REGISTRATION_IMAGE_SIZE,
                   expandExclusionRect(reference.exclusionMask, 3 / SEED_REGISTRATION_IMAGE_SIZE),
                   6,
                 ).pixels
-              : referencePixels;
+              : referenceRegistrationPixels;
             const initialSeedReg = await registerRigid2DWithElastix(
               initialFixedPixels,
-              seedRender.pixels,
+              supportedRegistrationPixels(seedRender.pixels, seedRender.validity),
               SEED_REGISTRATION_IMAGE_SIZE,
               {
                 numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
                 webWorker: sharedWebWorker,
                 signal: alignmentAbortController.signal,
+                ...(referenceAnalysisPixelSpacing && movingAnalysisPixelSpacing
+                  ? {
+                      fixedPixelSpacing: referenceAnalysisPixelSpacing,
+                      movingPixelSpacing: movingAnalysisPixelSpacing,
+                    }
+                  : {}),
               },
             );
             ensureNotAborted();
@@ -774,13 +978,14 @@ export function useAutoAlign() {
                 },
                 SEED_REGISTRATION_IMAGE_SIZE,
               );
-              const prewarpedSeed = warpGrayscaleAffineWithValidity(
+              const prewarpedSeed = warpPerceptualCandidateWithValidity(
                 seedRender.pixels,
                 SEED_REGISTRATION_IMAGE_SIZE,
                 initialWarp,
+                seedRender.validity,
               );
               const residualSeedReg = await registerRigid2DWithElastix(
-                referencePixels,
+                referenceRegistrationPixels,
                 fillInvalidWarpWithValidMean(prewarpedSeed),
                 SEED_REGISTRATION_IMAGE_SIZE,
                 {
@@ -788,6 +993,12 @@ export function useAutoAlign() {
                   webWorker: sharedWebWorker,
                   exclusionRect: reference.exclusionMask,
                   signal: alignmentAbortController.signal,
+                  ...(referenceAnalysisPixelSpacing
+                    ? {
+                        fixedPixelSpacing: referenceAnalysisPixelSpacing,
+                        movingPixelSpacing: referenceAnalysisPixelSpacing,
+                      }
+                    : {}),
                 },
               );
               ensureNotAborted();
@@ -875,7 +1086,11 @@ export function useAutoAlign() {
               sliceSearchRenderMs += rendered.timingMs.total;
 
               const tScore0 = nowMs();
-              const { phase, components } = await scoringRunner!.scoreCoarse(rendered.pixels, seedTransform);
+              const { phase, components } = await scoringRunner!.scoreCoarse(
+                rendered.pixels,
+                seedTransform,
+                rendered.validity,
+              );
               sliceSearchScoreMs += nowMs() - tScore0;
               return { index, phase, components };
             };
@@ -983,6 +1198,7 @@ export function useAutoAlign() {
                 rendered.pixels,
                 seedTransform,
                 coarseCandidate.phase,
+                rendered.validity,
               );
               sliceSearchScoreMs += nowMs() - tScore0;
               fineCandidates.push({ index, phase: coarseCandidate.phase, components });
@@ -996,6 +1212,7 @@ export function useAutoAlign() {
               winner: winningCandidate,
               candidates: rankedFine,
               normalizedReference: normalizedReferenceFine,
+              referenceValidity: referenceRender.validity,
               imageSize: ALIGNMENT_IMAGE_SIZE,
               sliceSpacingMm: physicalSpacingMm,
               exclusionMask: reference.exclusionMask,
@@ -1227,7 +1444,12 @@ export function useAutoAlign() {
               captureScratchFull,
             );
             const winningWarp = correctedWarpAtSize(seedTransform, winningCandidate.phase, ALIGNMENT_IMAGE_SIZE);
-            const prewarpedBest = warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, winningWarp);
+            const prewarpedBest = warpPerceptualCandidateWithValidity(
+              bestRender.pixels,
+              ALIGNMENT_IMAGE_SIZE,
+              winningWarp,
+              bestRender.validity,
+            );
             const prewarpedBestPixels = fillInvalidWarpWithValidMean(prewarpedBest);
 
             const tRefine0 = nowMs();
@@ -1236,6 +1458,7 @@ export function useAutoAlign() {
               : undefined;
             const normalizedBestForStructure = normalizePerceptualSource(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
               exclusionRect: sourceStructureExclusion,
+              validity: bestRender.validity,
             });
             const referenceStructure = buildStructuralPhaseImageSquare(
               inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
@@ -1248,7 +1471,12 @@ export function useAutoAlign() {
               ALIGNMENT_IMAGE_SIZE,
             );
             const prewarpedMovingStructure = fillInvalidWarpWithValidMean(
-              warpGrayscaleAffineWithValidity(movingStructureSource, ALIGNMENT_IMAGE_SIZE, winningWarp),
+              warpPerceptualCandidateWithValidity(
+                movingStructureSource,
+                ALIGNMENT_IMAGE_SIZE,
+                winningWarp,
+                bestRender.validity,
+              ),
             );
 
             type OptimizerKind = Exclude<FinalAffineProposalKind, 'seed-only'>;
@@ -1279,6 +1507,12 @@ export function useAutoAlign() {
                     webWorker: sharedWebWorker,
                     exclusionRect: reference.exclusionMask,
                     signal: alignmentAbortController.signal,
+                    ...(referenceAnalysisPixelSpacing
+                      ? {
+                          fixedPixelSpacing: referenceAnalysisPixelSpacing,
+                          movingPixelSpacing: referenceAnalysisPixelSpacing,
+                        }
+                      : {}),
                   },
                 );
                 ensureNotAborted();
@@ -1304,12 +1538,13 @@ export function useAutoAlign() {
               }
             };
 
-            await runOptimizerAttempt('intensity-elastix', referencePixels, prewarpedBestPixels);
+            await runOptimizerAttempt('intensity-elastix', referenceRegistrationPixels, prewarpedBestPixels);
             await runOptimizerAttempt('structure-elastix', referenceStructure, prewarpedMovingStructure);
             ensureNotAborted();
 
             const finalAffineSelection = await scoringRunner.scoreFinal({
               movingPixels: bestRender.pixels,
+              movingValidity: bestRender.validity,
               winningWarp,
               fixedExclusionRect: reference.exclusionMask,
               optimizerProposals,
@@ -1319,15 +1554,29 @@ export function useAutoAlign() {
             const deltaStd = selectedProposal.totalMovingToFixed;
             const origin = { x: (ALIGNMENT_IMAGE_SIZE - 1) / 2, y: (ALIGNMENT_IMAGE_SIZE - 1) / 2 };
             const selectedAboutCenter = standardToAffineAboutOrigin(deltaStd.A, deltaStd.b, origin);
-            const selectedRawResample = fillInvalidWarpWithValidMean(
-              warpGrayscaleAffineWithValidity(bestRender.pixels, ALIGNMENT_IMAGE_SIZE, {
+            const selectedWarpedPresentation = warpPerceptualCandidateWithValidity(
+              bestRender.pixels,
+              ALIGNMENT_IMAGE_SIZE,
+              {
                 A: selectedAboutCenter.A,
                 translateX: selectedAboutCenter.t.x,
                 translateY: selectedAboutCenter.t.y,
-              }),
+              },
+              bestRender.validity,
             );
+            const selectedRawResample = fillInvalidWarpWithValidMean(selectedWarpedPresentation);
+            const finalComparisonSupport =
+              bestRender.validity || referenceRender.validity
+                ? Uint8Array.from(selectedRawResample, (_value, index) =>
+                    (selectedWarpedPresentation.validity[index] ?? 0) > 1e-6 &&
+                    (referenceRender.validity?.[index] ?? 1) > 1e-6
+                      ? 1
+                      : 0,
+                  )
+                : undefined;
             const selectedQuality = computeMutualInformation(referencePixels, selectedRawResample, {
               bins: 64,
+              inclusionMask: finalComparisonSupport,
               exclusionRect: reference.exclusionMask,
               imageWidth: ALIGNMENT_IMAGE_SIZE,
               imageHeight: ALIGNMENT_IMAGE_SIZE,
@@ -1421,9 +1670,14 @@ export function useAutoAlign() {
             );
 
             const targetDisplayPixels = selectedRawResample.some((value) => value < 0 || value > 1)
-              ? normalizePerceptualSource(selectedRawResample, ALIGNMENT_IMAGE_SIZE)
+              ? normalizePerceptualSource(selectedRawResample, ALIGNMENT_IMAGE_SIZE, {
+                  validity: selectedWarpedPresentation.validity,
+                })
               : selectedRawResample;
-            const targetStats = computeHistogramStats(targetDisplayPixels);
+            const targetStats = supportedHistogramStats(
+              targetDisplayPixels,
+              bestRender.validity ? selectedWarpedPresentation.validity : undefined,
+            );
 
             // Compose recovered delta onto the reference geometry so the displayed target matches the
             // displayed reference (including reference zoom/rotation/pan and any stored shear).

@@ -17,6 +17,7 @@ import {
   normalizePerceptualSource,
   preparePerceptualReference,
   scoreAlignedCandidate,
+  warpPerceptualCandidateWithValidity,
   type PerceptualComponents,
 } from './perceptualSliceSimilarity';
 import {
@@ -34,6 +35,8 @@ import {
 export type AlignmentScoringConfiguration = {
   referenceFinePixels: Float32Array;
   referenceCoarsePixels: Float32Array;
+  referenceFineValidity?: Float32Array;
+  referenceCoarseValidity?: Float32Array;
   fineSize: number;
   coarseSize: number;
   fineScales: number[];
@@ -50,6 +53,7 @@ export type AlignmentScoredCandidate = {
 
 export type AlignmentFinalScoringInput = {
   movingPixels: Float32Array;
+  movingValidity?: Float32Array;
   winningWarp: WarpTransform;
   fixedExclusionRect?: ExclusionMask;
   optimizerProposals: readonly OptimizerFinalAffineProposal[];
@@ -66,27 +70,45 @@ export class AlignmentScoringEngine {
 
   constructor(config: AlignmentScoringConfiguration) {
     this.config = config;
-    const { referenceFinePixels, referenceCoarsePixels, fineSize, coarseSize, exclusionMask } = config;
+    const {
+      referenceFinePixels,
+      referenceCoarsePixels,
+      referenceFineValidity,
+      referenceCoarseValidity,
+      fineSize,
+      coarseSize,
+      exclusionMask,
+    } = config;
     const coarseExclusion = exclusionMask
       ? expandExclusionRect(exclusionMask, config.phaseMaxCorrectionPx / coarseSize)
       : undefined;
     const normalizedCoarse = normalizePerceptualSource(referenceCoarsePixels, coarseSize, {
       exclusionRect: coarseExclusion,
+      validity: referenceCoarseValidity,
     });
     const normalizedFine = normalizePerceptualSource(referenceFinePixels, fineSize, {
       exclusionRect: exclusionMask ? expandExclusionRect(exclusionMask, 3 / fineSize) : undefined,
+      validity: referenceFineValidity,
     });
     this.normalizedFine = normalizedFine;
 
     this.coarseReference = preparePerceptualReference(normalizedCoarse, coarseSize, {
       scales: config.coarseScales,
       exclusionRect: exclusionMask,
+      validity: referenceCoarseValidity,
     });
     this.fineReference = preparePerceptualReference(normalizedFine, fineSize, {
       scales: config.fineScales,
       exclusionRect: exclusionMask,
+      validity: referenceFineValidity,
     });
     const referenceSupport = buildSoftForegroundSupportSquare(normalizedCoarse, coarseSize);
+    if (referenceCoarseValidity) {
+      const structuralValidity = erodeFractionalSupportSquare(referenceCoarseValidity, coarseSize, 1);
+      for (let index = 0; index < referenceSupport.length; index++) {
+        referenceSupport[index] = referenceSupport[index]! * structuralValidity[index]!;
+      }
+    }
     const referenceStructure = buildStructuralPhaseImageSquare(
       inpaintExclusionRectSquare(normalizedCoarse, coarseSize, coarseExclusion, 6).pixels,
       coarseSize,
@@ -98,7 +120,7 @@ export class AlignmentScoringEngine {
     });
   }
 
-  scoreCoarse(pixels: Float32Array, seed: GridSeedTransform): AlignmentScoredCandidate {
+  scoreCoarse(pixels: Float32Array, seed: GridSeedTransform, validity?: Float32Array): AlignmentScoredCandidate {
     const { coarseSize, phaseFftSize, phaseMaxCorrectionPx, exclusionMask } = this.config;
     const initialWarp = correctedWarpAtSize(
       seed,
@@ -108,11 +130,20 @@ export class AlignmentScoringEngine {
     const sourceExclusion = exclusionMask
       ? mapFixedExclusionToMovingBounds(exclusionMask, initialWarp, coarseSize, phaseMaxCorrectionPx)
       : undefined;
-    const normalized = normalizePerceptualSource(pixels, coarseSize, { exclusionRect: sourceExclusion });
+    const normalized = normalizePerceptualSource(pixels, coarseSize, {
+      exclusionRect: sourceExclusion,
+      validity,
+    });
     const inpainted = inpaintExclusionRectSquare(normalized, coarseSize, sourceExclusion, 6).pixels;
     const sourceStructure = buildStructuralPhaseImageSquare(inpainted, coarseSize);
     const warpedStructure = warpGrayscaleAffineWithValidity(sourceStructure, coarseSize, initialWarp);
     const sourceSupport = buildSoftForegroundSupportSquare(normalized, coarseSize);
+    if (validity) {
+      const structuralValidity = erodeFractionalSupportSquare(validity, coarseSize, 1);
+      for (let index = 0; index < sourceSupport.length; index++) {
+        sourceSupport[index] = sourceSupport[index]! * structuralValidity[index]!;
+      }
+    }
     const warpedSupport = warpGrayscaleAffineWithValidity(sourceSupport, coarseSize, initialWarp);
     const erodedValidity = erodeFractionalSupportSquare(warpedStructure.validity, coarseSize, 1);
     const phasePixels = new Float32Array(warpedStructure.pixels.length);
@@ -128,7 +159,7 @@ export class AlignmentScoringEngine {
 
     const phase = estimatePreparedPhaseCorrection(this.phaseReference, phasePixels, { support: phaseSupport });
     const correctedWarp = correctedWarpAtSize(seed, phase, coarseSize);
-    const aligned = warpGrayscaleAffineWithValidity(normalized, coarseSize, correctedWarp);
+    const aligned = warpPerceptualCandidateWithValidity(normalized, coarseSize, correctedWarp, validity);
     return {
       phase,
       components: scoreAlignedCandidate(
@@ -141,14 +172,19 @@ export class AlignmentScoringEngine {
     };
   }
 
-  scoreFine(pixels: Float32Array, seed: GridSeedTransform, phase: PhaseCorrection): AlignmentScoredCandidate {
+  scoreFine(
+    pixels: Float32Array,
+    seed: GridSeedTransform,
+    phase: PhaseCorrection,
+    validity?: Float32Array,
+  ): AlignmentScoredCandidate {
     const { fineSize, exclusionMask } = this.config;
     const warp = correctedWarpAtSize(seed, phase, fineSize);
     const sourceExclusion = exclusionMask
       ? mapFixedExclusionToMovingBounds(exclusionMask, warp, fineSize, 3)
       : undefined;
-    const normalized = normalizePerceptualSource(pixels, fineSize, { exclusionRect: sourceExclusion });
-    const aligned = warpGrayscaleAffineWithValidity(normalized, fineSize, warp);
+    const normalized = normalizePerceptualSource(pixels, fineSize, { exclusionRect: sourceExclusion, validity });
+    const aligned = warpPerceptualCandidateWithValidity(normalized, fineSize, warp, validity);
     return {
       phase,
       components: scoreAlignedCandidate(this.fineReference, aligned.pixels, aligned.validity, fineSize, this.scratch),
@@ -159,6 +195,7 @@ export class AlignmentScoringEngine {
     return selectFinalAffineProposal({
       ...input,
       normalizedReference: this.normalizedFine,
+      referenceValidity: this.config.referenceFineValidity,
       size: this.config.fineSize,
       scales: this.config.fineScales,
     });

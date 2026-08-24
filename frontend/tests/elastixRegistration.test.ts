@@ -25,6 +25,7 @@ vi.mock('itk-wasm', async (importOriginal) => {
 });
 
 import { registerRigid2DWithElastix } from '../src/utils/elastixRegistration';
+import { warpGrayscaleAffine } from '../src/utils/warpAffine';
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -83,6 +84,62 @@ describe('registerRigid2DWithElastix', () => {
     expect(result.movingToFixed.A.m11).toBeCloseTo(1, 10);
     expect(result.movingToFixed.b.x).toBeCloseTo(0, 10);
     expect(result.movingToFixed.b.y).toBeCloseTo(0, 10);
+  });
+
+  test('calibrates anisotropic ITK images in millimeters and converts a physical transform back to viewer pixels', async () => {
+    const size = 16;
+    const pixels = Float32Array.from({ length: size * size }, (_, index) => ((index * 13) % 251) / 250);
+    const resampled = warpGrayscaleAffine(pixels, size, {
+      A: { m00: 1, m01: 0, m10: 0, m11: 1 },
+      translateX: 2,
+      translateY: 2,
+    });
+    const worker = { terminate: vi.fn() } as unknown as Worker;
+    mocks.defaultParameterMap.mockResolvedValue({ parameterMap: { Transform: ['EulerTransform'] } });
+    mocks.runPipeline.mockResolvedValue({
+      webWorker: worker,
+      returnValue: 0,
+      stdout: '',
+      stderr: '',
+      outputs: [
+        { data: { data: resampled } },
+        { data: [] },
+        {
+          data: [
+            {
+              Transform: ['EulerTransform'],
+              TransformParameters: ['0', '2', '1'],
+              CenterOfRotationPoint: ['7.5', '3.75'],
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = await registerRigid2DWithElastix(pixels, pixels, size, {
+      webWorker: worker,
+      fixedPixelSpacing: [0.5, 1],
+      movingPixelSpacing: [0.5, 1],
+    });
+
+    const pipelineInputs = mocks.runPipeline.mock.calls[0]![3] as Array<{ data?: { spacing?: number[] } }>;
+    expect(pipelineInputs[1]?.data?.spacing).toEqual([1, 0.5]);
+    expect(pipelineInputs[2]?.data?.spacing).toEqual([1, 0.5]);
+    expect(result.movingToFixed.b.x).toBeCloseTo(2, 8);
+    expect(result.movingToFixed.b.y).toBeCloseTo(2, 8);
+  });
+
+  test('rejects nonpositive physical pixel spacing before invoking the image registration worker', async () => {
+    const pixels = new Float32Array(16);
+    const worker = { terminate: vi.fn() } as unknown as Worker;
+
+    await expect(
+      registerRigid2DWithElastix(pixels, pixels, 4, {
+        webWorker: worker,
+        fixedPixelSpacing: [0, 1],
+      }),
+    ).rejects.toThrow(/pixel spacing/i);
+    expect(mocks.runPipeline).not.toHaveBeenCalled();
   });
 
   test('terminates the active worker and rejects promptly when registration is aborted', async () => {

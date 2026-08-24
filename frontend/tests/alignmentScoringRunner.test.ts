@@ -13,7 +13,14 @@ const config: AlignmentScoringConfiguration = {
   phaseMaxCorrectionPx: 2,
 };
 
-type WorkerMessage = { kind: string; requestId: number; input?: { movingPixels: Float32Array } };
+type WorkerMessage = {
+  kind: string;
+  requestId: number;
+  input?: { movingPixels: Float32Array; movingValidity?: Float32Array };
+  config?: AlignmentScoringConfiguration;
+  pixels?: Float32Array;
+  validity?: Float32Array;
+};
 
 class FakeScoringWorker {
   static instances: FakeScoringWorker[] = [];
@@ -22,7 +29,8 @@ class FakeScoringWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   terminate = vi.fn();
-  postMessage = vi.fn((message: WorkerMessage) => {
+  postMessage = vi.fn((message: WorkerMessage, _transfer?: Transferable[]) => {
+    void _transfer;
     if (
       FakeScoringWorker.mode === 'initialize-throw' ||
       (FakeScoringWorker.mode === 'candidate-throw' && message.kind !== 'initialize')
@@ -116,9 +124,12 @@ describe('bounded alignment scoring worker lifecycle', () => {
   it('moves final affine comparison into the existing worker without transferring display pixels', async () => {
     const runner = await createAlignmentScoringRunner(config, new AbortController().signal);
     const movingPixels = new Float32Array(64).fill(0.75);
+    const movingValidity = new Float32Array(64).fill(1);
+    movingValidity[0] = 0;
 
     await runner.scoreFinal({
       movingPixels,
+      movingValidity,
       winningWarp: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, translateX: 0, translateY: 0 },
       optimizerProposals: [],
     });
@@ -126,7 +137,39 @@ describe('bounded alignment scoring worker lifecycle', () => {
     const message = FakeScoringWorker.instances[0]!.postMessage.mock.calls[1]![0];
     expect(message.kind).toBe('final');
     expect(message.input!.movingPixels).not.toBe(movingPixels);
+    expect(message.input!.movingValidity).not.toBe(movingValidity);
+    expect(message.input!.movingValidity?.[0]).toBe(0);
     expect(movingPixels[0]).toBe(0.75);
+    expect(movingValidity[0]).toBe(0);
+    expect(FakeScoringWorker.instances[0]!.postMessage.mock.calls[1]![1]).toHaveLength(2);
+    runner.close();
+  });
+
+  it('transfers reference and candidate acquired-validity masks through the same bounded scoring worker', async () => {
+    const referenceFineValidity = new Float32Array(64).fill(1);
+    const referenceCoarseValidity = new Float32Array(64).fill(1);
+    referenceFineValidity[0] = 0;
+    referenceCoarseValidity[1] = 0;
+    const runner = await createAlignmentScoringRunner(
+      { ...config, referenceFineValidity, referenceCoarseValidity },
+      new AbortController().signal,
+    );
+    const worker = FakeScoringWorker.instances[0]!;
+    const initialization = worker.postMessage.mock.calls[0]!;
+
+    expect(initialization[0].config?.referenceFineValidity?.[0]).toBe(0);
+    expect(initialization[0].config?.referenceCoarseValidity?.[1]).toBe(0);
+    expect(initialization[1]).toHaveLength(4);
+
+    const pixels = new Float32Array(64).fill(0.25);
+    const validity = new Float32Array(64).fill(1);
+    validity[2] = 0;
+    const seed = { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, translatePx: { x: 0, y: 0 }, gridSize: 8 };
+    await runner.scoreCoarse(pixels, seed, validity);
+
+    const coarse = worker.postMessage.mock.calls[1]!;
+    expect(coarse[0].validity?.[2]).toBe(0);
+    expect(coarse[1]).toEqual([pixels.buffer, validity.buffer]);
     runner.close();
   });
 

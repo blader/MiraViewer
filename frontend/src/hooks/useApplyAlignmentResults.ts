@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { AlignmentResult, ComparisonData, PanelSettings } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import { persistDerivedAlignmentFrame, setDerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
+import { outputGridFingerprint } from '../utils/outputPlaneGrid';
 
 export function useApplyAlignmentResults(opts: {
   isAligning: boolean;
@@ -51,6 +52,26 @@ export function useApplyAlignmentResults(opts: {
       const seriesRef = data.series_map[selectedSeqId]?.[r.date];
       if (!seriesRef || seriesRef.series_uid !== r.seriesUid) continue;
       if (r.patientKey && seriesRef.patient_key && r.patientKey !== seriesRef.patient_key) continue;
+      if (r.derivedFrame && (r.outputGrid || r.derivedFrame.outputGrid)) {
+        const derivedGrid = r.derivedFrame.outputGrid;
+        if (!r.outputGrid || !derivedGrid) continue;
+        if (
+          r.derivedFrame.rows !== derivedGrid.rows ||
+          r.derivedFrame.columns !== derivedGrid.columns ||
+          r.derivedFrame.pixels.length !== derivedGrid.rows * derivedGrid.columns ||
+          (r.derivedFrame.valid && r.derivedFrame.valid.length !== r.derivedFrame.pixels.length) ||
+          (r.derivedFrame.referenceSopInstanceUid &&
+            derivedGrid.referenceSopInstanceUid &&
+            r.derivedFrame.referenceSopInstanceUid !== derivedGrid.referenceSopInstanceUid)
+        ) {
+          continue;
+        }
+        try {
+          if (outputGridFingerprint(r.outputGrid) !== outputGridFingerprint(derivedGrid)) continue;
+        } catch {
+          continue;
+        }
+      }
 
       const existing = panelSettings.get(r.date) || DEFAULT_PANEL_SETTINGS;
       const reverseSliceOrder = !!existing.reverseSliceOrder;

@@ -25,6 +25,7 @@ describe('dicom ingestion', () => {
   afterEach(async () => {
     await resetDbForTests();
     await resetDb();
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -43,6 +44,7 @@ describe('dicom ingestion', () => {
       x00200013: '12',
       x00280010: '256',
       x00280011: '256',
+      x00280103: '1',
       x00201041: '4.2',
       x00200032: '1\\2\\3',
       x00200037: '1\\0\\0\\0\\1\\0',
@@ -50,16 +52,20 @@ describe('dicom ingestion', () => {
       x00180050: '1.5',
       x00281050: '40',
       x00281051: '400',
+      x00280120: '-2000',
+      x00280121: '-1998',
     };
 
     (dicomParser.parseDicom as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
       string: (tag: string) => tags[tag],
       floatString: (tag: string) => {
+        if (tag === 'x00280120' || tag === 'x00280121') return undefined;
         const v = tags[tag];
         if (!v) return undefined;
         return parseFloat(v.split('\\\\')[0]);
       },
       intString: (tag: string) => {
+        if (tag === 'x00280120' || tag === 'x00280121') return undefined;
         const v = tags[tag];
         if (!v) return undefined;
         return parseInt(v.split('\\\\')[0], 10);
@@ -67,6 +73,7 @@ describe('dicom ingestion', () => {
       uint16: (tag: string) => {
         const v = tags[tag];
         if (!v) return undefined;
+        if (tag === 'x00280120' || tag === 'x00280121') return (parseInt(v, 10) + 65_536) % 65_536;
         return parseInt(v.split('\\\\')[0], 10);
       },
       int16: (tag: string) => {
@@ -97,6 +104,8 @@ describe('dicom ingestion', () => {
       // Presence of Pixel Data is what makes this a displayable image.
       elements: {
         x7fe00010: { length: 123 },
+        x00280120: { length: 2 },
+        x00280121: { length: 2 },
       },
     });
 
@@ -116,6 +125,8 @@ describe('dicom ingestion', () => {
     expect(series?.plane).toBe('Axial');
 
     expect(instance?.instanceNumber).toBe(12);
+    expect(instance?.pixelPaddingValue).toBe(-2000);
+    expect(instance?.pixelPaddingRangeLimit).toBe(-1998);
     expect(instance?.fileBlob).toBeTruthy();
   });
 
@@ -201,6 +212,44 @@ describe('dicom ingestion', () => {
     expect(series?.sequenceType).toBe('MPRAGE');
     // Inferred from sequence type when explicit T1/T2 token is missing.
     expect(series?.weight).toBe('T1');
+  });
+
+  it.each([
+    ['a same-normal 90-degree in-plane rotation', { x00200037: '0\\1\\0\\-1\\0\\0' }, /orientations/i],
+    ['mismatched row dimensions', { x00280010: '128' }, /dimensions/i],
+    ['mismatched column dimensions', { x00280011: '128' }, /dimensions/i],
+    ['swapped calibrated row and column spacing', { x00280030: '0.75\\0.5' }, /spacing/i],
+  ])('rejects %s before contaminating an existing physical stack', async (_description, conflicting, message) => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const base = {
+      x0020000d: 'study-uid',
+      x0020000e: 'series-uid',
+      x00080018: 'instance-one',
+      x00080060: 'MR',
+      x00280010: '256',
+      x00280011: '256',
+      x00200032: '0\\0\\0',
+      x00200037: '1\\0\\0\\0\\1\\0',
+      x00280030: '0.5\\0.75',
+    };
+    const dataset = (tags: Record<string, string>) => ({
+      string: (tag: string) => tags[tag] ?? '',
+      uint16: (tag: string) => (tags[tag] ? Number(tags[tag]) : undefined),
+      intString: (tag: string) => (tags[tag] ? Number(tags[tag]) : undefined),
+      floatString: (tag: string) => (tags[tag] ? Number(tags[tag]) : undefined),
+      elements: { x7fe00010: { length: 1 } },
+    });
+    const parser = dicomParser.parseDicom as unknown as ReturnType<typeof vi.fn>;
+    parser.mockReturnValueOnce(dataset(base));
+    parser.mockReturnValueOnce(dataset({ ...base, ...conflicting, x00080018: 'instance-two' }));
+
+    expect((await processDicomFile(new File([new Uint8Array([1])], 'first.dcm'))).status).toBe('ingested');
+    const rejected = await processDicomFile(new File([new Uint8Array([2])], 'second.dcm'));
+
+    expect(rejected).toMatchObject({ status: 'error', reason: 'db-error' });
+    if (rejected.status === 'error') expect(rejected.message).toMatch(message);
+    const db = await getDB();
+    expect((await db.getAll('instances')).length).toBe(1);
   });
 
   it('skips DICOM objects without pixel data (non-displayable)', async () => {

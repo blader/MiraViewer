@@ -37,6 +37,7 @@ import { DEFAULT_PANEL_SETTINGS, OVERLAY } from '../utils/constants';
 import { getEffectiveInstanceIndex, getSliceIndex } from '../utils/math';
 import { COMPARISON_UI_STORAGE_KEY } from '../utils/storageKeys';
 import { clearDerivedAlignmentFrames, hydrateDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
+import { isOutputGridMode, type OutputGridMode } from '../utils/outputPlaneGrid';
 
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
@@ -49,11 +50,13 @@ function getOverlayViewerSize(gridSize: { width: number; height: number }) {
 type PersistedComparisonUiState = {
   sidebarOpen: boolean;
   rightSidebarOpen: boolean;
+  alignmentOutputMode: OutputGridMode;
 };
 
 const DEFAULT_COMPARISON_UI_STATE: PersistedComparisonUiState = {
   sidebarOpen: true,
   rightSidebarOpen: true,
+  alignmentOutputMode: 'native',
 };
 
 function validateComparisonUiState(raw: unknown): PersistedComparisonUiState | null {
@@ -63,6 +66,9 @@ function validateComparisonUiState(raw: unknown): PersistedComparisonUiState | n
     sidebarOpen: typeof obj.sidebarOpen === 'boolean' ? obj.sidebarOpen : DEFAULT_COMPARISON_UI_STATE.sidebarOpen,
     rightSidebarOpen:
       typeof obj.rightSidebarOpen === 'boolean' ? obj.rightSidebarOpen : DEFAULT_COMPARISON_UI_STATE.rightSidebarOpen,
+    alignmentOutputMode: isOutputGridMode(obj.alignmentOutputMode)
+      ? obj.alignmentOutputMode
+      : DEFAULT_COMPARISON_UI_STATE.alignmentOutputMode,
   };
 }
 
@@ -87,7 +93,7 @@ export function ComparisonMatrix() {
     DEFAULT_COMPARISON_UI_STATE,
     validateComparisonUiState,
   );
-  const { sidebarOpen, rightSidebarOpen } = uiState;
+  const { sidebarOpen, rightSidebarOpen, alignmentOutputMode } = uiState;
   const setSidebarOpen = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) =>
       setUiState({
@@ -383,7 +389,9 @@ export function ComparisonMatrix() {
           sequenceId: selectedSeqId,
           datasetRevision: data.dataset_revision,
         };
-        const results = await alignAllDates(finalReference, targetDates, seriesMap, progress);
+        const results = await alignAllDates(finalReference, targetDates, seriesMap, progress, {
+          outputMode: alignmentOutputMode,
+        });
 
         // Results are applied incrementally via an effect so the UI updates per-date.
         const aligned = results.filter((result) => result.outcome === 'aligned');
@@ -398,7 +406,7 @@ export function ComparisonMatrix() {
         console.error('[Alignment] Failed:', err);
       }
     },
-    [abortAlignment, alignAllDates, data, isAligning, overlayColumns, progress, selectedSeqId],
+    [abortAlignment, alignAllDates, alignmentOutputMode, data, isAligning, overlayColumns, progress, selectedSeqId],
   );
 
   // Keep a ref of the latest progress so autoplay doesn't restart its effect on every tick.
@@ -742,6 +750,9 @@ export function ComparisonMatrix() {
             sequencesWithDataForDates={sequencesWithDataForDates}
             selectedSeqId={selectedSeqId}
             onSelectSequence={selectSequence}
+            alignmentOutputMode={alignmentOutputMode}
+            onAlignmentOutputModeChange={(mode) => setUiState({ ...uiState, alignmentOutputMode: mode })}
+            alignmentInProgress={isAligning}
           />
         ) : null}
 

@@ -96,11 +96,15 @@ function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   // string parsing only if needed.
 
   const knownVr =
-    tag === 'x00280010' || tag === 'x00280011'
+    tag === 'x00280010' || tag === 'x00280011' || tag === 'x00280103'
       ? 'US'
       : tag === 'x00200011' || tag === 'x00200013' || tag === 'x00280008'
         ? 'IS'
-        : undefined;
+        : tag === 'x00280120' || tag === 'x00280121'
+          ? getNumber(dataSet, 'x00280103') === 1
+            ? 'SS'
+            : 'US'
+          : undefined;
   const vr = dataSet.elements?.[tag]?.vr ?? knownVr;
   const preferred = vr ? NUMERIC_ACCESSORS[vr as keyof typeof NUMERIC_ACCESSORS] : undefined;
   const candidates = preferred
@@ -187,6 +191,8 @@ const TAGS = {
 
   Rows: 'x00280010',
   Columns: 'x00280011',
+  PixelPaddingValue: 'x00280120',
+  PixelPaddingRangeLimit: 'x00280121',
   SliceLocation: 'x00201041',
   ImagePositionPatient: 'x00200032',
   ImageOrientationPatient: 'x00200037',
@@ -370,6 +376,15 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
   const sliceThickness = getNumber(dataSet, TAGS.SliceThickness);
   const spacingBetweenSlices = getNumber(dataSet, TAGS.SpacingBetweenSlices);
+  const pixelPaddingValue =
+    dataSet.elements?.[TAGS.PixelPaddingValue] || getText(dataSet, TAGS.PixelPaddingValue)
+      ? getNumber(dataSet, TAGS.PixelPaddingValue)
+      : undefined;
+  const pixelPaddingRangeLimit =
+    pixelPaddingValue !== undefined &&
+    (dataSet.elements?.[TAGS.PixelPaddingRangeLimit] || getText(dataSet, TAGS.PixelPaddingRangeLimit))
+      ? getNumber(dataSet, TAGS.PixelPaddingRangeLimit)
+      : undefined;
 
   const instanceBase = {
     sopInstanceUid: instanceUid,
@@ -388,6 +403,8 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     pixelSpacing: pixelSpacing,
     sliceThickness: sliceThickness > 0 ? sliceThickness : undefined,
     spacingBetweenSlices: spacingBetweenSlices > 0 ? spacingBetweenSlices : undefined,
+    pixelPaddingValue,
+    pixelPaddingRangeLimit,
     windowCenter: wc,
     windowWidth: ww,
   };
@@ -440,15 +457,37 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
       await tx.done;
       throw new Error('A series cannot mix incompatible spatial frames of reference');
     }
+    if (
+      existingSeries &&
+      ((existingSeries.rows > 0 && existingSeries.rows !== rows) ||
+        (existingSeries.columns > 0 && existingSeries.columns !== columns))
+    ) {
+      await tx.done;
+      throw new Error('A series cannot mix incompatible row or column dimensions');
+    }
+    if (existingSeries?.pixelSpacing && pixelSpacing) {
+      const expectedSpacing = parsePixelSpacingMm(existingSeries.pixelSpacing);
+      const actualSpacing = parsePixelSpacingMm(pixelSpacing);
+      if (
+        expectedSpacing &&
+        actualSpacing &&
+        (Math.abs(expectedSpacing.rowSpacingMm - actualSpacing.rowSpacingMm) > 1e-6 ||
+          Math.abs(expectedSpacing.colSpacingMm - actualSpacing.colSpacingMm) > 1e-6)
+      ) {
+        await tx.done;
+        throw new Error('A series cannot mix incompatible calibrated row or column spacing');
+      }
+    }
     if (existingSeries?.imageOrientationPatient && iop) {
       const expectedAxes = parseImageOrientationPatient(existingSeries.imageOrientationPatient);
       const actualAxes = parseImageOrientationPatient(iop);
       if (expectedAxes && actualAxes) {
-        const similarity =
-          expectedAxes.normalDir.x * actualAxes.normalDir.x +
-          expectedAxes.normalDir.y * actualAxes.normalDir.y +
-          expectedAxes.normalDir.z * actualAxes.normalDir.z;
-        if (similarity < 0.999) {
+        const aligned = (['rowDir', 'colDir', 'normalDir'] as const).every((axis) => {
+          const expected = expectedAxes[axis];
+          const actual = actualAxes[axis];
+          return expected.x * actual.x + expected.y * actual.y + expected.z * actual.z >= 0.999;
+        });
+        if (!aligned) {
           await tx.done;
           throw new Error('A series cannot mix incompatible slice orientations');
         }

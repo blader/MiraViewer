@@ -109,17 +109,23 @@ async function runLongitudinalWorker(
     const sourceSlices =
       request.type === 'run'
         ? [...request.options.referenceSlices, ...request.options.targetSlices]
-        : request.options.targetSlices;
+        : [...request.options.targetSlices, ...(request.options.nativeReferenceSlices ?? [])];
     for (const slice of sourceSlices) {
-      const buffer = slice.pixels.buffer as ArrayBuffer;
+      for (const view of [slice.pixels, slice.valid]) {
+        if (!view) continue;
+        const buffer = view.buffer as ArrayBuffer;
+        if (!seen.has(buffer)) {
+          seen.add(buffer);
+          transfer.push(buffer);
+        }
+      }
+    }
+    if (request.options.referenceExclusionMask) {
+      const buffer = request.options.referenceExclusionMask.buffer as ArrayBuffer;
       if (!seen.has(buffer)) {
         seen.add(buffer);
         transfer.push(buffer);
       }
-    }
-    if (request.type === 'run' && request.options.referenceExclusionMask) {
-      const buffer = request.options.referenceExclusionMask.buffer as ArrayBuffer;
-      if (!seen.has(buffer)) transfer.push(buffer);
     }
 
     try {

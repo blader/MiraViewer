@@ -1,6 +1,6 @@
 import cornerstone from 'cornerstone-core';
 import { getImageIdForInstance } from './localApi';
-import { resample2dAreaAverage, resample2dLanczos3 } from './svr/resample2d';
+import { resample2dAreaAverage, resample2dAreaAverageWithValidity, resample2dLanczos3 } from './svr/resample2d';
 
 type DecodedCornerstoneImage = {
   imageId?: string;
@@ -12,11 +12,15 @@ type DecodedCornerstoneImage = {
   intercept?: number;
   rowPixelSpacing?: number;
   columnPixelSpacing?: number;
+  pixelPaddingValue?: number;
+  pixelPaddingRangeLimit?: number;
   getPixelData?: () => ArrayLike<number>;
 };
 
 export type DecodedFrame = {
   pixels: Float32Array;
+  /** Fraction of the native acquired footprint retained in every decoded sample. */
+  validity: Float32Array;
   rows: number;
   cols: number;
   imageId: string;
@@ -48,13 +52,13 @@ function getImageDimensions(image: DecodedCornerstoneImage): { rows: number; col
   return { rows, cols };
 }
 
-/** Resample native signed/unsigned source pixels, then apply the linear modality transform. */
-export function resampleDecodedImage(
+/** Evaluate stored-domain padding before any interpolation or linear modality transform. */
+export function decodeImageWithValidity(
   image: DecodedCornerstoneImage,
   targetRows: number,
   targetCols: number,
   kernel: DecodedFrameResampleKernel = 'area',
-): Float32Array {
+): { pixels: Float32Array; validity: Float32Array } {
   const { rows, cols } = getImageDimensions(image);
   if (typeof image.getPixelData !== 'function') {
     throw new Error('Decoded DICOM image did not expose source pixel data');
@@ -65,16 +69,50 @@ export function resampleDecodedImage(
     throw new Error('Decoded DICOM image pixel data is smaller than its native dimensions');
   }
 
-  const resample = kernel === 'lanczos3' ? resample2dLanczos3 : resample2dAreaAverage;
-  const pixels = resample(source, rows, cols, targetRows, targetCols);
+  const paddingValue = image.pixelPaddingValue;
+  const paddingLimit = Number.isFinite(image.pixelPaddingRangeLimit) ? image.pixelPaddingRangeLimit! : paddingValue;
+  const hasPadding = Number.isFinite(paddingValue);
+  let pixels: Float32Array;
+  let validity: Float32Array;
+  if (hasPadding) {
+    const low = Math.min(paddingValue!, paddingLimit!);
+    const high = Math.max(paddingValue!, paddingLimit!);
+    const sourceValidity = new Uint8Array(rows * cols);
+    for (let index = 0; index < sourceValidity.length; index++) {
+      const value = source[index]!;
+      sourceValidity[index] = Number.isFinite(value) && (value < low || value > high) ? 1 : 0;
+    }
+    ({ pixels, validity } = resample2dAreaAverageWithValidity(
+      source,
+      sourceValidity,
+      rows,
+      cols,
+      targetRows,
+      targetCols,
+    ));
+  } else {
+    const resample = kernel === 'lanczos3' ? resample2dLanczos3 : resample2dAreaAverage;
+    pixels = resample(source, rows, cols, targetRows, targetCols);
+    validity = new Float32Array(pixels.length).fill(1);
+  }
   const slope = Number.isFinite(image.slope) ? image.slope! : 1;
   const intercept = Number.isFinite(image.intercept) ? image.intercept! : 0;
   if (slope !== 1 || intercept !== 0) {
     for (let index = 0; index < pixels.length; index++) {
-      pixels[index] = pixels[index] * slope + intercept;
+      if (validity[index]! > 0) pixels[index] = pixels[index]! * slope + intercept;
     }
   }
-  return pixels;
+  return { pixels, validity };
+}
+
+/** Resample native signed/unsigned source pixels, then apply the linear modality transform. */
+export function resampleDecodedImage(
+  image: DecodedCornerstoneImage,
+  targetRows: number,
+  targetCols: number,
+  kernel: DecodedFrameResampleKernel = 'area',
+): Float32Array {
+  return decodeImageWithValidity(image, targetRows, targetCols, kernel).pixels;
 }
 
 /** Return full-precision, modality-linear pixels for the exact physical frame displayed by a viewer. */
@@ -82,9 +120,10 @@ export async function getDecodedFrame(seriesUid: string, instanceIndex: number):
   const imageId = await getImageIdForInstance(seriesUid, instanceIndex);
   const image = (await loadCornerstoneImage(imageId)) as unknown as DecodedCornerstoneImage;
   const { rows, cols } = getImageDimensions(image);
+  const decoded = decodeImageWithValidity(image, rows, cols);
 
   return {
-    pixels: resampleDecodedImage(image, rows, cols),
+    ...decoded,
     rows,
     cols,
     imageId,

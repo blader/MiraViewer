@@ -17,7 +17,12 @@ vi.mock('cornerstone-core', () => ({
   },
 }));
 
-import { getDecodedFrame, loadCornerstoneImage, resampleDecodedImage } from '../src/utils/decodedFrame';
+import {
+  decodeImageWithValidity,
+  getDecodedFrame,
+  loadCornerstoneImage,
+  resampleDecodedImage,
+} from '../src/utils/decodedFrame';
 
 describe('canonical decoded DICOM frames', () => {
   beforeEach(() => {
@@ -77,4 +82,53 @@ describe('canonical decoded DICOM frames', () => {
       expect(document.querySelector('canvas')).toBeNull();
     },
   );
+
+  it('excludes declared padding before modality scaling and never averages it into adjacent anatomy', () => {
+    const image = {
+      rows: 1,
+      columns: 4,
+      pixelPaddingValue: -2000,
+      slope: 2,
+      intercept: 1000,
+      getPixelData: () => new Int16Array([-2000, 100, 100, 100]),
+    };
+
+    const result = decodeImageWithValidity(image, 1, 2);
+
+    expect(Array.from(result.pixels)).toEqual([1200, 1200]);
+    expect(Array.from(result.validity)).toEqual([0.5, 1]);
+    expect(Array.from(resampleDecodedImage(image, 1, 2))).toEqual([1200, 1200]);
+  });
+
+  it('respects inclusive stored-domain padding ranges without treating legitimate zero or negative anatomy as invalid', () => {
+    const image = {
+      rows: 1,
+      columns: 5,
+      pixelPaddingValue: -2000,
+      pixelPaddingRangeLimit: -1998,
+      slope: -2,
+      intercept: 100,
+      getPixelData: () => new Int16Array([-2000, -1999, -1998, -1, 0]),
+    };
+
+    const result = decodeImageWithValidity(image, 1, 5);
+
+    expect(Array.from(result.validity)).toEqual([0, 0, 0, 1, 1]);
+    expect(Array.from(result.pixels)).toEqual([0, 0, 0, 102, 100]);
+  });
+
+  it('preserves explicit validity on full-resolution decoded frames', async () => {
+    mocks.loadAndCacheImage.mockResolvedValue({
+      imageId: 'miradb:instance-1',
+      rows: 1,
+      columns: 3,
+      pixelPaddingValue: -2000,
+      getPixelData: () => new Int16Array([-2000, 0, -3]),
+    });
+
+    const frame = await getDecodedFrame('series-1', 0);
+
+    expect(Array.from(frame.validity)).toEqual([0, 1, 1]);
+    expect(Array.from(frame.pixels)).toEqual([0, 0, -3]);
+  });
 });

@@ -32,6 +32,7 @@ import {
   getModelBlob,
   putModelBlob,
 } from '../src/utils/segmentation/onnx/modelCache';
+import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { ClearDataModal } from '../src/components/ClearDataModal';
 
 type SyntheticDicomOptions = {
@@ -245,6 +246,28 @@ describe('durable MRI storage and import contracts', () => {
       ordering: 'instance-number',
       geometryReliable: false,
     });
+  });
+
+  it('rejects whole-stack in-plane axis changes, spacing changes, and duplicated canonical depths', async () => {
+    await processDicomFile(makeImplicitDicom({ instanceUid: '1.2.3.4.1', instanceNumber: 1, position: 0 }));
+    await processDicomFile(makeImplicitDicom({ instanceUid: '1.2.3.4.2', instanceNumber: 2, position: 1 }));
+    const db = await getDB();
+    const second = (await db.get('instances', '1.2.3.4.2'))!;
+
+    await db.put('instances', {
+      ...second,
+      imageOrientationPatient: '0\\1\\0\\-1\\0\\0',
+    });
+    expect((await getSeriesFrameManifest('1.2.3.4')).geometryReliable).toBe(false);
+
+    await db.put('instances', { ...second, pixelSpacing: '0.6\\0.75' });
+    expect((await getSeriesFrameManifest('1.2.3.4')).geometryReliable).toBe(false);
+
+    await db.put('instances', { ...second, imagePositionPatient: '0\\0\\0' });
+    expect((await getSeriesFrameManifest('1.2.3.4')).geometryReliable).toBe(false);
+
+    await db.put('instances', second);
+    expect((await getSeriesFrameManifest('1.2.3.4')).geometryReliable).toBe(true);
   });
 
   it('rejects incompatible frames of reference within one anatomical series', async () => {
@@ -477,6 +500,59 @@ describe('durable MRI storage and import contracts', () => {
     expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toEqual([]);
   });
 
+  it('round-trips a 1024-pixel physical output grid, support mask, and complete source provenance', async () => {
+    await processDicomFile(makeImplicitDicom());
+    const reference = (await (await getDB()).get('instances', '1.2.3.4.1'))!;
+    const outputGrid = buildOutputPlaneGrid(reference, { mode: 'fixed-1024' });
+    const pixelCount = 1024 * 1024;
+    const pixels = new Float32Array(pixelCount);
+    pixels[0] = 41;
+    pixels[pixelCount - 1] = 82;
+    const valid = new Uint8Array(pixelCount).fill(1);
+    valid[3] = 0;
+    const frame = makeDerivedFrame({
+      rows: 1024,
+      columns: 1024,
+      pixels,
+      valid,
+      outputGrid,
+      contributingSourceSopInstanceUids: ['1.2.3.4.1'],
+    });
+    await expect(saveDerivedAlignmentFrame({ ...frame, valid: undefined })).rejects.toThrow('anatomical-support map');
+    await expect(saveDerivedAlignmentFrame({ ...frame, contributingSourceSopInstanceUids: undefined })).rejects.toThrow(
+      'contributing source images',
+    );
+    await expect(
+      saveDerivedAlignmentFrame({
+        ...frame,
+        outputGrid: {
+          ...outputGrid,
+          originMm: [outputGrid.originMm[0] + 1, ...outputGrid.originMm.slice(1)] as [number, number, number],
+        },
+      }),
+    ).rejects.toThrow('selected reference image');
+    await saveDerivedAlignmentFrame(frame);
+
+    const saved = (await loadDerivedAlignmentFrames('synthetic-patient', 1))[0]!;
+    expect(saved.outputGrid?.rowSpacingMm).toBe(0.03125);
+    expect(saved.outputGrid?.columnSpacingMm).toBe(0.046875);
+    expect(saved.valid?.[3]).toBe(0);
+
+    const blob = await exportStudiesToZip(['1.2.3']);
+    await deleteAllStoredMriData();
+    const archive = await loadSafeArchive(blob);
+    const manifest = await readSnapshotManifest(archive.zip);
+    await restoreSnapshot(archive.zip, manifest!);
+
+    const restored = (await loadDerivedAlignmentFrames('synthetic-patient', await getDatasetRevision()))[0]!;
+    expect(restored.outputGrid).toEqual(outputGrid);
+    expect(restored.contributingSourceSopInstanceUids).toEqual(['1.2.3.4.1']);
+    expect(restored.pixels[0]).toBe(41);
+    expect(restored.pixels[pixelCount - 1]).toBe(82);
+    expect(restored.valid?.[3]).toBe(0);
+    expect(restored.valid?.[4]).toBe(1);
+  });
+
   it('rejects stale registered frames after image imports change their committed dataset revision', async () => {
     await processDicomFile(makeImplicitDicom());
     await getComparisonData();
@@ -505,6 +581,9 @@ describe('durable MRI storage and import contracts', () => {
     ['reference plane geometry', { referenceImagePositionPatient: '0\\0\\99' }, /reference image geometry/i],
     ['rigid transform', { transform: [0, 0, Number.NaN, 0, 0, 0] }, /rigid transform/i],
     ['quality evidence', { coverage: Number.NaN }, /quality evidence/i],
+    ['anatomical support map', { valid: new Uint8Array([1, 2, 1, 1]) }, /support map/i],
+    ['unsupported image samples', { valid: new Uint8Array([1, 0, 1, 1]) }, /unsupported image samples/i],
+    ['contributor identity', { contributingSourceSopInstanceUids: ['different-image'] }, /another examination/i],
   ] as const)('rejects derived frames with stale %s', async (_label, changes, error) => {
     await processDicomFile(makeImplicitDicom());
     await expect(saveDerivedAlignmentFrame(makeDerivedFrame(changes))).rejects.toThrow(error);

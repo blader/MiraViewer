@@ -16,6 +16,9 @@ import type {
 } from '../db/schema';
 import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
 import { parseSeriesDescription } from './dicomSeriesParsing';
+import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
+import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
+import { dot } from './svr/vec3';
 
 export type PatientSummary = NonNullable<ComparisonData['patients']>[number];
 export type ExaminationSummary = NonNullable<ComparisonData['examinations']>[string];
@@ -423,11 +426,42 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
       return metadata;
     }),
   );
-  const positions = frames.map((frame) => frame.physicalSlicePosition);
-  const geometryReliable = positions.every(
-    (position): position is number => typeof position === 'number' && Number.isFinite(position),
+  let sortedPositions: number[] = [];
+  let geometryReliable = frames.every(
+    (frame) => typeof frame.physicalSlicePosition === 'number' && Number.isFinite(frame.physicalSlicePosition),
   );
-  const sortedPositions = geometryReliable ? (positions as number[]) : [];
+  if (geometryReliable && frames.length > 0) {
+    try {
+      const first = getSliceGeometryFromInstance(frames[0]!);
+      for (const frame of frames) {
+        const geometry = getSliceGeometryFromInstance(frame);
+        if (
+          geometry.rows !== first.rows ||
+          geometry.cols !== first.cols ||
+          Math.abs(geometry.rowSpacingMm - first.rowSpacingMm) > 1e-6 ||
+          Math.abs(geometry.colSpacingMm - first.colSpacingMm) > 1e-6 ||
+          dot(geometry.rowDir, first.rowDir) < 0.999 ||
+          dot(geometry.colDir, first.colDir) < 0.999 ||
+          dot(geometry.normalDir, first.normalDir) < 0.999 ||
+          (series.frameOfReferenceUid &&
+            frame.frameOfReferenceUid &&
+            series.frameOfReferenceUid !== frame.frameOfReferenceUid)
+        ) {
+          geometryReliable = false;
+          break;
+        }
+        const position = dot(geometry.ippMm, first.normalDir);
+        if (!Number.isFinite(position) || (sortedPositions.length > 0 && position <= sortedPositions.at(-1)! + 1e-6)) {
+          geometryReliable = false;
+          break;
+        }
+        sortedPositions.push(position);
+      }
+    } catch {
+      geometryReliable = false;
+    }
+  }
+  if (!geometryReliable) sortedPositions = [];
   const spacings = sortedPositions.slice(1).map((position, index) => position - sortedPositions[index]!);
   const positiveSpacings = spacings.filter((spacing) => spacing > 1e-6).sort((a, b) => a - b);
   const sliceSpacingMm = positiveSpacings.length
@@ -605,7 +639,7 @@ export async function deleteVolumeSegmentation(volumeKey: string): Promise<void>
 }
 
 const MAX_DERIVED_ALIGNMENT_FRAMES = 12;
-const MAX_DERIVED_FRAME_PIXELS = 512 * 512;
+const MAX_DERIVED_FRAME_PIXELS = MAX_OUTPUT_GRID_PIXELS;
 
 export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFrameRow): void {
   if (!frame.id || !frame.patientKey || !frame.sequenceId || !frame.targetStudyUid || !frame.targetSeriesUid) {
@@ -630,7 +664,7 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
     pixels <= 0 ||
     pixels > MAX_DERIVED_FRAME_PIXELS
   ) {
-    throw new Error('A derived alignment frame exceeds the safe 512 × 512 geometry limit');
+    throw new Error('A derived alignment frame exceeds the safe 1024 × 1024 geometry limit');
   }
   if (
     !ArrayBuffer.isView(frame.pixels) ||
@@ -642,6 +676,44 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
   }
   for (const pixel of frame.pixels) {
     if (!Number.isFinite(pixel)) throw new Error('A derived alignment frame contains invalid image samples');
+  }
+  if (
+    frame.valid &&
+    (!ArrayBuffer.isView(frame.valid) ||
+      Object.prototype.toString.call(frame.valid) !== '[object Uint8Array]' ||
+      frame.valid.length !== pixels)
+  ) {
+    throw new Error('A derived alignment frame has an invalid anatomical-support map');
+  }
+  if (frame.valid) {
+    for (let index = 0; index < frame.valid.length; index++) {
+      const supported = frame.valid[index]!;
+      if (supported !== 0 && supported !== 1) {
+        throw new Error('A derived alignment frame has an invalid anatomical-support map');
+      }
+      if (!supported && frame.pixels[index] !== 0) {
+        throw new Error('A derived alignment frame contains unsupported image samples');
+      }
+    }
+  }
+  if (frame.outputGrid) {
+    validateOutputPlaneGrid(frame.outputGrid);
+    if (frame.outputGrid.rows !== frame.rows || frame.outputGrid.columns !== frame.columns) {
+      throw new Error('A derived alignment frame does not match its physical output grid');
+    }
+    if (!frame.valid || !frame.contributingSourceSopInstanceUids?.length) {
+      throw new Error('A physical output grid requires its anatomical-support map and contributing source images');
+    }
+  }
+  if (
+    frame.contributingSourceSopInstanceUids &&
+    (!Array.isArray(frame.contributingSourceSopInstanceUids) ||
+      frame.contributingSourceSopInstanceUids.length === 0 ||
+      frame.contributingSourceSopInstanceUids.length > 96 ||
+      frame.contributingSourceSopInstanceUids.some((uid) => typeof uid !== 'string' || uid.length === 0) ||
+      new Set(frame.contributingSourceSopInstanceUids).size !== frame.contributingSourceSopInstanceUids.length)
+  ) {
+    throw new Error('A derived alignment frame has invalid contributing source-image provenance');
   }
   if (
     frame.transform &&
@@ -701,12 +773,18 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
   if (frame.sourceImageId !== `miradb:${targetSop}`) {
     throw new Error('A derived alignment frame does not match its source image');
   }
+  if (frame.contributingSourceSopInstanceUids?.some((uid) => !orderedUids.includes(uid))) {
+    throw new Error('A derived alignment frame includes a contributing image from another examination');
+  }
   const targetFrame = frame.targetFrameOfReferenceUid ?? frame.sourceFrameOfReferenceUid;
   if (targetFrame && targetSeries.frameOfReferenceUid && targetFrame !== targetSeries.frameOfReferenceUid) {
     throw new Error('A derived alignment frame has an incompatible target spatial frame');
   }
 
   let referenceFrame = frame.referenceFrameOfReferenceUid ?? frame.frameOfReferenceUid;
+  if (frame.outputGrid && (!frame.referenceSeriesUid || !frame.referenceSopInstanceUid)) {
+    throw new Error('A physical output grid requires its verified native reference image');
+  }
   if (frame.referenceSeriesUid) {
     const referenceSeries = await db.get('series', frame.referenceSeriesUid);
     if (!referenceSeries || (frame.referenceStudyUid && referenceSeries.studyInstanceUid !== frame.referenceStudyUid)) {
@@ -739,6 +817,9 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
         (frame.referenceColumns !== undefined && frame.referenceColumns !== reference.columns)
       ) {
         throw new Error('A derived alignment frame does not match its reference image geometry');
+      }
+      if (frame.outputGrid) {
+        validateOutputGridReference(frame.outputGrid, reference, referenceSeries.frameOfReferenceUid);
       }
       if (frame.referenceFrameIndex !== undefined) {
         const orderedReferences = await getSortedSopInstanceUidsForSeries(frame.referenceSeriesUid);

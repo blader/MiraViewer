@@ -194,6 +194,42 @@ const SVR_PARAMS: SvrParams = {
 };
 
 describe('svr/computeCore', () => {
+  it('reconstructs valid zero and negative observations while rejecting explicitly invalid positive pixels', async () => {
+    const occupancy = new Uint8Array(4);
+    const volume = await reconstructVolumeFromSlices({
+      slices: [
+        {
+          pixels: new Float32Array([-2, 0, 5, 999]),
+          valid: new Uint8Array([1, 1, 1, 0]),
+          dsRows: 2,
+          dsCols: 2,
+          ippMm: { x: 0, y: 0, z: 0 },
+          rowDir: { x: 1, y: 0, z: 0 },
+          colDir: { x: 0, y: 1, z: 0 },
+          normalDir: { x: 0, y: 0, z: 1 },
+          rowSpacingDsMm: 1,
+          colSpacingDsMm: 1,
+          sliceThicknessMm: 1,
+          spacingBetweenSlicesMm: 1,
+        },
+      ],
+      grid: { dims: { nx: 2, ny: 2, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+      occupancy,
+      options: {
+        iterations: 0,
+        stepSize: 0,
+        clampOutput: false,
+        psfMode: 'none',
+        robustLoss: 'none',
+        robustDelta: 0.1,
+        laplacianWeight: 0,
+      },
+    });
+
+    expect(Array.from(occupancy)).toEqual([1, 1, 1, 0]);
+    expect(Array.from(volume)).toEqual([-2, 0, 5, 0]);
+  });
+
   it('computeSvrFromLoadedSlices matches a direct solver run on the same grid', async () => {
     const allSlices = makeAllSlices();
     // The compute phase mutates pixels in place and empties the array, so the

@@ -94,6 +94,7 @@ export async function hydrateDerivedAlignmentFrames(
     const runId = row.runId ?? `restored-${row.id}`;
     storeFrame({
       pixels: row.pixels,
+      valid: row.valid,
       rows: row.rows,
       columns: row.columns,
       sourceImageId: row.sourceImageId,
@@ -115,6 +116,8 @@ export async function hydrateDerivedAlignmentFrames(
       rotationCenterMm: row.centerMm,
       nativeSliceSpacingMm: row.nativeSliceSpacingMm,
       sourceFrameCount: row.sourceFrameCount,
+      outputGrid: row.outputGrid,
+      contributingSourceSopInstanceUids: row.contributingSourceSopInstanceUids,
       runId,
       seriesUid: row.targetSeriesUid,
       instanceIndex: row.targetFrameIndex,

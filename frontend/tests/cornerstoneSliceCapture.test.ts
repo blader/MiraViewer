@@ -133,4 +133,22 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
     expect(result.timingMs.waitForRender).toBe(0);
     expect(container.querySelector('canvas')).toBeNull();
   });
+
+  test('carries stored-domain padding support through registration capture', async () => {
+    mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
+    mocks.loadImage.mockResolvedValue({
+      imageId: 'miradb:instance',
+      rows: 2,
+      columns: 2,
+      slope: 2,
+      intercept: 1000,
+      pixelPaddingValue: -2000,
+      getPixelData: () => Int16Array.from([-2000, 100, 200, -2000]),
+    });
+
+    const result = await renderSliceToPixels(document.createElement('div'), 'series', 0, 2);
+
+    expect(Array.from(result.pixels)).toEqual([0, 1200, 1400, 0]);
+    expect(Array.from(result.validity ?? [])).toEqual([0, 1, 1, 0]);
+  });
 });

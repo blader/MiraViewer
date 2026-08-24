@@ -9,11 +9,16 @@ import type { PhaseCorrection } from './phaseCorrelation';
 import type { FinalAffineSelection } from './structuralAffineSelection';
 
 export type AlignmentScoringRunner = {
-  scoreCoarse: (pixels: Float32Array, seed: GridSeedTransform) => Promise<AlignmentScoredCandidate>;
+  scoreCoarse: (
+    pixels: Float32Array,
+    seed: GridSeedTransform,
+    validity?: Float32Array,
+  ) => Promise<AlignmentScoredCandidate>;
   scoreFine: (
     pixels: Float32Array,
     seed: GridSeedTransform,
     phase: PhaseCorrection,
+    validity?: Float32Array,
   ) => Promise<AlignmentScoredCandidate>;
   scoreFinal: (input: AlignmentFinalScoringInput) => Promise<FinalAffineSelection>;
   close: () => void;
@@ -34,8 +39,8 @@ export async function createAlignmentScoringRunner(
     if (import.meta.env.MODE === 'test') {
       const engine = new AlignmentScoringEngine(config);
       return {
-        scoreCoarse: async (pixels, seed) => engine.scoreCoarse(pixels, seed),
-        scoreFine: async (pixels, seed, phase) => engine.scoreFine(pixels, seed, phase),
+        scoreCoarse: async (pixels, seed, validity) => engine.scoreCoarse(pixels, seed, validity),
+        scoreFine: async (pixels, seed, phase, validity) => engine.scoreFine(pixels, seed, phase, validity),
         scoreFinal: async (input) => engine.scoreFinal(input),
         close: () => undefined,
       };
@@ -123,10 +128,24 @@ export async function createAlignmentScoringRunner(
 
   const fine = Float32Array.from(config.referenceFinePixels);
   const coarse = Float32Array.from(config.referenceCoarsePixels);
+  const fineValidity = config.referenceFineValidity ? Float32Array.from(config.referenceFineValidity) : undefined;
+  const coarseValidity = config.referenceCoarseValidity ? Float32Array.from(config.referenceCoarseValidity) : undefined;
+  const referenceTransfers: Transferable[] = [fine.buffer, coarse.buffer];
+  if (fineValidity) referenceTransfers.push(fineValidity.buffer);
+  if (coarseValidity) referenceTransfers.push(coarseValidity.buffer);
   try {
     await request(
-      { kind: 'initialize', config: { ...config, referenceFinePixels: fine, referenceCoarsePixels: coarse } },
-      [fine.buffer, coarse.buffer],
+      {
+        kind: 'initialize',
+        config: {
+          ...config,
+          referenceFinePixels: fine,
+          referenceCoarsePixels: coarse,
+          ...(fineValidity ? { referenceFineValidity: fineValidity } : {}),
+          ...(coarseValidity ? { referenceCoarseValidity: coarseValidity } : {}),
+        },
+      },
+      referenceTransfers,
     );
   } catch (error) {
     close();
@@ -134,20 +153,33 @@ export async function createAlignmentScoringRunner(
   }
 
   return {
-    scoreCoarse: async (pixels, seed) => {
-      const response = await request({ kind: 'coarse', pixels, seed }, [pixels.buffer]);
+    scoreCoarse: async (pixels, seed, validity) => {
+      const response = await request(
+        { kind: 'coarse', pixels, seed, ...(validity ? { validity } : {}) },
+        validity ? [pixels.buffer, validity.buffer] : [pixels.buffer],
+      );
       if (response.kind !== 'result') throw new Error('Alignment scoring worker returned an invalid coarse result');
       return response.result;
     },
-    scoreFine: async (pixels, seed, phase) => {
-      const response = await request({ kind: 'fine', pixels, seed, phase }, [pixels.buffer]);
+    scoreFine: async (pixels, seed, phase, validity) => {
+      const response = await request(
+        { kind: 'fine', pixels, seed, phase, ...(validity ? { validity } : {}) },
+        validity ? [pixels.buffer, validity.buffer] : [pixels.buffer],
+      );
       if (response.kind !== 'result') throw new Error('Alignment scoring worker returned an invalid fine result');
       return response.result;
     },
     scoreFinal: async (input) => {
       // The selected native pixels remain needed for display statistics after worker scoring.
       const movingPixels = Float32Array.from(input.movingPixels);
-      const response = await request({ kind: 'final', input: { ...input, movingPixels } }, [movingPixels.buffer]);
+      const movingValidity = input.movingValidity ? Float32Array.from(input.movingValidity) : undefined;
+      const response = await request(
+        {
+          kind: 'final',
+          input: { ...input, movingPixels, ...(movingValidity ? { movingValidity } : {}) },
+        },
+        movingValidity ? [movingPixels.buffer, movingValidity.buffer] : [movingPixels.buffer],
+      );
       if (response.kind !== 'final-result')
         throw new Error('Alignment scoring worker returned an invalid final result');
       return response.result;

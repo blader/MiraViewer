@@ -1,3 +1,5 @@
+import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
+
 export interface DicomStudy {
   studyInstanceUid: string;
   studyDate: string; // YYYYMMDD
@@ -223,6 +225,8 @@ export interface DicomInstance {
   pixelSpacing?: string; // [row, col] as string
   sliceThickness?: number;
   spacingBetweenSlices?: number;
+  pixelPaddingValue?: number;
+  pixelPaddingRangeLimit?: number;
 
   // Windowing
   windowCenter?: number;
@@ -293,6 +297,7 @@ export interface DerivedAlignmentFrameRow {
   rows: number;
   columns: number;
   pixels: Float32Array;
+  valid?: Uint8Array;
   sourceImageId: string;
   transform?: number[];
   centerMm?: [number, number, number];
@@ -301,6 +306,8 @@ export interface DerivedAlignmentFrameRow {
   margin?: number;
   nativeSliceSpacingMm?: number;
   sourceFrameCount?: number;
+  outputGrid?: OutputPlaneGrid;
+  contributingSourceSopInstanceUids?: string[];
   runId?: string;
   createdAt: number;
 }
