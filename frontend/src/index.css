@@ -113,21 +113,6 @@ textarea {
   transition: color 120ms ease;
 }
 
-.instrument-mode-tab:hover,
-.instrument-mode-tab[aria-pressed='true'] {
-  color: var(--text-primary);
-}
-
-.instrument-mode-tab[aria-pressed='true']::after {
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 2px;
-  background: var(--signal-metal);
-  content: '';
-}
-
 .instrument-patient {
   display: flex;
   min-width: 0;
@@ -307,11 +292,14 @@ textarea {
   transition: color 120ms ease;
 }
 
+.instrument-mode-tab:hover,
+.instrument-mode-tab[aria-pressed='true'],
 .instrument-study-button:hover,
 .instrument-study-button[aria-current='true'] {
   color: var(--text-primary);
 }
 
+.instrument-mode-tab[aria-pressed='true']::after,
 .instrument-study-button[aria-current='true']::after {
   position: absolute;
   right: 0;
@@ -320,6 +308,10 @@ textarea {
   height: 2px;
   background: var(--signal-metal);
   content: '';
+}
+
+.instrument-mode-tab[aria-pressed='true']::after {
+  bottom: -1px;
 }
 
 .instrument-stage {
@@ -532,14 +524,12 @@ textarea {
 
   .instrument-identity-rail {
     column-gap: 16px;
-    padding-right: 16px;
-    padding-left: 16px;
+    padding: 0 16px;
   }
 
   .instrument-context-rail {
     gap: 12px;
-    padding-right: 16px;
-    padding-left: 16px;
+    padding: 0 16px;
   }
 }
 
@@ -548,8 +538,7 @@ textarea {
     min-height: 52px;
     grid-template-columns: auto minmax(0, 1fr) auto;
     column-gap: 10px;
-    padding-right: 12px;
-    padding-left: 12px;
+    padding: 0 12px;
   }
 
   .instrument-wordmark {
@@ -597,8 +586,7 @@ textarea {
     min-height: 44px;
     gap: 10px;
     overflow: hidden;
-    padding-right: 12px;
-    padding-left: 12px;
+    padding: 0 12px;
   }
 
   .instrument-context-summary {

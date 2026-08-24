@@ -677,6 +677,17 @@ export async function deleteVolumeSegmentation(volumeKey: string): Promise<void>
 
 export const MAX_DERIVED_ALIGNMENT_FRAMES = 12;
 
+export function matchesReferenceGeometry(frame: Partial<DerivedAlignmentFrameRow>, reference?: DicomInstance): boolean {
+  return !(
+    (frame.referenceImagePositionPatient && frame.referenceImagePositionPatient !== reference?.imagePositionPatient) ||
+    (frame.referenceImageOrientationPatient &&
+      frame.referenceImageOrientationPatient !== reference?.imageOrientationPatient) ||
+    (frame.referencePixelSpacing && frame.referencePixelSpacing !== reference?.pixelSpacing) ||
+    (frame.referenceRows !== undefined && frame.referenceRows !== reference?.rows) ||
+    (frame.referenceColumns !== undefined && frame.referenceColumns !== reference?.columns)
+  );
+}
+
 export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFrameRow): void {
   if (!frame.id || !frame.patientKey || !frame.sequenceId || !frame.targetStudyUid || !frame.targetSeriesUid) {
     throw new Error('A derived alignment frame is missing its required patient or examination identity');
@@ -837,15 +848,7 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
       if (!reference || reference.seriesInstanceUid !== frame.referenceSeriesUid) {
         throw new Error('A derived alignment frame does not match its reference image');
       }
-      if (
-        (frame.referenceImagePositionPatient &&
-          frame.referenceImagePositionPatient !== reference.imagePositionPatient) ||
-        (frame.referenceImageOrientationPatient &&
-          frame.referenceImageOrientationPatient !== reference.imageOrientationPatient) ||
-        (frame.referencePixelSpacing && frame.referencePixelSpacing !== reference.pixelSpacing) ||
-        (frame.referenceRows !== undefined && frame.referenceRows !== reference.rows) ||
-        (frame.referenceColumns !== undefined && frame.referenceColumns !== reference.columns)
-      ) {
+      if (!matchesReferenceGeometry(frame, reference)) {
         throw new Error('A derived alignment frame does not match its reference image geometry');
       }
       if (frame.outputGrid) {

@@ -703,19 +703,7 @@ export async function reconstructVolumeMultiPlane(params: {
   // objects before result assembly.
   allSlices.length = 0;
 
-  const {
-    volume,
-    observedSupport,
-    supportedVoxelCount,
-    acquiredOrientationCount,
-    effectiveResolutionMm,
-    sliceProfileSource,
-    reconstructionFingerprint,
-    dims,
-    originMm,
-    voxelSizeMm,
-    bounds,
-  } = computed;
+  const { volume, dims, originMm, voxelSizeMm, bounds, ...acquisitionEvidence } = computed;
 
   onProgress?.({
     phase: 'finalizing',
@@ -727,12 +715,8 @@ export async function reconstructVolumeMultiPlane(params: {
   return {
     volume: {
       data: volume,
-      observedSupport,
-      supportedVoxelCount,
-      acquiredOrientationCount,
-      effectiveResolutionMm,
-      sliceProfileSource,
-      reconstructionFingerprint,
+      ...acquisitionEvidence,
+      effectiveResolutionMm: acquisitionEvidence.effectiveResolutionMm,
       dims: [dims.nx, dims.ny, dims.nz],
       voxelSizeMm: [voxelSizeMm, voxelSizeMm, voxelSizeMm],
       originMm: [originMm.x, originMm.y, originMm.z],

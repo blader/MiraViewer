@@ -20,7 +20,7 @@ import type {
 } from '../db/schema';
 import { isOwnedStorageKey } from '../utils/storageKeys';
 import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
-import { assertValidDerivedAlignmentFrameShape, getImageCounts, MAX_DERIVED_ALIGNMENT_FRAMES } from '../utils/localApi';
+import * as localApi from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
@@ -162,7 +162,7 @@ export async function exportStudiesToZip(
   const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
 
   const instances: SnapshotInstance[] = [];
-  const totalInstances = Object.values(await getImageCounts(series)).reduce((count, next) => count + next, 0);
+  const totalInstances = Object.values(await localApi.getImageCounts(series)).reduce((count, next) => count + next, 0);
   let collected = 0;
 
   for (const item of series) {
@@ -436,13 +436,7 @@ export async function restoreSnapshot(
         (!frame.referenceSeriesUid ||
           orderedInstancesForSeries(frame.referenceSeriesUid)[frame.referenceFrameIndex]?.sopInstanceUid !==
             frame.referenceSopInstanceUid)) ||
-      (frame.referenceImagePositionPatient &&
-        frame.referenceImagePositionPatient !== referenceInstance?.imagePositionPatient) ||
-      (frame.referenceImageOrientationPatient &&
-        frame.referenceImageOrientationPatient !== referenceInstance?.imageOrientationPatient) ||
-      (frame.referencePixelSpacing && frame.referencePixelSpacing !== referenceInstance?.pixelSpacing) ||
-      (frame.referenceRows !== undefined && frame.referenceRows !== referenceInstance?.rows) ||
-      (frame.referenceColumns !== undefined && frame.referenceColumns !== referenceInstance?.columns) ||
+      !localApi.matchesReferenceGeometry(frame, referenceInstance) ||
       (frame.targetFrameOfReferenceUid &&
         target.frameOfReferenceUid &&
         frame.targetFrameOfReferenceUid !== target.frameOfReferenceUid) ||
@@ -468,10 +462,10 @@ export async function restoreSnapshot(
       ? new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, validFile, signal, integrityWarnings)))
       : undefined;
     const derivedFrame = { ...frame, pixels, ...(valid && { valid }) };
-    assertValidDerivedAlignmentFrameShape(derivedFrame);
+    localApi.assertValidDerivedAlignmentFrameShape(derivedFrame);
     derivedFrames.push(derivedFrame);
   }
-  if (derivedFrames.length > MAX_DERIVED_ALIGNMENT_FRAMES)
+  if (derivedFrames.length > localApi.MAX_DERIVED_ALIGNMENT_FRAMES)
     throw new Error('The backup contains more derived frames than the safe storage limit.');
 
   const models = [] as Array<{ key: string; blob: Blob }>;

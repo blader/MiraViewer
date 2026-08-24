@@ -73,6 +73,12 @@ type DenseLongitudinalOptions = {
 
 const MAX_NATIVE_REFERENCE_BYTES = 32 * 1024 * 1024;
 
+function outputPlaneCorners(grid: OutputPlaneGrid): Vec3[] {
+  return [0, grid.rows - 1].flatMap((row) =>
+    [0, grid.columns - 1].map((column) => outputGridPixelToWorld(grid, row, column)),
+  );
+}
+
 function selectNativeReferenceContext(options: DenseLongitudinalOptions): {
   manifest: SeriesFrameManifest;
   sourceIndices: number[];
@@ -434,12 +440,7 @@ export async function prepareDenseLongitudinalResliceInput(
   void _detachedValidity;
   if (options.outputGrid) validateOutputPlaneGrid(options.outputGrid);
   const corners = options.outputGrid
-    ? [
-        outputGridPixelToWorld(options.outputGrid, 0, 0),
-        outputGridPixelToWorld(options.outputGrid, 0, options.outputGrid.columns - 1),
-        outputGridPixelToWorld(options.outputGrid, options.outputGrid.rows - 1, 0),
-        outputGridPixelToWorld(options.outputGrid, options.outputGrid.rows - 1, options.outputGrid.columns - 1),
-      ]
+    ? outputPlaneCorners(options.outputGrid)
     : sliceCornersMm({
         ippMm: referencePlane.ippMm,
         rowDir: referencePlane.rowDir,
@@ -468,17 +469,7 @@ export async function prepareDenseLongitudinalResliceInput(
     const context = selectNativeReferenceContext(options);
     for (const index of context.sourceIndices) {
       const geometry = getSliceGeometryFromInstance(context.manifest.frames[index]!);
-      sourceCorners.push(
-        ...sliceCornersMm({
-          ippMm: geometry.ippMm,
-          rowDir: geometry.rowDir,
-          colDir: geometry.colDir,
-          rowSpacingMm: geometry.rowSpacingMm,
-          colSpacingMm: geometry.colSpacingMm,
-          rows: geometry.rows,
-          cols: geometry.cols,
-        }),
-      );
+      sourceCorners.push(...sliceCornersMm(geometry));
     }
   }
   const depths = nativeCandidatePoses.flatMap((candidate) => {
@@ -706,22 +697,7 @@ export function measureLongitudinalPlaneDrift(
   const reference = getSliceGeometryFromInstance(referenceFrame);
   const target = getSliceGeometryFromInstance(targetFrame);
   const angle = Math.acos(Math.max(-1, Math.min(1, Math.abs(dot(reference.normalDir, target.normalDir)))));
-  const corners = options.outputGrid
-    ? [
-        outputGridPixelToWorld(options.outputGrid, 0, 0),
-        outputGridPixelToWorld(options.outputGrid, 0, options.outputGrid.columns - 1),
-        outputGridPixelToWorld(options.outputGrid, options.outputGrid.rows - 1, 0),
-        outputGridPixelToWorld(options.outputGrid, options.outputGrid.rows - 1, options.outputGrid.columns - 1),
-      ]
-    : sliceCornersMm({
-        ippMm: reference.ippMm,
-        rowDir: reference.rowDir,
-        colDir: reference.colDir,
-        rowSpacingMm: reference.rowSpacingMm,
-        colSpacingMm: reference.colSpacingMm,
-        rows: reference.rows,
-        cols: reference.cols,
-      });
+  const corners = options.outputGrid ? outputPlaneCorners(options.outputGrid) : sliceCornersMm(reference);
   const center = v3(
     (corners[0]!.x + corners[3]!.x) / 2,
     (corners[0]!.y + corners[3]!.y) / 2,

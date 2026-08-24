@@ -234,28 +234,6 @@ function stackBounds(slices: readonly SvrReconstructionSlice[]): BoundsMm {
   return { min, max };
 }
 
-function sampledIntensityVariance(slices: readonly SvrReconstructionSlice[]): number {
-  const pixelCount = slices.reduce((count, slice) => count + slice.pixels.length, 0);
-  const stride = Math.max(1, Math.floor(pixelCount / 20_000));
-  let seen = 0;
-  let count = 0;
-  let mean = 0;
-  let squaredDeviation = 0;
-
-  for (const slice of slices) {
-    for (let index = 0; index < slice.pixels.length; index++) {
-      const value = slice.pixels[index]!;
-      if (seen++ % stride !== 0 || (slice.valid && !slice.valid[index]) || !Number.isFinite(value)) continue;
-      count++;
-      const delta = value - mean;
-      mean += delta / count;
-      squaredDeviation += delta * (value - mean);
-    }
-  }
-
-  return count > 1 ? squaredDeviation / count : 0;
-}
-
 function maximumPoseDisplacementMm(first: RigidParams, second: RigidParams, bounds: BoundsMm, centerMm: Vec3): number {
   const firstRotation = mat3FromEulerXYZ(first.rx, first.ry, first.rz);
   const secondRotation = mat3FromEulerXYZ(second.rx, second.ry, second.rz);
@@ -321,7 +299,7 @@ function prepareScoringSlices(
   });
 }
 
-function normalizeScoringSlices(slices: readonly SvrReconstructionSlice[]): void {
+function normalizeScoringSlices(slices: readonly SvrReconstructionSlice[]): number {
   const sample: number[] = [];
   const totalPixels = slices.reduce((sum, slice) => sum + slice.pixels.length, 0);
   const stride = Math.max(1, Math.floor(totalPixels / 20_000));
@@ -338,13 +316,27 @@ function normalizeScoringSlices(slices: readonly SvrReconstructionSlice[]): void
   const lo = sample[Math.floor((sample.length - 1) * 0.01)] ?? 0;
   const hi = sample[Math.floor((sample.length - 1) * 0.99)] ?? lo;
   const inverseRange = hi > lo + 1e-9 ? 1 / (hi - lo) : 0;
+  index = 0;
+  let count = 0;
+  let mean = 0;
+  let squaredDeviation = 0;
   for (const slice of slices) {
     for (let pixel = 0; pixel < slice.pixels.length; pixel++) {
-      if (slice.valid && !slice.valid[pixel]) continue;
+      if (slice.valid && !slice.valid[pixel]) {
+        index++;
+        continue;
+      }
       const normalized = ((slice.pixels[pixel] ?? lo) - lo) * inverseRange;
       slice.pixels[pixel] = Math.max(0, Math.min(1, normalized));
+      const value = slice.pixels[pixel]!;
+      if (index++ % stride !== 0 || !Number.isFinite(value)) continue;
+      count++;
+      const delta = value - mean;
+      mean += delta / count;
+      squaredDeviation += delta * (value - mean);
     }
   }
+  return count > 1 ? squaredDeviation / count : 0;
 }
 
 function maskReferenceAnatomy(
@@ -1215,10 +1207,8 @@ export async function registerAndResliceLongitudinal(
         initialCenter,
       );
     }
-    normalizeScoringSlices(referencePrepared);
-    normalizeScoringSlices(targetPrepared);
-    const referenceIntensityVariance = sampledIntensityVariance(referencePrepared);
-    const targetIntensityVariance = sampledIntensityVariance(targetPrepared);
+    const referenceIntensityVariance = normalizeScoringSlices(referencePrepared);
+    const targetIntensityVariance = normalizeScoringSlices(targetPrepared);
     if (referenceIntensityVariance <= Number.EPSILON || targetIntensityVariance <= Number.EPSILON) {
       return failure(
         'insufficient-evidence',
