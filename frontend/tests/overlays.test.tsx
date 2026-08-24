@@ -37,6 +37,21 @@ describe('HelpModal', () => {
 });
 
 describe('AccessibleDialog', () => {
+  it('uses the shared instrument folio without blur and keeps a usable close target', () => {
+    render(
+      <AccessibleDialog title="Acquisition settings" description="Stored on this device." onClose={vi.fn()}>
+        <button type="button">Continue</button>
+      </AccessibleDialog>,
+    );
+
+    const dialog = screen.getByRole('dialog', { name: 'Acquisition settings' });
+    expect(dialog).toHaveClass('instrument-dialog', 'rounded-[4px]');
+    expect(dialog.parentElement).toHaveClass('instrument-dialog-backdrop');
+    expect(dialog.parentElement?.className).not.toContain('backdrop-blur');
+    expect(dialog).toHaveAccessibleDescription('Stored on this device.');
+    expect(screen.getByRole('button', { name: 'Close Acquisition settings' })).toHaveClass('min-h-11', 'min-w-11');
+  });
+
   it('traps keyboard focus, isolates the app, and restores the triggering control', () => {
     const appRoot = document.createElement('div');
     appRoot.id = 'root';

@@ -36,7 +36,11 @@ describe('ExportModal', () => {
       expect(screen.getByText(/2024-01-01/i)).toBeInTheDocument();
     });
 
+    expect(screen.getByText('COMPLETE BACKUP')).toBeInTheDocument();
+    expect(screen.getByText('EXAMINATIONS')).toBeInTheDocument();
+    expect(screen.getByText('2/2 selected')).toBeInTheDocument();
     const exportButton = screen.getByRole('button', { name: /^export$/i });
+    expect(exportButton).toHaveClass('min-h-11');
     fireEvent.click(exportButton);
 
     await waitFor(() => {

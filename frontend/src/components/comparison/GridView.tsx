@@ -4,7 +4,7 @@ import { Loader2 } from 'lucide-react';
 import { GridCell } from './GridCell';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
-import { DEFAULT_PANEL_SETTINGS } from '../../utils/constants';
+import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
 
 export type GridViewProps = {
   comboId: string;
@@ -56,19 +56,24 @@ export function GridView({
   const onMouseOverGrid = updateHoveredCellFromEvent;
 
   const onMouseLeaveGrid = useCallback(() => setHoveredGridCellDate(null), []);
+  const stackedStudies = gridCols === 1 && columns.length > 1;
 
   return (
-    <div className="flex-1 flex items-center justify-center">
+    <div
+      className={`relative flex min-h-0 min-w-0 flex-1 justify-center ${
+        stackedStudies ? 'items-start overflow-y-auto overflow-x-hidden py-6' : 'items-center overflow-hidden'
+      }`}
+    >
       {isAligning && alignmentProgress && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20">
+        <div className="absolute left-1/2 top-3 z-20 max-w-[calc(100%-2rem)] -translate-x-1/2">
           <div
             role="status"
             aria-live="polite"
-            className="flex items-center gap-3 px-4 py-3 rounded-xl bg-black/70 border border-white/10 shadow-xl"
+            className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
           >
-            <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
             <div className="min-w-0">
-              <div className="text-sm font-medium text-white">
+              <div className="text-sm font-medium text-[var(--text-primary)]">
                 {alignmentProgress.phase === 'capturing'
                   ? 'Preparing reference…'
                   : alignmentProgress.currentDate
@@ -76,7 +81,7 @@ export function GridView({
                     : 'Aligning…'}
               </div>
               {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
-                <div className="text-xs text-white/70">
+                <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
                   {alignmentProgress.slicesChecked} slices · Score {alignmentProgress.bestMiSoFar.toFixed(3)}
                 </div>
               ) : null}
@@ -84,7 +89,7 @@ export function GridView({
             <button
               type="button"
               onClick={abortAlignment}
-              className="shrink-0 px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs"
+              className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
               title="Cancel alignment"
             >
               Cancel
@@ -94,10 +99,10 @@ export function GridView({
       )}
 
       <div
-        className="grid gap-2"
+        className={`grid max-w-full gap-2 ${stackedStudies ? 'max-h-none' : 'max-h-full'}`}
         style={{
           gridTemplateColumns: `repeat(${gridCols}, ${gridCellSize}px)`,
-          gridAutoRows: `${gridCellSize}px`,
+          gridAutoRows: `${gridCellSize + GRID_CELL_METADATA_HEIGHT}px`,
         }}
         onMouseOver={onMouseOverGrid}
         onMouseMove={onMouseMoveGrid}

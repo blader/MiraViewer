@@ -1,0 +1,98 @@
+{
+  "route": "http://[::1]:43124/",
+  "syntheticFrameCount": 252,
+  "gridMetrics": {
+    "cells": [
+      {
+        "width": 389,
+        "height": 485,
+        "imageWidth": 387,
+        "imageHeight": 387
+      },
+      {
+        "width": 389,
+        "height": 485,
+        "imageWidth": 387,
+        "imageHeight": 387
+      },
+      {
+        "width": 389,
+        "height": 485,
+        "imageWidth": 387,
+        "imageHeight": 387
+      }
+    ],
+    "patient": "PatientSYNTHETIC^SVR^NO^PATIENT^DATA",
+    "horizontalOverflow": false
+  },
+  "overlayMetrics": {
+    "mountedCanvasCount": 2,
+    "blurredControls": 0
+  },
+  "readinessMetrics": {
+    "workspaceWidth": 1440,
+    "railWidth": 256,
+    "text": "RECONSTRUCTION\nSYNTHETIC^SVR^NO^PATIENT^DATA\nExamination Jan 10, 2035 · 12:00 PM\nT2 FLAIR\n3 orientations\n·\n84 acquired slices\nAcquired source sequences\nT2 FLAIR\n3 planes · 84 slices\nVerified acquired evidence\nAxial · 28 slices\n1.00 × 1.00 mm\nCoronal · 28 slices\n1.00 × 1.00 mm\nSagittal · 28 slices\n1.00 × 1.00 mm\nAcquired source data\n2.1 MiB\nConservative peak\n12 MiB\nRequested voxel spacing\n1.00 mm\nAdvanced SVR settings\nFocus box (optional)\nClear\nReconstruct volume\nVERIFIED SOUR"
+  },
+  "volumeMetrics": {
+    "canvasWidth": 1184,
+    "canvasHeight": 755,
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "alerts": [],
+    "hasAcceptedEvidence": true
+  },
+  "compact3dMetrics": {
+    "workspaceWidth": 1280,
+    "canvasWidth": 1024,
+    "imageRatio": 0.8,
+    "horizontalOverflow": false
+  },
+  "mobileMetrics": {
+    "viewport": 390,
+    "scrollWidth": 390,
+    "patientVisible": true,
+    "smallestVisibleControlHeight": 44,
+    "canvasCount": 3
+  },
+  "mobileDialogMetrics": {
+    "width": 366,
+    "height": 729,
+    "left": 12,
+    "right": 378,
+    "viewportWidth": 390,
+    "viewportHeight": 844,
+    "scrollWidth": 390,
+    "controls": [
+      {
+        "label": "Close Import scans",
+        "height": 44
+      },
+      {
+        "label": "Drop local DICOM files or an acquisition folder, or choose files",
+        "height": 104
+      },
+      {
+        "label": "Choose folder",
+        "height": 44
+      },
+      {
+        "label": "Choose files",
+        "height": 44
+      },
+      {
+        "label": "Choose backup / ZIP",
+        "height": 44
+      },
+      {
+        "label": "Cancel",
+        "height": 44
+      },
+      {
+        "label": "Import scans",
+        "height": 44
+      }
+    ]
+  },
+  "externalRequests": [],
+  "consoleErrors": []
+}

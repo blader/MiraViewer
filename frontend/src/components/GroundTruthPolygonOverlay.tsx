@@ -434,17 +434,17 @@ export function GroundTruthPolygonOverlay({
         Otherwise it visually overlaps the control bar in GridView/OverlayView.
       */}
       <div className="absolute top-12 left-2 z-20 flex items-center gap-2" data-gt-ui="true">
-        <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-xs flex items-center gap-2">
-          <Pencil className="w-3.5 h-3.5 text-cyan-300" />
+        <div className="flex items-center gap-2 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-primary)]">
+          <Pencil className="h-3.5 w-3.5 text-[var(--signal-metal)]" />
           GT Polygon
-          {busy ? <span className="text-white/70">…</span> : null}
+          {busy ? <span className="text-[var(--text-secondary)]">…</span> : null}
         </div>
 
         <button
           type="button"
           onClick={onRequestClose}
           aria-label="Close ground-truth polygon tool"
-          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded bg-black/70 border border-white/10 text-white/80 hover:text-white"
+          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
           title="Close ground truth tool"
         >
           <X className="w-4 h-4" />
@@ -457,10 +457,10 @@ export function GroundTruthPolygonOverlay({
           onClick={onUndo}
           aria-label="Undo last polygon point"
           disabled={!canUndo}
-          className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded border ${
+          className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] ${
             canUndo
-              ? 'bg-black/70 border-white/10 text-white/90 hover:text-white'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              : 'text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Undo last point (Backspace)"
         >
@@ -471,10 +471,10 @@ export function GroundTruthPolygonOverlay({
           type="button"
           onClick={onClear}
           disabled={!canClear}
-          className={`min-h-9 px-2 py-1.5 rounded border text-xs ${
+          className={`min-h-9 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1.5 text-xs ${
             canClear
-              ? 'bg-black/70 border-white/10 text-white/90 hover:text-white'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              : 'text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Clear draft polygon"
         >
@@ -485,10 +485,10 @@ export function GroundTruthPolygonOverlay({
           type="button"
           onClick={() => void onSave()}
           disabled={!canSave}
-          className={`min-h-9 px-2 py-1.5 rounded border text-xs flex items-center gap-1.5 ${
+          className={`flex min-h-9 items-center gap-1.5 rounded-[4px] border px-2 py-1.5 text-xs ${
             canSave
-              ? 'bg-cyan-500/80 border-cyan-300/30 text-white hover:bg-cyan-500'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'border-[var(--accent)] bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
+              : 'border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Save ground truth polygon"
         >
@@ -502,10 +502,8 @@ export function GroundTruthPolygonOverlay({
             onClick={() => void onDelete()}
             aria-label="Delete saved ground-truth polygon"
             disabled={busy}
-            className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded border ${
-              busy
-                ? 'bg-black/40 border-white/10 text-white/40'
-                : 'bg-red-500/20 border-red-300/20 text-red-200 hover:bg-red-500/30'
+            className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] ${
+              busy ? 'text-[var(--text-tertiary)] opacity-50' : 'text-[var(--danger)] hover:bg-[var(--bg-tertiary)]'
             }`}
             title="Delete saved ground truth"
           >
@@ -518,21 +516,21 @@ export function GroundTruthPolygonOverlay({
       {error ? (
         <div
           role="alert"
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-red-900/60 border border-red-400/30 text-red-100 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border-l-2 border-l-[var(--danger)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--danger)]"
           data-gt-ui="true"
         >
           {error}
         </div>
       ) : !isClosed ? (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-black/60 border border-white/10 text-white/80 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-gt-ui="true"
         >
           Click to add points. Click the first point (or press Enter) to close.
         </div>
       ) : (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-black/60 border border-white/10 text-white/80 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-gt-ui="true"
         >
           Polygon closed. Save to persist.

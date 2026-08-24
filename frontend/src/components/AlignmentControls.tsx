@@ -33,51 +33,42 @@ export function AlignmentControls({
   disabled = false,
 }: AlignmentControlsProps) {
   return (
-    <div className="flex items-center gap-2">
-      {/* Set Reference Button */}
+    <div className="flex flex-wrap items-center gap-2">
       <button
         type="button"
         onClick={isReferenceDate ? onClearReference : onSetReference}
         disabled={disabled || isCapturing || isAligning}
-        className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
+        aria-pressed={isReferenceDate}
+        className={`flex min-h-9 items-center gap-1.5 rounded-[4px] border px-2.5 text-xs font-medium transition-colors ${
           isReferenceDate
-            ? 'bg-[var(--accent)] text-white'
+            ? 'border-[var(--signal-metal)] bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
             : disabled || isCapturing || isAligning
-            ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
-            : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              ? 'border-[var(--border-color)] text-[var(--text-tertiary)]'
+              : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
         }`}
-        title={
-          isReferenceDate
-            ? 'Clear alignment reference'
-            : 'Set current view as alignment reference'
-        }
+        title={isReferenceDate ? 'Clear alignment reference' : 'Set current view as alignment reference'}
       >
-        {isCapturing ? (
-          <Loader2 className="w-3 h-3 animate-spin" />
-        ) : (
-          <Crosshair className="w-3 h-3" />
-        )}
-        {isReferenceDate ? 'Reference ✓' : 'Set Ref'}
+        {isCapturing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Crosshair className="w-3 h-3" />}
+        {isReferenceDate ? 'Reference' : 'Set reference'}
       </button>
 
-      {/* Auto-Align Button */}
       <button
         type="button"
         onClick={isAligning ? onAbortAlign : onAutoAlign}
         disabled={disabled || !hasReference || isCapturing}
-        className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
+        className={`flex min-h-9 items-center gap-1.5 rounded-[4px] border px-2.5 text-xs font-medium transition-colors ${
           isAligning
-            ? 'bg-amber-600 text-white hover:bg-amber-700'
+            ? 'border-[var(--warning)] text-[var(--warning)] hover:bg-[var(--bg-tertiary)]'
             : !hasReference || disabled || isCapturing
-            ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
-            : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              ? 'border-[var(--border-color)] text-[var(--text-tertiary)]'
+              : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
         }`}
         title={
           isAligning
             ? 'Cancel alignment'
             : !hasReference
-            ? 'Set a reference first'
-            : 'Auto-align all dates to reference'
+              ? 'Set a reference first'
+              : 'Auto-align all dates to reference'
         }
       >
         {isAligning ? (
@@ -93,10 +84,9 @@ export function AlignmentControls({
         )}
       </button>
 
-      {/* Progress indicator */}
       {isAligning && progress && (
-        <div className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]">
-          <Loader2 className="w-3 h-3 animate-spin text-[var(--accent)]" />
+        <div role="status" aria-live="polite" className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--signal-metal)]" />
           <span>
             {progress.currentDate
               ? `${formatDate(progress.currentDate)} (${progress.dateIndex + 1}/${progress.totalDates})`
@@ -119,7 +109,8 @@ export function AlignmentControls({
 export function ReferenceIndicator({ className = '' }: { className?: string }) {
   return (
     <span
-      className={`inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--accent)] text-white text-[8px] font-bold ${className}`}
+      aria-label="Alignment reference"
+      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-[2px] border border-[var(--signal-metal)] px-1 font-[family-name:var(--font-mono)] text-xs text-[var(--signal-metal)] ${className}`}
       title="Alignment reference"
     >
       R

@@ -15,7 +15,7 @@ interface ImageControlsProps {
 }
 
 const Divider = ({ wide = false }: { wide?: boolean }) => (
-  <div className={`w-px h-3 bg-[var(--border-color)] ${wide ? 'mx-3' : 'mx-2'}`} />
+  <div aria-hidden="true" className={`h-4 w-px shrink-0 bg-[var(--border-color)] ${wide ? 'mx-2' : 'mx-1'}`} />
 );
 
 export function ImageControls({
@@ -46,7 +46,7 @@ export function ImageControls({
   };
 
   return (
-    <div className="flex items-center">
+    <div className="flex shrink-0 items-center">
       {showSliceControl && (
         <>
           <StepControl
@@ -82,12 +82,8 @@ export function ImageControls({
         value={`${formatRotation(settings.rotation)}°`}
         valueWidth="w-12"
         tabular
-        onDecrement={() =>
-          onUpdate({ rotation: normalizeRotation(settings.rotation - CONTROL_LIMITS.ROTATION.STEP) })
-        }
-        onIncrement={() =>
-          onUpdate({ rotation: normalizeRotation(settings.rotation + CONTROL_LIMITS.ROTATION.STEP) })
-        }
+        onDecrement={() => onUpdate({ rotation: normalizeRotation(settings.rotation - CONTROL_LIMITS.ROTATION.STEP) })}
+        onIncrement={() => onUpdate({ rotation: normalizeRotation(settings.rotation + CONTROL_LIMITS.ROTATION.STEP) })}
       />
 
       <Divider />
@@ -132,19 +128,20 @@ export function ImageControls({
         type="button"
         onClick={toggleReverseSliceOrder}
         disabled={!canReverse}
-        className={`px-2 py-1 rounded-md text-[10px] font-medium flex items-center gap-1 transition-colors ${
+        aria-pressed={isReversed}
+        className={`flex min-h-8 items-center gap-1 rounded-[3px] px-2 text-xs font-medium transition-colors ${
           !canReverse
-            ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)]'
+            ? 'text-[var(--text-tertiary)]'
             : isReversed
-            ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
-            : 'bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
+              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
         }`}
         title={
           !canReverse
             ? 'Not enough slices to reverse'
             : isReversed
-            ? 'Slice order reversed (click to restore)'
-            : 'Reverse slice order'
+              ? 'Slice order reversed (click to restore)'
+              : 'Reverse slice order'
         }
       >
         <ArrowDownUp className="w-3 h-3" />

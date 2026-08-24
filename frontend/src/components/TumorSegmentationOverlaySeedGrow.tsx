@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Sparkles, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import type { NormalizedPoint, TumorGrow2dMeta, TumorPolygon, TumorThreshold, ViewerTransform } from '../db/schema';
 import type { DicomViewerHandle } from './DicomViewer';
 import {
@@ -1245,7 +1245,7 @@ export function TumorSegmentationOverlay({
           className="flex flex-col items-center gap-1 select-none"
           title="Surface tension: discourages thin peninsulas/leaks near strong edges"
         >
-          <div className="text-[10px] text-white/90 tabular-nums whitespace-nowrap bg-black/60 border border-white/10 px-1.5 py-0.5 rounded">
+          <div className="whitespace-nowrap rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-xs tabular-nums text-[var(--text-primary)]">
             tension {grow2dTuning.surfaceTension.toFixed(2)}
           </div>
           <div className="relative flex items-center justify-center" style={{ width: 18, height: sliderHeight }}>
@@ -1279,7 +1279,7 @@ export function TumorSegmentationOverlay({
           className="flex flex-col items-center gap-1 select-none"
           title={`Target area: ${aClamped} pixels${pixelAreaMm2 !== null ? ` (${(aClamped * pixelAreaMm2).toFixed(1)} mm²)` : ''}.${saving ? ' Saving…' : ''}`}
         >
-          <div className="text-[10px] text-white/90 tabular-nums whitespace-nowrap bg-black/60 border border-white/10 px-1.5 py-0.5 rounded">
+          <div className="whitespace-nowrap rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-xs tabular-nums text-[var(--text-primary)]">
             capPx {aClamped}
           </div>
           <div className="relative flex items-center justify-center" style={{ width: 18, height: sliderHeight }}>
@@ -1311,24 +1311,23 @@ export function TumorSegmentationOverlay({
     <div ref={containerRef} className="absolute inset-0 pointer-events-none" onContextMenu={(e) => e.preventDefault()}>
       {/* UI chrome */}
       <div className="absolute top-12 left-2 z-20 flex items-center gap-2 pointer-events-auto" data-tumor-ui="true">
-        <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-xs flex items-center gap-2">
-          <Sparkles className="w-3.5 h-3.5 text-[var(--accent)]" />
+        <div className="flex items-center gap-2 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-primary)]">
           Tumor
           {draftAreaPx !== null ? (
-            <span className="tabular-nums text-white/80" aria-label="Segmented area">
+            <span className="tabular-nums text-[var(--text-secondary)]" aria-label="Segmented area">
               {pixelAreaMm2 !== null
                 ? `${(draftAreaPx * pixelAreaMm2).toFixed(1)} mm²`
                 : `${draftAreaPx.toLocaleString()} px`}
             </span>
           ) : null}
-          {busy ? <span className="text-white/70">…</span> : null}
+          {busy ? <span className="text-[var(--text-secondary)]">…</span> : null}
         </div>
 
         <button
           type="button"
           onClick={onRequestClose}
           aria-label="Close tumor segmentation tool"
-          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded bg-black/70 border border-white/10 text-white/80 hover:text-white"
+          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
           title="Close tumor tool"
         >
           <X className="w-4 h-4" />
@@ -1338,14 +1337,14 @@ export function TumorSegmentationOverlay({
       {/* Error / status */}
       {error ? (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-red-900/60 border border-red-400/30 text-red-100 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border-l-2 border-l-[var(--danger)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--danger)]"
           data-tumor-ui="true"
         >
           {error}
         </div>
       ) : !draftSeed ? (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-black/60 border border-white/10 text-white/80 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-tumor-ui="true"
         >
           Drag a rectangle on the image, then click Segment. Drag the slider to grow/shrink.

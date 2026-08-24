@@ -6,7 +6,7 @@ interface HelpModalProps {
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded text-[11px] font-mono text-[var(--text-primary)]">
+    <kbd className="rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-primary)] px-1.5 py-0.5 font-[family-name:var(--font-mono)] text-[11px] text-[var(--text-primary)]">
       {children}
     </kbd>
   );
@@ -18,11 +18,13 @@ function Label({ children }: { children: React.ReactNode }) {
 
 export function HelpModal({ onClose }: HelpModalProps) {
   return (
-    <AccessibleDialog title="Help" onClose={onClose}>
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6 text-sm text-[var(--text-secondary)]">
+    <AccessibleDialog title="Help" description="Controls, comparison tools, and keyboard shortcuts." onClose={onClose}>
+      <div className="flex-1 space-y-6 overflow-y-auto px-5 py-6 text-sm leading-relaxed text-[var(--text-secondary)] sm:px-7">
         {/* Viewing */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">Viewing</h3>
+        <section className="border-b border-[var(--border-color)] pb-5">
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
+            Viewing
+          </h3>
           <ul className="space-y-2">
             <li>
               <Kbd>⌘</Kbd> + <Kbd>Scroll</Kbd> over an image to zoom.
@@ -40,8 +42,8 @@ export function HelpModal({ onClose }: HelpModalProps) {
         </section>
 
         {/* Comparing dates (Overlay mode) */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">
+        <section className="border-b border-[var(--border-color)] pb-5">
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
             Comparing dates (Overlay)
           </h3>
           <ul className="space-y-2">
@@ -61,8 +63,8 @@ export function HelpModal({ onClose }: HelpModalProps) {
         </section>
 
         {/* Alignment */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">
+        <section className="border-b border-[var(--border-color)] pb-5">
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
             Aligning scans
           </h3>
           <ul className="space-y-2">
@@ -85,8 +87,8 @@ export function HelpModal({ onClose }: HelpModalProps) {
         </section>
 
         {/* Image adjustments */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">
+        <section className="border-b border-[var(--border-color)] pb-5">
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
             Image adjustments
           </h3>
           <p className="mb-2">Hover over an image to reveal controls:</p>
@@ -108,8 +110,8 @@ export function HelpModal({ onClose }: HelpModalProps) {
         </section>
 
         {/* Slice loop */}
-        <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">
+        <section className="border-b border-[var(--border-color)] pb-5">
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
             Slice loop (bottom bar)
           </h3>
           <ul className="space-y-2">
@@ -127,7 +129,9 @@ export function HelpModal({ onClose }: HelpModalProps) {
 
         {/* Tips */}
         <section>
-          <h3 className="text-xs uppercase tracking-wide font-semibold text-[var(--text-tertiary)] mb-3">Tips</h3>
+          <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
+            Tips
+          </h3>
           <ul className="space-y-1.5 list-disc list-inside">
             <li>The global slice slider syncs anatomical position across all dates.</li>
             <li>All settings persist automatically in your browser.</li>

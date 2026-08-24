@@ -89,7 +89,7 @@ export function AccessibleDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      className="instrument-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-6"
       onClick={(event) => {
         if (closeOnBackdrop && event.target === event.currentTarget) onClose();
       }}
@@ -103,17 +103,20 @@ export function AccessibleDialog({
         tabIndex={-1}
         className={
           className ??
-          'flex max-h-[min(85vh,48rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl ' +
-            'border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-2xl'
+          'instrument-dialog flex max-h-[min(88vh,48rem)] w-full max-w-xl flex-col overflow-hidden ' +
+            'rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)]'
         }
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-[var(--border-color)] px-5 py-4">
+        <div className="flex min-h-[4.25rem] shrink-0 items-center justify-between gap-5 border-b border-[var(--border-color)] px-5 py-3 sm:px-7">
           <div className="min-w-0">
-            <h2 id={titleId} className="text-lg font-semibold text-[var(--text-primary)]">
+            <h2
+              id={titleId}
+              className="font-[family-name:var(--font-display)] text-[1.05rem] font-medium tracking-[-0.025em] text-[var(--text-primary)]"
+            >
               {title}
             </h2>
             {description ? (
-              <p id={descriptionId} className="mt-1 text-sm text-[var(--text-secondary)]">
+              <p id={descriptionId} className="mt-1 text-[0.8rem] leading-relaxed text-[var(--text-secondary)]">
                 {description}
               </p>
             ) : null}
@@ -123,9 +126,9 @@ export function AccessibleDialog({
             aria-label={`Close ${title}`}
             onClick={onClose}
             disabled={closeDisabled}
-            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[3px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <X className="h-5 w-5" aria-hidden="true" />
+            <X className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
         </div>
         {children}

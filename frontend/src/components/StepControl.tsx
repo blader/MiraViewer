@@ -31,11 +31,11 @@ export function StepControl({
   tabular = false,
 }: StepControlProps) {
   const chevronClass = accent
-    ? 'p-1 min-h-6 min-w-6 rounded hover:bg-[var(--bg-tertiary)] text-[var(--accent)] opacity-80 hover:opacity-100'
-    : 'p-1 min-h-6 min-w-6 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]';
+    ? 'inline-flex min-h-7 min-w-7 items-center justify-center rounded-[3px] p-1 text-[var(--signal-metal)] transition-colors hover:bg-[var(--bg-tertiary)]'
+    : 'inline-flex min-h-7 min-w-7 items-center justify-center rounded-[3px] p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]';
 
   const valueClass = [
-    'text-[var(--text-primary)] text-xs text-center font-mono',
+    'text-center font-[family-name:var(--font-mono)] text-xs text-[var(--text-primary)]',
     valueWidth,
     tabular ? 'tabular-nums' : '',
   ]
@@ -43,8 +43,8 @@ export function StepControl({
     .join(' ');
 
   return (
-    <div className="flex items-center gap-0.5" title={title}>
-      {label && <span className="text-[var(--text-secondary)] text-xs">{label}</span>}
+    <div className="flex shrink-0 items-center gap-0.5" title={title}>
+      {label && <span className="text-xs text-[var(--text-secondary)]">{label}</span>}
       <RepeatButton
         onAction={onDecrement}
         className={chevronClass}

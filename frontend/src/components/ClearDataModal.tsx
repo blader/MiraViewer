@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { AlertCircle, CheckCircle, Loader2, Trash2 } from 'lucide-react';
 import { deleteAllStoredMriData } from '../db/db';
 import { deleteModelCache } from '../utils/segmentation/onnx/modelCache';
@@ -28,6 +28,7 @@ function clearAppLocalStorage() {
 }
 
 export function ClearDataModal({ onClose, onReset }: ClearDataModalProps) {
+  const confirmationId = useId();
   const [status, setStatus] = useState<'idle' | 'clearing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [confirmText, setConfirmText] = useState('');
@@ -63,75 +64,87 @@ export function ClearDataModal({ onClose, onReset }: ClearDataModalProps) {
   return (
     <AccessibleDialog
       title="Clear all local data"
+      description="Permanently remove scans and saved work from this browser."
       onClose={() => {
         if (status !== 'clearing') onClose();
       }}
       closeOnBackdrop={status !== 'clearing'}
       closeOnEscape={status !== 'clearing'}
     >
-      <div className="p-6">
+      <div className="px-5 py-6 sm:px-7">
         {status === 'success' ? (
-          <div className="flex flex-col items-center justify-center py-6 text-center">
-            <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
-              <CheckCircle className="w-6 h-6" />
+          <div className="flex items-start gap-3 py-4" role="status">
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--evidence)]" aria-hidden="true" />
+            <div>
+              <h4 className="mb-1 font-medium text-[var(--text-primary)]">Data cleared</h4>
+              <p className="text-sm text-[var(--text-secondary)]">Reloading…</p>
             </div>
-            <h4 className="text-[var(--text-primary)] font-medium mb-1">Data cleared</h4>
-            <p className="text-sm text-[var(--text-secondary)]">Reloading…</p>
           </div>
         ) : (
           <>
-            <div className="text-sm text-[var(--text-secondary)] space-y-2">
-              <p>
-                This will permanently delete <span className="text-[var(--text-primary)]">all</span> MRI data stored on
-                this device for MiraViewer, including DICOM files, annotations, derived alignments, saved settings, and
-                uploaded models.
+            <div className="border-l-2 border-[var(--danger)] pl-4">
+              <p className="mb-2 font-[family-name:var(--font-mono)] text-[0.68rem] tracking-[0.13em] text-[var(--danger)]">
+                PERMANENT REMOVAL
               </p>
-              <p className="text-xs text-[var(--text-tertiary)]">
-                Tip: export a backup ZIP first if you might need this data later.
-              </p>
+              <div className="space-y-2 text-sm leading-relaxed text-[var(--text-secondary)]">
+                <p>
+                  This will permanently delete <span className="text-[var(--text-primary)]">all</span> MRI data stored
+                  on this device for MiraViewer, including DICOM files, annotations, derived alignments, saved settings,
+                  and uploaded models.
+                </p>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Export a backup ZIP first if you might need this data later.
+                </p>
+              </div>
             </div>
 
-            <div className="mt-4">
-              <label className="text-xs text-[var(--text-secondary)]">Type CLEAR to confirm</label>
+            <div className="mt-6">
+              <label htmlFor={confirmationId} className="text-xs text-[var(--text-secondary)]">
+                Type CLEAR to confirm
+              </label>
               <input
+                id={confirmationId}
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
                 disabled={status === 'clearing'}
-                className="mt-1 w-full px-3 py-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
+                className="mt-2 min-h-11 w-full rounded-[3px] border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 font-[family-name:var(--font-mono)] text-sm tracking-[0.08em] text-[var(--text-primary)]"
                 placeholder="CLEAR"
               />
             </div>
 
             {errorMessage && (
               <div
-                className={`mt-4 flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${status === 'error' ? 'text-red-400 bg-red-400/10' : 'text-[var(--text-secondary)] bg-[var(--bg-tertiary)]'}`}
+                role={status === 'error' ? 'alert' : 'status'}
+                className={`mt-4 flex items-center gap-2 rounded-[3px] border px-3 py-2 text-sm ${status === 'error' ? 'border-[var(--danger)] text-[var(--danger)]' : 'border-[var(--border-color)] bg-[var(--bg-tertiary)] text-[var(--text-secondary)]'}`}
               >
-                <AlertCircle className="w-4 h-4 shrink-0" />
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
                 {errorMessage}
               </div>
             )}
 
-            <div className="mt-6 flex justify-end gap-2">
+            <div className="mt-7 flex flex-wrap justify-end gap-2 border-t border-[var(--border-color)] pt-5">
               <button
+                type="button"
                 onClick={onClose}
                 disabled={status === 'clearing'}
-                className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] rounded-lg transition-colors"
+                className="min-h-11 rounded-[3px] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={handleClear}
                 disabled={!canClear}
-                className="px-4 py-2 text-sm bg-red-500 text-white hover:bg-red-600 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="flex min-h-11 items-center gap-2 rounded-[3px] bg-[var(--danger)] px-4 py-2 text-sm font-medium text-[var(--bg-primary)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {status === 'clearing' ? (
                   <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                     Clearing…
                   </>
                 ) : (
                   <>
-                    <Trash2 className="w-4 h-4" />
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
                     Clear all data
                   </>
                 )}

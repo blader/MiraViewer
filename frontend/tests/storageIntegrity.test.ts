@@ -739,6 +739,9 @@ describe('durable MRI storage and import contracts', () => {
 
     const onReset = vi.fn();
     render(createElement(ClearDataModal, { onClose: () => {}, onReset }));
+    expect(screen.getByText('PERMANENT REMOVAL')).toBeInTheDocument();
+    expect(screen.getByLabelText('Type CLEAR to confirm')).toBe(screen.getByPlaceholderText('CLEAR'));
+    expect(screen.getByRole('button', { name: /^clear all data$/i })).toBeDisabled();
     fireEvent.change(screen.getByPlaceholderText('CLEAR'), { target: { value: 'CLEAR' } });
     fireEvent.click(screen.getByRole('button', { name: /^clear all data$/i }));
 

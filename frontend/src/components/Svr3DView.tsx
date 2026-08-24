@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import cornerstone from 'cornerstone-core';
-import { ChevronLeft, ChevronRight, CircleAlert, Layers3, Loader2, ScanLine, ShieldCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
 import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
@@ -297,8 +297,8 @@ export function DicomRoiSlicePreview(props: {
     : { w: 1, h: 1 };
 
   return (
-    <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
-      <div className="relative w-full bg-black" style={{ aspectRatio: `${aspect.w} / ${aspect.h}` }}>
+    <div className="overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]">
+      <div className="relative w-full bg-[var(--bg-primary)]" style={{ aspectRatio: `${aspect.w} / ${aspect.h}` }}>
         <canvas
           ref={canvasRef}
           role="img"
@@ -308,7 +308,7 @@ export function DicomRoiSlicePreview(props: {
 
         {rect ? (
           <div
-            className="absolute border border-[var(--accent)] bg-[var(--accent)]/10"
+            className="absolute border border-[var(--signal-metal)]"
             style={{
               left: `${rect.left * 100}%`,
               top: `${rect.top * 100}%`,
@@ -319,11 +319,11 @@ export function DicomRoiSlicePreview(props: {
         ) : null}
 
         {renderError ? (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-red-300 bg-black/60 p-3 text-center">
+          <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-3 text-center text-xs text-[var(--danger)]">
             {renderError}
           </div>
         ) : !slice ? (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-white/70 bg-black/40 p-3 text-center">
+          <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-3 text-center text-xs text-[var(--text-secondary)]">
             Select a series to preview an input slice.
           </div>
         ) : null}
@@ -401,9 +401,9 @@ export function DicomRoiSlicePreview(props: {
         />
       </div>
 
-      <div className="px-2 py-1 text-xs text-white/70 bg-black/60 flex items-center justify-between">
+      <div className="flex items-center justify-between bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
         <span>Input slice</span>
-        {roiRect ? <span className="text-xs text-[var(--accent)]">Box</span> : null}
+        {roiRect ? <span className="text-xs text-[var(--signal-metal)]">Box</span> : null}
       </div>
     </div>
   );
@@ -1054,27 +1054,24 @@ export function Svr3DView({
   return (
     <section
       aria-label="MRI reconstruction workspace"
-      className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-secondary)]"
+      className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-primary)]"
     >
-      <header className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <Layers3 aria-hidden="true" className="h-4 w-4 shrink-0 text-[var(--accent)]" />
-          <span className="truncate text-sm font-medium text-[var(--text-primary)]">MRI reconstruction</span>
+      <header className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="shrink-0 text-xs font-medium tracking-[0.12em] text-[var(--text-tertiary)]">
+            RECONSTRUCTION
+          </span>
           {displayedPatient ? (
-            <span className="hidden truncate text-xs text-[var(--text-secondary)] sm:inline">{displayedPatient}</span>
+            <span className="truncate text-xs text-[var(--text-primary)]">{displayedPatient}</span>
           ) : null}
         </div>
         {displayedDate ? (
-          <span className="rounded-full border border-[var(--border-color)] px-2 py-1 text-xs text-[var(--text-secondary)]">
+          <span className="text-xs tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
             Examination {formatDate(displayedDate)}
           </span>
         ) : null}
-        {selectedGroup ? (
-          <span className="rounded-full bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
-            {selectedGroup.label}
-          </span>
-        ) : null}
-        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
+        {selectedGroup ? <span className="text-xs text-[var(--text-secondary)]">{selectedGroup.label}</span> : null}
+        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs tabular-nums text-[var(--text-secondary)]">
           {currentReadiness?.manifests.length ? (
             <>
               <span>
@@ -1089,20 +1086,22 @@ export function Svr3DView({
       </header>
       <div
         data-generation-open={!generationCollapsed}
-        className={`svr-generation-layout grid min-h-0 flex-1 gap-3 overflow-hidden p-3 ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(280px,340px)_minmax(0,1fr)]'}`}
+        className={`svr-generation-layout grid min-h-0 flex-1 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(208px,256px)_minmax(0,1fr)]'}`}
       >
         {generationCollapsed ? null : (
-          <aside aria-label="Reconstruction sources and quality" className="space-y-3 overflow-auto pr-1">
-            <div className="border border-[var(--border-color)] rounded-lg overflow-hidden">
-              <div className="flex items-center gap-2 bg-[var(--bg-tertiary)] px-3 py-2.5 text-xs font-medium text-[var(--text-primary)]">
-                <ScanLine aria-hidden="true" className="h-4 w-4 text-[var(--text-secondary)]" />
+          <aside
+            aria-label="Reconstruction sources and quality"
+            className="space-y-5 overflow-auto border-r border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5"
+          >
+            <div className="space-y-3">
+              <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">
                 Acquired source sequences
               </div>
               <div className="max-h-[260px] overflow-auto">
                 {sequenceGroupsForDate.length === 0 ? (
-                  <div className="p-3 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
+                  <div className="py-2 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
                 ) : (
-                  <div className="divide-y divide-[var(--border-color)]">
+                  <div className="space-y-1">
                     {sequenceGroupsForDate.map((g) => {
                       const checked = selectedSequenceKey === g.key;
 
@@ -1112,7 +1111,11 @@ export function Svr3DView({
                       return (
                         <label
                           key={g.key}
-                          className="flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] cursor-pointer"
+                          className={`flex min-h-10 cursor-pointer items-center gap-2 border-l-2 py-2 pl-2 pr-1 text-xs transition-colors hover:bg-[var(--bg-tertiary)] ${
+                            checked
+                              ? 'border-l-[var(--signal-metal)] text-[var(--text-primary)]'
+                              : 'border-l-transparent text-[var(--text-secondary)]'
+                          }`}
                         >
                           <input
                             type="radio"
@@ -1122,7 +1125,7 @@ export function Svr3DView({
                             onChange={() => setSelectedSequenceKey(g.key)}
                           />
                           <span className="flex-1 min-w-0 truncate">{g.label}</span>
-                          <span className="text-[var(--text-tertiary)] shrink-0">
+                          <span className="shrink-0 tabular-nums text-[var(--text-tertiary)]">
                             {planeLabel} · {sliceLabel}
                           </span>
                         </label>
@@ -1134,23 +1137,23 @@ export function Svr3DView({
             </div>
 
             {currentReadiness?.manifests.length ? (
-              <div className="overflow-hidden rounded-lg border border-[var(--border-color)]">
-                <div className="flex items-center gap-2 bg-[var(--bg-tertiary)] px-3 py-2.5 text-xs font-medium text-[var(--text-primary)]">
-                  <ShieldCheck aria-hidden="true" className="h-4 w-4 text-emerald-400" />
+              <div className="border-t border-[var(--border-color)] pt-4">
+                <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
+                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
                   Verified acquired evidence
                 </div>
-                <div className="space-y-2 px-3 py-2.5 text-xs">
+                <div className="mt-3 space-y-2.5 text-xs">
                   {currentReadiness.manifests.map((manifest, index) => {
                     const frame = manifest.frames[0]!;
                     const geometry = getSliceGeometryFromInstance(frame);
                     const series = selectedSeries[index];
 
                     return (
-                      <div key={manifest.seriesUid} className="flex items-start justify-between gap-2">
+                      <div key={manifest.seriesUid} className="flex flex-col gap-1">
                         <span className="min-w-0 truncate text-[var(--text-primary)]">
                           {series?.plane ?? 'Acquired'} · {manifest.frames.length} slices
                         </span>
-                        <span className="shrink-0 tabular-nums text-[var(--text-secondary)]">
+                        <span className="shrink-0 tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
                           {geometry.rowSpacingMm.toFixed(2)} × {geometry.colSpacingMm.toFixed(2)} mm
                         </span>
                       </div>
@@ -1165,7 +1168,7 @@ export function Svr3DView({
                       <div className="mt-1 flex items-center justify-between gap-2">
                         <span>Conservative peak</span>
                         <span
-                          className={`tabular-nums ${exceedsMemoryBudget ? 'text-amber-300' : 'text-[var(--text-primary)]'}`}
+                          className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
                         >
                           {Math.ceil(estimatedPeakMemoryMiB)} MiB
                         </span>
@@ -1180,8 +1183,8 @@ export function Svr3DView({
               </div>
             ) : null}
 
-            <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
-              <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">
+            <details className="border-t border-[var(--border-color)] pt-3">
+              <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                 Advanced SVR settings
               </summary>
 
@@ -1269,8 +1272,8 @@ export function Svr3DView({
               </div>
             </details>
 
-            <details className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2">
-              <summary className="cursor-pointer select-none text-xs text-[var(--text-secondary)]">
+            <details className="border-t border-[var(--border-color)] pt-3">
+              <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
                 Focus box (optional)
               </summary>
               <div className="mt-2 space-y-2">
@@ -1295,9 +1298,13 @@ export function Svr3DView({
                 </div>
 
                 {roiSeriesSopUidsError ? (
-                  <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSeriesSopUidsError}</div>
+                  <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
+                    {roiSeriesSopUidsError}
+                  </div>
                 ) : roiSliceGeomError ? (
-                  <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg">{roiSliceGeomError}</div>
+                  <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
+                    {roiSliceGeomError}
+                  </div>
                 ) : null}
 
                 <div className="flex items-center justify-between gap-2">
@@ -1355,7 +1362,7 @@ export function Svr3DView({
                       roiDragRef.current = null;
                       setRoiWorld(null);
                     }}
-                    className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                   >
                     Clear box
                   </button>
@@ -1375,7 +1382,7 @@ export function Svr3DView({
               </div>
             </details>
 
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
               <button
                 type="button"
                 disabled={isRunning}
@@ -1387,7 +1394,7 @@ export function Svr3DView({
                   setRoiWorld(null);
                   clear();
                 }}
-                className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
               >
                 Clear
               </button>
@@ -1397,7 +1404,7 @@ export function Svr3DView({
                   <button
                     type="button"
                     onClick={cancel}
-                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white"
+                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-tertiary)]"
                   >
                     Cancel
                   </button>
@@ -1408,7 +1415,7 @@ export function Svr3DView({
                   disabled={!canRun}
                   onClick={startReconstruction}
                   aria-describedby={sourceReadinessMessage ? 'svr-source-readiness' : undefined}
-                  className="min-h-9 rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent)]/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="min-h-9 rounded-[4px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
                 </button>
@@ -1419,10 +1426,10 @@ export function Svr3DView({
               <div
                 id="svr-source-readiness"
                 role={currentReadiness?.error ? 'alert' : 'status'}
-                className={`rounded-lg border px-3 py-2 text-xs leading-relaxed ${
+                className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
                   currentReadiness?.error || exceedsMemoryBudget
-                    ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-                    : 'border-[var(--border-color)] text-[var(--text-secondary)]'
+                    ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
+                    : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
                 }`}
               >
                 {sourceReadinessMessage}
@@ -1436,34 +1443,36 @@ export function Svr3DView({
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={percent}
-                className="mt-2"
+                className="border-t border-[var(--border-color)] pt-3"
               >
                 <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                  <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
                   <span className="truncate">{progressMessage}</span>
                   <span className="ml-auto tabular-nums">{percent}%</span>
                 </div>
-                <div className="mt-1 h-2 rounded bg-[var(--bg-primary)] overflow-hidden">
-                  <div className="h-2 bg-[var(--accent)]" style={{ width: `${percent}%` }} />
+                <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
+                  <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
                 </div>
               </div>
             ) : null}
 
             {error ? (
-              <div role="alert" className="mt-2 rounded-lg bg-red-400/10 px-3 py-2 text-xs text-red-300">
+              <div
+                role="alert"
+                className="border-l-2 border-l-[var(--danger)] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]"
+              >
                 {error}
               </div>
             ) : null}
 
             {acceptedResult ? (
-              <div className="rounded-lg border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)]">
+              <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
                 <div className="font-medium text-[var(--text-primary)]">Accepted reconstruction</div>
                 <div className="mt-1 tabular-nums">
                   {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]}{' '}
                   voxels · {acceptedResult.volume.voxelSizeMm[0].toFixed(2)} mm
                 </div>
                 {acceptedResult.volume.observedSupport ? (
-                  <div className="mt-1 text-emerald-300">
+                  <div className="mt-1 text-[var(--evidence)]">
                     {typeof acceptedResult.volume.supportedVoxelCount === 'number'
                       ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
                       : 'Acquired-voxel support preserved'}
@@ -1476,11 +1485,11 @@ export function Svr3DView({
               </div>
             ) : null}
 
-            <div ref={sliceInspectorPortalRef} />
+            <div ref={sliceInspectorPortalRef} className="border-t border-[var(--border-color)] pt-4" />
           </aside>
         )}
 
-        <div className="relative min-h-0 overflow-hidden">
+        <div className="relative min-h-0 overflow-hidden bg-[var(--bg-primary)]">
           <button
             type="button"
             onClick={() => setGenerationCollapsed((v) => !v)}
@@ -1490,7 +1499,7 @@ export function Svr3DView({
                 : 'Hide reconstruction sources and controls'
             }
             aria-expanded={!generationCollapsed}
-            className="absolute left-2 top-2 z-30 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full border border-white/10 bg-black/60 text-white/80 hover:bg-black/80"
+            className="absolute left-3 top-3 z-30 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
             title={generationCollapsed ? 'Show SVR controls' : 'Hide SVR controls'}
           >
             {generationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
@@ -1504,29 +1513,40 @@ export function Svr3DView({
               sliceInspectorPortalTarget={generationCollapsed ? undefined : sliceInspectorPortalTarget}
             />
           ) : (
-            <div className="flex h-full min-h-0 items-center justify-center rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-6 py-10">
+            <div className="flex h-full min-h-0 items-center justify-center bg-[var(--bg-primary)] px-6 py-10">
               <div className="w-full max-w-lg text-center">
                 {isRunning ? (
                   <>
-                    <Loader2 aria-hidden="true" className="mx-auto h-8 w-8 animate-spin text-[var(--accent)]" />
-                    <h2 className="mt-5 text-base font-medium text-[var(--text-primary)]">
+                    <div className="text-xs tracking-[0.14em] text-[var(--signal-metal)]">ACQUIRED EVIDENCE</div>
+                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
                       Reconstructing supported anatomy
                     </h2>
                     <p aria-live="polite" className="mt-2 text-sm text-[var(--text-secondary)]">
                       {progressMessage || 'Validating acquired MRI source images…'}
                     </p>
                     <p className="mt-2 text-xs tabular-nums text-[var(--text-tertiary)]">
-                      {percent}% · {sourceFrameCount} acquired slices
+                      {progress ? `${percent}% · ` : ''}
+                      {sourceFrameCount} acquired slices
                     </p>
                   </>
                 ) : (
                   <>
-                    {currentReadiness?.error || exceedsMemoryBudget ? (
-                      <CircleAlert aria-hidden="true" className="mx-auto h-8 w-8 text-amber-300" />
-                    ) : (
-                      <Layers3 aria-hidden="true" className="mx-auto h-8 w-8 text-[var(--accent)]" />
-                    )}
-                    <h2 className="mt-5 text-base font-medium text-[var(--text-primary)]">
+                    <div
+                      className={`text-xs tracking-[0.14em] ${
+                        currentReadiness?.error || exceedsMemoryBudget
+                          ? 'text-[var(--warning)]'
+                          : canRun
+                            ? 'text-[var(--evidence)]'
+                            : 'text-[var(--text-tertiary)]'
+                      }`}
+                    >
+                      {currentReadiness?.error || exceedsMemoryBudget
+                        ? 'SOURCE REVIEW REQUIRED'
+                        : canRun
+                          ? 'VERIFIED SOURCE EVIDENCE'
+                          : 'ACQUIRED SOURCE EVIDENCE'}
+                    </div>
+                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
                       {currentReadiness?.error || exceedsMemoryBudget
                         ? 'This acquisition cannot be reconstructed safely'
                         : selectedSeries.length === 1
@@ -1549,15 +1569,15 @@ export function Svr3DView({
                       <button
                         type="button"
                         onClick={() => setShowAcquiredStack((current) => !current)}
-                        className="mt-5 min-h-9 rounded-lg border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--text-primary)] hover:border-[var(--accent)]"
+                        className="mt-6 min-h-10 rounded-[4px] border border-[var(--border-color)] px-4 py-2 text-xs font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--signal-metal)]"
                       >
                         {showAcquiredStack ? 'Hide acquired stack' : 'Inspect acquired stack'}
                       </button>
-                    ) : canRun ? (
+                    ) : canRun && generationCollapsed ? (
                       <button
                         type="button"
                         onClick={startReconstruction}
-                        className="mt-5 min-h-9 rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white hover:bg-[var(--accent)]/90"
+                        className="mt-6 min-h-10 rounded-[4px] bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
                       >
                         Reconstruct volume
                       </button>

@@ -42,6 +42,9 @@ describe('DragRectActionOverlay', () => {
     fireEvent.pointerMove(overlay, { pointerId: 1, isPrimary: true, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(overlay, { pointerId: 1, button: 0, isPrimary: true, clientX: 200, clientY: 200 });
 
+    expect(container.querySelector('[data-selection-outline="true"]')).toHaveClass('bg-transparent');
+    expect(screen.getByRole('button', { name: 'Clear selection' })).toHaveClass('min-h-11', 'min-w-11');
+    expect(screen.getByRole('button', { name: 'Align All' })).toHaveClass('min-h-11');
     fireEvent.click(screen.getByRole('button', { name: 'Align All' }));
 
     expect(onConfirm).toHaveBeenCalledTimes(1);

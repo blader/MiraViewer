@@ -2,19 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { AlignmentReference, ExclusionMask, SequenceCombo, SeriesRef } from '../types/api';
 import { formatDate } from '../utils/format';
 import { usePersistedState } from '../hooks/usePersistedState';
-import {
-  Brain,
-  Layers,
-  LayoutGrid,
-  Play,
-  Pause,
-  Upload,
-  Download,
-  Trash2,
-  MoreVertical,
-  HelpCircle,
-  Box,
-} from 'lucide-react';
+import { Play, Pause, Upload, Download, Trash2, MoreVertical, HelpCircle } from 'lucide-react';
 import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
 import { ExportModal } from './ExportModal';
@@ -42,9 +30,11 @@ import { isOutputGridMode, type OutputGridMode } from '../utils/outputPlaneGrid'
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
 function getOverlayViewerSize(gridSize: { width: number; height: number }) {
-  // Fill available space while leaving room for the top strip.
+  if (gridSize.width <= 0 || gridSize.height <= 0) return 300;
+
+  // Keep image geometry inside the measured pane, including its external caption rails.
   const maxSize = Math.min(Math.max(0, gridSize.width - 48), Math.max(0, gridSize.height - 120));
-  return Math.max(300, maxSize);
+  return Math.max(1, maxSize);
 }
 
 type PersistedComparisonUiState = {
@@ -55,7 +45,7 @@ type PersistedComparisonUiState = {
 
 const DEFAULT_COMPARISON_UI_STATE: PersistedComparisonUiState = {
   sidebarOpen: true,
-  rightSidebarOpen: true,
+  rightSidebarOpen: false,
   alignmentOutputMode: 'native',
 };
 
@@ -95,21 +85,43 @@ export function ComparisonMatrix() {
   );
   const { sidebarOpen, rightSidebarOpen, alignmentOutputMode } = uiState;
   const setSidebarOpen = useCallback(
-    (v: boolean | ((prev: boolean) => boolean)) =>
+    (value: boolean | ((previous: boolean) => boolean)) => {
+      const nextOpen = typeof value === 'function' ? value(uiState.sidebarOpen) : value;
       setUiState({
         ...uiState,
-        sidebarOpen: typeof v === 'function' ? v(uiState.sidebarOpen) : v,
-      }),
+        sidebarOpen: nextOpen,
+        rightSidebarOpen: nextOpen && window.innerWidth < 1440 ? false : uiState.rightSidebarOpen,
+      });
+    },
     [setUiState, uiState],
   );
   const setRightSidebarOpen = useCallback(
-    (v: boolean | ((prev: boolean) => boolean)) =>
+    (value: boolean | ((previous: boolean) => boolean)) => {
+      const nextOpen = typeof value === 'function' ? value(uiState.rightSidebarOpen) : value;
       setUiState({
         ...uiState,
-        rightSidebarOpen: typeof v === 'function' ? v(uiState.rightSidebarOpen) : v,
-      }),
+        sidebarOpen: nextOpen && window.innerWidth < 1440 ? false : uiState.sidebarOpen,
+        rightSidebarOpen: nextOpen,
+      });
+    },
     [setUiState, uiState],
   );
+  const compactNavigationInitialized = useRef(false);
+
+  useEffect(() => {
+    const closeCompactNavigation = () => {
+      if (window.innerWidth > 760 || (!uiState.sidebarOpen && !uiState.rightSidebarOpen)) return;
+      setUiState({ ...uiState, sidebarOpen: false, rightSidebarOpen: false });
+    };
+
+    if (!compactNavigationInitialized.current) {
+      compactNavigationInitialized.current = true;
+      closeCompactNavigation();
+    }
+
+    window.addEventListener('resize', closeCompactNavigation);
+    return () => window.removeEventListener('resize', closeCompactNavigation);
+  }, [setUiState, uiState]);
 
   const [helpOpen, setHelpOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -167,6 +179,24 @@ export function ComparisonMatrix() {
   } = useAutoAlign();
 
   const interactionBlocked = helpOpen || uploadModalOpen || exportModalOpen || clearDataModalOpen || isAligning;
+
+  useEffect(() => {
+    if (interactionBlocked || headerMenuOpen || (!sidebarOpen && !rightSidebarOpen)) return;
+
+    const closeDrawerOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || window.innerWidth >= 1440) return;
+      const closeFilters = sidebarOpen && window.innerWidth <= 1024;
+      if (!closeFilters && !rightSidebarOpen) return;
+      setUiState({
+        ...uiState,
+        sidebarOpen: closeFilters ? false : sidebarOpen,
+        rightSidebarOpen: false,
+      });
+    };
+
+    window.addEventListener('keydown', closeDrawerOnEscape);
+    return () => window.removeEventListener('keydown', closeDrawerOnEscape);
+  }, [headerMenuOpen, interactionBlocked, rightSidebarOpen, setUiState, sidebarOpen, uiState]);
 
   useApplyAlignmentResults({
     isAligning,
@@ -484,10 +514,10 @@ export function ComparisonMatrix() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-[var(--bg-primary)]">
-        <div className="flex flex-col items-center gap-4">
-          <Brain className="w-8 h-8 text-[var(--accent)] animate-pulse" />
-          <p className="text-[var(--text-secondary)]">Loading comparison data…</p>
+      <div className="instrument-shell instrument-loading" role="status" aria-live="polite">
+        <div className="instrument-loading-inner">
+          <p className="instrument-eyebrow">MiraViewer</p>
+          <p>Loading saved scans…</p>
         </div>
       </div>
     );
@@ -496,11 +526,19 @@ export function ComparisonMatrix() {
   const hasData = data && selectedPlane && selectedSeqId;
 
   if (error) {
-    return <div className="h-screen flex items-center justify-center text-[var(--text-secondary)]">{error}</div>;
+    return (
+      <div className="instrument-shell instrument-loading" role="alert">
+        <div className="instrument-loading-inner">{error}</div>
+      </div>
+    );
   }
 
+  const selectedSequence = data?.sequences.find((sequence) => sequence.id === selectedSeqId);
+  const activeExaminationDate = overlayDisplayedDate ?? columns.find((column) => column.ref)?.date ?? null;
+  const showStudyFilmstrip = viewMode === 'overlay' || viewMode === 'svr3d';
+
   return (
-    <div className="h-screen flex flex-col">
+    <div className="instrument-shell flex flex-col">
       {/* Help Modal */}
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
 
@@ -516,50 +554,47 @@ export function ComparisonMatrix() {
         <ClearDataModal onClose={() => setClearDataModalOpen(false)} onReset={() => window.location.reload()} />
       )}
 
-      {/* Header */}
-      <div className="px-4 py-3 bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-3 shrink-0">
-            <Brain className="w-6 h-6 text-[var(--accent)]" />
-            <h1 className="text-lg font-semibold">MiraViewer</h1>
+      <header className="instrument-header">
+        <div className="instrument-identity-rail">
+          <h1 className="instrument-wordmark">
+            Mira<span>Viewer</span>
+          </h1>
 
-            {/* View mode toggle (left side) */}
-            {hasData ? (
-              <div className="flex items-center bg-[var(--bg-primary)] rounded-lg border border-[var(--border-color)]">
-                <button
-                  onClick={() => setViewMode('grid')}
-                  aria-pressed={viewMode === 'grid'}
-                  className={`px-3 py-1.5 text-xs rounded-l-lg transition-colors flex items-center gap-1.5 ${viewMode === 'grid' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-                  title="Grid view"
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" />
-                  Grid
-                </button>
-                <button
-                  onClick={() => setViewMode('overlay')}
-                  aria-pressed={viewMode === 'overlay'}
-                  className={`px-3 py-1.5 text-xs transition-colors flex items-center gap-1.5 ${viewMode === 'overlay' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-                  title="Overlay view - toggle between dates"
-                >
-                  <Layers className="w-3.5 h-3.5" />
-                  Overlay
-                </button>
-                <button
-                  onClick={() => setViewMode('svr3d')}
-                  aria-pressed={viewMode === 'svr3d'}
-                  className={`px-3 py-1.5 text-xs rounded-r-lg transition-colors flex items-center gap-1.5 ${viewMode === 'svr3d' ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
-                  title="SVR 3D view"
-                >
-                  <Box className="w-3.5 h-3.5" />
-                  3D
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {hasData ? (
+            <nav className="instrument-mode-nav" aria-label="Viewing mode">
+              <button
+                type="button"
+                onClick={() => setViewMode('grid')}
+                aria-pressed={viewMode === 'grid'}
+                className="instrument-mode-tab"
+                title="Grid view"
+              >
+                Compare
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('overlay')}
+                aria-pressed={viewMode === 'overlay'}
+                className="instrument-mode-tab"
+                title="Overlay view - toggle between dates"
+              >
+                Overlay
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('svr3d')}
+                aria-pressed={viewMode === 'svr3d'}
+                className="instrument-mode-tab"
+                title="SVR 3D view"
+              >
+                3D
+              </button>
+            </nav>
+          ) : null}
 
           {(data?.patients?.length ?? 0) > 1 ? (
-            <label className="flex min-w-0 items-center gap-2 text-xs text-[var(--text-secondary)]">
-              <span className="shrink-0">Patient</span>
+            <label className="instrument-patient">
+              <span className="instrument-patient-label">Patient</span>
               <select
                 aria-label="Selected patient"
                 value={data?.selected_patient_key ?? ''}
@@ -569,7 +604,7 @@ export function ComparisonMatrix() {
                   clearAlignmentState();
                   void selectPatient(event.target.value);
                 }}
-                className="max-w-52 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-1.5 text-[var(--text-primary)]"
+                className="instrument-patient-select"
               >
                 {data?.patients?.map((patient) => (
                   <option key={patient.key} value={patient.key}>
@@ -579,122 +614,65 @@ export function ComparisonMatrix() {
               </select>
             </label>
           ) : (data?.patients?.length ?? 0) === 1 ? (
-            <div className="min-w-0 text-xs text-[var(--text-secondary)]" aria-label="Selected patient">
-              <span className="mr-2">Patient</span>
-              <span className="font-medium text-[var(--text-primary)]">
+            <div className="instrument-patient" aria-label="Selected patient">
+              <span className="instrument-patient-label">Patient</span>
+              <span className="instrument-patient-value">
                 {data?.patients?.[0]?.patient_name || data?.patients?.[0]?.patient_id || 'Unknown patient'}
               </span>
             </div>
           ) : null}
 
-          {/* Overlay playback/date controls (inline with header) */}
-          <div className="flex items-center gap-4 flex-1 min-w-0">
-            {viewMode === 'overlay' && overlayColumns.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setIsPlaying(!isPlaying)}
-                  disabled={overlayColumns.length < 2}
-                  className={`p-2 rounded-lg transition-colors focus:outline-none ${
-                    overlayColumns.length < 2
-                      ? 'bg-[var(--bg-primary)] text-[var(--text-tertiary)] cursor-not-allowed'
-                      : isPlaying
-                        ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                  }`}
-                  title={isPlaying ? 'Pause' : 'Play'}
-                  aria-label={isPlaying ? 'Pause comparison playback' : 'Start comparison playback'}
-                >
-                  {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                </button>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-xs text-[var(--text-secondary)]">Speed:</span>
-                  <select
-                    aria-label="Comparison playback speed"
-                    value={playSpeed}
-                    onChange={(e) => setPlaySpeed(parseInt(e.target.value, 10))}
-                    disabled={overlayColumns.length < 2}
-                    className={`px-2 py-1 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] ${
-                      overlayColumns.length < 2 ? 'opacity-50 cursor-not-allowed' : ''
-                    }`}
-                  >
-                    {OVERLAY.PLAY_SPEEDS.map((s) => (
-                      <option key={s.value} value={s.value}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="w-px h-6 bg-[var(--border-color)] shrink-0" />
-
-                <div className="flex items-center gap-1 flex-1 overflow-x-auto min-w-0 translate-y-1 pb-1">
-                  {overlayColumns.map((col, idx) => (
-                    <button
-                      key={col.date}
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        setOverlayDateIndex(idx);
-                        setIsPlaying(false);
-                      }}
-                      aria-current={idx === overlayDateIndex ? 'true' : undefined}
-                      className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap transition-colors flex items-center gap-2 focus:outline-none ${
-                        idx === overlayDateIndex
-                          ? 'bg-[var(--accent)] text-white'
-                          : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                      }`}
-                    >
-                      <span className="w-5 h-5 rounded bg-black/20 flex items-center justify-center text-xs font-mono">
-                        {idx + 1}
-                      </span>
-                      {formatDate(col.date)}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="instrument-actions">
+            {hasData ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setHeaderMenuOpen(false);
+                  setUploadModalOpen(true);
+                }}
+                className="instrument-header-action"
+                aria-label="Import additional scans"
+              >
+                <Upload className="h-4 w-4" aria-hidden="true" />
+                <span>Import</span>
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => {
                 setHeaderMenuOpen(false);
                 setHelpOpen(true);
               }}
-              className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="instrument-icon-button"
               title="Help & shortcuts"
               aria-label="Help and keyboard shortcuts"
             >
-              <HelpCircle className="w-5 h-5" />
+              <HelpCircle className="h-[18px] w-[18px]" aria-hidden="true" />
             </button>
 
-            {/* Header menu (Import/Export/Delete) */}
             <div className="relative" ref={headerMenuRef}>
               <button
                 type="button"
-                onClick={() => setHeaderMenuOpen((v) => !v)}
-                className="p-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                onClick={() => setHeaderMenuOpen((value) => !value)}
+                className="instrument-icon-button"
                 title="Menu"
                 aria-label="Application menu"
                 aria-expanded={headerMenuOpen}
               >
-                <MoreVertical className="w-5 h-5" />
+                <MoreVertical className="h-[18px] w-[18px]" aria-hidden="true" />
               </button>
 
-              {headerMenuOpen && (
-                <div className="absolute right-0 mt-2 w-56 rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] shadow-xl overflow-hidden z-50">
+              {headerMenuOpen ? (
+                <div className="instrument-menu">
                   <button
                     type="button"
                     onClick={() => {
                       setHeaderMenuOpen(false);
                       setUploadModalOpen(true);
                     }}
-                    className="w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
+                    className="instrument-menu-item"
                   >
-                    <Upload className="w-4 h-4" />
+                    <Upload className="h-4 w-4" aria-hidden="true" />
                     Import scans
                   </button>
                   {hasData ? (
@@ -704,9 +682,9 @@ export function ComparisonMatrix() {
                         setHeaderMenuOpen(false);
                         setExportModalOpen(true);
                       }}
-                      className="w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
+                      className="instrument-menu-item"
                     >
-                      <Download className="w-4 h-4" />
+                      <Download className="h-4 w-4" aria-hidden="true" />
                       Export backup (ZIP)
                     </button>
                   ) : null}
@@ -717,18 +695,95 @@ export function ComparisonMatrix() {
                         setHeaderMenuOpen(false);
                         setClearDataModalOpen(true);
                       }}
-                      className="w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-[var(--bg-tertiary)] text-red-400"
+                      className="instrument-menu-item"
+                      data-destructive="true"
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
                       Delete all local data
                     </button>
                   ) : null}
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
-      </div>
+
+        {hasData ? (
+          <div className="instrument-context-rail" aria-label="Selected examination and image context">
+            <div className="instrument-context-summary">
+              <span className="instrument-context-value">{selectedPlane}</span>
+              {selectedSequence ? (
+                <>
+                  <span className="instrument-context-separator" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="instrument-context-value">{formatSequenceLabel(selectedSequence)}</span>
+                </>
+              ) : null}
+              {activeExaminationDate && !showStudyFilmstrip ? (
+                <>
+                  <span className="instrument-context-separator" data-secondary="true" aria-hidden="true">
+                    ·
+                  </span>
+                  <span data-secondary="true">{formatDate(activeExaminationDate)}</span>
+                </>
+              ) : null}
+            </div>
+
+            {viewMode === 'overlay' && overlayColumns.length > 0 ? (
+              <div className="instrument-context-playback">
+                <button
+                  type="button"
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  disabled={overlayColumns.length < 2}
+                  className="instrument-icon-button disabled:cursor-not-allowed disabled:opacity-50"
+                  title={isPlaying ? 'Pause' : 'Play'}
+                  aria-label={isPlaying ? 'Pause comparison playback' : 'Start comparison playback'}
+                >
+                  {isPlaying ? (
+                    <Pause className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Play className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </button>
+                <select
+                  aria-label="Comparison playback speed"
+                  value={playSpeed}
+                  onChange={(event) => setPlaySpeed(parseInt(event.target.value, 10))}
+                  disabled={overlayColumns.length < 2}
+                  className="disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {OVERLAY.PLAY_SPEEDS.map((speed) => (
+                    <option key={speed.value} value={speed.value}>
+                      {speed.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
+            {showStudyFilmstrip && overlayColumns.length > 0 ? (
+              <nav className="instrument-study-filmstrip" aria-label="Available examinations">
+                {overlayColumns.map((column, index) => (
+                  <button
+                    key={column.date}
+                    type="button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      setOverlayDateIndex(index);
+                      setIsPlaying(false);
+                    }}
+                    aria-current={index === overlayDateIndex ? 'true' : undefined}
+                    className="instrument-study-button"
+                  >
+                    {formatDate(column.date)}
+                  </button>
+                ))}
+              </nav>
+            ) : null}
+          </div>
+        ) : null}
+      </header>
 
       {/* Main area with sidebar */}
       <div className="flex-1 flex overflow-hidden relative">
@@ -750,18 +805,15 @@ export function ComparisonMatrix() {
         ) : null}
 
         {/* Main content area - Grid / Overlay / SVR 3D */}
-        <div ref={setCenterPaneRef} className="flex-1 overflow-hidden bg-black flex flex-col relative">
+        <div ref={setCenterPaneRef} className="instrument-stage relative flex min-w-0 flex-1 flex-col overflow-hidden">
           {persistenceError ? (
             <div
               role="alert"
-              className="absolute top-2 left-2 right-2 z-50 flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-950/90 px-3 py-2 text-sm text-red-100"
+              className="instrument-notice flex items-center justify-between gap-3"
+              data-severity="error"
             >
               <span>Changes could not be saved: {persistenceError}</span>
-              <button
-                type="button"
-                className="rounded border border-red-500/30 px-2 py-1"
-                onClick={clearPersistenceError}
-              >
+              <button type="button" className="instrument-notice-button" onClick={clearPersistenceError}>
                 Dismiss
               </button>
             </div>
@@ -769,16 +821,13 @@ export function ComparisonMatrix() {
           {alignmentError && !isAligning ? (
             <div
               role="alert"
-              className="absolute top-2 left-2 right-2 z-50 flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-red-950/80 border border-red-500/30 text-red-100 text-sm"
+              className="instrument-notice flex items-center justify-between gap-3"
+              data-severity="error"
             >
               <div className="min-w-0 truncate">
                 <span className="font-medium">Alignment failed:</span> {alignmentError}
               </div>
-              <button
-                type="button"
-                className="shrink-0 px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/30"
-                onClick={() => clearAlignmentState()}
-              >
+              <button type="button" className="instrument-notice-button" onClick={() => clearAlignmentState()}>
                 Dismiss
               </button>
             </div>
@@ -786,15 +835,11 @@ export function ComparisonMatrix() {
           {!isAligning &&
           !alignmentError &&
           alignmentResults.some((result) => result.outcome && result.outcome !== 'aligned') ? (
-            <div
-              role="status"
-              aria-live="polite"
-              className="absolute top-2 left-2 right-2 z-40 rounded-lg border border-amber-300/35 bg-amber-950/90 px-3 py-2 text-sm text-amber-50"
-            >
+            <div role="status" aria-live="polite" className="instrument-notice">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-medium">Some examinations could not be aligned safely.</p>
-                  <ul className="mt-1 space-y-1 text-xs text-amber-100">
+                  <ul className="mt-1 space-y-1 text-xs text-[var(--text-secondary)]">
                     {alignmentResults
                       .filter((result) => result.outcome && result.outcome !== 'aligned')
                       .map((result) => (
@@ -804,42 +849,25 @@ export function ComparisonMatrix() {
                       ))}
                   </ul>
                 </div>
-                <button
-                  type="button"
-                  className="shrink-0 rounded border border-amber-300/30 px-2 py-1"
-                  onClick={clearAlignmentState}
-                >
+                <button type="button" className="instrument-notice-button" onClick={clearAlignmentState}>
                   Dismiss
                 </button>
               </div>
             </div>
           ) : null}
           {!hasData ? (
-            /* Empty state */
-            <div className="flex-1 flex flex-col items-center justify-center gap-8 text-center p-8 max-w-2xl mx-auto">
-              <div className="p-6 rounded-full bg-[var(--bg-secondary)] border border-[var(--border-color)]">
-                <Brain className="w-20 h-20 text-[var(--accent)]" />
-              </div>
-
-              <div className="space-y-4">
-                <h2 className="text-3xl font-bold text-[var(--text-primary)] tracking-tight">Welcome to MiraViewer</h2>
-                <p className="text-lg text-[var(--text-secondary)] leading-relaxed">
-                  Import your MRI scans to visualize and compare them over time.
+            <div className="instrument-empty">
+              <div className="instrument-empty-inner">
+                <p className="instrument-eyebrow">Private imaging workspace</p>
+                <h2 className="instrument-empty-heading">Bring your scans into Mira.</h2>
+                <p className="instrument-empty-copy">
+                  Import your MRI examinations to view and compare acquired images over time.
                 </p>
-                <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-tertiary)] bg-[var(--bg-secondary)] py-2 px-4 rounded-full border border-[var(--border-color)] w-fit mx-auto">
-                  <span className="text-emerald-500">🔒</span>
-                  <span>Your data is stored locally in your browser and never leaves your device.</span>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 w-full max-w-sm">
-                <button
-                  onClick={() => setUploadModalOpen(true)}
-                  className="flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl bg-[var(--accent)] text-white font-medium hover:bg-[var(--accent-hover)] transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5"
-                >
-                  <Upload className="w-5 h-5" />
+                <button type="button" onClick={() => setUploadModalOpen(true)} className="instrument-primary-button">
+                  <Upload className="h-4 w-4" aria-hidden="true" />
                   Import scans
                 </button>
+                <p className="instrument-empty-disclosure">Your images stay on this device.</p>
               </div>
             </div>
           ) : viewMode === 'grid' ? (
@@ -905,7 +933,7 @@ export function ComparisonMatrix() {
           )}
         </div>
 
-        {hasData ? (
+        {hasData && viewMode !== 'svr3d' ? (
           <ComparisonDatesSidebar
             open={rightSidebarOpen}
             onToggleOpen={() => setRightSidebarOpen((v) => !v)}

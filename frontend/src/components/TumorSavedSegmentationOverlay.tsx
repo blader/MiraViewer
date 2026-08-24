@@ -146,7 +146,7 @@ export function TumorSavedSegmentationOverlay({
       {coordinateWarning ? (
         <div
           role="alert"
-          className="absolute bottom-2 left-2 right-2 z-20 rounded border border-amber-300/35 bg-amber-950/95 px-2 py-1 text-xs text-amber-50"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border-l-2 border-l-[var(--warning)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--warning)]"
         >
           {coordinateWarning}
         </div>

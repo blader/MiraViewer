@@ -550,7 +550,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         )}
 
         {derivedFrame && !imageUrlOverride ? (
-          <div className="pointer-events-none absolute left-2 top-2 rounded border border-sky-300/30 bg-black/75 px-2 py-1 text-[11px] text-sky-100">
+          <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-1rem)] rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11px] text-[var(--signal-metal)]">
             Derived 3D-aligned plane
             {derivedFrame.nativeSliceSpacingMm
               ? ` · ${derivedFrame.nativeSliceSpacingMm.toFixed(1)} mm native slices`
@@ -565,7 +565,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
         {debugSliceScores && isZHeld ? (
           <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
-            <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-[10px] font-mono tabular-nums leading-snug">
+            <div className="rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[10px] tabular-nums leading-snug text-[var(--text-primary)]">
               {sliceScore?.coverage != null ? (
                 <>
                   <div>
@@ -669,7 +669,7 @@ function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
 
   return (
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+      <div className="h-5 w-5 animate-spin rounded-full border border-[var(--signal-metal)] border-t-transparent" />
     </div>
   );
 }

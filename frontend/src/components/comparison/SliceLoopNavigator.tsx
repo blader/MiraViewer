@@ -209,15 +209,18 @@ export function SliceLoopNavigator({
     };
   }, [draggingHandle, loopEnd, loopStart, updateLoop]);
 
+  const currentSlice =
+    playbackInstanceCount > 0 ? Math.round(clamp01(progress) * (playbackInstanceCount - 1)) + 1 : null;
+
   return (
-    <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)] flex items-center gap-4">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:flex-nowrap sm:gap-5">
+      <div className="flex shrink-0 items-center gap-1">
         <button
           type="button"
           aria-label={isLooping && !interactionBlocked ? 'Pause slice playback' : 'Play slices'}
           aria-pressed={isLooping && !interactionBlocked}
-          disabled={interactionBlocked}
-          className={`p-2 rounded-md border border-[var(--border-color)] disabled:cursor-not-allowed disabled:opacity-50 ${isLooping && !interactionBlocked ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+          disabled={interactionBlocked || currentSlice === null}
+          className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border disabled:cursor-not-allowed disabled:opacity-50 ${isLooping && !interactionBlocked ? 'border-[var(--signal-metal)] bg-[var(--bg-tertiary)] text-[var(--signal-metal)]' : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
           onClick={() => {
             // Ensure loop window has size before starting
             const minGap = 0.02;
@@ -232,15 +235,15 @@ export function SliceLoopNavigator({
         >
           {isLooping ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
         </button>
-        <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)]">
+        <div className="flex items-center text-xs text-[var(--text-secondary)]">
           {[1, 2, 4].map((s) => (
             <button
               key={s}
               type="button"
               aria-label={`Playback speed ${s} times`}
               aria-pressed={loopSpeed === s}
-              disabled={interactionBlocked}
-              className={`px-2 py-1 rounded border text-xs disabled:cursor-not-allowed disabled:opacity-50 ${loopSpeed === s ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-color)]'}`}
+              disabled={interactionBlocked || currentSlice === null}
+              className={`min-h-9 min-w-8 rounded-[3px] px-1 font-[family-name:var(--font-mono)] text-xs disabled:cursor-not-allowed disabled:opacity-50 ${loopSpeed === s ? 'text-[var(--signal-metal)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
               onClick={() => setLoopSpeed(s as 1 | 2 | 4)}
             >
               {s}x
@@ -249,13 +252,17 @@ export function SliceLoopNavigator({
         </div>
       </div>
 
-      <div className="text-xs text-[var(--text-secondary)] whitespace-nowrap">Slice</div>
+      <div className="shrink-0 whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
+        {currentSlice === null ? 'No slices' : `Slice ${currentSlice} / ${playbackInstanceCount}`}
+      </div>
 
-      <div className="relative flex-1 h-8" ref={trackRef}>
-        {/* Highlighted loop window */}
-        <div className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--bg-tertiary)] w-full" aria-hidden />
+      <div
+        className="relative order-3 h-11 min-w-12 basis-full sm:order-none sm:h-9 sm:flex-1 sm:basis-auto"
+        ref={trackRef}
+      >
+        <div className="absolute top-1/2 h-px w-full -translate-y-1/2 bg-[var(--border-color)]" aria-hidden />
         <div
-          className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--accent)] opacity-40"
+          className="absolute top-1/2 h-px -translate-y-1/2 bg-[var(--signal-metal)] opacity-70"
           style={{
             left: `${loopStart * 100}%`,
             width: `${Math.max(0, loopEnd - loopStart) * 100}%`,
@@ -263,62 +270,71 @@ export function SliceLoopNavigator({
           aria-hidden
         />
 
-        {/* Main progress slider */}
         <input
           type="range"
           min={0}
           max={CONTROL_LIMITS.SLICE_NAV.MAX_RANGE}
           step={1}
-          disabled={interactionBlocked}
+          disabled={interactionBlocked || currentSlice === null}
           value={Math.round(progress * CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
           onChange={(e) => setProgress(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
-          className="slice-position-input absolute inset-0 w-full h-8 opacity-0 cursor-pointer"
+          className="slice-position-input absolute inset-0 h-9 w-full cursor-pointer opacity-0"
           aria-label="Slice position"
+          aria-valuetext={
+            currentSlice === null ? 'No slices available' : `Slice ${currentSlice} of ${playbackInstanceCount}`
+          }
         />
 
-        {/* Visible thumb for current position */}
-        <div
-          className="slice-position-thumb absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-[var(--text-primary)] rounded pointer-events-none"
-          style={{ left: `calc(${progress * 100}% - 4px)` }}
-          aria-hidden
-        />
+        {currentSlice !== null ? (
+          <div
+            data-registration-datum="slice-position"
+            className="slice-position-thumb pointer-events-none absolute top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-[1px] bg-[var(--signal-metal)]"
+            style={{ left: `calc(${clamp01(progress) * 100}% - 1.5px)` }}
+            aria-hidden
+          />
+        ) : null}
 
-        {/* Loop handles */}
-        {(['start', 'end'] as const).map((handle) => {
-          const pos = handle === 'start' ? loopStart : loopEnd;
-          return (
-            <button
-              key={handle}
-              type="button"
-              role="slider"
-              aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(pos * 100)}
-              disabled={interactionBlocked}
-              className="absolute top-1/2 -translate-y-1/2 min-w-6 min-h-8 bg-white border border-[var(--accent)] rounded cursor-ew-resize"
-              style={{ left: `calc(${pos * 100}% - 6px)` }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                setDraggingHandle(handle);
-              }}
-              onKeyDown={(event) => {
-                const direction =
-                  event.key === 'ArrowLeft' || event.key === 'ArrowDown'
-                    ? -1
-                    : event.key === 'ArrowRight' || event.key === 'ArrowUp'
-                      ? 1
-                      : 0;
-                if (direction === 0) return;
-                event.preventDefault();
-                const step = direction / Math.max(1, playbackInstanceCount - 1);
-                if (handle === 'start') updateLoop(loopStart + step, loopEnd);
-                else updateLoop(loopStart, loopEnd + step);
-              }}
-              title={handle === 'start' ? 'Loop start' : 'Loop end'}
-            />
-          );
-        })}
+        {currentSlice !== null &&
+          (['start', 'end'] as const).map((handle) => {
+            const pos = handle === 'start' ? loopStart : loopEnd;
+            return (
+              <button
+                key={handle}
+                type="button"
+                role="slider"
+                aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(pos * 100)}
+                disabled={interactionBlocked}
+                className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+                style={{ left: `${pos * 100}%` }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setDraggingHandle(handle);
+                }}
+                onKeyDown={(event) => {
+                  const direction =
+                    event.key === 'ArrowLeft' || event.key === 'ArrowDown'
+                      ? -1
+                      : event.key === 'ArrowRight' || event.key === 'ArrowUp'
+                        ? 1
+                        : 0;
+                  if (direction === 0) return;
+                  event.preventDefault();
+                  const step = direction / Math.max(1, playbackInstanceCount - 1);
+                  if (handle === 'start') updateLoop(loopStart + step, loopEnd);
+                  else updateLoop(loopStart, loopEnd + step);
+                }}
+                title={handle === 'start' ? 'Loop start' : 'Loop end'}
+              >
+                <span
+                  aria-hidden="true"
+                  className="h-6 w-2 rounded-[2px] border border-[var(--signal-metal)] bg-[var(--bg-secondary)]"
+                />
+              </button>
+            );
+          })}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Link2, Pencil, Sparkles } from 'lucide-react';
+import { Link2, Pencil, ScanLine } from 'lucide-react';
 import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
@@ -65,112 +65,101 @@ export function GridCell({
 
   if (!refData) {
     return (
-      <div className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] bg-[var(--bg-primary)]">
-        <div className="px-3 py-2 text-xs text-[var(--text-secondary)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
+      <div className="relative flex min-h-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]">
+        <div className="flex min-h-10 items-center border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
           {formatDate(date)}
         </div>
-        <div className="flex-1 flex items-center justify-center text-[var(--text-secondary)]">No series</div>
+        <div className="flex flex-1 items-center justify-center text-sm text-[var(--text-secondary)]">No series</div>
       </div>
     );
   }
 
   return (
     <div
-      ref={studyCellRef}
       data-grid-cell-date={date}
+      data-alignment-state={derivedFrame ? 'aligned' : 'acquired'}
       data-controls-visible={isHovered || tumorToolOpen || gtPolygonToolOpen}
-      className="study-cell relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
+      className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
     >
-      {/* Cell controls (shown on hover) */}
-      <div className="study-controls absolute top-0 left-0 right-0 z-10 transition-opacity">
-        <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowSavedTumor((v) => !v)}
-              disabled={tumorToolOpen || !nativeAnnotationsAvailable}
-              aria-pressed={showSavedTumor}
-              className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                tumorToolOpen || !nativeAnnotationsAvailable
-                  ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]'
-                  : showSavedTumor
-                    ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                    : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-              }`}
-              title={
-                !nativeAnnotationsAvailable
-                  ? 'Native annotations are unavailable on a derived alignment plane'
-                  : tumorToolOpen
-                    ? 'Close segmentation tool to view saved tumor overlay'
-                    : 'Toggle saved tumor segmentation overlay'
-              }
+      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
+            {formatDate(date)}
+          </span>
+          {derivedFrame ? (
+            <span
+              data-registration-datum="verified"
+              aria-label="Verified aligned presentation"
+              className="flex items-center gap-1.5 text-xs text-[var(--signal-metal)]"
             >
-              <Sparkles className="w-3.5 h-3.5" />
-              Tumor
-            </button>
+              <span aria-hidden="true" className="h-3 w-px bg-[var(--signal-metal)]" />
+              <span className="hidden lg:inline">Aligned</span>
+            </span>
+          ) : null}
+        </div>
 
-            <button
-              type="button"
-              aria-pressed={gtPolygonToolOpen}
-              disabled={!nativeAnnotationsAvailable}
-              onClick={() => {
-                setGtPolygonToolOpen((v) => {
-                  const next = !v;
-                  if (next) setTumorToolOpen(false);
-                  return next;
-                });
-              }}
-              className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                gtPolygonToolOpen
-                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                  : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-              }`}
-              title={
-                nativeAnnotationsAvailable
-                  ? 'Ground truth polygon tool (debug)'
-                  : 'Native annotations are unavailable on a derived alignment plane'
-              }
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              GT
-            </button>
-          </div>
+        <div className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100">
+          <button
+            type="button"
+            onClick={() => setShowSavedTumor((v) => !v)}
+            disabled={tumorToolOpen || !nativeAnnotationsAvailable}
+            aria-pressed={showSavedTumor}
+            className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
+              tumorToolOpen || !nativeAnnotationsAvailable
+                ? 'text-[var(--text-tertiary)]'
+                : showSavedTumor
+                  ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+            }`}
+            title={
+              !nativeAnnotationsAvailable
+                ? 'Native annotations are unavailable on a derived alignment plane'
+                : tumorToolOpen
+                  ? 'Close segmentation tool to view saved tumor overlay'
+                  : 'Toggle saved tumor segmentation overlay'
+            }
+          >
+            <ScanLine className="h-3.5 w-3.5" />
+            Tumor
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={gtPolygonToolOpen}
+            disabled={!nativeAnnotationsAvailable}
+            onClick={() => {
+              setGtPolygonToolOpen((v) => {
+                const next = !v;
+                if (next) setTumorToolOpen(false);
+                return next;
+              });
+            }}
+            className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
+              gtPolygonToolOpen
+                ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
+                : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+            }`}
+            title={
+              nativeAnnotationsAvailable
+                ? 'Ground truth polygon tool (debug)'
+                : 'Native annotations are unavailable on a derived alignment plane'
+            }
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            GT
+          </button>
 
           <ImageControls
             settings={settings}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
-            onUpdate={(update) => {
-              updatePanelSetting(date, update);
-            }}
+            onUpdate={(update) => updatePanelSetting(date, update)}
             showSliceControl={false}
           />
         </div>
       </div>
 
-      {/* Slice selector (shown on hover, bottom-right corner) */}
-      <div
-        className="study-controls absolute bottom-2 right-2 z-10 transition-opacity"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
-          <StepControl
-            title="Slice offset"
-            value={`${idx + 1}/${refData.instance_count}`}
-            valueWidth="w-16"
-            tabular
-            accent
-            onDecrement={() => {
-              updatePanelSetting(date, { offset: settings.offset - 1 });
-            }}
-            onIncrement={() => {
-              updatePanelSetting(date, { offset: settings.offset + 1 });
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="flex-1 min-h-0 bg-black relative">
+      <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
         <DragRectActionOverlay
           className="absolute inset-0 cursor-crosshair"
           imageSize={{ width: refData.columns ?? 512, height: refData.rows ?? 512 }}
@@ -220,7 +209,7 @@ export function GridCell({
               key: 'segment-tumor',
               label: 'Segment',
               title: 'Segment tumor from this rectangle',
-              icon: <Sparkles className="w-4 h-4" />,
+              icon: <ScanLine className="w-4 h-4" />,
               variant: 'secondary',
               minSizeSpace: 'screen',
               disabled: isAligning || !nativeAnnotationsAvailable,
@@ -309,12 +298,22 @@ export function GridCell({
               />
             ) : null}
           </Suspense>
-
-          {/* Date overlay (matches overlay view style) */}
-          <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
-            {formatDate(date)}
-          </div>
         </DragRectActionOverlay>
+      </div>
+
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+        <span className="truncate text-xs text-[var(--text-secondary)]">
+          {derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+        </span>
+        <StepControl
+          title="Slice offset"
+          value={`${idx + 1}/${refData.instance_count}`}
+          valueWidth="w-16"
+          tabular
+          accent
+          onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}
+          onIncrement={() => updatePanelSetting(date, { offset: settings.offset + 1 })}
+        />
       </div>
     </div>
   );

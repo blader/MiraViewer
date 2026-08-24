@@ -1,18 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, DragEvent } from 'react';
-import {
-  AlertCircle,
-  ArchiveRestore,
-  CheckCircle2,
-  Database,
-  FileArchive,
-  Files,
-  FolderOpen,
-  Loader2,
-  LockKeyhole,
-  ScanLine,
-  ShieldCheck,
-} from 'lucide-react';
+import { AlertCircle, ArchiveRestore, CheckCircle2, Files, FolderOpen, Loader2 } from 'lucide-react';
 import { getStorageHealth, subscribeStorageHealth } from '../db/db';
 import { loadSafeArchive, readArchiveEntry } from '../services/archiveSafety';
 import type { SafeArchive } from '../services/archiveSafety';
@@ -605,7 +593,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   return (
     <AccessibleDialog
       title="Import scans"
-      description="Add imaging from this device, or restore a complete MiraViewer backup."
+      description="Choose images from this device or restore a complete MiraViewer backup."
       onClose={() => {
         if (busy) cancelOperation();
         else onClose();
@@ -613,24 +601,23 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       closeOnBackdrop={!busy}
       closeOnEscape={phase !== 'finishing'}
       closeDisabled={phase === 'finishing'}
-      className="intake-console flex max-h-[min(92vh,56rem)] w-full max-w-[54rem] flex-col overflow-hidden rounded-2xl border shadow-2xl"
+      className="intake-console flex max-h-[min(92vh,54rem)] w-full max-w-[48rem] flex-col overflow-hidden rounded-[4px] border"
     >
       <div className="intake-privacy-rail" aria-label="Privacy and device storage">
         <span className="intake-privacy-label">
-          <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" aria-hidden="true" />
           Processed locally · never uploaded
         </span>
         <span className="intake-storage-label">
-          <Database className="h-4 w-4" aria-hidden="true" />
           {availableBytes === null ? 'Storage capacity unavailable' : `${formatBytes(availableBytes)} available`}
         </span>
       </div>
 
       <div className="intake-content overflow-y-auto">
         <div className="intake-intro">
-          <span className="intake-eyebrow">ACQUISITION INTAKE</span>
-          <h3>Bring your imaging into view.</h3>
-          <p>DICOM images stay in this browser. Folders, extensionless files, and image archives are supported.</p>
+          <span className="intake-eyebrow">ACQUISITION</span>
+          <h3>Bring scans into Mira</h3>
+          <p>Your images stay on this device. Folders, extensionless DICOM files, and ZIP archives are supported.</p>
         </div>
 
         {storageHealth.checked && !storageHealth.persisted && (
@@ -668,64 +655,68 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
           aria-label="Select an acquisition folder"
         />
 
-        <button
-          type="button"
-          data-dialog-autofocus
-          disabled={busy}
-          onClick={() => openInput(fileInputRef.current)}
-          onDragEnter={(event) => {
-            event.preventDefault();
-            if (!busy) setDragActive(true);
-          }}
-          onDragOver={(event) => {
-            event.preventDefault();
-            if (!busy) event.dataTransfer.dropEffect = 'copy';
-          }}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={(event) => void handleDrop(event)}
-          className="intake-drop-target"
-          data-active={dragActive || undefined}
-          aria-label="Drop local DICOM files or an acquisition folder, or choose files"
-        >
-          <span className="intake-scan-icon">
-            <ScanLine className="h-7 w-7" aria-hidden="true" />
-          </span>
-          <span className="intake-drop-title">Drop imaging files or a folder</span>
-          <span className="intake-drop-help">or choose a source below · DICOM and ZIP</span>
-        </button>
-
-        <div className="intake-source-actions" aria-label="Choose an imaging source">
+        {!terminal && (
           <button
             type="button"
-            onClick={() => void openFolderPicker()}
-            disabled={!folderSupported || busy}
-            className="intake-source-button"
-            title={
-              folderSupported ? undefined : 'Folder selection is unavailable in this browser; choose files instead.'
-            }
-          >
-            <FolderOpen className="h-4 w-4" aria-hidden="true" />
-            Choose folder
-          </button>
-          <button
-            type="button"
+            data-dialog-autofocus
+            disabled={busy}
             onClick={() => openInput(fileInputRef.current)}
-            disabled={busy}
-            className="intake-source-button"
+            onDragEnter={(event) => {
+              event.preventDefault();
+              if (!busy) setDragActive(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!busy) event.dataTransfer.dropEffect = 'copy';
+            }}
+            onDragLeave={() => setDragActive(false)}
+            onDrop={(event) => void handleDrop(event)}
+            className="intake-drop-target"
+            data-active={dragActive || undefined}
+            aria-label="Drop local DICOM files or an acquisition folder, or choose files"
           >
-            <Files className="h-4 w-4" aria-hidden="true" />
-            Choose files
+            <span className="intake-scan-icon">
+              <FolderOpen className="h-5 w-5" aria-hidden="true" />
+            </span>
+            <span className="intake-drop-title">Drop a folder or imaging files</span>
+            <span className="intake-drop-help">or choose a local source below</span>
           </button>
-          <button
-            type="button"
-            onClick={() => openInput(backupInputRef.current)}
-            disabled={busy}
-            className="intake-source-button intake-backup-button"
-          >
-            <ArchiveRestore className="h-4 w-4" aria-hidden="true" />
-            Choose backup / ZIP
-          </button>
-        </div>
+        )}
+
+        {phase !== 'complete' && (
+          <div className="intake-source-actions" aria-label="Choose an imaging source">
+            <button
+              type="button"
+              onClick={() => void openFolderPicker()}
+              disabled={!folderSupported || busy}
+              className="intake-source-button"
+              title={
+                folderSupported ? undefined : 'Folder selection is unavailable in this browser; choose files instead.'
+              }
+            >
+              <FolderOpen className="h-4 w-4" aria-hidden="true" />
+              Choose folder
+            </button>
+            <button
+              type="button"
+              onClick={() => openInput(fileInputRef.current)}
+              disabled={busy}
+              className="intake-source-button"
+            >
+              <Files className="h-4 w-4" aria-hidden="true" />
+              Choose files
+            </button>
+            <button
+              type="button"
+              onClick={() => openInput(backupInputRef.current)}
+              disabled={busy}
+              className="intake-source-button intake-backup-button"
+            >
+              <ArchiveRestore className="h-4 w-4" aria-hidden="true" />
+              Choose backup / ZIP
+            </button>
+          </div>
+        )}
 
         {source && (
           <section className="intake-manifest" aria-label="Selected acquisition">
@@ -733,11 +724,15 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
               <span className="intake-eyebrow">
                 {source.kind === 'complete-backup' ? 'COMPLETE BACKUP' : 'ACQUISITION MANIFEST'}
               </span>
-              {source.kind === 'image-archive' || source.kind === 'complete-backup' ? (
-                <FileArchive className="h-4 w-4" aria-hidden="true" />
-              ) : (
-                <LockKeyhole className="h-4 w-4" aria-hidden="true" />
-              )}
+              <span className="text-[0.7rem] text-[var(--text-secondary)]">
+                {source.kind === 'complete-backup'
+                  ? 'Backup archive'
+                  : source.kind === 'image-archive'
+                    ? 'Image archive'
+                    : source.kind === 'folder'
+                      ? 'Local folder'
+                      : 'Local files'}
+              </span>
             </div>
             <div className="intake-manifest-grid">
               <div className="intake-manifest-source">
@@ -949,10 +944,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       </div>
 
       <div className="intake-footer">
-        <span className="intake-footer-private">
-          <LockKeyhole className="h-4 w-4" aria-hidden="true" />
-          Your scans remain on this device
-        </span>
+        <span className="intake-footer-private">Your scans remain on this device</span>
         <div className="intake-footer-actions">
           <button
             type="button"

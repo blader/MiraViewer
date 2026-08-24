@@ -100,29 +100,41 @@ export function ExportModal({ onClose }: ExportModalProps) {
   return (
     <AccessibleDialog
       title="Export Backup (ZIP)"
+      description="Create a complete local backup of the selected patient's imaging and saved work."
       onClose={() => {
         if (status !== 'exporting') onClose();
       }}
       closeOnBackdrop={status !== 'exporting'}
       closeOnEscape={status !== 'exporting'}
     >
-      <div className="overflow-y-auto p-6">
+      <div className="overflow-y-auto px-5 py-6 sm:px-7">
         {status === 'success' ? (
-          <div className="flex flex-col items-center justify-center py-4 text-center">
-            <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
-              <CheckCircle className="w-6 h-6" />
+          <div className="flex items-start gap-3 py-4" role="status">
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--evidence)]" aria-hidden="true" />
+            <div>
+              <h4 className="mb-1 font-medium text-[var(--text-primary)]">Export complete</h4>
+              <p className="text-sm text-[var(--text-secondary)]">Your ZIP download should begin shortly.</p>
             </div>
-            <h4 className="text-[var(--text-primary)] font-medium mb-1">Export complete</h4>
-            <p className="text-sm text-[var(--text-secondary)]">Your ZIP download should begin shortly.</p>
           </div>
         ) : (
           <>
-            <div className="text-xs text-[var(--text-secondary)] mb-3">
+            <p className="mb-2 font-[family-name:var(--font-mono)] text-[0.68rem] tracking-[0.13em] text-[var(--signal-metal)]">
+              COMPLETE BACKUP
+            </p>
+            <div className="mb-5 text-[0.82rem] leading-relaxed text-[var(--text-secondary)]">
               This creates a complete, restorable backup of the selected patient’s scans, annotations, ground truth,
               viewer settings, saved 3D segmentations, and local models.
             </div>
 
-            <div className="max-h-64 overflow-auto border border-[var(--border-color)] rounded-lg divide-y divide-[var(--border-color)]">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-[family-name:var(--font-mono)] text-[0.68rem] tracking-[0.11em] text-[var(--text-secondary)]">
+                EXAMINATIONS
+              </span>
+              <span className="text-xs tabular-nums text-[var(--text-secondary)]">
+                {selectedCount}/{totalCount} selected
+              </span>
+            </div>
+            <div className="max-h-64 divide-y divide-[var(--border-color)] overflow-auto rounded-[3px] border border-[var(--border-color)]">
               {studies.length === 0 ? (
                 <div className="p-4 text-sm text-[var(--text-secondary)]">No studies found.</div>
               ) : (
@@ -131,14 +143,19 @@ export function ExportModal({ onClose }: ExportModalProps) {
                   return (
                     <label
                       key={study.study_id}
-                      className="flex items-start gap-3 p-3 text-sm cursor-pointer hover:bg-[var(--bg-tertiary)]"
+                      className="flex min-h-14 cursor-pointer items-start gap-3 px-3 py-3 text-sm transition-colors hover:bg-[var(--bg-tertiary)]"
                     >
-                      <input type="checkbox" checked={checked} onChange={() => handleToggle(study.study_id)} />
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => handleToggle(study.study_id)}
+                        className="mt-1 accent-[var(--signal-metal)]"
+                      />
                       <div className="flex-1">
-                        <div className="text-[var(--text-primary)] font-medium">
+                        <div className="font-medium tabular-nums text-[var(--text-primary)]">
                           {formatDateShort(study.study_date)} · {study.scan_type || 'Study'}
                         </div>
-                        <div className="text-[var(--text-secondary)] text-xs">
+                        <div className="mt-1 text-xs text-[var(--text-secondary)]">
                           {study.series_count} series · {study.total_instances} instances
                         </div>
                       </div>
@@ -149,44 +166,47 @@ export function ExportModal({ onClose }: ExportModalProps) {
             </div>
 
             {status === 'exporting' && (
-              <div className="mt-4 flex items-center gap-2 text-[var(--text-secondary)] text-sm">
-                <Loader2 className="w-4 h-4 animate-spin" />
+              <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-secondary)]" role="status">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                 {progressLabel || 'Exporting...'}
               </div>
             )}
 
             {errorMessage && (
-              <div className="mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-400/10 px-3 py-2 rounded-lg">
-                <AlertCircle className="w-4 h-4 shrink-0" />
+              <div
+                className="mt-4 flex items-center gap-2 rounded-[3px] border border-[var(--danger)] px-3 py-2 text-sm text-[var(--danger)]"
+                role="alert"
+              >
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
                 {errorMessage}
               </div>
             )}
 
-            <div className="mt-6 flex justify-between items-center">
-              <div className="text-xs text-[var(--text-secondary)]">
-                {selectedCount}/{totalCount} selected
-              </div>
+            <div className="mt-6 flex items-center justify-between gap-4 border-t border-[var(--border-color)] pt-5">
+              <div className="text-xs text-[var(--text-secondary)]">Stored on this device</div>
               <div className="flex gap-2">
                 <button
+                  type="button"
                   onClick={onClose}
                   disabled={status === 'exporting'}
-                  className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] rounded-lg transition-colors"
+                  className="min-h-11 rounded-[3px] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
+                  type="button"
                   onClick={handleExport}
                   disabled={!canExport}
-                  className="px-4 py-2 text-sm bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  className="flex min-h-11 items-center gap-2 rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {status === 'exporting' ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                       Exporting…
                     </>
                   ) : (
                     <>
-                      <Download className="w-4 h-4" />
+                      <Download className="h-4 w-4" aria-hidden="true" />
                       Export
                     </>
                   )}

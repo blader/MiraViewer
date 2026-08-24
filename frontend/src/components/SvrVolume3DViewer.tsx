@@ -26,8 +26,6 @@ import {
 import {
   RAYMARCH_FRAGMENT_SHADER,
   RAYMARCH_VERTEX_SHADER,
-  SVR3D_CAMERA_Z,
-  SVR3D_FOCAL_Z,
   SVR3D_OCC_BLOCK,
   buildOccupancyMaxGrid,
   buildOccupancyMaxGridAsync,
@@ -75,14 +73,6 @@ type Vec3 = { x: number; y: number; z: number };
 // Quaternion [x, y, z, w]
 type Quat = [number, number, number, number];
 
-function v3Add(a: Vec3, b: Vec3): Vec3 {
-  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
-}
-
-function v3Scale(v: Vec3, s: number): Vec3 {
-  return { x: v.x * s, y: v.y * s, z: v.z * s };
-}
-
 function v3ApplyMat3(m: Float32Array, v: Vec3): Vec3 {
   // Column-major 3x3.
   return {
@@ -92,215 +82,77 @@ function v3ApplyMat3(m: Float32Array, v: Vec3): Vec3 {
   };
 }
 
-function projectWorldToCanvas(params: {
-  world: Vec3;
-  canvasW: number;
-  canvasH: number;
-  aspect: number;
-  zoom: number;
-}): { x: number; y: number } | null {
-  const { world, canvasW, canvasH, aspect, zoom } = params;
-
-  // Must match the simple camera model used in the fragment shader:
-  // roW = (0,0,CAM_Z)
-  // rdW = normalize(vec3(p, -FOCAL_Z))
-  const CAM_Z = SVR3D_CAMERA_Z;
-  const FOCAL_Z = SVR3D_FOCAL_Z;
-
-  const vz = world.z - CAM_Z;
-  if (!(vz < -1e-6)) {
-    // Point is at/behind the camera plane; skip.
-    return null;
-  }
-
-  // Intersect the ray from camera origin through the point with the image plane at z = CAM_Z - FOCAL_Z.
-  const t = -FOCAL_Z / vz;
-
-  const px = world.x * t;
-  const py = world.y * t;
-
-  // In shader: p.x *= aspect; p /= zoom.
-  // So inverse mapping is: ndc.x = px * zoom / aspect; ndc.y = py * zoom.
-  const ndcX = (px * zoom) / Math.max(1e-6, aspect);
-  const ndcY = py * zoom;
-
-  return {
-    x: (ndcX * 0.5 + 0.5) * canvasW,
-    y: (1 - (ndcY * 0.5 + 0.5)) * canvasH,
-  };
-}
-
-function niceStepMm(rangeMm: number, targetTicks: number): number {
-  const r = Math.abs(rangeMm);
-  if (!(r > 1e-6) || !(targetTicks > 0)) return 1;
-
-  const raw = r / targetTicks;
-  const pow10 = Math.pow(10, Math.floor(Math.log10(raw)));
-  const x = raw / pow10;
-
-  const nice = x <= 1 ? 1 : x <= 2 ? 2 : x <= 5 ? 5 : 10;
-  return nice * pow10;
-}
-
 type DrawAxesOverlayParams = {
   axesCanvas: HTMLCanvasElement;
   axesCtx: CanvasRenderingContext2D;
   canvas: HTMLCanvasElement;
   volume: SvrVolume;
-  boxScale: readonly [number, number, number];
   rotMat: Float32Array;
-  zoom: number;
 };
 
 function drawAxesOverlay(params: DrawAxesOverlayParams): void {
-  const { axesCanvas, axesCtx, canvas, volume, boxScale, rotMat, zoom } = params;
+  const { axesCanvas, axesCtx, canvas, volume, rotMat } = params;
 
   const w = axesCanvas.width;
   const h = axesCanvas.height;
   if (!(w > 0 && h > 0)) return;
 
-  // Clear.
   axesCtx.clearRect(0, 0, w, h);
-
-  // Volume physical size in mm.
-  const [nx, ny, nz] = volume.dims;
-  const [vx, vy, vz] = volume.voxelSizeMm;
-
-  const sizeMm = {
-    x: Math.abs(nx * vx),
-    y: Math.abs(ny * vy),
-    z: Math.abs(nz * vz),
-  };
-
-  // Object-space box extents used by the shader.
-  const box = { x: boxScale[0], y: boxScale[1], z: boxScale[2] };
-
-  // Place axes on the (x-, y-, z+) corner of the box.
-  const originObj: Vec3 = {
-    x: -0.5 * box.x,
-    y: -0.5 * box.y,
-    z: 0.5 * box.z,
-  };
-
-  const aspect = w / Math.max(1, h);
   const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
+  if (w < 132 * dpr || h < 112 * dpr) return;
 
-  // NOTE: `rotMat` is the forward (object->world) rotation; the shader receives its
-  // transpose as u_invRot, so this overlay stays consistent with the rendered volume.
-  const projectObj = (obj: Vec3) => {
-    const world = v3ApplyMat3(rotMat, obj);
-    return projectWorldToCanvas({ world, canvasW: w, canvasH: h, aspect, zoom });
-  };
-
-  // 2D styling.
+  // Orientation is a corner instrument, not a ruler projected across anatomy.
+  // The same forward rotation used by the shader keeps every direction truthful.
+  const origin = { x: 48 * dpr, y: h - 70 * dpr };
+  const axisLength = 28 * dpr;
   axesCtx.save();
   axesCtx.lineCap = 'round';
   axesCtx.lineJoin = 'round';
-
-  const fontPx = Math.max(10, Math.round(10 * dpr));
-  axesCtx.font = `${fontPx}px ui-sans-serif, system-ui`;
+  axesCtx.lineWidth = Math.max(1, dpr);
+  axesCtx.font = `${Math.max(12, Math.round(12 * dpr))}px SFMono-Regular, ui-monospace, monospace`;
   axesCtx.textBaseline = 'middle';
 
-  const tickMajorPx = 7 * dpr;
-  const tickMinorPx = 4 * dpr;
-  const labelOffsetPx = 10 * dpr;
-
   const axes: Array<{
-    name: 'X' | 'Y' | 'Z';
+    name: 'x' | 'y' | 'z';
     dirObj: Vec3;
-    lenObj: number;
-    lenMm: number;
     rgba: string;
   }> = [
-    { name: 'X', dirObj: { x: 1, y: 0, z: 0 }, lenObj: box.x, lenMm: sizeMm.x, rgba: 'rgba(255,80,80,0.9)' },
-    { name: 'Y', dirObj: { x: 0, y: 1, z: 0 }, lenObj: box.y, lenMm: sizeMm.y, rgba: 'rgba(80,255,80,0.9)' },
-    // Use -Z so the axis spans the full box depth from the front face into the volume.
-    { name: 'Z', dirObj: { x: 0, y: 0, z: -1 }, lenObj: box.z, lenMm: sizeMm.z, rgba: 'rgba(80,160,255,0.9)' },
+    { name: 'x', dirObj: { x: 1, y: 0, z: 0 }, rgba: 'rgba(199,181,140,0.86)' },
+    { name: 'y', dirObj: { x: 0, y: 1, z: 0 }, rgba: 'rgba(143,186,178,0.82)' },
+    { name: 'z', dirObj: { x: 0, y: 0, z: 1 }, rgba: 'rgba(166,165,155,0.78)' },
   ];
 
   for (const axis of axes) {
-    if (!(axis.lenObj > 1e-9) || !(axis.lenMm > 1e-6)) continue;
-
-    const p0 = projectObj(originObj);
-    const p1 = projectObj(v3Add(originObj, v3Scale(axis.dirObj, axis.lenObj)));
-    if (!p0 || !p1) continue;
-
-    const dx = p1.x - p0.x;
-    const dy = p1.y - p0.y;
-    const dLen = Math.hypot(dx, dy);
-    if (!(dLen > 1e-6)) continue;
-
-    const ux = dx / dLen;
-    const uy = dy / dLen;
-    const px = -uy;
-    const py = ux;
-
-    // Main axis line.
-    axesCtx.lineWidth = 1.25 * dpr;
+    const direction = v3ApplyMat3(rotMat, axis.dirObj);
+    const endpoint = {
+      x: origin.x + direction.x * axisLength,
+      y: origin.y - direction.y * axisLength,
+    };
+    const projectedLength = Math.hypot(direction.x, direction.y);
     axesCtx.strokeStyle = axis.rgba;
     axesCtx.beginPath();
-    axesCtx.moveTo(p0.x, p0.y);
-    axesCtx.lineTo(p1.x, p1.y);
+    if (projectedLength < 0.12) {
+      axesCtx.arc(origin.x, origin.y, 2.5 * dpr, 0, Math.PI * 2);
+    } else {
+      axesCtx.moveTo(origin.x, origin.y);
+      axesCtx.lineTo(endpoint.x, endpoint.y);
+    }
     axesCtx.stroke();
 
-    // Ticks.
-    const majorStepMm = niceStepMm(axis.lenMm, 5);
-    const minorStepMm = majorStepMm >= 10 ? majorStepMm / 5 : majorStepMm / 2;
-
-    const stepObj = axis.lenObj / axis.lenMm;
-
-    const isNear = (a: number, b: number) => Math.abs(a - b) <= 1e-6 * Math.max(1, axis.lenMm);
-
-    const drawTickAt = (tMm: number, isMajor: boolean) => {
-      const tObj = tMm * stepObj;
-      const ptObj = v3Add(originObj, v3Scale(axis.dirObj, tObj));
-      const p = projectObj(ptObj);
-      if (!p) return;
-
-      const half = (isMajor ? tickMajorPx : tickMinorPx) * 0.5;
-      axesCtx.lineWidth = (isMajor ? 1.25 : 1.0) * dpr;
-      axesCtx.strokeStyle = axis.rgba;
-      axesCtx.beginPath();
-      axesCtx.moveTo(p.x - px * half, p.y - py * half);
-      axesCtx.lineTo(p.x + px * half, p.y + py * half);
-      axesCtx.stroke();
-
-      if (isMajor && tMm > 0) {
-        const text = `${Math.round(tMm)}mm`;
-        const lx = p.x + px * labelOffsetPx;
-        const ly = p.y + py * labelOffsetPx;
-
-        axesCtx.textAlign = px >= 0 ? 'left' : 'right';
-        axesCtx.lineWidth = 3 * dpr;
-        axesCtx.strokeStyle = 'rgba(0,0,0,0.8)';
-        axesCtx.strokeText(text, lx, ly);
-        axesCtx.fillStyle = axis.rgba;
-        axesCtx.fillText(text, lx, ly);
-      }
-    };
-
-    // Minor ticks.
-    for (let t = 0; t <= axis.lenMm + minorStepMm * 0.25; t += minorStepMm) {
-      // Skip ticks that coincide with major ticks.
-      const q = Math.round(t / majorStepMm);
-      const isMajor = isNear(t, q * majorStepMm);
-      drawTickAt(Math.min(t, axis.lenMm), isMajor);
-    }
-
-    // Axis label at end.
-    {
-      const text = `${axis.name}: ${Math.round(axis.lenMm)}mm`;
-      const lx = p1.x + px * (labelOffsetPx * 1.2) + ux * (6 * dpr);
-      const ly = p1.y + py * (labelOffsetPx * 1.2) + uy * (6 * dpr);
-      axesCtx.textAlign = px >= 0 ? 'left' : 'right';
-      axesCtx.lineWidth = 3 * dpr;
-      axesCtx.strokeStyle = 'rgba(0,0,0,0.8)';
-      axesCtx.strokeText(text, lx, ly);
-      axesCtx.fillStyle = axis.rgba;
-      axesCtx.fillText(text, lx, ly);
-    }
+    axesCtx.fillStyle = axis.rgba;
+    axesCtx.textAlign = direction.x < -0.2 ? 'right' : 'left';
+    axesCtx.fillText(
+      axis.name,
+      endpoint.x + (direction.x < -0.2 ? -6 : 6) * dpr,
+      endpoint.y - (projectedLength < 0.12 ? 8 : 0) * dpr,
+    );
   }
 
+  const dimensionsMm = volume.dims.map((count, index) => Math.abs(count * volume.voxelSizeMm[index]!));
+  const dimensionLabel = dimensionsMm.map((size) => (Number.isInteger(size) ? size.toFixed(0) : size.toFixed(1)));
+  axesCtx.fillStyle = 'rgba(166,165,155,0.86)';
+  axesCtx.textAlign = 'left';
+  axesCtx.fillText(`${dimensionLabel.join(' × ')} mm`, 16 * dpr, origin.y + 28 * dpr);
   axesCtx.restore();
 }
 
@@ -2144,9 +1996,9 @@ export function SvrVolume3DViewer({
 
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-        // Overlay reference axes with mm tick marks for gauging physical size.
+        // Keep truthful physical orientation and dimensions in the quiet corner.
         if (axesCanvas && axesCtx) {
-          drawAxesOverlay({ axesCanvas, axesCtx, canvas, volume, boxScale, rotMat, zoom });
+          drawAxesOverlay({ axesCanvas, axesCtx, canvas, volume, rotMat });
         }
 
         // Reset bindings (avoid leaking WebGL state across frames).
@@ -2448,20 +2300,16 @@ export function SvrVolume3DViewer({
   );
 
   const sliceInspectorCard = (
-    <div
-      className={`border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)] ${COARSE_POINTER_CONTROL_TARGETS}`}
-    >
-      <div className="px-3 py-2 text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)]">
-        Slice Inspector
-      </div>
-      <div className="p-3 space-y-2">
-        <div className="grid grid-cols-2 gap-2">
+    <div className={`space-y-3 bg-[var(--bg-secondary)] ${COARSE_POINTER_CONTROL_TARGETS}`}>
+      <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">Slice Inspector</div>
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
           <label className="block text-xs text-[var(--text-secondary)]">
             Plane
             <select
               value={inspectPlane}
               onChange={(e) => setInspectPlane(e.target.value as SvrRoiPlane)}
-              className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+              className="mt-1 min-h-9 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-2 py-1 text-[var(--text-primary)]"
               disabled={!volume}
             >
               <option value="axial">Axial (z)</option>
@@ -2482,7 +2330,7 @@ export function SvrVolume3DViewer({
               className="mt-1 w-full"
               disabled={!volume}
             />
-            <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+            <div className="mt-1 text-xs tabular-nums text-[var(--text-tertiary)] [font-family:var(--font-mono)]">
               {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
             </div>
           </label>
@@ -2498,9 +2346,9 @@ export function SvrVolume3DViewer({
             aria-live="polite"
             className={`text-xs tabular-nums ${
               inspectedCoordinate.supported === false
-                ? 'text-amber-200'
+                ? 'text-[var(--warning)]'
                 : inspectedCoordinate.supported === true
-                  ? 'text-cyan-200/90'
+                  ? 'text-[var(--evidence)]'
                   : 'text-[var(--text-tertiary)]'
             }`}
           >
@@ -2515,7 +2363,7 @@ export function SvrVolume3DViewer({
           </div>
         ) : null}
 
-        <div className="border border-[var(--border-color)] rounded overflow-hidden bg-black">
+        <div className="overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]">
           <canvas
             ref={sliceCanvasRef}
             className="w-full h-auto"
@@ -2535,7 +2383,7 @@ export function SvrVolume3DViewer({
         </div>
 
         {volume ? (
-          <div className="text-xs text-[var(--text-tertiary)] tabular-nums">
+          <div className="text-xs tabular-nums text-[var(--text-tertiary)] [font-family:var(--font-mono)]">
             Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
           </div>
         ) : null}
@@ -2546,27 +2394,29 @@ export function SvrVolume3DViewer({
   const wantsSliceInspectorPortal = Boolean(sliceInspectorPortalTarget);
   const sliceInspectorPortal =
     volume && sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;
-  const controlsVisible = Boolean(volume) && !controlsCollapsed;
+  // The source rail already owns the accepted-volume inspector. Never open a
+  // competing appearance rail beside it; collapsing sources reveals that rail.
+  const controlsVisible = Boolean(volume) && !controlsCollapsed && !wantsSliceInspectorPortal;
 
   return (
     <div
       data-controls-open={controlsVisible}
-      className={`svr-volume-layout h-full min-h-0 overflow-hidden grid grid-rows-1 gap-3 ${COARSE_POINTER_CONTROL_TARGETS} ${
-        controlsVisible ? 'grid-cols-[minmax(0,1fr)_minmax(280px,380px)]' : 'grid-cols-1'
+      className={`svr-volume-layout grid h-full min-h-0 grid-rows-1 overflow-hidden ${COARSE_POINTER_CONTROL_TARGETS} ${
+        controlsVisible ? 'grid-cols-[minmax(0,1fr)_minmax(208px,256px)]' : 'grid-cols-1'
       }`}
     >
       {sliceInspectorPortal}
 
       <div className="min-h-0">
-        <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-black h-full min-h-0">
+        <div className="h-full min-h-0 overflow-hidden bg-[var(--bg-primary)]">
           <div className="relative w-full h-full min-h-0">
-            {volume ? (
+            {volume && !wantsSliceInspectorPortal ? (
               <button
                 type="button"
                 onClick={() => setControlsCollapsed((v) => !v)}
                 aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
                 aria-expanded={!controlsCollapsed}
-                className="absolute right-2 top-2 z-20 inline-flex min-h-9 min-w-9 items-center justify-center rounded-full bg-black/50 border border-white/10 text-white/80 hover:bg-black/70"
+                className="absolute right-3 top-3 z-20 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
               >
                 {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
@@ -2594,29 +2444,29 @@ export function SvrVolume3DViewer({
             />
 
             {!volume ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-white/70 bg-black/40 p-4 text-center">
+              <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-4 text-center text-xs text-[var(--text-secondary)]">
                 Run SVR to generate a volume for 3D viewing.
               </div>
             ) : initError ? (
               <div
                 role="alert"
-                className="absolute inset-0 flex items-center justify-center text-sm text-amber-200 bg-black/60 p-4 text-center"
+                className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-4 text-center text-sm text-[var(--warning)]"
               >
                 {initError}
               </div>
             ) : renderBuild.status === 'error' ? (
               <div
                 role="alert"
-                className="absolute inset-0 flex items-center justify-center text-sm text-red-300 bg-black/60 p-4 text-center"
+                className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-4 text-center text-sm text-[var(--danger)]"
               >
                 {renderBuild.error ?? 'Failed to prepare 3D render volume.'}
               </div>
             ) : renderBuild.status !== 'ready' ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-white/80 bg-black/60 p-4 text-center">
+              <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-4 text-center text-xs text-[var(--text-secondary)]">
                 <div className="space-y-2">
                   <div>Preparing 3D render…</div>
                   {renderPlan ? (
-                    <div className="text-xs text-white/60 tabular-nums">
+                    <div className="text-xs tabular-nums text-[var(--text-tertiary)]">
                       {renderPlan.dims.nx}×{renderPlan.dims.ny}×{renderPlan.dims.nz} ·{' '}
                       {renderPlan.kind === 'f32' ? 'float' : 'u8'} · {renderPlan.note}
                     </div>
@@ -2624,14 +2474,14 @@ export function SvrVolume3DViewer({
                 </div>
               </div>
             ) : (
-              <div className="absolute left-3 bottom-3 text-xs text-white/75 bg-black/60 px-3 py-2 rounded-md">
+              <div className="absolute bottom-4 left-4 bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
                 Drag or use arrow keys to rotate · Wheel or +/− to zoom
               </div>
             )}
 
             {volume && renderPlan ? (
-              <div className="absolute left-3 top-3 z-10 max-w-[calc(100%-4rem)] rounded-md border border-white/10 bg-black/70 px-3 py-2 text-xs text-white/80">
-                <div className="tabular-nums">
+              <div className="absolute left-16 top-4 z-10 max-w-[calc(100%-6rem)] bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
+                <div className="tabular-nums [font-family:var(--font-mono)]">
                   Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
                   {' · '}
                   {actualTextureFormat === 'f16'
@@ -2641,20 +2491,22 @@ export function SvrVolume3DViewer({
                       : 'preparing'}
                 </div>
                 {volume.acquiredOrientationCount !== undefined ? (
-                  <div className="mt-1 text-white/70">
+                  <div className="mt-1 text-[var(--text-secondary)]">
                     {volume.acquiredOrientationCount} source orientation
                     {volume.acquiredOrientationCount === 1 ? '' : 's'}
                   </div>
                 ) : null}
                 {volume.effectiveResolutionMm ? (
-                  <div className="mt-1 text-white/70 tabular-nums">
+                  <div className="mt-1 tabular-nums text-[var(--text-secondary)]">
                     Acquired resolution: {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')} mm
                   </div>
                 ) : null}
                 {volume.sliceProfileSource ? (
                   <div
                     className={
-                      volume.sliceProfileSource === 'declared' ? 'mt-1 text-white/70' : 'mt-1 text-amber-200/90'
+                      volume.sliceProfileSource === 'declared'
+                        ? 'mt-1 text-[var(--text-secondary)]'
+                        : 'mt-1 text-[var(--warning)]'
                     }
                   >
                     Slice profile: {volume.sliceProfileSource}
@@ -2662,7 +2514,11 @@ export function SvrVolume3DViewer({
                   </div>
                 ) : null}
                 {observedSupportSummary ? (
-                  <div className={observedSupportSummary.valid ? 'mt-1 text-cyan-200/90' : 'mt-1 text-amber-200'}>
+                  <div
+                    className={
+                      observedSupportSummary.valid ? 'mt-1 text-[var(--evidence)]' : 'mt-1 text-[var(--warning)]'
+                    }
+                  >
                     {observedSupportSummary.valid
                       ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
                       : 'Acquired support does not match the reconstruction.'}
@@ -2675,10 +2531,10 @@ export function SvrVolume3DViewer({
       </div>
 
       {!controlsVisible ? null : (
-        <div className="min-h-0 overflow-y-auto space-y-3 pr-1">
-          <div className="text-xs font-medium text-[var(--text-secondary)]">3D Controls</div>
+        <div className="min-h-0 space-y-4 overflow-y-auto border-l border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5">
+          <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">3D Controls</div>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <label className="block text-xs text-[var(--text-secondary)]">
               Opacity
               <input
@@ -2732,7 +2588,7 @@ export function SvrVolume3DViewer({
               type="button"
               onClick={resetView}
               disabled={!volume}
-              className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
             >
               Reset view
             </button>
@@ -2743,11 +2599,11 @@ export function SvrVolume3DViewer({
             tissue.
           </div>
 
-          <div className="border border-[var(--border-color)] rounded-lg overflow-hidden bg-[var(--bg-secondary)]">
+          <div className="border-t border-[var(--border-color)] pt-2">
             <button
               type="button"
               onClick={() => setSegmentationCollapsed((v) => !v)}
-              className="w-full px-3 py-2 flex items-center justify-between text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="flex min-h-10 w-full items-center justify-between py-2 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
               aria-expanded={!segmentationCollapsed}
             >
               <span>Segmentation</span>
@@ -2755,7 +2611,7 @@ export function SvrVolume3DViewer({
             </button>
 
             {segmentationCollapsed ? null : (
-              <div className="p-3 space-y-2">
+              <div className="space-y-3 pt-2">
                 <div className="flex items-end gap-2">
                   <label className="block flex-1 text-xs text-[var(--text-secondary)]">
                     ROI falloff
@@ -2788,7 +2644,7 @@ export function SvrVolume3DViewer({
                       scheduleSeedGrow({ roiBounds: null });
                     }}
                     disabled={!growRoiBounds || onnxSegRunning}
-                    className="min-h-9 px-2 py-1 text-xs rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                   >
                     Clear ROI
                   </button>
@@ -2817,7 +2673,7 @@ export function SvrVolume3DViewer({
                         setGrowTargetLabel(next);
                         scheduleSeedGrow({ targetLabel: next });
                       }}
-                      className="mt-1 w-full px-2 py-1 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)]"
+                      className="mt-1 min-h-9 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-2 py-1 text-[var(--text-primary)]"
                       disabled={!volume || onnxSegRunning || !growRoiBounds}
                     >
                       <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
@@ -2853,7 +2709,7 @@ export function SvrVolume3DViewer({
                     <button
                       type="button"
                       onClick={() => cancelSeedGrow()}
-                      className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                      className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                     >
                       Cancel
                     </button>
@@ -2867,14 +2723,17 @@ export function SvrVolume3DViewer({
                       setGeneratedLabels(null);
                     }}
                     disabled={!generatedLabels || onnxSegRunning}
-                    className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                    className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                   >
                     Clear seg
                   </button>
                 </div>
 
                 {growStatus.error ? (
-                  <div role="alert" className="text-xs text-red-300 bg-red-400/10 px-2 py-1 rounded">
+                  <div
+                    role="alert"
+                    className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]"
+                  >
                     {growStatus.error}
                   </div>
                 ) : growStatus.message ? (
@@ -2908,7 +2767,7 @@ export function SvrVolume3DViewer({
                         type="button"
                         onClick={onnxUploadClick}
                         disabled={onnxStatus.loading}
-                        className="px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                        className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                       >
                         Upload model + manifest
                       </button>
@@ -2917,7 +2776,7 @@ export function SvrVolume3DViewer({
                         type="button"
                         onClick={initOnnxSession}
                         disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
-                        className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                        className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
                       >
                         Init
                       </button>
@@ -2932,7 +2791,7 @@ export function SvrVolume3DViewer({
                           onnxStatus.loading ||
                           !!onnxPreflight?.blockedByDefault
                         }
-                        className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/20 text-white disabled:opacity-50"
+                        className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
                       >
                         Run ML
                       </button>
@@ -2941,7 +2800,7 @@ export function SvrVolume3DViewer({
                         <button
                           type="button"
                           onClick={cancelOnnxSegmentation}
-                          className="px-3 py-2 text-xs rounded-lg border border-white/10 bg-black/40 text-white/80 hover:bg-black/60"
+                          className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                         >
                           Cancel
                         </button>
@@ -2951,7 +2810,7 @@ export function SvrVolume3DViewer({
                         type="button"
                         onClick={onnxClearModel}
                         disabled={!onnxStatus.cached || onnxStatus.loading}
-                        className="ml-auto px-3 py-2 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+                        className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
                       >
                         Clear model
                       </button>
@@ -2971,7 +2830,7 @@ export function SvrVolume3DViewer({
                     </details>
 
                     {onnxPreflight?.blockedByDefault ? (
-                      <div className="text-xs text-yellow-200 bg-yellow-400/10 px-2 py-1 rounded">
+                      <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
                         Model inference would require approximately {formatMiB(onnxPreflight.estimatedPeakBytes)} of
                         resident memory, exceeding the shared {formatMiB(onnxPreflight.budgetBytes)} SVR budget.
                         Reconstruct a smaller focus region or use a lower resolution.
@@ -2979,7 +2838,10 @@ export function SvrVolume3DViewer({
                     ) : null}
 
                     {onnxStatus.error ? (
-                      <div role="alert" className="text-xs text-red-300 bg-red-400/10 px-2 py-1 rounded">
+                      <div
+                        role="alert"
+                        className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]"
+                      >
                         {onnxStatus.error}
                       </div>
                     ) : onnxStatus.message ? (
@@ -3026,7 +2888,7 @@ export function SvrVolume3DViewer({
                           {labelMetrics.totalMm3.toFixed(1)} mm³ · {labelMetrics.totalMl.toFixed(2)} mL
                         </div>
                         {labelMetrics.unsupportedBoundaryCount > 0 ? (
-                          <div className="rounded bg-amber-400/10 px-2 py-1 text-xs text-amber-200">
+                          <div className="border-l-2 border-l-[var(--warning)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
                             Incomplete acquired coverage: {labelMetrics.unsupportedBoundaryCount.toLocaleString()}{' '}
                             labeled boundary voxels touch unsupported anatomy. Reported volume includes observed voxels
                             only.
@@ -3040,7 +2902,9 @@ export function SvrVolume3DViewer({
             )}
           </div>
 
-          {!wantsSliceInspectorPortal ? sliceInspectorCard : null}
+          {!wantsSliceInspectorPortal ? (
+            <div className="border-t border-[var(--border-color)] pt-4">{sliceInspectorCard}</div>
+          ) : null}
         </div>
       )}
     </div>

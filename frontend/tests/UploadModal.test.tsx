@@ -111,8 +111,12 @@ describe('UploadModal', () => {
   it('presents a private, keyboard-accessible intake console without excluding extensionless images', () => {
     render(<UploadModal onClose={vi.fn()} />);
 
-    expect(screen.getByRole('dialog', { name: 'Import scans' })).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'Import scans' });
+    expect(dialog).toHaveClass('rounded-[4px]');
+    expect(screen.getByRole('heading', { name: 'Bring scans into Mira' })).toBeInTheDocument();
     expect(screen.getByText(/processed locally · never uploaded/i)).toBeInTheDocument();
+    expect(screen.getByText(/your images stay on this device/i)).toBeInTheDocument();
+    expect(dialog.querySelector('canvas, img, video')).toBeNull();
     const dropTarget = screen.getByRole('button', { name: /drop local dicom files or an acquisition folder/i });
     expect(dropTarget).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Choose files' })).toBeEnabled();
@@ -140,6 +144,9 @@ describe('UploadModal', () => {
     expect(onUploadComplete).toHaveBeenCalled();
     expect(screen.getByText('Import complete')).toBeInTheDocument();
     expect(screen.getByText('1 image saved to this device.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /drop local dicom files or an acquisition folder/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Choose files' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -215,6 +222,8 @@ describe('UploadModal', () => {
 
     await waitFor(() => expect(screen.getByText('Import canceled')).toBeInTheDocument());
     expect(screen.getByText('1 image saved to this device.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /drop local dicom files or an acquisition folder/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Choose files' })).toBeEnabled();
     expect(onUploadComplete).toHaveBeenCalledTimes(1);
     expect(processFiles).toHaveBeenCalledTimes(1);
   });

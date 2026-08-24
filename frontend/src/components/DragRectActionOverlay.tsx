@@ -404,7 +404,8 @@ export function DragRectActionOverlay({
       {effectiveRect && effectiveRect.width > 0 && effectiveRect.height > 0 && (
         <div className="absolute inset-0 pointer-events-none">
           <div
-            className="absolute border-2 border-[var(--accent)] bg-[var(--accent)]/15 rounded-sm"
+            data-selection-outline="true"
+            className="absolute rounded-[2px] border border-[var(--signal-metal)] bg-transparent"
             style={{
               left: effectiveRect.x,
               top: effectiveRect.y,
@@ -425,11 +426,12 @@ export function DragRectActionOverlay({
                   e.stopPropagation();
                   clearSelection();
                 }}
-                className="absolute pointer-events-auto p-1 rounded bg-black/70 text-white/90 hover:bg-black/80"
+                aria-label="Clear selection"
+                className="absolute pointer-events-auto flex min-h-11 min-w-11 items-center justify-center rounded-[3px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
                 style={{ left: effectiveRect.x + 6, top: effectiveRect.y + 6 }}
                 title="Clear selection"
               >
-                <X className="w-4 h-4" />
+                <X className="h-4 w-4" aria-hidden="true" />
               </button>
 
               {/* Action buttons */}
@@ -442,7 +444,7 @@ export function DragRectActionOverlay({
                 const cls = enabled
                   ? variant === 'primary'
                     ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
-                    : 'bg-black/70 text-white/90 hover:bg-black/80 border-white/10'
+                    : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] border-[var(--border-color)]'
                   : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
 
                 return (
@@ -460,8 +462,8 @@ export function DragRectActionOverlay({
                       clearSelection();
                     }}
                     disabled={!enabled}
-                    className={`absolute pointer-events-auto px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-xl transition-colors border ${cls}`}
-                    style={{ left: effectiveRect.x + 40, top: effectiveRect.y + 6 + actionIdx * 44 }}
+                    className={`absolute pointer-events-auto flex min-h-11 items-center gap-2 rounded-[3px] border px-3 py-2 text-sm font-medium transition-colors ${cls}`}
+                    style={{ left: effectiveRect.x + 56, top: effectiveRect.y + 6 + actionIdx * 48 }}
                     title={action.title}
                   >
                     {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
