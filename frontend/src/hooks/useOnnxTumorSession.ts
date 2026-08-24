@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as Ort from 'onnxruntime-web';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
-import { deleteModelBlob, getModelBlob, getModelSavedAtMs, putModelBlob } from '../utils/segmentation/onnx/modelCache';
+import { deleteModelBlob, getModelBlob, getModelRecord, putModelBlob } from '../utils/segmentation/onnx/modelCache';
 import { verifyTumorModelManifest } from '../utils/segmentation/onnx/modelManifest';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
@@ -105,17 +105,14 @@ export function useOnnxTumorSession(
 
   const refreshCacheStatus = useCallback(() => {
     const generation = modelGenerationRef.current;
-    void Promise.all([
-      getModelSavedAtMs(ONNX_TUMOR_MODEL_KEY),
-      getModelBlob(ONNX_TUMOR_MODEL_KEY),
-      getModelBlob(ONNX_TUMOR_MANIFEST_KEY),
-    ])
-      .then(async ([savedAtMs, model, manifest]) => {
+    void Promise.all([getModelRecord(ONNX_TUMOR_MODEL_KEY), getModelBlob(ONNX_TUMOR_MANIFEST_KEY)])
+      .then(async ([record, manifest]) => {
         if (modelGenerationRef.current !== generation) return;
-        if (!model || savedAtMs === null) {
+        if (!record?.blob || record.savedAtMs == null) {
           setStatus((s) => ({ ...s, cached: false, verified: false, savedAtMs: null, error: undefined }));
           return;
         }
+        const { blob: model, savedAtMs } = record;
 
         try {
           await verifyTumorModelManifest(model, manifest);

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { AlertCircle, CheckCircle, Loader2, Trash2 } from 'lucide-react';
 import { deleteAllStoredMriData } from '../db/db';
 import { deleteModelCache } from '../utils/segmentation/onnx/modelCache';
-import { OWNED_COOKIE_NAMES, OWNED_EXACT_STORAGE_KEYS, OWNED_STORAGE_KEY_PREFIX } from '../utils/storageKeys';
+import { isOwnedStorageKey, OWNED_COOKIE_NAMES } from '../utils/storageKeys';
 import { AccessibleDialog } from './ui/AccessibleDialog';
 
 interface ClearDataModalProps {
@@ -17,12 +17,9 @@ function deleteCookie(name: string) {
 }
 
 function clearAppLocalStorage() {
-  const ownedKeys = new Set<string>(OWNED_EXACT_STORAGE_KEYS);
   for (let i = localStorage.length - 1; i >= 0; i--) {
     const key = localStorage.key(i);
-    if (key?.startsWith(OWNED_STORAGE_KEY_PREFIX)) ownedKeys.add(key);
-  }
-  for (const key of ownedKeys) {
+    if (!key || !isOwnedStorageKey(key)) continue;
     localStorage.removeItem(key);
     if (localStorage.getItem(key) !== null) {
       throw new Error('Some application settings could not be removed from local storage');

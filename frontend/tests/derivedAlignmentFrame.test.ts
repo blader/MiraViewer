@@ -11,6 +11,7 @@ const storage = vi.hoisted(() => ({
 
 vi.mock('../src/utils/localApi', () => ({
   loadDerivedAlignmentFrames: storage.load,
+  MAX_DERIVED_ALIGNMENT_FRAMES: 12,
   saveDerivedAlignmentFrame: storage.save,
 }));
 

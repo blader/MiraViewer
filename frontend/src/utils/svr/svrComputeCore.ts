@@ -273,41 +273,22 @@ async function rigidAlignSeriesInRoi(params: {
       occupancy: movingOccupancy,
     };
 
+    const registration = {
+      samples,
+      refVolume: refVol,
+      dims: scoreGrid.dims,
+      originMm: scoreGrid.originMm,
+      voxelSizeMm: scoreGrid.voxelSizeMm,
+      centerMm,
+      occupancy: refOccupancy,
+      reverse,
+    };
     const before = scoreBidirectionalNcc({
-      samples,
-      refVolume: refVol,
-      dims: scoreGrid.dims,
-      originMm: scoreGrid.originMm,
-      voxelSizeMm: scoreGrid.voxelSizeMm,
-      centerMm,
+      ...registration,
       rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-      occupancy: refOccupancy,
-      reverse,
     });
-
-    const opt = await optimizeRigidNcc({
-      samples,
-      refVolume: refVol,
-      dims: scoreGrid.dims,
-      originMm: scoreGrid.originMm,
-      voxelSizeMm: scoreGrid.voxelSizeMm,
-      centerMm,
-      signal,
-      occupancy: refOccupancy,
-      reverse,
-    });
-
-    const after = scoreBidirectionalNcc({
-      samples,
-      refVolume: refVol,
-      dims: scoreGrid.dims,
-      originMm: scoreGrid.originMm,
-      voxelSizeMm: scoreGrid.voxelSizeMm,
-      centerMm,
-      rigid: opt.best,
-      occupancy: refOccupancy,
-      reverse,
-    });
+    const opt = await optimizeRigidNcc({ ...registration, signal });
+    const after = scoreBidirectionalNcc({ ...registration, rigid: opt.best });
 
     // Only apply if the score actually improved.
     if (!(after.ncc > before.ncc + 1e-3)) {

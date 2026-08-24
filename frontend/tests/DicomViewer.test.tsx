@@ -14,6 +14,7 @@ import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 
 vi.mock('../src/utils/localApi', () => ({
   getImageIdForInstance: vi.fn().mockResolvedValue('miradb:inst-1'),
+  MAX_DERIVED_ALIGNMENT_FRAMES: 12,
 }));
 
 vi.mock('cornerstone-core', () => ({

@@ -247,13 +247,8 @@ export function ComparisonMatrix() {
   }, [data, selectedSeqId, enabledDates]);
 
   // For overlay mode: columns sorted oldest to newest (earliest left, latest right)
-  const overlayColumns = useMemo(() => {
-    if (!data || !selectedSeqId) return [] as { date: string; ref?: SeriesRef }[];
-    const map = data.series_map[selectedSeqId] || {};
-    // Sort by date ascending (oldest first)
-    const selectedDates = [...enabledDates].sort((a, b) => a.localeCompare(b));
-    return selectedDates.map((date) => ({ date, ref: map[date] })).filter((c) => c.ref);
-  }, [data, selectedSeqId, enabledDates]);
+  // Sort by date ascending (oldest first)
+  const overlayColumns = useMemo(() => [...columns].reverse().filter((column) => column.ref), [columns]);
 
   // Hooks for layout and navigation
   const {

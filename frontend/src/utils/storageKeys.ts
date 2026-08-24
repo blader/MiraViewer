@@ -50,3 +50,7 @@ export const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
 
 export const OWNED_EXACT_STORAGE_KEYS = [FILTERS_STORAGE_KEY] as const;
 export const OWNED_COOKIE_NAMES = [PLAYBACK_COOKIE_NAME_V2, LEGACY_PLAYBACK_COOKIE_NAME] as const;
+
+export function isOwnedStorageKey(key: string): boolean {
+  return key.startsWith(OWNED_STORAGE_KEY_PREFIX) || (OWNED_EXACT_STORAGE_KEYS as readonly string[]).includes(key);
+}

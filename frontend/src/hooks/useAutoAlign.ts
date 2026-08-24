@@ -3,14 +3,7 @@ import type { AlignmentReference, AlignmentResult, AlignmentProgress, SeriesRef 
 import { collectBoundedSliceCandidates, computeAlignedSettings, selectFineSliceShortlist } from '../utils/alignment';
 import { ALIGNMENT_IMAGE_SIZE, computeHistogramStats } from '../utils/imageCapture';
 import { computeMutualInformation } from '../utils/mutualInformation';
-import {
-  createCornerstoneRenderElement,
-  disposeCornerstoneRenderElement,
-  createPixelCaptureScratch,
-  renderSliceToPixels,
-  type PixelCaptureScratch,
-  type RenderedSlice,
-} from '../utils/cornerstoneSliceCapture';
+import { renderSliceToPixels, type RenderedSlice } from '../utils/cornerstoneSliceCapture';
 import { clamp, nowMs } from '../utils/math';
 import { fillInvalidWarpWithValidMean } from '../utils/warpAffine';
 import { buildStructuralPhaseImageSquare, inpaintExclusionRectSquare } from '../utils/imageFeatures';
@@ -64,6 +57,7 @@ import {
 import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from '../utils/svr/resample2d';
+import { yieldToMain } from '../utils/svr/svrUtils';
 
 const COARSE_IMAGE_SIZE = 128;
 const PHASE_SAMPLE_SIZE = 128;
@@ -124,13 +118,6 @@ function averageRawMindDistance(components: PerceptualComponents): number | unde
   return distances.reduce((sum, distance) => sum + distance, 0) / distances.length;
 }
 
-/**
- * Yield to the main thread to keep UI responsive during alignment.
- */
-function yieldToMain(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 function applyBrightnessContrastToPixels(pixels: Float32Array, brightness: number, contrast: number): Float32Array {
   // Mirror the viewer's CSS filter order:
   //   filter: brightness(b) contrast(c)
@@ -158,7 +145,7 @@ function supportedRegistrationPixels(pixels: Float32Array, validity?: Float32Arr
 
 function supportedHistogramStats(pixels: Float32Array, validity?: Float32Array) {
   if (!validity) return computeHistogramStats(pixels);
-  return computeHistogramStats(Float32Array.from(pixels.filter((_value, index) => (validity[index] ?? 0) > 1e-6)));
+  return computeHistogramStats(pixels.filter((_value, index) => (validity[index] ?? 0) > 1e-6));
 }
 
 export interface AutoAlignState {
@@ -230,50 +217,25 @@ export function useAutoAlign() {
         error: null,
       });
 
-      let renderElement: HTMLDivElement | null = null;
       let scoringRunner: AlignmentScoringRunner | null = null;
       try {
-        // One element and two reusable capture grids keep the exhaustive search allocation-bounded.
-        const activeRenderElement = createCornerstoneRenderElement(ALIGNMENT_IMAGE_SIZE);
-        renderElement = activeRenderElement;
-        const captureScratchFull = createPixelCaptureScratch(ALIGNMENT_IMAGE_SIZE);
-        const captureScratchCoarse = createPixelCaptureScratch(COARSE_IMAGE_SIZE);
+        // Direct source-pixel capture keeps exhaustive search independent of offscreen display rendering.
         const ensureNotAborted = () => {
           if (alignmentAbortController.signal.aborted) {
             throw new AlignmentCancelledError();
           }
         };
-        const renderVerifiedSlice = async (
+        const captureSlice = async (
           seriesUid: string,
           sliceIndex: number,
           targetSize: number,
-          scratch: PixelCaptureScratch,
         ): Promise<RenderedSlice> => {
-          let lastFailure = 'unknown render failure';
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            ensureNotAborted();
-            const rendered = await renderSliceToPixels(
-              activeRenderElement,
-              seriesUid,
-              sliceIndex,
-              targetSize,
-              scratch,
-              { signal: alignmentAbortController.signal },
-            );
-            ensureNotAborted();
-            const idMismatch =
-              rendered.renderedImageId != null && rendered.renderedImageId !== rendered.expectedImageId;
-            if (!rendered.renderTimedOut && !idMismatch) return rendered;
-            lastFailure = rendered.renderTimedOut
-              ? `render timed out for ${seriesUid} slice ${sliceIndex}`
-              : `rendered ${rendered.renderedImageId} while waiting for ${rendered.expectedImageId}`;
-            debugAlignmentLog(
-              'capture.retry',
-              { seriesUid, sliceIndex, targetSize, attempt, reason: lastFailure },
-              isDebugAlignmentEnabled(),
-            );
-          }
-          throw new Error(`Alignment capture failed after retry: ${lastFailure}`);
+          ensureNotAborted();
+          const captured = await renderSliceToPixels(seriesUid, sliceIndex, targetSize, {
+            signal: alignmentAbortController.signal,
+          });
+          ensureNotAborted();
+          return captured;
         };
 
         const debugAlignment = isDebugAlignmentEnabled();
@@ -296,19 +258,11 @@ export function useAutoAlign() {
         });
 
         // Render the reference slice from DICOM directly (identity view space).
-        const referenceRender = await renderVerifiedSlice(
-          reference.seriesUid,
-          reference.sliceIndex,
-          ALIGNMENT_IMAGE_SIZE,
-          captureScratchFull,
-        );
+        const referenceRender = await captureSlice(reference.seriesUid, reference.sliceIndex, ALIGNMENT_IMAGE_SIZE);
 
         if (debugAlignment)
           console.info('[alignment] Reference slice rendered', {
             imageId: referenceRender.imageId,
-            expectedImageId: referenceRender.expectedImageId,
-            renderedImageId: referenceRender.renderedImageId,
-            renderTimedOut: referenceRender.renderTimedOut,
           });
         const referencePixels = referenceRender.pixels;
         const referenceRegistrationPixels = supportedRegistrationPixels(referencePixels, referenceRender.validity);
@@ -322,12 +276,7 @@ export function useAutoAlign() {
           exclusionRect: fineNormalizationExclusion,
           validity: referenceRender.validity,
         });
-        const referenceCoarseRender = await renderVerifiedSlice(
-          reference.seriesUid,
-          reference.sliceIndex,
-          COARSE_IMAGE_SIZE,
-          captureScratchCoarse,
-        );
+        const referenceCoarseRender = await captureSlice(reference.seriesUid, reference.sliceIndex, COARSE_IMAGE_SIZE);
         const referencePixelsCoarse = referenceCoarseRender.pixels;
         scoringRunner = await createAlignmentScoringRunner(
           {
@@ -790,6 +739,9 @@ export function useAutoAlign() {
               ensureNotAborted();
               results.push(physicalResult);
               setStateForCurrentRun((state) => ({ ...state, results: [...results] }));
+              /**
+               * Yield to the main thread to keep UI responsive during alignment.
+               */
               await yieldToMain();
               continue;
             }
@@ -906,12 +858,7 @@ export function useAutoAlign() {
                 numberOfResolutions: SEED_REGISTRATION_RESOLUTIONS,
               });
 
-            const seedRender = await renderVerifiedSlice(
-              seriesRef.series_uid,
-              seedIdx,
-              SEED_REGISTRATION_IMAGE_SIZE,
-              captureScratchFull,
-            );
+            const seedRender = await captureSlice(seriesRef.series_uid, seedIdx, SEED_REGISTRATION_IMAGE_SIZE);
             const seedFrame = targetManifest?.frames[seedIdx];
             const seedGeometry = seedFrame ? getSliceGeometryFromInstance(seedFrame) : null;
             const movingAnalysisPixelSpacing: [number, number] | undefined = seedGeometry
@@ -1057,12 +1004,7 @@ export function useAutoAlign() {
                 A: seedTransform.A,
                 initial: { A: initialSeedReg.A, translatePx: initialSeedReg.translatePx },
                 exclusionAwareResidual: Boolean(reference.exclusionMask),
-                renderTimedOut: seedRender.renderTimedOut,
-                render: {
-                  imageId: seedRender.imageId,
-                  expectedImageId: seedRender.expectedImageId,
-                  renderedImageId: seedRender.renderedImageId,
-                },
+                render: { imageId: seedRender.imageId },
               },
               debugAlignment,
             );
@@ -1070,19 +1012,13 @@ export function useAutoAlign() {
             // 2) Exhaustively score the bounded window. Phase correlation estimates only the
             // residual translation; aligned local structure decides which slice wins.
             let sliceSearchRenderMs = 0;
-            const sliceSearchWarpMs = 0;
             let sliceSearchScoreMs = 0;
             let slicesChecked = 0;
             let provisionalBestScore = 0;
             const progressUpdateMinIntervalMs = 100;
             let lastProgressUpdateMs = 0;
             const scoreCoarseSlice = async (index: number): Promise<SlicePerceptualCandidate> => {
-              const rendered = await renderVerifiedSlice(
-                seriesRef.series_uid,
-                index,
-                COARSE_IMAGE_SIZE,
-                captureScratchCoarse,
-              );
+              const rendered = await captureSlice(seriesRef.series_uid, index, COARSE_IMAGE_SIZE);
               sliceSearchRenderMs += rendered.timingMs.total;
 
               const tScore0 = nowMs();
@@ -1186,12 +1122,7 @@ export function useAutoAlign() {
             for (const index of shortlist.fineIndices) {
               const coarseCandidate = coarseByIndex.get(index);
               if (!coarseCandidate) continue;
-              const rendered = await renderVerifiedSlice(
-                seriesRef.series_uid,
-                index,
-                ALIGNMENT_IMAGE_SIZE,
-                captureScratchFull,
-              );
+              const rendered = await captureSlice(seriesRef.series_uid, index, ALIGNMENT_IMAGE_SIZE);
               sliceSearchRenderMs += rendered.timingMs.total;
               const tScore0 = nowMs();
               const { components } = await scoringRunner.scoreFine(
@@ -1412,7 +1343,6 @@ export function useAutoAlign() {
                 slicesChecked,
                 scoreMs: sliceSearchScoreMs,
                 renderMs: sliceSearchRenderMs,
-                warpMs: sliceSearchWarpMs,
                 peakIndices: shortlist.peakIndices,
                 peakSelections: shortlist.peakSelections,
                 fineIndices: shortlist.fineIndices,
@@ -1437,12 +1367,7 @@ export function useAutoAlign() {
             if (debugAlignment)
               console.info('[alignment] Refinement starting', { date, bestSliceIndex: winningCandidate.index });
 
-            const bestRender = await renderVerifiedSlice(
-              seriesRef.series_uid,
-              winningCandidate.index,
-              ALIGNMENT_IMAGE_SIZE,
-              captureScratchFull,
-            );
+            const bestRender = await captureSlice(seriesRef.series_uid, winningCandidate.index, ALIGNMENT_IMAGE_SIZE);
             const winningWarp = correctedWarpAtSize(seedTransform, winningCandidate.phase, ALIGNMENT_IMAGE_SIZE);
             const prewarpedBest = warpPerceptualCandidateWithValidity(
               bestRender.pixels,
@@ -1819,7 +1744,6 @@ export function useAutoAlign() {
       } finally {
         scoringRunner?.close();
         if (abortControllerRef.current === alignmentAbortController) abortControllerRef.current = null;
-        if (renderElement) disposeCornerstoneRenderElement(renderElement);
       }
     },
     [],

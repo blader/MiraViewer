@@ -33,9 +33,6 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
-  createCornerstoneRenderElement: () => document.createElement('div'),
-  disposeCornerstoneRenderElement: vi.fn(),
-  createPixelCaptureScratch: () => ({}),
   renderSliceToPixels: mocks.renderSliceToPixels,
 }));
 
@@ -100,18 +97,12 @@ function makeBoundarySearchSlice(
   return output;
 }
 
-function renderedSlice(pixels: Float32Array, seriesUid: string, index: number, size: number) {
+function renderedSlice(pixels: Float32Array, seriesUid: string, index: number) {
   const imageId = `${seriesUid}:${index}`;
   return {
     pixels,
     imageId,
-    expectedImageId: imageId,
-    renderedImageId: imageId,
-    renderTimedOut: false,
-    sourceCanvasWidth: size,
-    sourceCanvasHeight: size,
-    targetSize: size,
-    timingMs: { getImageId: 0, loadImage: 0, waitForRender: 0, capture: 0, total: 0 },
+    timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
   };
 }
 
@@ -176,13 +167,11 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     vi.clearAllMocks();
     const worker = { terminate: vi.fn() } as unknown as Worker;
 
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) => {
-        const variant =
-          seriesUid === 'reference-series' || index === 2 ? 'reference' : index === 1 ? 'missing' : 'different';
-        return renderedSlice(makeSlice(size, variant), seriesUid, index, size);
-      },
-    );
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) => {
+      const variant =
+        seriesUid === 'reference-series' || index === 2 ? 'reference' : index === 1 ? 'missing' : 'different';
+      return renderedSlice(makeSlice(size, variant), seriesUid, index);
+    });
 
     mocks.registerRigid2DWithElastix.mockImplementation(async (_fixed: Float32Array, moving: Float32Array) => ({
       movingToFixed: {
@@ -240,9 +229,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     const referenceHistogram = Array.from(pixelsForSlice('reference-series', seedIndex, 64)).sort((a, b) => a - b);
     const seedHistogram = Array.from(pixelsForSlice('target-series', seedIndex, 64)).sort((a, b) => a - b);
     expect(seedHistogram).toEqual(referenceHistogram);
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) =>
-        renderedSlice(pixelsForSlice(seriesUid, index, size), seriesUid, index, size),
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) =>
+      renderedSlice(pixelsForSlice(seriesUid, index, size), seriesUid, index),
     );
 
     const affineObservedRecordedWinner: boolean[] = [];
@@ -264,12 +252,6 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
       exclusionMask: { x: 0.45, y: 0.45, width: 0.05, height: 0.05 },
     };
     const { result } = renderHook(() => useAutoAlign());
-    mocks.renderSliceToPixels.mockResolvedValueOnce({
-      ...renderedSlice(pixelsForSlice('reference-series', seedIndex, 256), 'reference-series', seedIndex, 256),
-      renderedImageId: null,
-      renderTimedOut: true,
-    });
-
     let aligned = [] as Awaited<ReturnType<typeof result.current.alignAllDates>>;
     await act(async () => {
       aligned = await result.current.alignAllDates(
@@ -302,15 +284,15 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     expect(mocks.registerAffine2DWithElastix.mock.calls[1]?.[3]).toMatchObject({ numberOfResolutions: 3 });
 
     const coarseIndices = mocks.renderSliceToPixels.mock.calls
-      .filter((call) => call[1] === 'target-series' && call[3] === 128)
-      .map((call) => call[2])
+      .filter((call) => call[0] === 'target-series' && call[2] === 128)
+      .map((call) => call[1])
       .sort((a, b) => a - b);
     expect(coarseIndices).toEqual(Array.from({ length: candidateCount }, (_, index) => index));
-    expect(mocks.renderSliceToPixels.mock.calls.slice(0, 2).map((call) => call.slice(1, 4))).toEqual([
+    expect(mocks.renderSliceToPixels.mock.calls.slice(0, 2).map((call) => call.slice(0, 3))).toEqual([
       ['reference-series', seedIndex, 256],
-      ['reference-series', seedIndex, 256],
+      ['reference-series', seedIndex, 128],
     ]);
-    expect(mocks.renderSliceToPixels.mock.calls.every((call) => call[5]?.signal instanceof AbortSignal)).toBe(true);
+    expect(mocks.renderSliceToPixels.mock.calls.every((call) => call[3]?.signal instanceof AbortSignal)).toBe(true);
 
     const scoreRecords = Array.from({ length: candidateCount }, (_, index) => ({
       index,
@@ -329,8 +311,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     }
 
     const fullSizeTargetIndices = mocks.renderSliceToPixels.mock.calls
-      .filter((call) => call[1] === 'target-series' && call[3] === ALIGNMENT_IMAGE_SIZE)
-      .map((call) => call[2]);
+      .filter((call) => call[0] === 'target-series' && call[2] === ALIGNMENT_IMAGE_SIZE)
+      .map((call) => call[1]);
     expect(fullSizeTargetIndices).toEqual([seedIndex, ...fineIndices, trueIndex]);
 
     const winningScore = getAlignmentSliceScore('target-series', trueIndex);
@@ -406,9 +388,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
         },
       });
     };
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, targetSize: number) =>
-        renderedSlice(pixelsAtSize(seriesUid, targetSize), seriesUid, index, targetSize),
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, targetSize: number) =>
+      renderedSlice(pixelsAtSize(seriesUid, targetSize), seriesUid, index),
     );
 
     const intensityWorker = { terminate: vi.fn() } as unknown as Worker;
@@ -555,9 +536,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
       sliceCount: 1,
       settings: { ...DEFAULT_PANEL_SETTINGS },
     };
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) =>
-        renderedSlice(makeSlice(size, 'reference'), seriesUid, index, size),
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) =>
+      renderedSlice(makeSlice(size, 'reference'), seriesUid, index),
     );
 
     const worker = { terminate: vi.fn() } as unknown as Worker;
@@ -647,16 +627,14 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     const labels = makeTissueLabelPhantom(size);
     const referencePixels = renderTissueContrast(labels, REFERENCE_CONTRAST);
     const targetPixels = renderTissueContrast(labels, NONFUNCTIONAL_CONTRAST);
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, targetSize: number) => {
-        const targetLabels = makeTissueLabelPhantom(targetSize);
-        const pixels = renderTissueContrast(
-          targetLabels,
-          seriesUid === 'reference-series' ? REFERENCE_CONTRAST : NONFUNCTIONAL_CONTRAST,
-        );
-        return renderedSlice(pixels, seriesUid, index, targetSize);
-      },
-    );
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, targetSize: number) => {
+      const targetLabels = makeTissueLabelPhantom(targetSize);
+      const pixels = renderTissueContrast(
+        targetLabels,
+        seriesUid === 'reference-series' ? REFERENCE_CONTRAST : NONFUNCTIONAL_CONTRAST,
+      );
+      return renderedSlice(pixels, seriesUid, index);
+    });
     const intensityWorker = { terminate: vi.fn() } as unknown as Worker;
     const structureWorker = { terminate: vi.fn() } as unknown as Worker;
     mocks.registerAffine2DWithElastix
@@ -778,9 +756,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
         sliceCount: 1,
         settings: { ...DEFAULT_PANEL_SETTINGS },
       };
-      mocks.renderSliceToPixels.mockImplementation(
-        async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) =>
-          renderedSlice(makeSlice(size, 'reference'), seriesUid, index, size),
+      mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) =>
+        renderedSlice(makeSlice(size, 'reference'), seriesUid, index),
       );
       const intensityWorker = { terminate: vi.fn() } as unknown as Worker;
       const structureWorker = { terminate: vi.fn() } as unknown as Worker;
@@ -845,9 +822,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
       sliceCount: 1,
       settings: { ...DEFAULT_PANEL_SETTINGS },
     };
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) =>
-        renderedSlice(makeSlice(size, 'reference'), seriesUid, index, size),
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) =>
+      renderedSlice(makeSlice(size, 'reference'), seriesUid, index),
     );
     const firstSeedWorker = { terminate: vi.fn() } as unknown as Worker;
     const secondSeedWorker = { terminate: vi.fn() } as unknown as Worker;
@@ -909,17 +885,15 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
       sliceCount: 90,
       settings: { ...DEFAULT_PANEL_SETTINGS },
     };
-    mocks.renderSliceToPixels.mockImplementation(
-      async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) => {
-        const variant =
-          seriesUid === 'reference-series' || index === 85
-            ? 'reference'
-            : index === 80
-              ? 'near-reference-boundary'
-              : 'relocated-distractor';
-        return renderedSlice(makeBoundarySearchSlice(size, variant), seriesUid, index, size);
-      },
-    );
+    mocks.renderSliceToPixels.mockImplementation(async (seriesUid: string, index: number, size: number) => {
+      const variant =
+        seriesUid === 'reference-series' || index === 85
+          ? 'reference'
+          : index === 80
+            ? 'near-reference-boundary'
+            : 'relocated-distractor';
+      return renderedSlice(makeBoundarySearchSlice(size, variant), seriesUid, index);
+    });
     const { result } = renderHook(() => useAutoAlign());
 
     let aligned = [] as Awaited<ReturnType<typeof result.current.alignAllDates>>;
@@ -942,8 +916,8 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
     expect(aligned[0].bestSliceIndex).toBe(85);
     expect(aligned[0].slicesChecked).toBe(90);
     const coarseIndices = mocks.renderSliceToPixels.mock.calls
-      .filter((call) => call[1] === 'target-series' && call[3] === 128)
-      .map((call) => call[2])
+      .filter((call) => call[0] === 'target-series' && call[2] === 128)
+      .map((call) => call[1])
       .sort((a, b) => a - b);
     expect(coarseIndices).toEqual(Array.from({ length: 90 }, (_, index) => index));
   });

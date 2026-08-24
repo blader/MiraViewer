@@ -21,22 +21,14 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.getSeriesFrameManifest,
+  MAX_DERIVED_ALIGNMENT_FRAMES: 12,
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
-  createCornerstoneRenderElement: () => document.createElement('div'),
-  disposeCornerstoneRenderElement: vi.fn(),
-  createPixelCaptureScratch: () => ({}),
-  renderSliceToPixels: async (_element: HTMLDivElement, series: string, index: number, size: number) => ({
+  renderSliceToPixels: async (series: string, index: number, size: number) => ({
     pixels: Float32Array.from({ length: size * size }, (_, pixel) => (pixel % size) / Math.max(1, size - 1)),
     imageId: `miradb:${series}-${index}`,
-    expectedImageId: `miradb:${series}-${index}`,
-    renderedImageId: `miradb:${series}-${index}`,
-    renderTimedOut: false,
-    sourceCanvasWidth: size,
-    sourceCanvasHeight: size,
-    targetSize: size,
-    timingMs: { getImageId: 0, loadImage: 0, waitForRender: 0, capture: 0, total: 0 },
+    timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
   }),
 }));
 

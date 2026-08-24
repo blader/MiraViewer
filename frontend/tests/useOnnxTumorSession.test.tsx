@@ -10,7 +10,10 @@ const { cache, createSession } = vi.hoisted(() => ({
 
 vi.mock('../src/utils/segmentation/onnx/modelCache', () => ({
   getModelBlob: vi.fn(async (key: string) => cache.get(key) ?? null),
-  getModelSavedAtMs: vi.fn(async (key: string) => (cache.has(key) ? 1 : null)),
+  getModelRecord: vi.fn(async (key: string) => {
+    const blob = cache.get(key);
+    return blob ? { key, blob, savedAtMs: 1 } : null;
+  }),
   putModelBlob: vi.fn(async (key: string, blob: Blob) => {
     cache.set(key, blob);
   }),

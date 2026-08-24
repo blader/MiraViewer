@@ -61,21 +61,18 @@ export async function putModelBlob(key: string, blob: Blob): Promise<void> {
   await db.put(STORE, rec, key);
 }
 
-export async function getModelBlob(key: string): Promise<Blob | null> {
+export async function getModelRecord(key: string): Promise<ModelRecord | null> {
   const db = await getDb();
-  const rec = (await db.get(STORE, key)) as ModelRecord | undefined;
-  return rec?.blob ?? null;
+  return ((await db.get(STORE, key)) as ModelRecord | undefined) ?? null;
+}
+
+export async function getModelBlob(key: string): Promise<Blob | null> {
+  return (await getModelRecord(key))?.blob ?? null;
 }
 
 export async function deleteModelBlob(key: string): Promise<void> {
   const db = await getDb();
   await db.delete(STORE, key);
-}
-
-export async function getModelSavedAtMs(key: string): Promise<number | null> {
-  const db = await getDb();
-  const rec = (await db.get(STORE, key)) as ModelRecord | undefined;
-  return rec?.savedAtMs ?? null;
 }
 
 export async function getAllModelRecords(): Promise<ModelRecord[]> {

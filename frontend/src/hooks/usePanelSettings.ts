@@ -318,37 +318,29 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
       const batchId = operationId ?? `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 
       const historyEntries: PanelSettingsHistoryEntry[] = [];
-      const currentSettings = panelSettingsRef.current;
-      const persistedUpdates = new Map<string, PanelSettings>();
 
       for (const [date, newSettings] of updates) {
-        const current = currentSettings.get(date) || { ...DEFAULT_PANEL_SETTINGS };
-        const updated = { ...current, ...newSettings };
+        const current = panelSettingsRef.current.get(date) || { ...DEFAULT_PANEL_SETTINGS };
         historyEntries.push({
           date,
           before: { ...current },
-          after: { ...updated },
+          after: { ...current, ...newSettings },
           batchId,
         });
-        persistedUpdates.set(date, updated);
       }
 
-      for (const entry of historyEntries) undoStackRef.current.push(entry);
+      undoStackRef.current.push(...historyEntries);
       redoStackRef.current.length = 0;
       while (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
 
       setPanelSettings((prev) => {
         const next = new Map(prev);
-
-        for (const [date, updated] of persistedUpdates) {
-          next.set(date, updated);
-        }
-
+        for (const { date, after } of historyEntries) next.set(date, after);
         return next;
       });
 
-      for (const [date, settings] of persistedUpdates) {
-        savePanelSettings(selectedSeqId, date, settings).catch(reportPersistenceFailure);
+      for (const { date, after } of historyEntries) {
+        savePanelSettings(selectedSeqId, date, after).catch(reportPersistenceFailure);
       }
     },
     [selectedSeqId, reportPersistenceFailure],

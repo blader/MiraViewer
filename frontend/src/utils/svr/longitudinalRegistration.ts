@@ -1,6 +1,6 @@
 import { outputGridPixelToWorld, validateOutputPlaneGrid, type OutputPlaneGrid } from '../outputPlaneGrid';
 import { sliceCornersMm } from './dicomGeometry';
-import { resample2dAreaAverage } from './resample2d';
+import { resample2dAreaAverageWithValidity } from './resample2d';
 import {
   applyRigidToPoint,
   boundsCenterMm,
@@ -39,22 +39,25 @@ export type LongitudinalRegistrationFailure = {
   message: string;
 };
 
-export type LongitudinalRegistrationResult = {
-  ok: true;
+type LongitudinalReslicedPlane = {
   pixels: Float32Array;
   /** Actual valid acquired support on the selected output lattice. */
   valid: Uint8Array;
   rows: number;
   cols: number;
+  coverage: number;
   outputGrid?: OutputPlaneGrid;
   contributingSourceSopInstanceUids?: string[];
+};
+
+export type LongitudinalRegistrationResult = LongitudinalReslicedPlane & {
+  ok: true;
   nativeRefinement?: NativeRefinementDiagnostics;
   /** Bounded physically distinct coarse hypotheses; only native anatomy may adjudicate them. */
   nativeCandidatePoses?: RigidParams[];
   targetToReference: RigidParams;
   /** All rigid parameters rotate around this reference-frame patient-space center. */
   centerMm: Vec3;
-  coverage: number;
   score: number;
   diagnostics: {
     rawScore: number;
@@ -123,15 +126,8 @@ export type DenseLongitudinalResliceOptions = {
   signal?: AbortSignal;
 };
 
-export type DenseLongitudinalResliceResult = {
+export type DenseLongitudinalResliceResult = LongitudinalReslicedPlane & {
   ok: true;
-  pixels: Float32Array;
-  valid: Uint8Array;
-  rows: number;
-  cols: number;
-  coverage: number;
-  outputGrid?: OutputPlaneGrid;
-  contributingSourceSopInstanceUids?: string[];
   targetToReference?: RigidParams;
   nativeRefinement?: NativeRefinementDiagnostics;
 };
@@ -294,25 +290,18 @@ function prepareScoringSlices(
     const colScale = slice.dsCols / cols;
     const rowOffsetMm = ((rowScale - 1) * slice.rowSpacingDsMm) / 2;
     const colOffsetMm = ((colScale - 1) * slice.colSpacingDsMm) / 2;
-    const supportedPixels = new Float32Array(slice.pixels.length);
-    const support = new Float32Array(slice.pixels.length);
-    for (let index = 0; index < slice.pixels.length; index++) {
-      const value = slice.pixels[index]!;
-      if ((!slice.valid || slice.valid[index]) && Number.isFinite(value)) {
-        supportedPixels[index] = value;
-        support[index] = 1;
-      }
-    }
-    const weighted = resample2dAreaAverage(supportedPixels, slice.dsRows, slice.dsCols, rows, cols);
-    const coverage = resample2dAreaAverage(support, slice.dsRows, slice.dsCols, rows, cols);
-    const pixels = new Float32Array(weighted.length);
-    const valid = new Uint8Array(weighted.length);
-    for (let index = 0; index < weighted.length; index++) {
-      const fraction = coverage[index]!;
-      if (fraction >= 1 - 1e-6) {
-        pixels[index] = weighted[index]! / fraction;
-        valid[index] = 1;
-      }
+    const { pixels, validity } = resample2dAreaAverageWithValidity(
+      slice.pixels,
+      slice.valid ?? new Uint8Array(slice.pixels.length).fill(1),
+      slice.dsRows,
+      slice.dsCols,
+      rows,
+      cols,
+    );
+    const valid = new Uint8Array(pixels.length);
+    for (let index = 0; index < pixels.length; index++) {
+      if (validity[index]! >= 1 - 1e-6) valid[index] = 1;
+      else pixels[index] = 0;
     }
 
     return {
@@ -484,18 +473,18 @@ function sampleSliceBilinear(slice: SvrReconstructionSlice, point: Vec3): number
   const c1 = Math.min(c0 + 1, slice.dsCols - 1);
   const fr = row - r0;
   const fc = col - c0;
-  const footprint = [
-    { index: r0 * slice.dsCols + c0, weight: (1 - fr) * (1 - fc) },
-    { index: r0 * slice.dsCols + c1, weight: (1 - fr) * fc },
-    { index: r1 * slice.dsCols + c0, weight: fr * (1 - fc) },
-    { index: r1 * slice.dsCols + c1, weight: fr * fc },
-  ];
   let value = 0;
-  for (const sample of footprint) {
-    if (sample.weight <= Number.EPSILON) continue;
-    const pixel = slice.pixels[sample.index];
-    if ((slice.valid && !slice.valid[sample.index]) || pixel === undefined || !Number.isFinite(pixel)) return null;
-    value += pixel * sample.weight;
+  for (let rowOffset = 0; rowOffset < 2; rowOffset++) {
+    const sourceRow = rowOffset ? r1 : r0;
+    const rowWeight = rowOffset ? fr : 1 - fr;
+    for (let colOffset = 0; colOffset < 2; colOffset++) {
+      const weight = rowWeight * (colOffset ? fc : 1 - fc);
+      if (weight <= Number.EPSILON) continue;
+      const index = sourceRow * slice.dsCols + (colOffset ? c1 : c0);
+      const pixel = slice.pixels[index];
+      if ((slice.valid && !slice.valid[index]) || pixel === undefined || !Number.isFinite(pixel)) return null;
+      value += pixel * weight;
+    }
   }
   return value;
 }
@@ -604,15 +593,7 @@ export function resliceStackToReferencePlane(params: {
   targetToReference?: RigidParams;
   centerMm?: Vec3;
   signal?: AbortSignal;
-}): {
-  pixels: Float32Array;
-  valid: Uint8Array;
-  rows: number;
-  cols: number;
-  coverage: number;
-  outputGrid?: OutputPlaneGrid;
-  contributingSourceSopInstanceUids?: string[];
-} {
+}): LongitudinalReslicedPlane {
   const { targetSlices, referenceSlice, outputGrid, signal } = params;
   if (outputGrid) validateOutputPlaneGrid(outputGrid);
   const targetStack = prepareNativeSliceStack(targetSlices);
@@ -642,6 +623,7 @@ export function resliceStackToReferencePlane(params: {
   const pixels = new Float32Array(rows * cols);
   const valid = new Uint8Array(pixels.length);
   const contributingSourceSopInstanceUids = new Set<string>();
+  const contributingSamples: NativeSliceSample[] = [];
   let supported = 0;
 
   for (let row = 0; row < rows; row++) {
@@ -652,7 +634,7 @@ export function resliceStackToReferencePlane(params: {
         : pixelToWorld(referenceSlice, row, col);
       let value = 0;
       let sampleCount = 0;
-      const contributingSamples: NativeSliceSample[] = [];
+      contributingSamples.length = 0;
       for (let sourceRow = 0; sourceRow < rowSampleCount; sourceRow++) {
         const rowOffset = ((sourceRow + 0.5) / rowSampleCount - 0.5) * outputRowSpacing;
         for (let sourceCol = 0; sourceCol < colSampleCount; sourceCol++) {
@@ -748,7 +730,7 @@ function buildNativeRefinementSamples(params: {
   const translation = v3(rigid.tx, rigid.ty, rigid.tz);
   let count = 0;
 
-  for (const slice of params.slices) {
+  sampling: for (const slice of params.slices) {
     assertNotAborted(params.signal);
     for (let row = 0; row < slice.dsRows; row += stride) {
       for (let col = 0; col < slice.dsCols; col += stride) {
@@ -808,15 +790,7 @@ function buildNativeRefinementSamples(params: {
         pos[count * 3] = sourcePoint.x;
         pos[count * 3 + 1] = sourcePoint.y;
         pos[count * 3 + 2] = sourcePoint.z;
-        if (++count >= maxSamples) {
-          return {
-            obs: obs.subarray(0, count),
-            pos: pos.subarray(0, count * 3),
-            count,
-            spatialFolds: spatialFolds.subarray(0, count),
-            spatialBlockIds: spatialBlockIds.subarray(0, count),
-          };
-        }
+        if (++count >= maxSamples) break sampling;
       }
     }
   }
@@ -1023,14 +997,14 @@ function refineNativeLongitudinalPose(
         for (const direction of [-1, 1]) {
           const value = Math.max(initial[key] - bound, Math.min(initial[key] + bound, current[key] + direction * step));
           if (value === current[key]) continue;
-          const candidate = { ...current, [key]: value };
-          const evidence = evaluate(candidate, 0);
+          const previous = current[key];
+          current[key] = value;
+          const evidence = evaluate(current, 0);
           evaluations++;
           if (evidence.score > best.score + 1e-7) {
-            current[key] = value;
             best = evidence;
             improved = true;
-          }
+          } else current[key] = previous;
         }
       }
       if (!improved) break;
@@ -1257,9 +1231,6 @@ export async function registerAndResliceLongitudinal(
     const targetBounds = stackBounds(targetPrepared);
     const centerMm = boundsCenterMm(referenceBounds);
     const targetCenter = boundsCenterMm(targetBounds);
-    const referenceSpacing = Math.min(referenceSlice.rowSpacingDsMm, referenceSlice.colSpacingDsMm);
-    const grid = boundedGrid(referenceBounds, referenceSpacing, maxDimension);
-    const occupancy = new Uint8Array(grid.dims.nx * grid.dims.ny * grid.dims.nz);
     const reconstructionOptions = {
       iterations: 0,
       stepSize: 0,
@@ -1269,13 +1240,23 @@ export async function registerAndResliceLongitudinal(
       robustDelta: 0.1,
       laplacianWeight: 0,
     };
-    const volume = await reconstructVolumeFromSlices({
-      slices: referencePrepared,
-      grid,
-      occupancy,
-      options: reconstructionOptions,
-      hooks: { signal: options.signal, yieldToMain },
-    });
+    const reconstructScoringDomain = async (slices: SvrReconstructionSlice[], bounds: BoundsMm, spacing: number) => {
+      const grid = boundedGrid(bounds, spacing, maxDimension);
+      const occupancy = new Uint8Array(grid.dims.nx * grid.dims.ny * grid.dims.nz);
+      const refVolume = await reconstructVolumeFromSlices({
+        slices,
+        grid,
+        occupancy,
+        options: reconstructionOptions,
+        hooks: { signal: options.signal, yieldToMain },
+      });
+      return { ...grid, occupancy, refVolume };
+    };
+    const referenceDomain = await reconstructScoringDomain(
+      referencePrepared,
+      referenceBounds,
+      Math.min(referenceSlice.rowSpacingDsMm, referenceSlice.colSpacingDsMm),
+    );
     const samples = buildSeriesSamples({
       slices: targetPrepared,
       roiBounds: targetBounds,
@@ -1294,16 +1275,11 @@ export async function registerAndResliceLongitudinal(
         'Too little stable anatomy is available for bidirectional 3D registration',
       );
     }
-    const targetSpacing = Math.min(targetFirst.rowSpacingDsMm, targetFirst.colSpacingDsMm);
-    const targetGrid = boundedGrid(targetBounds, targetSpacing, maxDimension);
-    const targetOccupancy = new Uint8Array(targetGrid.dims.nx * targetGrid.dims.ny * targetGrid.dims.nz);
-    const targetVolume = await reconstructVolumeFromSlices({
-      slices: targetPrepared,
-      grid: targetGrid,
-      occupancy: targetOccupancy,
-      options: reconstructionOptions,
-      hooks: { signal: options.signal, yieldToMain },
-    });
+    const targetDomain = await reconstructScoringDomain(
+      targetPrepared,
+      targetBounds,
+      Math.min(targetFirst.rowSpacingDsMm, targetFirst.colSpacingDsMm),
+    );
     const minimumSamples = Math.min(
       512,
       Math.max(32, Math.floor(Math.min(samples.count, referenceSamples.count) * 0.1)),
@@ -1324,28 +1300,17 @@ export async function registerAndResliceLongitudinal(
       const rotatedCenter = alignCenters(targetCenter, centerMm, rotation);
       candidates.push({ ...angles, tx: rotatedCenter.x, ty: rotatedCenter.y, tz: rotatedCenter.z });
     } else {
-      candidates.push({ ...IDENTITY_RIGID, tx: grid.voxelSizeMm });
+      candidates.push({ ...IDENTITY_RIGID, tx: referenceDomain.voxelSizeMm });
     }
 
     const common = {
       samples,
-      refVolume: volume,
-      dims: grid.dims,
-      originMm: grid.originMm,
-      voxelSizeMm: grid.voxelSizeMm,
+      ...referenceDomain,
       centerMm,
-      occupancy,
       minimumCoverage,
       minimumSamples,
     };
-    const reverse = {
-      samples: referenceSamples,
-      refVolume: targetVolume,
-      dims: targetGrid.dims,
-      originMm: targetGrid.originMm,
-      voxelSizeMm: targetGrid.voxelSizeMm,
-      occupancy: targetOccupancy,
-    };
+    const reverse = { samples: referenceSamples, ...targetDomain };
     const scoredSeeds = candidates
       .map((rigid) => ({ rigid, evidence: scoreBidirectionalNcc({ ...common, rigid, reverse }) }))
       .filter(({ evidence }) => Number.isFinite(evidence.ncc))
@@ -1454,14 +1419,7 @@ export async function registerAndResliceLongitudinal(
       maxTranslationMm,
       maxRotationRad,
       finestTranslationStepMm: Math.max(0.05, nativeSpacing / 4),
-      reverse: {
-        samples,
-        refVolume: volume,
-        dims: grid.dims,
-        originMm: grid.originMm,
-        voxelSizeMm: grid.voxelSizeMm,
-        occupancy,
-      },
+      reverse: { samples, ...referenceDomain },
     });
     const inverseConsistencyErrorMm = maximumPoseDisplacementMm(
       invertRigidParams(inverse.best),
@@ -1471,7 +1429,7 @@ export async function registerAndResliceLongitudinal(
     );
     if (
       !Number.isFinite(inverse.bestScore) ||
-      inverseConsistencyErrorMm > Math.max(grid.voxelSizeMm, nativeSpacing * 2)
+      inverseConsistencyErrorMm > Math.max(referenceDomain.voxelSizeMm, nativeSpacing * 2)
     ) {
       return failure('ambiguous', 'Independent forward and reverse rigid registrations are physically inconsistent');
     }
@@ -1512,7 +1470,7 @@ export async function registerAndResliceLongitudinal(
           candidates.length + inverse.evals + hypotheses.reduce((sum, hypothesis) => sum + hypothesis.evaluations, 0),
         optimizedHypothesisCount: hypotheses.length,
         optimizedAlternativeCount: alternatives.length,
-        referenceVoxelSizeMm: grid.voxelSizeMm,
+        referenceVoxelSizeMm: referenceDomain.voxelSizeMm,
         angleDifferenceDeg,
         scoreMargin,
         minimumDistinguishableScoreMargin,

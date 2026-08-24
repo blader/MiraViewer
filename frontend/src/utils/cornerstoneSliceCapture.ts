@@ -49,27 +49,14 @@ function waitForBoundedOperation<T>(
   });
 }
 
-export type PixelCaptureScratch = { targetSize: number };
-
-export function createPixelCaptureScratch(targetSize: number): PixelCaptureScratch {
-  return { targetSize };
-}
-
 export type RenderedSlice = {
   pixels: Float32Array;
   /** Native acquired-footprint support, independent of modality intensity or canvas background. */
   validity?: Float32Array;
   imageId: string;
-  expectedImageId: string;
-  renderedImageId: string | null;
-  renderTimedOut: boolean;
-  sourceCanvasWidth: number;
-  sourceCanvasHeight: number;
-  targetSize: number;
   timingMs: {
     getImageId: number;
     loadImage: number;
-    waitForRender: number;
     capture: number;
     total: number;
   };
@@ -79,31 +66,16 @@ export type RenderSliceToPixelsOptions = {
   signal?: AbortSignal;
 };
 
-export function createCornerstoneRenderElement(sizePx: number): HTMLDivElement {
-  const el = document.createElement('div');
-  el.style.width = `${sizePx}px`;
-  el.style.height = `${sizePx}px`;
-  return el;
-}
-
-export function disposeCornerstoneRenderElement(el: HTMLDivElement) {
-  el.remove();
-}
-
 /**
  * Read a DICOM slice directly from its decoded modality-linear source pixel buffer.
  * Registration never depends on display windowing, asynchronous rendering, or 8-bit canvas readback.
  */
 export async function renderSliceToPixels(
-  renderElement: HTMLDivElement,
   seriesUid: string,
   sliceIndex: number,
   targetSize: number = ALIGNMENT_IMAGE_SIZE,
-  scratch?: PixelCaptureScratch,
   options: RenderSliceToPixelsOptions = {},
 ): Promise<RenderedSlice> {
-  void renderElement;
-  void scratch;
   const tStart = nowMs();
 
   const tGetId0 = nowMs();
@@ -122,9 +94,7 @@ export async function renderSliceToPixels(
   });
   const tLoad1 = nowMs();
 
-  const expectedImageId = (image as unknown as { imageId?: string }).imageId || imageId;
   const tCapture0 = nowMs();
-  const decoded = image as unknown as { rows?: number; columns?: number; height?: number; width?: number };
   const captured = decodeImageWithValidity(
     image as unknown as Parameters<typeof decodeImageWithValidity>[0],
     targetSize,
@@ -135,16 +105,9 @@ export async function renderSliceToPixels(
   return {
     ...captured,
     imageId,
-    expectedImageId,
-    renderedImageId: expectedImageId,
-    renderTimedOut: false,
-    sourceCanvasWidth: decoded.columns ?? decoded.width ?? targetSize,
-    sourceCanvasHeight: decoded.rows ?? decoded.height ?? targetSize,
-    targetSize,
     timingMs: {
       getImageId: tGetId1 - tGetId0,
       loadImage: tLoad1 - tLoad0,
-      waitForRender: 0,
       capture: tCapture1 - tCapture0,
       total: tCapture1 - tStart,
     },

@@ -12,9 +12,9 @@ import type {
   TumorSegmentationRow,
   VolumeSegmentationRow,
 } from '../db/schema';
-import { OWNED_EXACT_STORAGE_KEYS, OWNED_STORAGE_KEY_PREFIX } from '../utils/storageKeys';
+import { isOwnedStorageKey } from '../utils/storageKeys';
 import { getAllModelRecords, putModelBlob } from '../utils/segmentation/onnx/modelCache';
-import { assertValidDerivedAlignmentFrameShape } from '../utils/localApi';
+import { assertValidDerivedAlignmentFrameShape, MAX_DERIVED_ALIGNMENT_FRAMES } from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
@@ -84,10 +84,9 @@ async function describeFile(path: string, bytes: ArrayBuffer): Promise<SnapshotF
 function captureOwnedLocalStorage(): Record<string, string> {
   const records: Record<string, string> = {};
   if (typeof localStorage === 'undefined') return records;
-  const exactKeys = new Set<string>(OWNED_EXACT_STORAGE_KEYS);
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (!key || (!key.startsWith(OWNED_STORAGE_KEY_PREFIX) && !exactKeys.has(key))) continue;
+    if (!key || !isOwnedStorageKey(key)) continue;
     const value = localStorage.getItem(key);
     if (value !== null) records[key] = value;
   }
@@ -392,7 +391,7 @@ export async function restoreSnapshot(
     assertValidDerivedAlignmentFrameShape(derivedFrame);
     derivedFrames.push(derivedFrame);
   }
-  if (derivedFrames.length > 12)
+  if (derivedFrames.length > MAX_DERIVED_ALIGNMENT_FRAMES)
     throw new Error('The backup contains more derived frames than the safe storage limit.');
 
   const models = [] as Array<{ key: string; blob: Blob }>;
@@ -473,9 +472,7 @@ export async function restoreSnapshot(
   }
   if (typeof localStorage !== 'undefined') {
     for (const [key, value] of Object.entries(manifest.records.localStorage ?? {})) {
-      if (key.startsWith(OWNED_STORAGE_KEY_PREFIX) || (OWNED_EXACT_STORAGE_KEYS as readonly string[]).includes(key)) {
-        localStorage.setItem(key, value);
-      }
+      if (isOwnedStorageKey(key)) localStorage.setItem(key, value);
     }
   }
   notifyDatasetMutation();

@@ -638,8 +638,7 @@ export async function deleteVolumeSegmentation(volumeKey: string): Promise<void>
   await db.delete('volume_segmentations', volumeKey);
 }
 
-const MAX_DERIVED_ALIGNMENT_FRAMES = 12;
-const MAX_DERIVED_FRAME_PIXELS = MAX_OUTPUT_GRID_PIXELS;
+export const MAX_DERIVED_ALIGNMENT_FRAMES = 12;
 
 export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFrameRow): void {
   if (!frame.id || !frame.patientKey || !frame.sequenceId || !frame.targetStudyUid || !frame.targetSeriesUid) {
@@ -662,7 +661,7 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
     !Number.isSafeInteger(frame.rows) ||
     !Number.isSafeInteger(frame.columns) ||
     pixels <= 0 ||
-    pixels > MAX_DERIVED_FRAME_PIXELS
+    pixels > MAX_OUTPUT_GRID_PIXELS
   ) {
     throw new Error('A derived alignment frame exceeds the safe 1024 × 1024 geometry limit');
   }
@@ -674,9 +673,6 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
   ) {
     throw new Error('A derived alignment frame does not match its source image dimensions');
   }
-  for (const pixel of frame.pixels) {
-    if (!Number.isFinite(pixel)) throw new Error('A derived alignment frame contains invalid image samples');
-  }
   if (
     frame.valid &&
     (!ArrayBuffer.isView(frame.valid) ||
@@ -685,15 +681,16 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
   ) {
     throw new Error('A derived alignment frame has an invalid anatomical-support map');
   }
-  if (frame.valid) {
-    for (let index = 0; index < frame.valid.length; index++) {
-      const supported = frame.valid[index]!;
-      if (supported !== 0 && supported !== 1) {
-        throw new Error('A derived alignment frame has an invalid anatomical-support map');
-      }
-      if (!supported && frame.pixels[index] !== 0) {
-        throw new Error('A derived alignment frame contains unsupported image samples');
-      }
+  for (let index = 0; index < pixels; index++) {
+    const pixel = frame.pixels[index]!;
+    if (!Number.isFinite(pixel)) throw new Error('A derived alignment frame contains invalid image samples');
+    if (!frame.valid) continue;
+    const supported = frame.valid[index]!;
+    if (supported !== 0 && supported !== 1) {
+      throw new Error('A derived alignment frame has an invalid anatomical-support map');
+    }
+    if (!supported && pixel !== 0) {
+      throw new Error('A derived alignment frame contains unsupported image samples');
     }
   }
   if (frame.outputGrid) {

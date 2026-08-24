@@ -11,10 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
-  createCornerstoneRenderElement: () => document.createElement('div'),
-  disposeCornerstoneRenderElement: vi.fn(),
-  createPixelCaptureScratch: () => ({}),
-  renderSliceToPixels: async (_element: HTMLDivElement, seriesUid: string, index: number, size: number) => {
+  renderSliceToPixels: async (seriesUid: string, index: number, size: number) => {
     const pixels = Float32Array.from({ length: size * size }, (_, pixel) => (pixel % 251) / 250);
     if (seriesUid === 'reference-series') {
       pixels[Math.floor(size / 2) * size + Math.floor(size / 2)] = 500;
@@ -31,13 +28,7 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
       pixels,
       validity,
       imageId,
-      expectedImageId: imageId,
-      renderedImageId: imageId,
-      renderTimedOut: false,
-      sourceCanvasWidth: size,
-      sourceCanvasHeight: size,
-      targetSize: size,
-      timingMs: { getImageId: 0, loadImage: 0, waitForRender: 0, capture: 0, total: 0 },
+      timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
     };
   },
 }));

@@ -1,6 +1,6 @@
 import type { AlignmentResult } from '../types/api';
 import type { DerivedAlignmentFrameRow } from '../db/schema';
-import { loadDerivedAlignmentFrames, saveDerivedAlignmentFrame } from './localApi';
+import { loadDerivedAlignmentFrames, MAX_DERIVED_ALIGNMENT_FRAMES, saveDerivedAlignmentFrame } from './localApi';
 
 export type DerivedAlignmentFrame = NonNullable<AlignmentResult['derivedFrame']> & {
   imageId: string;
@@ -9,7 +9,6 @@ export type DerivedAlignmentFrame = NonNullable<AlignmentResult['derivedFrame']>
   instanceIndex: number;
 };
 
-const MAX_DERIVED_FRAMES = 12;
 const frames = new Map<string, DerivedAlignmentFrame>();
 const listeners = new Set<() => void>();
 let hydrationGeneration = 0;
@@ -39,7 +38,7 @@ export function setDerivedAlignmentFrame(result: AlignmentResult): void {
 function storeFrame(frame: DerivedAlignmentFrame): void {
   frames.delete(key(frame.seriesUid, frame.instanceIndex));
   frames.set(key(frame.seriesUid, frame.instanceIndex), frame);
-  while (frames.size > MAX_DERIVED_FRAMES) {
+  while (frames.size > MAX_DERIVED_ALIGNMENT_FRAMES) {
     const oldest = frames.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     frames.delete(oldest);
