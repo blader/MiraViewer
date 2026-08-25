@@ -51,12 +51,7 @@ import { Svr3DView } from '../src/components/Svr3DView';
 const EXAMINATION = '2035-01-15T12:00:00';
 
 function data(patient = 'patient-a', orientationCount = 2, unclassified = false): ComparisonData {
-  const sourcePlanes =
-    orientationCount === 1
-      ? ['Axial']
-      : orientationCount === 3
-        ? ['Axial', 'Coronal', 'Sagittal']
-        : ['Axial', 'Coronal'];
+  const sourcePlanes = ['Axial', 'Coronal', 'Sagittal'].slice(0, orientationCount);
   const studyUid = 'study-' + patient;
   const sequences = sourcePlanes.map((plane) => ({
     id: plane.toLowerCase() + '-' + patient,

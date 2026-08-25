@@ -173,18 +173,8 @@ function OverlaySelectedLayer({
         interactionBlocked={isAligning}
         instanceIndex={sliceIndex}
         instanceCount={series.instance_count}
-        reverseSliceOrder={settings.reverseSliceOrder}
+        {...settings}
         onInstanceChange={(index) => setProgress(getProgressFromSlice(index, series.instance_count, settings.offset))}
-        brightness={settings.brightness}
-        contrast={settings.contrast}
-        zoom={settings.zoom}
-        rotation={settings.rotation}
-        panX={settings.panX}
-        panY={settings.panY}
-        affine00={settings.affine00}
-        affine01={settings.affine01}
-        affine10={settings.affine10}
-        affine11={settings.affine11}
         onPanChange={
           isComparing
             ? undefined
@@ -238,20 +228,10 @@ function OverlayComparisonLayer({
         interactionBlocked={isAligning || isComparing}
         instanceIndex={sliceIndex}
         instanceCount={series.instance_count}
-        reverseSliceOrder={settings.reverseSliceOrder}
+        {...settings}
         onInstanceChange={(index) => {
           setProgress(getProgressFromSlice(index, series.instance_count, settings.offset));
         }}
-        brightness={settings.brightness}
-        contrast={settings.contrast}
-        zoom={settings.zoom}
-        rotation={settings.rotation}
-        panX={settings.panX}
-        panY={settings.panY}
-        affine00={settings.affine00}
-        affine01={settings.affine01}
-        affine10={settings.affine10}
-        affine11={settings.affine11}
         onPanChange={undefined}
         onZoomChange={undefined}
       />
