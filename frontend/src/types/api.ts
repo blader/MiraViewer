@@ -1,3 +1,4 @@
+import type { DerivedAlignmentFramePresentation } from '../db/schema';
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,31 +193,10 @@ export interface AlignmentResult {
     rotationDegrees?: [number, number, number];
   };
   /** Verified rigidly resliced frame, explicitly identified as derived presentation. */
-  derivedFrame?: {
-    pixels: Float32Array;
-    valid?: Uint8Array;
-    rows: number;
-    columns: number;
-    sourceImageId: string;
-    referenceStudyUid?: string;
-    referenceSeriesUid?: string;
-    referenceSopInstanceUid?: string;
-    referenceFrameIndex?: number;
-    referenceImagePositionPatient?: string;
-    referenceImageOrientationPatient?: string;
-    referencePixelSpacing?: string;
-    referenceRows?: number;
-    referenceColumns?: number;
+  derivedFrame?: DerivedAlignmentFramePresentation & {
     targetStudyUid?: string;
-    targetSopInstanceUid?: string;
-    referenceFrameOfReferenceUid?: string;
-    targetFrameOfReferenceUid?: string;
     rigidTransform?: [number, number, number, number, number, number];
     rotationCenterMm?: [number, number, number];
-    nativeSliceSpacingMm?: number;
-    sourceFrameCount?: number;
-    outputGrid?: OutputPlaneGrid;
-    contributingSourceSopInstanceUids?: string[];
   };
 }
 

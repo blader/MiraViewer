@@ -271,16 +271,12 @@ export interface VolumeSegmentationRow {
   updatedAt: number;
 }
 
-/** A registered reference-plane image that remains bound to both source examinations. */
-export interface DerivedAlignmentFrameRow {
-  id: string;
-  patientKey: string;
-  datasetRevision: number;
-  sequenceId: string;
-  targetStudyUid: string;
-  targetSeriesUid: string;
-  targetSopInstanceUid?: string;
-  targetFrameIndex: number;
+export interface DerivedAlignmentFramePresentation {
+  pixels: Float32Array;
+  valid?: Uint8Array;
+  rows: number;
+  columns: number;
+  sourceImageId: string;
   referenceStudyUid?: string;
   referenceSeriesUid?: string;
   referenceSopInstanceUid?: string;
@@ -290,24 +286,31 @@ export interface DerivedAlignmentFrameRow {
   referencePixelSpacing?: string;
   referenceRows?: number;
   referenceColumns?: number;
+  targetSopInstanceUid?: string;
   referenceFrameOfReferenceUid?: string;
   targetFrameOfReferenceUid?: string;
+  nativeSliceSpacingMm?: number;
+  sourceFrameCount?: number;
+  outputGrid?: OutputPlaneGrid;
+  contributingSourceSopInstanceUids?: string[];
+}
+
+/** A registered reference-plane image that remains bound to both source examinations. */
+export interface DerivedAlignmentFrameRow extends DerivedAlignmentFramePresentation {
+  id: string;
+  patientKey: string;
+  datasetRevision: number;
+  sequenceId: string;
+  targetStudyUid: string;
+  targetSeriesUid: string;
+  targetFrameIndex: number;
   frameOfReferenceUid?: string;
   sourceFrameOfReferenceUid?: string;
-  rows: number;
-  columns: number;
-  pixels: Float32Array;
-  valid?: Uint8Array;
-  sourceImageId: string;
   transform?: number[];
   centerMm?: [number, number, number];
   coverage?: number;
   score?: number;
   margin?: number;
-  nativeSliceSpacingMm?: number;
-  sourceFrameCount?: number;
-  outputGrid?: OutputPlaneGrid;
-  contributingSourceSopInstanceUids?: string[];
   runId?: string;
   createdAt: number;
 }

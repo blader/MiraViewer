@@ -72,14 +72,11 @@ function ComparisonStage({
       ) : navigation.viewMode === 'grid' ? (
         <GridView
           comboId={selectedSeqId}
-          columns={navigation.columns}
-          gridCols={navigation.gridCols}
-          gridCellSize={navigation.gridCellSize}
+          {...navigation}
           panelSettings={panel.settings}
           progress={panel.progress}
           setProgress={panel.setProgress}
           updatePanelSetting={panel.updateSetting}
-          overlayColumns={navigation.overlayColumns}
           isAligning={alignment.active}
           alignmentProgress={alignment.progress}
           abortAlignment={alignment.abort}
@@ -88,23 +85,7 @@ function ComparisonStage({
       ) : navigation.viewMode === 'overlay' ? (
         <OverlayView
           comboId={selectedSeqId}
-          overlayColumns={navigation.overlayColumns}
-          overlayViewerSize={navigation.overlayViewerSize}
-          overlayDisplayedRef={navigation.overlayDisplayedRef}
-          overlayDisplayedDate={navigation.overlayDisplayedDate}
-          overlayDisplayedSettings={navigation.overlayDisplayedSettings}
-          overlayDisplayedSliceIndex={navigation.overlayDisplayedSliceIndex}
-          overlayDisplayedEffectiveSliceIndex={navigation.overlayDisplayedEffectiveSliceIndex}
-          overlaySelectedRef={navigation.overlaySelectedRef}
-          overlaySelectedDate={navigation.overlaySelectedDate}
-          overlaySelectedSettings={navigation.overlaySelectedSettings}
-          overlaySelectedSliceIndex={navigation.overlaySelectedSliceIndex}
-          overlayCompareRef={navigation.overlayCompareRef}
-          overlayCompareDate={navigation.overlayCompareDate}
-          overlayCompareSettings={navigation.overlayCompareSettings}
-          overlayCompareSliceIndex={navigation.overlayCompareSliceIndex}
-          isOverlayComparing={navigation.isOverlayComparing}
-          hasOverlayCompareTarget={navigation.hasOverlayCompareTarget}
+          {...navigation}
           isAligning={alignment.active}
           alignmentProgress={alignment.progress}
           abortAlignment={alignment.abort}
