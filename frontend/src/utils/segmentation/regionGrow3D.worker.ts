@@ -6,18 +6,14 @@ const workerScope = globalThis as unknown as {
   postMessage: (message: RegionGrow3DWorkerResponse, transfer?: Transferable[]) => void;
 };
 
-let volume: Float32Array | null = null;
-let observedSupport: Uint8Array | undefined;
-let dims: [number, number, number] | null = null;
+let initialized: Extract<RegionGrow3DWorkerRequest, { type: 'init' }> | null = null;
 let activeRun: { runId: number; controller: AbortController } | null = null;
 
 workerScope.onmessage = ({ data }) => {
   if (data.type === 'init') {
     activeRun?.controller.abort();
     activeRun = null;
-    volume = data.volume;
-    observedSupport = data.observedSupport;
-    dims = data.dims;
+    initialized = data;
     return;
   }
 
@@ -27,7 +23,7 @@ workerScope.onmessage = ({ data }) => {
   }
 
   activeRun?.controller.abort();
-  if (!volume || !dims) {
+  if (!initialized) {
     workerScope.postMessage({ type: 'error', runId: data.runId, message: 'The 3D volume was not initialized.' });
     return;
   }
@@ -35,6 +31,7 @@ workerScope.onmessage = ({ data }) => {
   const controller = new AbortController();
   const run = { runId: data.runId, controller };
   activeRun = run;
+  const { volume, observedSupport, dims } = initialized;
 
   void regionGrow3D_v2({
     volume,

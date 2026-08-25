@@ -81,9 +81,7 @@ const MAX_DIRECTORY_FILES = 100_000;
 const PROGRESS_INTERVAL_MS = 120;
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException
-    ? error.name === 'AbortError'
-    : (error as { name?: string })?.name === 'AbortError';
+  return (error as { name?: string })?.name === 'AbortError';
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -169,13 +167,8 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     [],
   );
 
-  const busy =
-    phase === 'discovering' ||
-    phase === 'preparing' ||
-    phase === 'importing' ||
-    phase === 'restoring' ||
-    phase === 'canceling' ||
-    phase === 'finishing';
+  const terminal = phase === 'complete' || phase === 'partial' || phase === 'canceled' || phase === 'failed';
+  const busy = phase !== 'idle' && phase !== 'reviewing' && !terminal;
 
   const beginOperation = (nextPhase: IntakePhase): IntakeOperation | null => {
     if (operationRef.current) return null;
@@ -228,13 +221,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       void onUploadComplete?.();
       return;
     }
-    if (canceled) {
-      setPhase('canceled');
-      setErrorMessage(null);
-    } else {
-      setPhase('failed');
-      setErrorMessage(error instanceof Error ? error.message : 'The selected acquisition could not be imported.');
-    }
+    setPhase(canceled ? 'canceled' : 'failed');
+    setErrorMessage(
+      canceled ? null : error instanceof Error ? error.message : 'The selected acquisition could not be imported.',
+    );
     endOperation(operation);
   };
 
@@ -581,7 +571,6 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     typeof storageHealth.quota === 'number' && typeof storageHealth.usage === 'number'
       ? Math.max(0, storageHealth.quota - storageHealth.usage)
       : null;
-  const terminal = phase === 'complete' || phase === 'partial' || phase === 'canceled' || phase === 'failed';
   const backupExceedsLimit =
     source?.kind === 'complete-backup' &&
     typeof source.restoreBytes === 'number' &&

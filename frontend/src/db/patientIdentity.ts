@@ -32,10 +32,9 @@ export function getPatientIdentityKeys(studies: readonly DicomStudy[]): Readonly
     else if (existingName !== normalizedName) namesByIdentity.set(identity, null);
   }
 
-  for (const study of studies) {
-    const identity = identityByStudy.get(study.studyInstanceUid)!;
+  for (const [studyUid, identity] of identityByStudy) {
     if (namesByIdentity.get(identity) === null) {
-      identityByStudy.set(study.studyInstanceUid, `${identity}#${study.studyInstanceUid}`);
+      identityByStudy.set(studyUid, `${identity}#${studyUid}`);
     }
   }
 

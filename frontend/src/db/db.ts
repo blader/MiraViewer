@@ -53,7 +53,7 @@ export async function deleteAllStoredMriData(options?: { onBlocked?: () => void 
 
 export function getDB() {
   if (!dbPromise) {
-    const opening = openDB<MiraDB>(DB_NAME, DB_VERSION, {
+    dbPromise = openDB<MiraDB>(DB_NAME, DB_VERSION, {
       upgrade(db, _oldVersion, _newVersion, transaction) {
         // Studies
         if (!db.objectStoreNames.contains('studies')) {
@@ -172,9 +172,7 @@ export function getDB() {
       terminated() {
         dbPromise = null;
       },
-    });
-
-    dbPromise = opening.catch((error: unknown) => {
+    }).catch((error: unknown) => {
       dbPromise = null;
       throw error;
     });

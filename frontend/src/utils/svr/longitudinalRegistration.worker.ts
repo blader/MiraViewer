@@ -1,6 +1,7 @@
 import {
   registerAndResliceLongitudinal,
   resliceDenseLongitudinalPlane,
+  longitudinalRegistrationFailure,
   type DenseLongitudinalResliceOptions,
   type DenseLongitudinalResliceResult,
   type LongitudinalRegistrationFailure,
@@ -46,15 +47,14 @@ self.onmessage = async (event: MessageEvent<LongitudinalWorkerRequest>) => {
     }
   } catch (error) {
     if (activeController !== controller) return;
-    const result: LongitudinalRegistrationFailure = {
-      ok: false,
-      reason: controller.signal.aborted ? 'cancelled' : 'registration-failed',
-      message: controller.signal.aborted
+    const result = longitudinalRegistrationFailure(
+      controller.signal.aborted ? 'cancelled' : 'registration-failed',
+      controller.signal.aborted
         ? 'Longitudinal registration cancelled'
         : error instanceof Error
           ? error.message
           : String(error),
-    };
+    );
     self.postMessage({ type: 'done', result } satisfies LongitudinalWorkerResponse);
   } finally {
     if (activeController === controller) activeController = null;

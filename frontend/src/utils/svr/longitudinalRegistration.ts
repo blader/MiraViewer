@@ -1490,4 +1490,4 @@ export async function registerAndResliceLongitudinal(
   }
 }
 
-export { applyRigidToPoint };
+export { applyRigidToPoint, failure as longitudinalRegistrationFailure };

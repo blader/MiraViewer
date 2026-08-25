@@ -8,11 +8,12 @@ import {
   type OutputPlaneGrid,
 } from '../outputPlaneGrid';
 import { downsampledSliceOriginMm, getSliceGeometryFromInstance, sliceCornersMm } from './dicomGeometry';
-import type {
-  DenseLongitudinalResliceOptions,
-  LongitudinalReferencePlane,
-  LongitudinalRegistrationFailure,
-  LongitudinalRegistrationResult,
+import {
+  longitudinalRegistrationFailure,
+  type DenseLongitudinalResliceOptions,
+  type LongitudinalReferencePlane,
+  type LongitudinalRegistrationFailure,
+  type LongitudinalRegistrationResult,
 } from './longitudinalRegistration';
 import type { SvrReconstructionSlice } from './reconstructionCore';
 import { applyRigidToPoint, invertRigidParams, mat3FromEulerXYZ, type RigidParams } from './rigidRegistration';
@@ -562,11 +563,10 @@ export async function densifyLongitudinalRegistration(
   try {
     const nativeCandidatePoses = registration.nativeCandidatePoses ?? options.nativeCandidatePoses;
     if ((nativeCandidatePoses?.length ?? 0) > 1 && !options.referenceManifest) {
-      return {
-        ok: false,
-        reason: 'ambiguous',
-        message: 'Ambiguous coarse poses require independently verified native reference anatomy',
-      };
+      return longitudinalRegistrationFailure(
+        'ambiguous',
+        'Ambiguous coarse poses require independently verified native reference anatomy',
+      );
     }
     const dense = await prepareDenseLongitudinalResliceInput(
       targetManifest,
@@ -626,29 +626,26 @@ export async function densifyLongitudinalRegistration(
     );
     if (!result.ok) return result;
     if ((nativeCandidatePoses?.length ?? 0) > 1 && !result.nativeRefinement) {
-      return {
-        ok: false,
-        reason: 'ambiguous',
-        message: 'The native worker did not independently adjudicate ambiguous coarse poses',
-      };
+      return longitudinalRegistrationFailure(
+        'ambiguous',
+        'The native worker did not independently adjudicate ambiguous coarse poses',
+      );
     }
     if (
       dense.outputGrid &&
       (!result.outputGrid || outputGridFingerprint(result.outputGrid) !== outputGridFingerprint(dense.outputGrid))
     ) {
-      return {
-        ok: false,
-        reason: 'invalid-geometry',
-        message: 'The native worker returned a different physical output grid',
-      };
+      return longitudinalRegistrationFailure(
+        'invalid-geometry',
+        'The native worker returned a different physical output grid',
+      );
     }
     const decodedSourceUids = dense.sourceIndices.map((index) => targetManifest.frames[index]!.sopInstanceUid);
     if (result.contributingSourceSopInstanceUids?.some((uid) => !decodedSourceUids.includes(uid))) {
-      return {
-        ok: false,
-        reason: 'invalid-geometry',
-        message: 'The native worker returned an unverified contributing source image',
-      };
+      return longitudinalRegistrationFailure(
+        'invalid-geometry',
+        'The native worker returned an unverified contributing source image',
+      );
     }
     const contributors = result.contributingSourceSopInstanceUids
       ? decodedSourceUids.filter((uid) => result.contributingSourceSopInstanceUids!.includes(uid))
@@ -666,15 +663,14 @@ export async function densifyLongitudinalRegistration(
       },
     };
   } catch (error) {
-    return {
-      ok: false,
-      reason: options.signal?.aborted ? 'cancelled' : 'insufficient-coverage',
-      message: options.signal?.aborted
+    return longitudinalRegistrationFailure(
+      options.signal?.aborted ? 'cancelled' : 'insufficient-coverage',
+      options.signal?.aborted
         ? 'Longitudinal registration cancelled'
         : error instanceof Error
           ? error.message
           : String(error),
-    };
+    );
   }
 }
 

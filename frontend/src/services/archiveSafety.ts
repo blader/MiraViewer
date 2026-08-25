@@ -29,19 +29,12 @@ export type ArchiveLoadOptions = ArchiveReadOptions & {
   deferStorageCheck?: boolean;
 };
 
-type ArchiveEntrySize = {
-  compressedSize?: number;
-  uncompressedSize?: number;
-  crc32?: number;
-};
-
 type LazyArchiveEntry = JSZip.JSZipObject & {
-  _data: Required<ArchiveEntrySize>;
+  _data: Pick<ArchiveMember, 'compressedSize' | 'uncompressedSize' | 'crc32'>;
   readVerified: (signal?: AbortSignal) => Promise<Blob>;
 };
 
 type ArchiveMember = {
-  name: string;
   compressedSize: number;
   uncompressedSize: number;
   crc32: number;
@@ -314,7 +307,6 @@ export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = 
     if (localHeaderOffset >= directory.offset) throw new Error('This archive contains an invalid file offset.');
 
     const member: ArchiveMember = {
-      name,
       compressedSize,
       uncompressedSize,
       crc32,
@@ -334,7 +326,7 @@ export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = 
         const data = new Uint8Array(await blob.arrayBuffer());
         if (type === 'uint8array') return data;
         if (type === 'arraybuffer') return data.buffer;
-        if (type === 'string' || type === 'text') return new TextDecoder().decode(data);
+        if (type === 'string' || type === 'text') return decoder.decode(data);
         throw new Error('This archive entry output format is not supported.');
       },
     } as unknown as LazyArchiveEntry;

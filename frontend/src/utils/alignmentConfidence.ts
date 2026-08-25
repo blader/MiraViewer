@@ -95,27 +95,19 @@ export function assessSliceAlignmentEvidence<T extends PerceptualCandidate>(opti
         Math.max(...physicallyDistinctRivals.map((candidate) => absoluteStructuralScore(candidate.components)))
       : structuralScore;
 
-  if (coverage < MINIMUM_SUPPORTED_COVERAGE) {
-    return {
-      outcome: 'insufficient-overlap',
-      structuralScore,
-      runnerUpGap,
-      minimumDistinguishableGap,
-      referenceIntensityVariance,
-    };
-  }
-
   const hasStructuralEvidence =
     candidates.length === 1
       ? winner.components.perScale.some((scale) => (scale.rawNgf ?? 2 * scale.ngf - 1) > 0.02)
       : winner.mindActive || winner.boundaryActive;
   const outcome =
-    structuralScore < MINIMUM_ABSOLUTE_STRUCTURAL_AGREEMENT ||
-    referenceIntensityVariance <= MINIMUM_REFERENCE_INTENSITY_VARIANCE ||
-    !hasStructuralEvidence ||
-    (physicallyDistinctRivals.length > 0 && runnerUpGap <= minimumDistinguishableGap)
-      ? 'ambiguous'
-      : 'aligned';
+    coverage < MINIMUM_SUPPORTED_COVERAGE
+      ? 'insufficient-overlap'
+      : structuralScore < MINIMUM_ABSOLUTE_STRUCTURAL_AGREEMENT ||
+          referenceIntensityVariance <= MINIMUM_REFERENCE_INTENSITY_VARIANCE ||
+          !hasStructuralEvidence ||
+          (physicallyDistinctRivals.length > 0 && runnerUpGap <= minimumDistinguishableGap)
+        ? 'ambiguous'
+        : 'aligned';
 
   return {
     outcome,

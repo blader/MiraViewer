@@ -260,7 +260,6 @@ export async function readSnapshotManifest(
     throwIfRestoreAborted(options.signal);
     parsed = JSON.parse(new TextDecoder().decode(bytes));
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error;
     if (!(error instanceof SyntaxError)) throw error;
     throw new Error('The backup manifest is invalid.');
   }

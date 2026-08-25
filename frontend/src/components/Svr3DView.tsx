@@ -97,20 +97,13 @@ function computeCubeRoiFromDicomRect01(params: {
   for (const row of [r.top * rMax, r.bottom * rMax]) {
     for (const col of [r.left * cMax, r.right * cMax]) {
       for (const normalOffset of [-halfDepth, halfDepth]) {
-        const point = [
-          geom.ippMm.x +
-            geom.colDir.x * row * geom.rowSpacingMm +
-            geom.rowDir.x * col * geom.colSpacingMm +
-            geom.normalDir.x * normalOffset,
-          geom.ippMm.y +
-            geom.colDir.y * row * geom.rowSpacingMm +
-            geom.rowDir.y * col * geom.colSpacingMm +
-            geom.normalDir.y * normalOffset,
-          geom.ippMm.z +
-            geom.colDir.z * row * geom.rowSpacingMm +
-            geom.rowDir.z * col * geom.colSpacingMm +
-            geom.normalDir.z * normalOffset,
-        ] as const;
+        const point = (['x', 'y', 'z'] as const).map(
+          (axis) =>
+            geom.ippMm[axis] +
+            geom.colDir[axis] * row * geom.rowSpacingMm +
+            geom.rowDir[axis] * col * geom.colSpacingMm +
+            geom.normalDir[axis] * normalOffset,
+        );
 
         for (let axis = 0; axis < 3; axis++) {
           min[axis] = Math.min(min[axis], point[axis]!);

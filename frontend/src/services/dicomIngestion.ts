@@ -688,14 +688,13 @@ function isImportAbort(error: unknown): boolean {
 }
 
 async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSignal): Promise<DicomIngestResult[]> {
-  if (!candidates.length) return [];
-  if (signal?.aborted) return [];
+  if (!candidates.length || signal?.aborted) return [];
   const db = await getDB();
   const ownership = await readPersistedOwnership(candidates);
   if (signal?.aborted) return [];
 
   const results: (DicomIngestResult | undefined)[] = Array(candidates.length);
-  const incoming = new Map<string, PreparedDicom>();
+  const incoming = new Set<string>();
   let incrementalBytes = 0;
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
@@ -704,9 +703,8 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       results[index] = persistedOwnershipResult(existing, candidate);
       continue;
     }
-    const first = incoming.get(candidate.instance.sopInstanceUid);
-    if (!first) {
-      incoming.set(candidate.instance.sopInstanceUid, candidate);
+    if (!incoming.has(candidate.instance.sopInstanceUid)) {
+      incoming.add(candidate.instance.sopInstanceUid);
       incrementalBytes += candidate.file.size + ESTIMATED_IMAGE_METADATA_BYTES;
     }
   }

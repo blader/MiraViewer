@@ -59,6 +59,15 @@ export type AlignmentFinalScoringInput = {
   optimizerProposals: readonly OptimizerFinalAffineProposal[];
 };
 
+function buildSupportedForeground(pixels: Float32Array, size: number, validity?: Float32Array): Float32Array {
+  const support = buildSoftForegroundSupportSquare(pixels, size);
+  if (validity) {
+    const structuralValidity = erodeFractionalSupportSquare(validity, size, 1);
+    for (let index = 0; index < support.length; index++) support[index] = support[index]! * structuralValidity[index]!;
+  }
+  return support;
+}
+
 /** Pure, reusable owner of candidate pyramids, reference descriptors, FFT state, and MIND scratch. */
 export class AlignmentScoringEngine {
   private readonly config: AlignmentScoringConfiguration;
@@ -102,13 +111,6 @@ export class AlignmentScoringEngine {
       exclusionRect: exclusionMask,
       validity: referenceFineValidity,
     });
-    const referenceSupport = buildSoftForegroundSupportSquare(normalizedCoarse, coarseSize);
-    if (referenceCoarseValidity) {
-      const structuralValidity = erodeFractionalSupportSquare(referenceCoarseValidity, coarseSize, 1);
-      for (let index = 0; index < referenceSupport.length; index++) {
-        referenceSupport[index] = referenceSupport[index]! * structuralValidity[index]!;
-      }
-    }
     const referenceStructure = buildStructuralPhaseImageSquare(
       inpaintExclusionRectSquare(normalizedCoarse, coarseSize, coarseExclusion, 6).pixels,
       coarseSize,
@@ -116,7 +118,7 @@ export class AlignmentScoringEngine {
     this.phaseReference = preparePhaseCorrectionReference(referenceStructure, coarseSize, {
       fftSize: config.phaseFftSize,
       maxCorrectionPx: config.phaseMaxCorrectionPx,
-      support: referenceSupport,
+      support: buildSupportedForeground(normalizedCoarse, coarseSize, referenceCoarseValidity),
     });
   }
 
@@ -137,13 +139,7 @@ export class AlignmentScoringEngine {
     const inpainted = inpaintExclusionRectSquare(normalized, coarseSize, sourceExclusion, 6).pixels;
     const sourceStructure = buildStructuralPhaseImageSquare(inpainted, coarseSize);
     const warpedStructure = warpGrayscaleAffineWithValidity(sourceStructure, coarseSize, initialWarp);
-    const sourceSupport = buildSoftForegroundSupportSquare(normalized, coarseSize);
-    if (validity) {
-      const structuralValidity = erodeFractionalSupportSquare(validity, coarseSize, 1);
-      for (let index = 0; index < sourceSupport.length; index++) {
-        sourceSupport[index] = sourceSupport[index]! * structuralValidity[index]!;
-      }
-    }
+    const sourceSupport = buildSupportedForeground(normalized, coarseSize, validity);
     const warpedSupport = warpGrayscaleAffineWithValidity(sourceSupport, coarseSize, initialWarp);
     const erodedValidity = erodeFractionalSupportSquare(warpedStructure.validity, coarseSize, 1);
     const phasePixels = new Float32Array(warpedStructure.pixels.length);
