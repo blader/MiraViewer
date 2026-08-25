@@ -33,10 +33,7 @@ type InstrumentActions = {
   setHeaderMenuOpen: Dispatch<SetStateAction<boolean>>;
   headerMenuRef: RefObject<HTMLDivElement | null>;
   abortAlignment: () => void;
-  setHelpOpen: (open: boolean) => void;
-  setUploadModalOpen: (open: boolean) => void;
-  setExportModalOpen: (open: boolean) => void;
-  setClearDataModalOpen: (open: boolean) => void;
+  openDialog: (dialog: 'help' | 'upload' | 'export' | 'clear') => void;
 };
 
 type InstrumentNotices = {
@@ -160,7 +157,7 @@ function InstrumentApplicationActions({
           disabled={actions.isAligning}
           onClick={() => {
             actions.setHeaderMenuOpen(false);
-            actions.setUploadModalOpen(true);
+            actions.openDialog('upload');
           }}
           className="instrument-header-action"
           aria-label="Import additional scans"
@@ -174,7 +171,7 @@ function InstrumentApplicationActions({
         disabled={actions.isAligning}
         onClick={() => {
           actions.setHeaderMenuOpen(false);
-          actions.setHelpOpen(true);
+          actions.openDialog('help');
         }}
         className="instrument-icon-button"
         title="Help & shortcuts"
@@ -203,7 +200,7 @@ function InstrumentApplicationActions({
               disabled={actions.isAligning}
               onClick={() => {
                 actions.setHeaderMenuOpen(false);
-                actions.setUploadModalOpen(true);
+                actions.openDialog('upload');
               }}
               className="instrument-menu-item"
             >
@@ -216,7 +213,7 @@ function InstrumentApplicationActions({
                 disabled={actions.isAligning}
                 onClick={() => {
                   actions.setHeaderMenuOpen(false);
-                  actions.setExportModalOpen(true);
+                  actions.openDialog('export');
                 }}
                 className="instrument-menu-item"
               >
@@ -230,7 +227,7 @@ function InstrumentApplicationActions({
                 disabled={actions.isAligning}
                 onClick={() => {
                   actions.setHeaderMenuOpen(false);
-                  actions.setClearDataModalOpen(true);
+                  actions.openDialog('clear');
                 }}
                 className="instrument-menu-item"
                 data-destructive="true"

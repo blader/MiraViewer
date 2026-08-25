@@ -168,14 +168,8 @@ export function ComparisonMatrix() {
     alignmentOutputMode,
     setSidebarOpen,
     setRightSidebarOpen,
-    helpOpen,
-    setHelpOpen,
-    uploadModalOpen,
-    setUploadModalOpen,
-    exportModalOpen,
-    setExportModalOpen,
-    clearDataModalOpen,
-    setClearDataModalOpen,
+    activeDialog,
+    setActiveDialog,
     headerMenuOpen,
     setHeaderMenuOpen,
     headerMenuRef,
@@ -309,18 +303,18 @@ export function ComparisonMatrix() {
   return (
     <div className="instrument-shell flex flex-col">
       {/* Help Modal */}
-      {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+      {activeDialog === 'help' && <HelpModal onClose={() => setActiveDialog(null)} />}
 
       {/* Upload Modal */}
-      {uploadModalOpen && (
+      {activeDialog === 'upload' && (
         <UploadModal
-          onClose={() => setUploadModalOpen(false)}
+          onClose={() => setActiveDialog(null)}
           onUploadComplete={() => reload(undefined, { background: true })}
         />
       )}
-      {exportModalOpen && <ExportModal onClose={() => setExportModalOpen(false)} />}
-      {clearDataModalOpen && (
-        <ClearDataModal onClose={() => setClearDataModalOpen(false)} onReset={() => window.location.reload()} />
+      {activeDialog === 'export' && <ExportModal onClose={() => setActiveDialog(null)} />}
+      {activeDialog === 'clear' && (
+        <ClearDataModal onClose={() => setActiveDialog(null)} onReset={() => window.location.reload()} />
       )}
 
       <ComparisonInstrumentHeader
@@ -349,10 +343,7 @@ export function ComparisonMatrix() {
           setHeaderMenuOpen,
           headerMenuRef,
           abortAlignment,
-          setHelpOpen,
-          setUploadModalOpen,
-          setExportModalOpen,
-          setClearDataModalOpen,
+          openDialog: setActiveDialog,
         }}
         notices={{ persistenceError, clearPersistenceError, alignmentError, alignmentResults, clearAlignmentState }}
       />
@@ -383,7 +374,7 @@ export function ComparisonMatrix() {
           navigation={workspaceNavigation}
           panel={{ settings: panelSettings, progress, setProgress, updateSetting: updatePanelSetting }}
           alignment={{ active: isAligning, progress: alignmentProgress, abort: abortAlignment, start: startAlignAll }}
-          onOpenUpload={() => setUploadModalOpen(true)}
+          onOpenUpload={() => setActiveDialog('upload')}
         />
 
         {hasData && viewMode !== 'svr3d' ? (

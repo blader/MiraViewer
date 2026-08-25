@@ -431,20 +431,20 @@ function useSvrVolumeViewerModel({
   }));
 
   // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
+  const segmentationState = useVolumeSegmentationState(volume);
   const {
     generatedLabels,
     setGeneratedLabels,
     seedVoxel,
     setSeedVoxel,
     growRoiOutsideScale,
-    setGrowRoiOutsideScale,
     growRoiBounds,
     setGrowRoiBounds,
     growRoiDraftBounds,
     setGrowRoiDraftBounds,
     growStatus,
     setGrowStatus,
-  } = useVolumeSegmentationState(volume);
+  } = segmentationState;
   const [hydratedVolumeKey, setHydratedVolumeKey] = useState<string | null>(null);
   const labelSourceRef = useRef<string | undefined>(undefined);
   const labelCountsRef = useRef<{
@@ -2408,6 +2408,7 @@ function useSvrVolumeViewerModel({
   );
 
   return {
+    ...segmentationState,
     THRESHOLD_MAX,
     actualTextureFormat,
     axesCanvasRef,
@@ -2416,11 +2417,7 @@ function useSvrVolumeViewerModel({
     canvasRef,
     controlsCollapsed,
     gamma,
-    generatedLabels,
     growOverlayRef,
-    growRoiBounds,
-    growRoiOutsideScale,
-    growStatus,
     growTargetLabel,
     growTolerance,
     hasLabels,
@@ -2454,27 +2451,20 @@ function useSvrVolumeViewerModel({
     resetView,
     runOnnxSegmentation,
     scheduleSeedGrow,
-    seedVoxel,
     segmentationCollapsed,
     setControlsCollapsed,
     setGamma,
-    setGeneratedLabels,
-    setGrowRoiBounds,
-    setGrowRoiDraftBounds,
-    setGrowRoiOutsideScale,
     setGrowTargetLabel,
     setGrowTolerance,
     setInspectIndex,
     setInspectPlane,
     setOpacity,
-    setSeedVoxel,
     setSegmentationCollapsed,
     setThreshold,
     sliceCanvasRef,
     sliceInspectorPortalTarget,
     threshold,
     volDims,
-    volume,
   };
 }
 

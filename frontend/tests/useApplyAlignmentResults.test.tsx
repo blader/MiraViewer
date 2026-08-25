@@ -81,8 +81,23 @@ function alignmentFixture({
         derivedFrame: frame({ sourceImageId: `miradb:${previousSeriesUid}-${bestSliceIndex}` }),
       }),
     );
+  const applyResults = (
+    alignmentResults: AlignmentResult[],
+    options: Partial<Parameters<typeof useApplyAlignmentResults>[0]> = {},
+  ) =>
+    renderHook(() =>
+      useApplyAlignmentResults({
+        isAligning: true,
+        alignmentResults,
+        panelSettings: new Map(),
+        data,
+        selectedSeqId: sequenceId,
+        batchUpdateSettings: vi.fn(),
+        ...options,
+      }),
+    );
 
-  return { date, sequenceId, seriesUid, data, frame, result, publishPreviousPlane };
+  return { date, sequenceId, seriesUid, data, frame, result, publishPreviousPlane, applyResults };
 }
 
 describe('useApplyAlignmentResults', () => {
@@ -289,7 +304,7 @@ describe('useApplyAlignmentResults', () => {
   });
 
   it('discards obsolete target planes when a successful replacement presents acquired anatomy', () => {
-    const { sequenceId, data, result, publishPreviousPlane } = alignmentFixture();
+    const { result, publishPreviousPlane, applyResults } = alignmentFixture();
     const clearPersisted = vi.spyOn(localApi, 'clearPersistedDerivedAlignmentFrames').mockResolvedValue();
     publishPreviousPlane('target-series', 1);
     publishPreviousPlane('target-series', 4);
@@ -297,16 +312,7 @@ describe('useApplyAlignmentResults', () => {
     const batchUpdateSettings = vi.fn();
 
     try {
-      renderHook(() =>
-        useApplyAlignmentResults({
-          isAligning: true,
-          alignmentResults: [result({ runId: 'replacement-native-run' })],
-          panelSettings: new Map(),
-          data,
-          selectedSeqId: sequenceId,
-          batchUpdateSettings,
-        }),
-      );
+      applyResults([result({ runId: 'replacement-native-run' })], { batchUpdateSettings });
 
       expect(batchUpdateSettings).toHaveBeenCalledOnce();
       expect(getDerivedAlignmentFrame('target-series', 1)).toBeNull();
@@ -321,7 +327,7 @@ describe('useApplyAlignmentResults', () => {
   });
 
   it('atomically replaces obsolete target indices and persists only the newest derived plane', async () => {
-    const { sequenceId, data, frame, result, publishPreviousPlane } = alignmentFixture();
+    const { frame, result, publishPreviousPlane, applyResults } = alignmentFixture();
     const operations: string[] = [];
     const durableFrames = new Map([
       ['target-series:1', 'old-target-one'],
@@ -354,26 +360,17 @@ describe('useApplyAlignmentResults', () => {
       });
     });
     try {
-      renderHook(() =>
-        useApplyAlignmentResults({
-          isAligning: true,
-          alignmentResults: [
-            result({
-              bestSliceIndex: 6,
-              runId: 'replacement-derived-run',
-              derivedFrame: frame({
-                pixels: new Float32Array([5, 6, 7, 8]),
-                sourceImageId: 'miradb:target-sop-six',
-                targetSopInstanceUid: 'target-sop-six',
-              }),
-            }),
-          ],
-          panelSettings: new Map(),
-          data,
-          selectedSeqId: sequenceId,
-          batchUpdateSettings: vi.fn(),
+      applyResults([
+        result({
+          bestSliceIndex: 6,
+          runId: 'replacement-derived-run',
+          derivedFrame: frame({
+            pixels: new Float32Array([5, 6, 7, 8]),
+            sourceImageId: 'miradb:target-sop-six',
+            targetSopInstanceUid: 'target-sop-six',
+          }),
         }),
-      );
+      ]);
 
       expect(observedPresentations).toEqual([{ current: true, obsolete: false, reference: true }]);
       await waitFor(() => expect(save).toHaveBeenCalledOnce());
@@ -555,26 +552,13 @@ describe('useApplyAlignmentResults', () => {
     { label: 'an ambiguous registration', result: { outcome: 'ambiguous' as const } },
     { label: 'insufficient physical overlap', result: { outcome: 'insufficient-overlap' as const } },
   ])('does not apply stale or unsafe results from $label', ({ result }) => {
-    const {
-      sequenceId,
-      data,
-      result: alignedResult,
-    } = alignmentFixture({
+    const { result: alignedResult, applyResults } = alignmentFixture({
       seriesUid: 'series-a',
       studyUid: 'study-a',
     });
     const batchUpdateSettings = vi.fn();
 
-    renderHook(() =>
-      useApplyAlignmentResults({
-        isAligning: true,
-        alignmentResults: [alignedResult({ bestSliceIndex: 2, ...result })],
-        panelSettings: new Map(),
-        data,
-        selectedSeqId: sequenceId,
-        batchUpdateSettings,
-      }),
-    );
+    applyResults([alignedResult({ bestSliceIndex: 2, ...result })], { batchUpdateSettings });
 
     expect(batchUpdateSettings).not.toHaveBeenCalled();
   });
@@ -598,7 +582,7 @@ describe('useApplyAlignmentResults', () => {
     frame?: Partial<NonNullable<AlignmentResult['derivedFrame']>>;
     data?: Partial<ComparisonData>;
   }>)('rejects a derived plane with $label before changing displayed or durable anatomy', async (failure) => {
-    const { date, sequenceId, seriesUid, data, frame, result } = alignmentFixture({
+    const { date, sequenceId, seriesUid, data, frame, result, applyResults } = alignmentFixture({
       date: 'target-date',
       sequenceId: 'target-sequence',
       instanceCount: 3,
@@ -634,17 +618,7 @@ describe('useApplyAlignmentResults', () => {
     };
 
     try {
-      renderHook(() =>
-        useApplyAlignmentResults({
-          isAligning: true,
-          alignmentResults: [candidate],
-          panelSettings: new Map(),
-          data,
-          selectedSeqId: sequenceId,
-          batchUpdateSettings,
-          onPersistenceError,
-        }),
-      );
+      applyResults([candidate], { batchUpdateSettings, onPersistenceError });
 
       await act(async () => {
         await Promise.resolve();
@@ -669,7 +643,7 @@ describe('useApplyAlignmentResults', () => {
     'mismatched-pixel-lattice',
     'mismatched-validity-mask',
   ] as const)('does not apply an aligned result whose verified output authority is %s', (failure) => {
-    const { sequenceId, data, frame, result } = alignmentFixture({ seriesUid: 'series-a', studyUid: 'study-a' });
+    const { frame, result, applyResults } = alignmentFixture({ seriesUid: 'series-a', studyUid: 'study-a' });
     const grid = buildOutputPlaneGrid({
       rows: 2,
       columns: 2,
@@ -688,28 +662,22 @@ describe('useApplyAlignmentResults', () => {
     });
     const batchUpdateSettings = vi.fn();
 
-    renderHook(() =>
-      useApplyAlignmentResults({
-        isAligning: true,
-        alignmentResults: [
-          result({
-            bestSliceIndex: 2,
-            runId: 'verified-grid-run',
-            outputGrid: grid,
-            derivedFrame: frame({
-              rows: failure === 'mismatched-pixel-lattice' ? 1 : 2,
-              ...(failure === 'mismatched-validity-mask' ? { valid: new Uint8Array([1, 0]) } : {}),
-              ...(failure === 'missing-derived-grid'
-                ? {}
-                : { outputGrid: failure === 'mismatched-derived-grid' ? mismatchedGrid : grid }),
-            }),
+    applyResults(
+      [
+        result({
+          bestSliceIndex: 2,
+          runId: 'verified-grid-run',
+          outputGrid: grid,
+          derivedFrame: frame({
+            rows: failure === 'mismatched-pixel-lattice' ? 1 : 2,
+            ...(failure === 'mismatched-validity-mask' ? { valid: new Uint8Array([1, 0]) } : {}),
+            ...(failure === 'missing-derived-grid'
+              ? {}
+              : { outputGrid: failure === 'mismatched-derived-grid' ? mismatchedGrid : grid }),
           }),
-        ],
-        panelSettings: new Map(),
-        data,
-        selectedSeqId: sequenceId,
-        batchUpdateSettings,
-      }),
+        }),
+      ],
+      { batchUpdateSettings },
     );
 
     expect(batchUpdateSettings).not.toHaveBeenCalled();
@@ -717,24 +685,14 @@ describe('useApplyAlignmentResults', () => {
 
   it('surfaces verified-plane persistence errors instead of claiming aligned anatomy survives restart', async () => {
     const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockRejectedValue(new Error('Storage quota exceeded'));
-    const { sequenceId, data, frame, result } = alignmentFixture({
+    const { frame, result, applyResults } = alignmentFixture({
       date: 'target-date',
       sequenceId: 'target-sequence',
       instanceCount: 3,
     });
     const reportPersistenceError = vi.fn();
 
-    renderHook(() =>
-      useApplyAlignmentResults({
-        isAligning: true,
-        alignmentResults: [result({ derivedFrame: frame() })],
-        panelSettings: new Map(),
-        data,
-        selectedSeqId: sequenceId,
-        batchUpdateSettings: vi.fn(),
-        onPersistenceError: reportPersistenceError,
-      }),
-    );
+    applyResults([result({ derivedFrame: frame() })], { onPersistenceError: reportPersistenceError });
 
     await waitFor(() => {
       expect(reportPersistenceError).toHaveBeenCalledWith(

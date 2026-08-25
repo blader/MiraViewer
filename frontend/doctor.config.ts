@@ -5,34 +5,27 @@ export default defineConfig({
     files: ['dist/**', 'release/**', 'tmp/**'],
     overrides: [
       {
-        // Yielding between sequential CPU slices is what keeps reconstruction responsive
-        // and cancellable. Parallelizing these shared-buffer loops defeats both guarantees.
         files: [
+          // Yielding between sequential CPU slices is what keeps reconstruction responsive
+          // and cancellable. Parallelizing these shared-buffer loops defeats both guarantees.
           'src/utils/svr/glRaymarch.ts',
           'src/utils/svr/reconstructionCore.ts',
           'src/utils/svr/renderLod.ts',
           'src/utils/svr/rigidRegistration.ts',
           'src/utils/svr/svrComputeCore.ts',
-        ],
-        rules: ['react-doctor/async-await-in-loop'],
-      },
-      {
-        // DICOM decoding, ZIP integrity checks, restore transactions, and model writes
-        // are deliberately ordered and bounded to preserve ownership, rollback, and RAM.
-        files: [
+          // DICOM decoding, ZIP integrity checks, restore transactions, and model writes
+          // are deliberately ordered and bounded to preserve ownership, rollback, and RAM.
           'src/components/UploadModal.tsx',
           'src/services/dicomIngestion.ts',
           'src/services/exportBackup.ts',
           'src/utils/segmentation/onnx/modelCache.ts',
           'src/utils/svr/longitudinalFrames.ts',
           'src/utils/svr/reconstructVolume.ts',
+          // Registration hypotheses share one rendering/scoring worker, cancellation
+          // signal, and optimization budget; Promise.all would race those authorities.
+          'src/hooks/useAutoAlign.ts',
+          'src/utils/svr/longitudinalRegistration.ts',
         ],
-        rules: ['react-doctor/async-await-in-loop'],
-      },
-      {
-        // Registration hypotheses share one rendering/scoring worker, cancellation
-        // signal, and optimization budget; Promise.all would race those authorities.
-        files: ['src/hooks/useAutoAlign.ts', 'src/utils/svr/longitudinalRegistration.ts'],
         rules: ['react-doctor/async-await-in-loop'],
       },
       {

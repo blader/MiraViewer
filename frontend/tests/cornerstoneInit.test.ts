@@ -115,15 +115,17 @@ describe('cornerstoneInit', () => {
       voiLUT: { lut: [0, 255], firstValueMapped: 0 },
       invert: true,
     });
+    const displayDerivedPixels = (pixels: Float32Array, valid = new Uint8Array(pixels.length).fill(1)) =>
+      sources.derived.mockReturnValue({
+        rows: 2,
+        columns: 3,
+        pixels,
+        valid,
+        sourceImageId: 'miradb:native-frame',
+      });
     const fractionalPixels = Float32Array.from([-100_000, -48.75, -12.125, 3.5, 23.875, 91.625]);
     const fractionalSupport = Uint8Array.from([0, 1, 1, 1, 1, 1]);
-    sources.derived.mockReturnValue({
-      rows: 2,
-      columns: 3,
-      pixels: fractionalPixels,
-      valid: fractionalSupport,
-      sourceImageId: 'miradb:native-frame',
-    });
+    displayDerivedPixels(fractionalPixels, fractionalSupport);
 
     const fractional = await derivedLoader('miraderived:fractional').promise;
     const presentationPixels = fractional.getPixelData();
@@ -180,13 +182,7 @@ describe('cornerstoneInit', () => {
     expect(constantRgba[7]).toBe(128);
 
     Object.assign(nativeImage, { windowCenter: 50, windowWidth: 100, invert: false });
-    sources.derived.mockReturnValue({
-      rows: 2,
-      columns: 3,
-      pixels: Float32Array.from([0, 25, 50, 75, 100, 10_000]),
-      valid: new Uint8Array(6).fill(1),
-      sourceImageId: 'miradb:native-frame',
-    });
+    displayDerivedPixels(Float32Array.from([0, 25, 50, 75, 100, 10_000]));
     const windowed = await derivedLoader('miraderived:native-window').promise;
     expect(windowed).toMatchObject({ windowCenter: 50, windowWidth: 100 });
     const windowedLuminance = renderImageLuminance(windowed, false);
@@ -198,13 +194,7 @@ describe('cornerstoneInit', () => {
     expect(windowedLuminance[5]).toBe(255);
 
     Object.assign(nativeImage, { windowCenter: 0, windowWidth: 1 });
-    sources.derived.mockReturnValue({
-      rows: 2,
-      columns: 3,
-      pixels: Float32Array.from([-1, -0.25, 0, 0.25, 1, 2]),
-      valid: new Uint8Array(6).fill(1),
-      sourceImageId: 'miradb:native-frame',
-    });
+    displayDerivedPixels(Float32Array.from([-1, -0.25, 0, 0.25, 1, 2]));
     const zeroCentered = await derivedLoader('miraderived:zero-centered').promise;
     expect(zeroCentered).toMatchObject({ windowCenter: 0, windowWidth: 1 });
     const zeroCenteredLuminance = renderImageLuminance(zeroCentered, false);

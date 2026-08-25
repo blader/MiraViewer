@@ -11,6 +11,20 @@ function makeGridPixels(rows: number, cols: number): Float32Array {
   return out;
 }
 
+function makeAxialSlice(size: number, z = 0, pixels = makeGridPixels(size, size)) {
+  return {
+    pixels,
+    dsRows: size,
+    dsCols: size,
+    ippMm: { x: 0, y: 0, z },
+    rowDir: { x: 1, y: 0, z: 0 },
+    colDir: { x: 0, y: 1, z: 0 },
+    normalDir: { x: 0, y: 0, z: 1 },
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+  };
+}
+
 describe('svr/sliceRoiCrop', () => {
   it('crops an axial slice and shifts IPP so (r0,c0) becomes the new origin', () => {
     const slice = {
@@ -85,18 +99,7 @@ describe('svr/sliceRoiCrop', () => {
   });
 
   it('keeps a thick slice when its physical slab overlaps the ROI despite its center being outside', () => {
-    const slice = {
-      pixels: makeGridPixels(3, 3),
-      dsRows: 3,
-      dsCols: 3,
-      ippMm: { x: 0, y: 0, z: -0.4 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      normalDir: { x: 0, y: 0, z: 1 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-      sliceThicknessMm: 1.2,
-    };
+    const slice = { ...makeAxialSlice(3, -0.4), sliceThicknessMm: 1.2 };
 
     expect(
       cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2, z: 1 } })),
@@ -108,18 +111,7 @@ describe('svr/sliceRoiCrop', () => {
     valid[3 * 8 + 4] = 1;
     valid[5 * 8 + 6] = 1;
 
-    const slice = {
-      pixels: makeGridPixels(8, 8),
-      valid,
-      dsRows: 8,
-      dsCols: 8,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      normalDir: { x: 0, y: 0, z: 1 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    };
+    const slice = { ...makeAxialSlice(8), valid };
 
     expect(
       cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 4, y: 3, z: -1 }, max: { x: 5, y: 4, z: 1 } })),
@@ -138,18 +130,7 @@ describe('svr/sliceRoiCrop', () => {
 
   it('rejects malformed acquired support before mutating a source slice', () => {
     const pixels = makeGridPixels(4, 4);
-    const slice = {
-      pixels,
-      valid: new Uint8Array(3),
-      dsRows: 4,
-      dsCols: 4,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      normalDir: { x: 0, y: 0, z: 1 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    };
+    const slice = { ...makeAxialSlice(4, 0, pixels), valid: new Uint8Array(3) };
 
     expect(() =>
       cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 1, y: 1, z: -1 }, max: { x: 2, y: 2, z: 1 } })),

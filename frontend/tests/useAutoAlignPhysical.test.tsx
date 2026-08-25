@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AlignmentReference, SeriesRef } from '../src/types/api';
+import type { AlignmentReference, AlignmentResult, SeriesRef } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import {
   clearDerivedAlignmentFrames,
@@ -100,6 +100,49 @@ const target: SeriesRef = {
   frame_of_reference_uid: 'frame-b',
 };
 
+function displayDerivedReference(
+  source: ReturnType<typeof manifest>,
+  options: {
+    slicesChecked?: number;
+    frame?: Partial<NonNullable<AlignmentResult['derivedFrame']>>;
+  } = {},
+) {
+  const originalFrame = source.frames[2]!;
+  const outputGrid = buildOutputPlaneGrid(originalFrame, { frameOfReferenceUid: source.frameOfReferenceUid });
+  setDerivedAlignmentFrame({
+    date: reference.date,
+    seriesUid: reference.seriesUid,
+    bestSliceIndex: reference.sliceIndex,
+    nmiScore: 1,
+    computedSettings: reference.settings,
+    slicesChecked: options.slicesChecked ?? 1,
+    runId: 'previously-verified',
+    patientKey: 'patient-a',
+    sequenceId: reference.sequenceId,
+    datasetRevision: reference.datasetRevision,
+    referenceSeriesUid: source.seriesUid,
+    outputGrid,
+    outcome: 'aligned',
+    derivedFrame: {
+      pixels: new Float32Array(16),
+      rows: outputGrid.rows,
+      columns: outputGrid.columns,
+      sourceImageId: 'miradb:reference-series-1',
+      referenceStudyUid: source.studyUid,
+      referenceSeriesUid: source.seriesUid,
+      referenceSopInstanceUid: originalFrame.sopInstanceUid,
+      referenceFrameIndex: 2,
+      targetStudyUid: reference.studyUid,
+      targetSopInstanceUid: 'reference-series-1',
+      referenceFrameOfReferenceUid: source.frameOfReferenceUid,
+      targetFrameOfReferenceUid: 'selected-frame',
+      outputGrid,
+      ...options.frame,
+    },
+  });
+  return { originalFrame, outputGrid };
+}
+
 async function runPhysicalAlignment(
   series: Record<string, SeriesRef> = { 'target-examination': target },
   options: Parameters<ReturnType<typeof useAutoAlign>['alignAllDates']>[4] = {},
@@ -170,39 +213,13 @@ describe('physically registered longitudinal auto-alignment', () => {
 
   it('keeps a selected derived reference stationary while registering against its verified displayed physical plane', async () => {
     const originalManifest = manifest('original-reference-series', 'patient-a', 'original-frame');
-    const originalFrame = originalManifest.frames[2]!;
-    const outputGrid = buildOutputPlaneGrid(originalFrame, { frameOfReferenceUid: 'original-frame' });
-    setDerivedAlignmentFrame({
-      date: reference.date,
-      seriesUid: reference.seriesUid,
-      bestSliceIndex: reference.sliceIndex,
-      nmiScore: 1,
-      computedSettings: reference.settings,
+    const { originalFrame, outputGrid } = displayDerivedReference(originalManifest, {
       slicesChecked: 3,
-      runId: 'previously-verified',
-      patientKey: reference.patientKey,
-      sequenceId: reference.sequenceId,
-      datasetRevision: reference.datasetRevision,
-      referenceSeriesUid: originalManifest.seriesUid,
-      outputGrid,
-      outcome: 'aligned',
-      derivedFrame: {
+      frame: {
         pixels: Float32Array.from({ length: 16 }, (_, index) => index + 1),
         valid: new Uint8Array(16).fill(1),
-        rows: outputGrid.rows,
-        columns: outputGrid.columns,
-        sourceImageId: 'miradb:reference-series-1',
-        referenceStudyUid: originalManifest.studyUid,
-        referenceSeriesUid: originalManifest.seriesUid,
-        referenceSopInstanceUid: originalFrame.sopInstanceUid,
-        referenceFrameIndex: 2,
-        targetStudyUid: reference.studyUid,
-        targetSopInstanceUid: 'reference-series-1',
-        referenceFrameOfReferenceUid: 'original-frame',
-        targetFrameOfReferenceUid: 'selected-frame',
         rigidTransform: [0, 0, 0, 0, 0, 0],
         rotationCenterMm: [0, 0, 2],
-        outputGrid,
         contributingSourceSopInstanceUids: ['reference-series-0', 'reference-series-1', 'reference-series-2'],
       },
     });
@@ -295,37 +312,7 @@ describe('physically registered longitudinal auto-alignment', () => {
 
   it('refuses a displayed derived reference whose acquired anchor provenance no longer matches the live patient', async () => {
     const originalManifest = manifest('original-reference-series', 'patient-b', 'original-frame');
-    const outputGrid = buildOutputPlaneGrid(originalManifest.frames[2]!, { frameOfReferenceUid: 'original-frame' });
-    setDerivedAlignmentFrame({
-      date: reference.date,
-      seriesUid: reference.seriesUid,
-      bestSliceIndex: reference.sliceIndex,
-      nmiScore: 1,
-      computedSettings: reference.settings,
-      slicesChecked: 1,
-      runId: 'previously-verified',
-      patientKey: 'patient-a',
-      sequenceId: reference.sequenceId,
-      datasetRevision: reference.datasetRevision,
-      referenceSeriesUid: originalManifest.seriesUid,
-      outputGrid,
-      outcome: 'aligned',
-      derivedFrame: {
-        pixels: new Float32Array(16),
-        rows: 4,
-        columns: 4,
-        sourceImageId: 'miradb:reference-series-1',
-        referenceStudyUid: originalManifest.studyUid,
-        referenceSeriesUid: originalManifest.seriesUid,
-        referenceSopInstanceUid: originalManifest.frames[2]!.sopInstanceUid,
-        referenceFrameIndex: 2,
-        targetStudyUid: reference.studyUid,
-        targetSopInstanceUid: 'reference-series-1',
-        referenceFrameOfReferenceUid: 'original-frame',
-        targetFrameOfReferenceUid: 'selected-frame',
-        outputGrid,
-      },
-    });
+    displayDerivedReference(originalManifest);
     const displayedImageId = getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)!.imageId;
     mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
       seriesUid === originalManifest.seriesUid ? originalManifest : manifest(seriesUid, 'patient-a', 'selected-frame'),

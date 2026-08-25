@@ -123,11 +123,6 @@ export function useComparisonInstrumentUi(isAligning: boolean) {
     return () => window.removeEventListener('keydown', closeDrawerOnEscape);
   }, [headerMenuOpen, interactionBlocked, rightSidebarOpen, setUiState, sidebarOpen, uiState]);
 
-  const setHelpOpen = useCallback((open: boolean) => setActiveDialog(open ? 'help' : null), []);
-  const setUploadModalOpen = useCallback((open: boolean) => setActiveDialog(open ? 'upload' : null), []);
-  const setExportModalOpen = useCallback((open: boolean) => setActiveDialog(open ? 'export' : null), []);
-  const setClearDataModalOpen = useCallback((open: boolean) => setActiveDialog(open ? 'clear' : null), []);
-
   return {
     uiState,
     setUiState,
@@ -136,14 +131,8 @@ export function useComparisonInstrumentUi(isAligning: boolean) {
     alignmentOutputMode,
     setSidebarOpen,
     setRightSidebarOpen,
-    helpOpen: activeDialog === 'help',
-    setHelpOpen,
-    uploadModalOpen: activeDialog === 'upload',
-    setUploadModalOpen,
-    exportModalOpen: activeDialog === 'export',
-    setExportModalOpen,
-    clearDataModalOpen: activeDialog === 'clear',
-    setClearDataModalOpen,
+    activeDialog,
+    setActiveDialog,
     headerMenuOpen,
     setHeaderMenuOpen,
     headerMenuRef,

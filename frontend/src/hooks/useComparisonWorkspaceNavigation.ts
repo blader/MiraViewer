@@ -119,8 +119,8 @@ export function useComparisonWorkspaceNavigation({
       };
     }
 
-    const first = columns.find((column) => column.ref);
-    if (!first?.ref) {
+    const first = columns[0];
+    if (!first) {
       return {
         defaultDateIso: null,
         fallbackRoiSeriesUid: null,
@@ -168,29 +168,15 @@ export function useComparisonWorkspaceNavigation({
       instanceCount = overlaySelectedRef.instance_count;
       offset = overlaySelectedSettings.offset;
     } else {
-      const primaryGrid = columns.find((column) => column.ref);
-      if (primaryGrid?.ref) {
+      const primaryGrid = columns[0];
+      if (primaryGrid) {
         instanceCount = primaryGrid.ref.instance_count;
         offset = (panelSettings.get(primaryGrid.date) || DEFAULT_PANEL_SETTINGS).offset;
-      } else {
-        const anyOverlay = overlayColumns.find((column) => column.ref);
-        if (anyOverlay?.ref) {
-          instanceCount = anyOverlay.ref.instance_count;
-          offset = (panelSettings.get(anyOverlay.date) || DEFAULT_PANEL_SETTINGS).offset;
-        }
       }
     }
 
     wheelNavContextRef.current = instanceCount > 1 ? { instanceCount, offset } : null;
-  }, [
-    viewMode,
-    overlaySelectedRef,
-    overlaySelectedDate,
-    overlaySelectedSettings.offset,
-    columns,
-    overlayColumns,
-    panelSettings,
-  ]);
+  }, [viewMode, overlaySelectedRef, overlaySelectedDate, overlaySelectedSettings.offset, columns, panelSettings]);
 
   const setProgressRef = useRef(setProgress);
   useEffect(() => {
