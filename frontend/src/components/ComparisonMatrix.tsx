@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback } from 'react';
-import type { AlignmentProgress, AlignmentReference, ComparisonData, ExclusionMask, PanelSettings } from '../types/api';
+import type { AlignmentReference, ComparisonData, ExclusionMask } from '../types/api';
 import { Upload } from 'lucide-react';
 import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
@@ -7,6 +7,7 @@ import { ExportModal } from './ExportModal';
 import { ClearDataModal } from './ClearDataModal';
 import { SliceLoopNavigator } from './comparison/SliceLoopNavigator';
 import { GridView } from './comparison/GridView';
+import type { GridViewProps } from './comparison/GridView';
 import { OverlayView } from './comparison/OverlayView';
 import { ComparisonFiltersSidebar } from './comparison/ComparisonFiltersSidebar';
 import { ComparisonDatesSidebar } from './comparison/ComparisonDatesSidebar';
@@ -26,18 +27,8 @@ type ComparisonStageProps = {
   selectedSeqId: string | null;
   hasData: boolean;
   navigation: ReturnType<typeof useComparisonWorkspaceNavigation>;
-  panel: {
-    settings: Map<string, PanelSettings>;
-    progress: number;
-    setProgress: (progress: number) => void;
-    updateSetting: (date: string, update: Partial<PanelSettings>) => void;
-  };
-  alignment: {
-    active: boolean;
-    progress: AlignmentProgress | null;
-    abort: () => void;
-    start: (reference: AlignmentReference, exclusionMask: ExclusionMask) => Promise<void>;
-  };
+  panel: Pick<ReturnType<typeof usePanelSettings>, 'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting'>;
+  alignment: Pick<GridViewProps, 'isAligning' | 'alignmentProgress' | 'abortAlignment' | 'startAlignAll'>;
   onOpenUpload: () => void;
 };
 
@@ -70,29 +61,9 @@ function ComparisonStage({
           </div>
         </div>
       ) : navigation.viewMode === 'grid' ? (
-        <GridView
-          comboId={selectedSeqId}
-          {...navigation}
-          panelSettings={panel.settings}
-          progress={panel.progress}
-          setProgress={panel.setProgress}
-          updatePanelSetting={panel.updateSetting}
-          isAligning={alignment.active}
-          alignmentProgress={alignment.progress}
-          abortAlignment={alignment.abort}
-          startAlignAll={alignment.start}
-        />
+        <GridView comboId={selectedSeqId} {...navigation} {...panel} {...alignment} />
       ) : navigation.viewMode === 'overlay' ? (
-        <OverlayView
-          comboId={selectedSeqId}
-          {...navigation}
-          isAligning={alignment.active}
-          alignmentProgress={alignment.progress}
-          abortAlignment={alignment.abort}
-          updatePanelSetting={panel.updateSetting}
-          startAlignAll={alignment.start}
-          setProgress={panel.setProgress}
-        />
+        <OverlayView comboId={selectedSeqId} {...navigation} {...panel} {...alignment} />
       ) : (
         <Suspense
           fallback={
@@ -351,8 +322,8 @@ export function ComparisonMatrix() {
           selectedSeqId={selectedSeqId}
           hasData={Boolean(hasData)}
           navigation={workspaceNavigation}
-          panel={{ settings: panelSettings, progress, setProgress, updateSetting: updatePanelSetting }}
-          alignment={{ active: isAligning, progress: alignmentProgress, abort: abortAlignment, start: startAlignAll }}
+          panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
+          alignment={{ isAligning, alignmentProgress, abortAlignment, startAlignAll }}
           onOpenUpload={() => setActiveDialog('upload')}
         />
 
