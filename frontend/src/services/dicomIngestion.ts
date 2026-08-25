@@ -460,9 +460,6 @@ async function prepareDicomFile(file: File): Promise<DicomIngestResult | Prepare
 }
 
 class DicomAdmissionError extends Error {}
-class DicomImportCancelled extends Error {
-  name = 'AbortError';
-}
 
 const DEFAULT_BATCH_MAX_ITEMS = 64;
 const DEFAULT_BATCH_MAX_BYTES = 16 * 1024 * 1024;
@@ -680,7 +677,7 @@ function isOrthogonalOriginalMrOrientationConflict(
 }
 
 function throwIfImportAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new DicomImportCancelled();
+  if (signal?.aborted) throw new DOMException('DICOM import cancelled.', 'AbortError');
 }
 
 function isImportAbort(error: unknown): boolean {

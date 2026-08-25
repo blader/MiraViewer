@@ -8,8 +8,7 @@ export function segmentationAreaMm2(
   rowSpacingMm: number | undefined,
   columnSpacingMm: number | undefined,
 ): number | null {
-  if (!validCount(pixelCount)) return null;
-  if (!rowSpacingMm || !columnSpacingMm) return null;
+  if (!validCount(pixelCount) || !rowSpacingMm || !columnSpacingMm) return null;
   if (!Number.isFinite(rowSpacingMm) || !Number.isFinite(columnSpacingMm)) return null;
   if (rowSpacingMm <= 0 || columnSpacingMm <= 0) return null;
   return pixelCount * rowSpacingMm * columnSpacingMm;
@@ -19,7 +18,6 @@ export function segmentationVolumeMm3(
   voxelCount: number,
   voxelSizeMm: readonly [number, number, number],
 ): number | null {
-  if (!validCount(voxelCount)) return null;
-  if (voxelSizeMm.some((spacing) => !Number.isFinite(spacing) || spacing <= 0)) return null;
+  if (!validCount(voxelCount) || voxelSizeMm.some((spacing) => !Number.isFinite(spacing) || spacing <= 0)) return null;
   return voxelCount * voxelSizeMm[0] * voxelSizeMm[1] * voxelSizeMm[2];
 }
