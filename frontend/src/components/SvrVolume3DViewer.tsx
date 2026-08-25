@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
@@ -273,6 +273,72 @@ type RenderBuildState = {
   error?: string;
 };
 
+type GrowStatus = { running: boolean; message?: string; error?: string };
+
+type VolumeSegmentationState = {
+  volume: SvrVolume | null;
+  generatedLabels: SvrLabelVolume | null;
+  seedVoxel: Vec3i | null;
+  growRoiOutsideScale: number;
+  growRoiBounds: { min: Vec3i; max: Vec3i } | null;
+  growRoiDraftBounds: { min: Vec3i; max: Vec3i } | null;
+  growStatus: GrowStatus;
+};
+
+type VolumeSegmentationUpdate =
+  | Partial<Omit<VolumeSegmentationState, 'volume'>>
+  | ((state: VolumeSegmentationState) => Partial<Omit<VolumeSegmentationState, 'volume'>>);
+
+function initialVolumeSegmentationState(volume: SvrVolume | null): VolumeSegmentationState {
+  return {
+    volume,
+    generatedLabels: null,
+    seedVoxel: null,
+    growRoiOutsideScale: 0.6,
+    growRoiBounds: null,
+    growRoiDraftBounds: null,
+    growStatus: { running: false },
+  };
+}
+
+function useVolumeSegmentationState(volume: SvrVolume | null) {
+  const [stored, dispatch] = useReducer(
+    (
+      previous: VolumeSegmentationState,
+      action: { volume: SvrVolume | null; update: VolumeSegmentationUpdate },
+    ): VolumeSegmentationState => {
+      const current = previous.volume === action.volume ? previous : initialVolumeSegmentationState(action.volume);
+      return { ...current, ...(typeof action.update === 'function' ? action.update(current) : action.update) };
+    },
+    volume,
+    initialVolumeSegmentationState,
+  );
+  const state = stored.volume === volume ? stored : initialVolumeSegmentationState(volume);
+  const update = useCallback((next: VolumeSegmentationUpdate) => dispatch({ volume, update: next }), [volume]);
+
+  return {
+    ...state,
+    setGeneratedLabels: useCallback((generatedLabels: SvrLabelVolume | null) => update({ generatedLabels }), [update]),
+    setSeedVoxel: useCallback((seedVoxel: Vec3i | null) => update({ seedVoxel }), [update]),
+    setGrowRoiOutsideScale: useCallback((growRoiOutsideScale: number) => update({ growRoiOutsideScale }), [update]),
+    setGrowRoiBounds: useCallback(
+      (growRoiBounds: { min: Vec3i; max: Vec3i } | null) => update({ growRoiBounds }),
+      [update],
+    ),
+    setGrowRoiDraftBounds: useCallback(
+      (growRoiDraftBounds: { min: Vec3i; max: Vec3i } | null) => update({ growRoiDraftBounds }),
+      [update],
+    ),
+    setGrowStatus: useCallback(
+      (next: GrowStatus | ((previous: GrowStatus) => GrowStatus)) =>
+        update(
+          typeof next === 'function' ? (current) => ({ growStatus: next(current.growStatus) }) : { growStatus: next },
+        ),
+      [update],
+    ),
+  };
+}
+
 function maskUnsupportedLabels(labels: SvrLabelVolume, observedSupport?: Uint8Array): SvrLabelVolume {
   if (!observedSupport || labels.data.length !== observedSupport.length) return labels;
 
@@ -335,7 +401,7 @@ export type SvrVolume3DViewerProps = {
   sliceInspectorPortalTarget?: Element | null;
 };
 
-export function SvrVolume3DViewer({
+function useSvrVolumeViewerModel({
   volume,
   labels: labelsOverride,
   volumeIdentity,
@@ -365,7 +431,20 @@ export function SvrVolume3DViewer({
   }));
 
   // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
-  const [generatedLabels, setGeneratedLabels] = useState<SvrLabelVolume | null>(null);
+  const {
+    generatedLabels,
+    setGeneratedLabels,
+    seedVoxel,
+    setSeedVoxel,
+    growRoiOutsideScale,
+    setGrowRoiOutsideScale,
+    growRoiBounds,
+    setGrowRoiBounds,
+    growRoiDraftBounds,
+    setGrowRoiDraftBounds,
+    growStatus,
+    setGrowStatus,
+  } = useVolumeSegmentationState(volume);
   const [hydratedVolumeKey, setHydratedVolumeKey] = useState<string | null>(null);
   const labelSourceRef = useRef<string | undefined>(undefined);
   const labelCountsRef = useRef<{
@@ -436,7 +515,7 @@ export function SvrVolume3DViewer({
     return () => {
       cancelled = true;
     };
-  }, [volume, volumeKey]);
+  }, [setGeneratedLabels, volume, volumeKey]);
 
   useEffect(() => {
     if (!volume || !volumeIdentity || !volumeKey || hydratedVolumeKey !== volumeKey || labelsOverride) return;
@@ -509,7 +588,7 @@ export function SvrVolume3DViewer({
       labelSourceRef.current = 'brats-tumor-v1';
       setGeneratedLabels(maskUnsupportedLabels(nextLabels, volume?.observedSupport));
     },
-    [volume],
+    [setGeneratedLabels, volume],
   );
   const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels);
   const {
@@ -544,22 +623,13 @@ export function SvrVolume3DViewer({
   const [segmentationCollapsed, setSegmentationCollapsed] = useState(true);
 
   // Baseline interactive segmentation (Phase 2): seeded 3D region-growing.
-  const [seedVoxel, setSeedVoxel] = useState<Vec3i | null>(null);
   const [growTargetLabel, setGrowTargetLabel] = useState<BratsBaseLabelId>(BRATS_LABEL_ID.ENHANCING);
   const [growTolerance, setGrowTolerance] = useState(0.12);
-  const [growAuto, setGrowAuto] = useState(true);
 
   // ROI guidance: draw a box on the slice inspector to reduce leakage.
   // NOTE: the 2D rectangle is interpreted as an axis-aligned *3D* cube-like ROI whose depth is
   // chosen to be roughly isotropic in mm (and centered on the current inspector slice).
   // The ROI acts as a smooth radial prior about its centroid (not a hard clamp).
-  const [growRoiOutsideScale, setGrowRoiOutsideScale] = useState(0.6);
-  const [growRoiBounds, setGrowRoiBounds] = useState<{ min: Vec3i; max: Vec3i } | null>(null);
-  const [growRoiDraftBounds, setGrowRoiDraftBounds] = useState<{ min: Vec3i; max: Vec3i } | null>(null);
-
-  const [growStatus, setGrowStatus] = useState<{ running: boolean; message?: string; error?: string }>(() => ({
-    running: false,
-  }));
   const growAbortRef = useRef<AbortController | null>(null);
   const growWorkerRef = useRef<RegionGrow3DWorkerController | null>(null);
   const growRunIdRef = useRef(0);
@@ -586,15 +656,7 @@ export function SvrVolume3DViewer({
 
   // When the underlying volume changes, drop any internally-generated labels, seeds, and ROI state.
   useEffect(() => {
-    setGeneratedLabels(null);
-    setSeedVoxel(null);
-    setGrowAuto(true);
-    setGrowRoiOutsideScale(0.6);
-    setGrowRoiBounds(null);
-    setGrowRoiDraftBounds(null);
-
     // Clear any pending/active grow.
-    setGrowStatus({ running: false });
     growAbortRef.current?.abort();
     growAbortRef.current = null;
     growWorkerRef.current?.dispose();
@@ -646,7 +708,6 @@ export function SvrVolume3DViewer({
         if (touchesUnsupportedAnatomy(i, volume.dims, volume.observedSupport)) unsupportedBoundaryCount++;
       }
       cached = { data, counts, unsupportedBoundaryCount };
-      labelCountsRef.current = cached;
     }
 
     const { counts, unsupportedBoundaryCount } = cached;
@@ -661,8 +722,12 @@ export function SvrVolume3DViewer({
     const totalMm3 = totalCount * voxelVolMm3;
     const totalMl = totalMm3 / 1000;
 
-    return { counts, voxelVolMm3, totalCount, totalMm3, totalMl, unsupportedBoundaryCount };
+    return { counts, voxelVolMm3, totalCount, totalMm3, totalMl, unsupportedBoundaryCount, cache: cached };
   }, [hasLabels, labels, volume]);
+
+  useEffect(() => {
+    labelCountsRef.current = labelMetrics?.cache ?? null;
+  }, [labelMetrics]);
 
   // Slice inspector (orthogonal slices).
   const sliceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1057,18 +1122,21 @@ export function SvrVolume3DViewer({
     auto?: boolean;
   };
 
-  const cancelSeedGrow = useCallback((message?: string) => {
-    growRunIdRef.current++;
-    growAbortRef.current?.abort();
-    growAbortRef.current = null;
+  const cancelSeedGrow = useCallback(
+    (message?: string) => {
+      growRunIdRef.current++;
+      growAbortRef.current?.abort();
+      growAbortRef.current = null;
 
-    if (growAutoTimerRef.current !== null) {
-      window.clearTimeout(growAutoTimerRef.current);
-      growAutoTimerRef.current = null;
-    }
+      if (growAutoTimerRef.current !== null) {
+        window.clearTimeout(growAutoTimerRef.current);
+        growAutoTimerRef.current = null;
+      }
 
-    setGrowStatus({ running: false, message: message ?? 'Cancelled' });
-  }, []);
+      setGrowStatus({ running: false, message: message ?? 'Cancelled' });
+    },
+    [setGrowStatus],
+  );
 
   const startSeedGrow = useCallback(
     (params?: StartSeedGrowParams) => {
@@ -1293,13 +1361,14 @@ export function SvrVolume3DViewer({
       labels,
       markLabelsDirty,
       onnxSegRunning,
+      setGeneratedLabels,
+      setGrowStatus,
       volume,
     ],
   );
 
   const scheduleSeedGrow = useCallback(
     (params?: Omit<StartSeedGrowParams, 'auto'>) => {
-      if (!growAuto) return;
       if (!volume) return;
       if (onnxSegRunning) return;
 
@@ -1318,7 +1387,7 @@ export function SvrVolume3DViewer({
         startSeedGrow({ ...params, auto: true, roiBounds });
       }, 150);
     },
-    [growAuto, growRoiBounds, onnxSegRunning, startSeedGrow, volume],
+    [growRoiBounds, onnxSegRunning, startSeedGrow, volume],
   );
 
   const onSliceInspectorPointerDown = useCallback(
@@ -1344,7 +1413,7 @@ export function SvrVolume3DViewer({
       e.preventDefault();
       e.stopPropagation();
     },
-    [inspectorPointerToVoxel, onnxSegRunning, volume],
+    [inspectorPointerToVoxel, onnxSegRunning, setGrowRoiDraftBounds, volume],
   );
 
   const onSliceInspectorPointerMove = useCallback(
@@ -1373,7 +1442,7 @@ export function SvrVolume3DViewer({
       e.preventDefault();
       e.stopPropagation();
     },
-    [computeRoiBoundsFromSliceVoxels, inspectorPointerToVoxel],
+    [computeRoiBoundsFromSliceVoxels, inspectorPointerToVoxel, setGrowRoiDraftBounds],
   );
 
   const onSliceInspectorPointerUp = useCallback(
@@ -1399,9 +1468,7 @@ export function SvrVolume3DViewer({
           };
           setSeedVoxel(seed);
 
-          if (growAuto) {
-            startSeedGrow({ auto: true, roiBounds: bounds, seed });
-          }
+          startSeedGrow({ auto: true, roiBounds: bounds, seed });
         }
       } else {
         // No single-click seeding: box draw is required.
@@ -1411,19 +1478,29 @@ export function SvrVolume3DViewer({
       e.preventDefault();
       e.stopPropagation();
     },
-    [computeRoiBoundsFromSliceVoxels, growAuto, inspectorPointerToVoxel, startSeedGrow],
+    [
+      computeRoiBoundsFromSliceVoxels,
+      inspectorPointerToVoxel,
+      setGrowRoiBounds,
+      setGrowRoiDraftBounds,
+      setSeedVoxel,
+      startSeedGrow,
+    ],
   );
 
-  const onSliceInspectorPointerCancel = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    const drag = sliceInspectorDragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
+  const onSliceInspectorPointerCancel = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const drag = sliceInspectorDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
 
-    sliceInspectorDragRef.current = null;
-    setGrowRoiDraftBounds(null);
+      sliceInspectorDragRef.current = null;
+      setGrowRoiDraftBounds(null);
 
-    e.preventDefault();
-    e.stopPropagation();
-  }, []);
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    [setGrowRoiDraftBounds],
+  );
 
   // Extract + downsample the current inspector slice (a plane read over the full volume
   // plus an area-average resample). Memoized separately from the canvas compositing effect
@@ -1696,7 +1773,7 @@ export function SvrVolume3DViewer({
     let supportEnabled = false;
     let occMaxCell: [number, number, number] = [0, 0, 0];
     let raf = 0;
-    let resizeObserverRef: ResizeObserver | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     try {
       program = createProgram(gl, vsSrc, fsSrc);
@@ -2064,9 +2141,8 @@ export function SvrVolume3DViewer({
 
       // The free-running loop used to pick up CSS size changes implicitly; on-demand
       // rendering needs an explicit nudge when the canvas is resized by layout.
-      const resizeObserver = new ResizeObserver(() => requestRender());
+      resizeObserver = new ResizeObserver(() => requestRender());
       resizeObserver.observe(canvas);
-      resizeObserverRef = resizeObserver;
 
       requestRender();
       // GPU uploads own their data after texImage; release the transient
@@ -2082,7 +2158,7 @@ export function SvrVolume3DViewer({
       // Detach the on-demand entry points first so late invalidations (settle timers,
       // label effects) can't schedule a frame against torn-down GL state.
       requestRenderRef.current = null;
-      resizeObserverRef?.disconnect();
+      resizeObserver?.disconnect();
 
       if (raf) window.cancelAnimationFrame(raf);
 
@@ -2331,7 +2407,97 @@ export function SvrVolume3DViewer({
     [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView],
   );
 
-  const sliceInspectorCard = (
+  return {
+    THRESHOLD_MAX,
+    actualTextureFormat,
+    axesCanvasRef,
+    cancelOnnxSegmentation,
+    cancelSeedGrow,
+    canvasRef,
+    controlsCollapsed,
+    gamma,
+    generatedLabels,
+    growOverlayRef,
+    growRoiBounds,
+    growRoiOutsideScale,
+    growStatus,
+    growTargetLabel,
+    growTolerance,
+    hasLabels,
+    initError,
+    initOnnxSession,
+    inspectIndex,
+    inspectPlane,
+    inspectedCoordinate,
+    inspectorInfo,
+    labelMetrics,
+    labels,
+    observedSupportSummary,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onSliceInspectorPointerCancel,
+    onSliceInspectorPointerDown,
+    onSliceInspectorPointerMove,
+    onSliceInspectorPointerUp,
+    onViewerKeyDown,
+    onnxClearModel,
+    onnxFileInputRef,
+    onnxHandleSelectedFiles,
+    onnxPreflight,
+    onnxSegRunning,
+    onnxStatus,
+    onnxUploadClick,
+    opacity,
+    renderBuild,
+    renderPlan,
+    resetView,
+    runOnnxSegmentation,
+    scheduleSeedGrow,
+    seedVoxel,
+    segmentationCollapsed,
+    setControlsCollapsed,
+    setGamma,
+    setGeneratedLabels,
+    setGrowRoiBounds,
+    setGrowRoiDraftBounds,
+    setGrowRoiOutsideScale,
+    setGrowTargetLabel,
+    setGrowTolerance,
+    setInspectIndex,
+    setInspectPlane,
+    setOpacity,
+    setSeedVoxel,
+    setSegmentationCollapsed,
+    setThreshold,
+    sliceCanvasRef,
+    sliceInspectorPortalTarget,
+    threshold,
+    volDims,
+    volume,
+  };
+}
+
+type SvrVolumeViewerModel = ReturnType<typeof useSvrVolumeViewerModel>;
+
+function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
+  const {
+    inspectIndex,
+    inspectPlane,
+    inspectedCoordinate,
+    inspectorInfo,
+    onSliceInspectorPointerCancel,
+    onSliceInspectorPointerDown,
+    onSliceInspectorPointerMove,
+    onSliceInspectorPointerUp,
+    setInspectIndex,
+    setInspectPlane,
+    sliceCanvasRef,
+    volDims,
+    volume,
+  } = model;
+
+  return (
     <div className={`space-y-3 bg-[var(--bg-secondary)] ${COARSE_POINTER_CONTROL_TARGETS}`}>
       <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">Slice Inspector</div>
       <div className="space-y-3">
@@ -2422,7 +2588,451 @@ export function SvrVolume3DViewer({
       </div>
     </div>
   );
+}
 
+function SvrOnnxModelControls({ model }: { model: SvrVolumeViewerModel }) {
+  const {
+    cancelOnnxSegmentation,
+    initOnnxSession,
+    onnxClearModel,
+    onnxFileInputRef,
+    onnxHandleSelectedFiles,
+    onnxPreflight,
+    onnxSegRunning,
+    onnxStatus,
+    onnxUploadClick,
+    runOnnxSegmentation,
+    volume,
+  } = model;
+
+  return (
+    <details className="pt-2 mt-2 border-t border-[var(--border-color)] text-xs text-[var(--text-secondary)]">
+      <summary className="min-h-9 cursor-pointer py-2 font-medium hover:text-[var(--text-primary)]">
+        Optional verified ONNX model
+      </summary>
+      <div className="space-y-2">
+        <input
+          ref={onnxFileInputRef}
+          type="file"
+          accept=".onnx,.json"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files?.length) {
+              onnxHandleSelectedFiles(Array.from(e.target.files));
+            }
+            // Allow re-uploading the same file.
+            e.target.value = '';
+          }}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onnxUploadClick}
+            disabled={onnxStatus.loading}
+            className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+          >
+            Upload model + manifest
+          </button>
+
+          <button
+            type="button"
+            onClick={initOnnxSession}
+            disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
+            className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+          >
+            Init
+          </button>
+
+          <button
+            type="button"
+            onClick={runOnnxSegmentation}
+            disabled={
+              !volume ||
+              !onnxStatus.cached ||
+              !onnxStatus.verified ||
+              onnxStatus.loading ||
+              !!onnxPreflight?.blockedByDefault
+            }
+            className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+          >
+            Run ML
+          </button>
+
+          {onnxSegRunning ? (
+            <button
+              type="button"
+              onClick={cancelOnnxSegmentation}
+              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+            >
+              Cancel
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={onnxClearModel}
+            disabled={!onnxStatus.cached || onnxStatus.loading}
+            className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+          >
+            Clear model
+          </button>
+        </div>
+
+        <details className="text-xs text-[var(--text-secondary)]">
+          <summary className="cursor-pointer py-1 text-[var(--text-primary)]">
+            Required verified model manifest (.json)
+          </summary>
+          <p className="mt-1">
+            Select the ONNX model and its JSON sidecar together. The manifest must declare the model's exact SHA-256
+            hash, MR input, preprocessing, axes, and tumor class meanings.
+          </p>
+          <pre className="mt-2 max-h-48 overflow-auto rounded bg-[var(--bg-primary)] p-2 text-xs">
+            {JSON.stringify(TUMOR_MODEL_MANIFEST_EXAMPLE, null, 2)}
+          </pre>
+        </details>
+
+        {onnxPreflight?.blockedByDefault ? (
+          <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
+            Model inference would require approximately {formatMiB(onnxPreflight.estimatedPeakBytes)} of resident
+            memory, exceeding the shared {formatMiB(onnxPreflight.budgetBytes)} SVR budget. Reconstruct a smaller focus
+            region or use a lower resolution.
+          </div>
+        ) : null}
+
+        {onnxStatus.error ? (
+          <div role="alert" className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]">
+            {onnxStatus.error}
+          </div>
+        ) : onnxStatus.message ? (
+          <div role="status" className="text-xs text-[var(--text-tertiary)]">
+            {onnxStatus.message}
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function SvrSegmentationMetrics({ model }: { model: SvrVolumeViewerModel }) {
+  const { hasLabels, labelMetrics, labels } = model;
+
+  if (!hasLabels || !labels) {
+    return <div className="text-xs text-[var(--text-tertiary)]">No segmentation labels available yet.</div>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {labels.meta.map((m) => {
+        if (m.id === 0) return null;
+        const count = labelMetrics?.counts.get(m.id) ?? 0;
+        const mm3 = count * (labelMetrics?.voxelVolMm3 ?? 0);
+        const ml = mm3 / 1000;
+
+        return (
+          <div
+            key={m.id}
+            className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
+            title={`${m.name} (id ${m.id})`}
+          >
+            <span
+              className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
+              style={{ backgroundColor: rgbCss(m.color) }}
+            />
+            <span className="truncate">{m.name}</span>
+            <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
+              {count.toLocaleString()} vox · {mm3.toFixed(1)} mm³ · {ml.toFixed(2)} mL
+            </span>
+          </div>
+        );
+      })}
+
+      {labelMetrics ? (
+        <>
+          <div className="pt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+            Total labeled: {labelMetrics.totalCount.toLocaleString()} vox · {labelMetrics.totalMm3.toFixed(1)} mm³ ·{' '}
+            {labelMetrics.totalMl.toFixed(2)} mL
+          </div>
+          {labelMetrics.unsupportedBoundaryCount > 0 ? (
+            <div className="border-l-2 border-l-[var(--warning)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
+              Incomplete acquired coverage: {labelMetrics.unsupportedBoundaryCount.toLocaleString()} labeled boundary
+              voxels touch unsupported anatomy or the reconstruction boundary. Reported volume includes observed voxels
+              only and may be truncated.
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function SvrSeededSegmentationControls({ model }: { model: SvrVolumeViewerModel }) {
+  const {
+    cancelSeedGrow,
+    generatedLabels,
+    growOverlayRef,
+    growRoiBounds,
+    growRoiOutsideScale,
+    growStatus,
+    growTargetLabel,
+    growTolerance,
+    onnxSegRunning,
+    scheduleSeedGrow,
+    seedVoxel,
+    segmentationCollapsed,
+    setGeneratedLabels,
+    setGrowRoiBounds,
+    setGrowRoiDraftBounds,
+    setGrowRoiOutsideScale,
+    setGrowTargetLabel,
+    setGrowTolerance,
+    setSeedVoxel,
+    setSegmentationCollapsed,
+    volume,
+  } = model;
+
+  return (
+    <div className="border-t border-[var(--border-color)] pt-2">
+      <button
+        type="button"
+        onClick={() => setSegmentationCollapsed((v) => !v)}
+        className="flex min-h-10 w-full items-center justify-between py-2 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        aria-expanded={!segmentationCollapsed}
+      >
+        <span>Segmentation</span>
+        {segmentationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+      </button>
+
+      {segmentationCollapsed ? null : (
+        <div className="space-y-3 pt-2">
+          <div className="flex items-end gap-2">
+            <label className="block flex-1 text-xs text-[var(--text-secondary)]">
+              ROI falloff
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={growRoiOutsideScale}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setGrowRoiOutsideScale(next);
+                  scheduleSeedGrow({ roiOutsideScale: next });
+                }}
+                className="mt-1 w-full"
+                disabled={!volume || onnxSegRunning || !growRoiBounds}
+              />
+              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+                ×{growRoiOutsideScale.toFixed(2)}
+              </div>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => {
+                setGrowRoiBounds(null);
+                setGrowRoiDraftBounds(null);
+                setSeedVoxel(null);
+                cancelSeedGrow('Cleared ROI');
+                scheduleSeedGrow({ roiBounds: null });
+              }}
+              disabled={!growRoiBounds || onnxSegRunning}
+              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+            >
+              Clear ROI
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+            <span className="truncate">
+              Seed (ROI center):{' '}
+              {seedVoxel ? (
+                <span className="tabular-nums">
+                  {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
+                </span>
+              ) : (
+                <span>—</span>
+              )}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Target
+              <select
+                value={growTargetLabel}
+                onChange={(e) => {
+                  const next = Number(e.target.value) as BratsBaseLabelId;
+                  setGrowTargetLabel(next);
+                  scheduleSeedGrow({ targetLabel: next });
+                }}
+                className="mt-1 min-h-9 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-2 py-1 text-[var(--text-primary)]"
+                disabled={!volume || onnxSegRunning || !growRoiBounds}
+              >
+                <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
+                <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
+                <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
+              </select>
+            </label>
+
+            <label className="block text-xs text-[var(--text-secondary)]">
+              Tolerance
+              <input
+                type="range"
+                min={0}
+                max={0.5}
+                step={0.005}
+                value={growTolerance}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setGrowTolerance(next);
+                  scheduleSeedGrow({ tolerance: next });
+                }}
+                className="mt-1 w-full"
+                disabled={!volume || onnxSegRunning || !growRoiBounds}
+              />
+              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">±{growTolerance.toFixed(3)}</div>
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {growStatus.running ? (
+              <button
+                type="button"
+                onClick={() => cancelSeedGrow()}
+                className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+              >
+                Cancel
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={() => {
+                cancelSeedGrow('Cleared segmentation');
+                growOverlayRef.current = null;
+                setGeneratedLabels(null);
+              }}
+              disabled={!generatedLabels || onnxSegRunning}
+              className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+            >
+              Clear seg
+            </button>
+          </div>
+
+          {growStatus.error ? (
+            <div role="alert" className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]">
+              {growStatus.error}
+            </div>
+          ) : growStatus.message ? (
+            <div role="status" className="text-xs text-[var(--text-tertiary)]">
+              {growStatus.message}
+            </div>
+          ) : null}
+
+          <SvrOnnxModelControls model={model} />
+          <SvrSegmentationMetrics model={model} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SvrAppearanceControls({ model }: { model: SvrVolumeViewerModel }) {
+  const { THRESHOLD_MAX, gamma, opacity, resetView, setGamma, setOpacity, setThreshold, threshold, volume } = model;
+
+  return (
+    <>
+      <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">3D Controls</div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block text-xs text-[var(--text-secondary)]">
+          Opacity
+          <input
+            type="range"
+            min={0.1}
+            max={20}
+            step={0.1}
+            value={opacity}
+            onChange={(e) => setOpacity(Number(e.target.value))}
+            className="mt-1 w-full"
+            disabled={!volume}
+          />
+          <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
+        </label>
+
+        <label className="block text-xs text-[var(--text-secondary)]">
+          Edge shading
+          <input
+            type="range"
+            min={0.1}
+            max={6}
+            step={0.05}
+            value={gamma}
+            onChange={(e) => setGamma(Number(e.target.value))}
+            className="mt-1 w-full"
+            disabled={!volume}
+          />
+          <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
+        </label>
+
+        <label className="col-span-2 block text-xs text-[var(--text-secondary)]">
+          Visibility threshold
+          <input
+            type="range"
+            min={0}
+            max={THRESHOLD_MAX}
+            step={0.001}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            className="mt-1 w-full"
+            disabled={!volume}
+          />
+          <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
+            Uniform intensity cutoff {threshold.toFixed(3)}
+          </div>
+        </label>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={resetView}
+          disabled={!volume}
+          className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+        >
+          Reset view
+        </button>
+      </div>
+
+      <div className="text-xs text-[var(--text-tertiary)]">
+        Opacity and edge shading are applied evenly across the acquired volume; unsupported regions never become tissue.
+      </div>
+    </>
+  );
+}
+
+export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
+  const model = useSvrVolumeViewerModel(props);
+  const {
+    actualTextureFormat,
+    axesCanvasRef,
+    canvasRef,
+    controlsCollapsed,
+    initError,
+    observedSupportSummary,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onViewerKeyDown,
+    renderBuild,
+    renderPlan,
+    setControlsCollapsed,
+    sliceInspectorPortalTarget,
+    volume,
+  } = model;
+  const sliceInspectorCard = <SvrSliceInspector model={model} />;
   const wantsSliceInspectorPortal = Boolean(sliceInspectorPortalTarget);
   const sliceInspectorPortal =
     volume && sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;
@@ -2564,375 +3174,8 @@ export function SvrVolume3DViewer({
 
       {!controlsVisible ? null : (
         <div className="min-h-0 space-y-4 overflow-y-auto border-l border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5">
-          <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">3D Controls</div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block text-xs text-[var(--text-secondary)]">
-              Opacity
-              <input
-                type="range"
-                min={0.1}
-                max={20}
-                step={0.1}
-                value={opacity}
-                onChange={(e) => setOpacity(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{opacity.toFixed(1)}</div>
-            </label>
-
-            <label className="block text-xs text-[var(--text-secondary)]">
-              Edge shading
-              <input
-                type="range"
-                min={0.1}
-                max={6}
-                step={0.05}
-                value={gamma}
-                onChange={(e) => setGamma(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">{gamma.toFixed(2)}</div>
-            </label>
-
-            <label className="col-span-2 block text-xs text-[var(--text-secondary)]">
-              Visibility threshold
-              <input
-                type="range"
-                min={0}
-                max={THRESHOLD_MAX}
-                step={0.001}
-                value={threshold}
-                onChange={(e) => setThreshold(Number(e.target.value))}
-                className="mt-1 w-full"
-                disabled={!volume}
-              />
-              <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
-                Uniform intensity cutoff {threshold.toFixed(3)}
-              </div>
-            </label>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={resetView}
-              disabled={!volume}
-              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-            >
-              Reset view
-            </button>
-          </div>
-
-          <div className="text-xs text-[var(--text-tertiary)]">
-            Opacity and edge shading are applied evenly across the acquired volume; unsupported regions never become
-            tissue.
-          </div>
-
-          <div className="border-t border-[var(--border-color)] pt-2">
-            <button
-              type="button"
-              onClick={() => setSegmentationCollapsed((v) => !v)}
-              className="flex min-h-10 w-full items-center justify-between py-2 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-              aria-expanded={!segmentationCollapsed}
-            >
-              <span>Segmentation</span>
-              {segmentationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
-
-            {segmentationCollapsed ? null : (
-              <div className="space-y-3 pt-2">
-                <div className="flex items-end gap-2">
-                  <label className="block flex-1 text-xs text-[var(--text-secondary)]">
-                    ROI falloff
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={growRoiOutsideScale}
-                      onChange={(e) => {
-                        const next = Number(e.target.value);
-                        setGrowRoiOutsideScale(next);
-                        scheduleSeedGrow({ roiOutsideScale: next });
-                      }}
-                      className="mt-1 w-full"
-                      disabled={!volume || onnxSegRunning || !growRoiBounds}
-                    />
-                    <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
-                      ×{growRoiOutsideScale.toFixed(2)}
-                    </div>
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setGrowRoiBounds(null);
-                      setGrowRoiDraftBounds(null);
-                      setSeedVoxel(null);
-                      cancelSeedGrow('Cleared ROI');
-                      scheduleSeedGrow({ roiBounds: null });
-                    }}
-                    disabled={!growRoiBounds || onnxSegRunning}
-                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-1 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                  >
-                    Clear ROI
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
-                  <span className="truncate">
-                    Seed (ROI center):{' '}
-                    {seedVoxel ? (
-                      <span className="tabular-nums">
-                        {seedVoxel.x},{seedVoxel.y},{seedVoxel.z}
-                      </span>
-                    ) : (
-                      <span>—</span>
-                    )}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="block text-xs text-[var(--text-secondary)]">
-                    Target
-                    <select
-                      value={growTargetLabel}
-                      onChange={(e) => {
-                        const next = Number(e.target.value) as BratsBaseLabelId;
-                        setGrowTargetLabel(next);
-                        scheduleSeedGrow({ targetLabel: next });
-                      }}
-                      className="mt-1 min-h-9 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-2 py-1 text-[var(--text-primary)]"
-                      disabled={!volume || onnxSegRunning || !growRoiBounds}
-                    >
-                      <option value={BRATS_LABEL_ID.NCR_NET}>Core (1)</option>
-                      <option value={BRATS_LABEL_ID.EDEMA}>Edema (2)</option>
-                      <option value={BRATS_LABEL_ID.ENHANCING}>Enhancing (4)</option>
-                    </select>
-                  </label>
-
-                  <label className="block text-xs text-[var(--text-secondary)]">
-                    Tolerance
-                    <input
-                      type="range"
-                      min={0}
-                      max={0.5}
-                      step={0.005}
-                      value={growTolerance}
-                      onChange={(e) => {
-                        const next = Number(e.target.value);
-                        setGrowTolerance(next);
-                        scheduleSeedGrow({ tolerance: next });
-                      }}
-                      className="mt-1 w-full"
-                      disabled={!volume || onnxSegRunning || !growRoiBounds}
-                    />
-                    <div className="mt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
-                      ±{growTolerance.toFixed(3)}
-                    </div>
-                  </label>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {growStatus.running ? (
-                    <button
-                      type="button"
-                      onClick={() => cancelSeedGrow()}
-                      className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-                    >
-                      Cancel
-                    </button>
-                  ) : null}
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      cancelSeedGrow('Cleared segmentation');
-                      growOverlayRef.current = null;
-                      setGeneratedLabels(null);
-                    }}
-                    disabled={!generatedLabels || onnxSegRunning}
-                    className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                  >
-                    Clear seg
-                  </button>
-                </div>
-
-                {growStatus.error ? (
-                  <div
-                    role="alert"
-                    className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]"
-                  >
-                    {growStatus.error}
-                  </div>
-                ) : growStatus.message ? (
-                  <div role="status" className="text-xs text-[var(--text-tertiary)]">
-                    {growStatus.message}
-                  </div>
-                ) : null}
-
-                <details className="pt-2 mt-2 border-t border-[var(--border-color)] text-xs text-[var(--text-secondary)]">
-                  <summary className="min-h-9 cursor-pointer py-2 font-medium hover:text-[var(--text-primary)]">
-                    Optional verified ONNX model
-                  </summary>
-                  <div className="space-y-2">
-                    <input
-                      ref={onnxFileInputRef}
-                      type="file"
-                      accept=".onnx,.json"
-                      multiple
-                      className="hidden"
-                      onChange={(e) => {
-                        if (e.target.files?.length) {
-                          onnxHandleSelectedFiles(Array.from(e.target.files));
-                        }
-                        // Allow re-uploading the same file.
-                        e.target.value = '';
-                      }}
-                    />
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={onnxUploadClick}
-                        disabled={onnxStatus.loading}
-                        className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                      >
-                        Upload model + manifest
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={initOnnxSession}
-                        disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
-                        className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
-                      >
-                        Init
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={runOnnxSegmentation}
-                        disabled={
-                          !volume ||
-                          !onnxStatus.cached ||
-                          !onnxStatus.verified ||
-                          onnxStatus.loading ||
-                          !!onnxPreflight?.blockedByDefault
-                        }
-                        className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
-                      >
-                        Run ML
-                      </button>
-
-                      {onnxSegRunning ? (
-                        <button
-                          type="button"
-                          onClick={cancelOnnxSegmentation}
-                          className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-                        >
-                          Cancel
-                        </button>
-                      ) : null}
-
-                      <button
-                        type="button"
-                        onClick={onnxClearModel}
-                        disabled={!onnxStatus.cached || onnxStatus.loading}
-                        className="ml-auto min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                      >
-                        Clear model
-                      </button>
-                    </div>
-
-                    <details className="text-xs text-[var(--text-secondary)]">
-                      <summary className="cursor-pointer py-1 text-[var(--text-primary)]">
-                        Required verified model manifest (.json)
-                      </summary>
-                      <p className="mt-1">
-                        Select the ONNX model and its JSON sidecar together. The manifest must declare the model's exact
-                        SHA-256 hash, MR input, preprocessing, axes, and tumor class meanings.
-                      </p>
-                      <pre className="mt-2 max-h-48 overflow-auto rounded bg-[var(--bg-primary)] p-2 text-xs">
-                        {JSON.stringify(TUMOR_MODEL_MANIFEST_EXAMPLE, null, 2)}
-                      </pre>
-                    </details>
-
-                    {onnxPreflight?.blockedByDefault ? (
-                      <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
-                        Model inference would require approximately {formatMiB(onnxPreflight.estimatedPeakBytes)} of
-                        resident memory, exceeding the shared {formatMiB(onnxPreflight.budgetBytes)} SVR budget.
-                        Reconstruct a smaller focus region or use a lower resolution.
-                      </div>
-                    ) : null}
-
-                    {onnxStatus.error ? (
-                      <div
-                        role="alert"
-                        className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]"
-                      >
-                        {onnxStatus.error}
-                      </div>
-                    ) : onnxStatus.message ? (
-                      <div role="status" className="text-xs text-[var(--text-tertiary)]">
-                        {onnxStatus.message}
-                      </div>
-                    ) : null}
-                  </div>
-                </details>
-
-                {!hasLabels || !labels ? (
-                  <div className="text-xs text-[var(--text-tertiary)]">No segmentation labels available yet.</div>
-                ) : (
-                  <div className="space-y-1">
-                    {labels.meta
-                      .filter((m) => m.id !== 0)
-                      .map((m) => {
-                        const count = labelMetrics?.counts.get(m.id) ?? 0;
-                        const mm3 = count * (labelMetrics?.voxelVolMm3 ?? 0);
-                        const ml = mm3 / 1000;
-
-                        return (
-                          <div
-                            key={m.id}
-                            className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
-                            title={`${m.name} (id ${m.id})`}
-                          >
-                            <span
-                              className="inline-block w-2.5 h-2.5 rounded-sm border border-black/30"
-                              style={{ backgroundColor: rgbCss(m.color) }}
-                            />
-                            <span className="truncate">{m.name}</span>
-                            <span className="ml-auto tabular-nums text-[var(--text-tertiary)]">
-                              {count.toLocaleString()} vox · {mm3.toFixed(1)} mm³ · {ml.toFixed(2)} mL
-                            </span>
-                          </div>
-                        );
-                      })}
-
-                    {labelMetrics ? (
-                      <>
-                        <div className="pt-1 text-xs text-[var(--text-tertiary)] tabular-nums">
-                          Total labeled: {labelMetrics.totalCount.toLocaleString()} vox ·{' '}
-                          {labelMetrics.totalMm3.toFixed(1)} mm³ · {labelMetrics.totalMl.toFixed(2)} mL
-                        </div>
-                        {labelMetrics.unsupportedBoundaryCount > 0 ? (
-                          <div className="border-l-2 border-l-[var(--warning)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
-                            Incomplete acquired coverage: {labelMetrics.unsupportedBoundaryCount.toLocaleString()}{' '}
-                            labeled boundary voxels touch unsupported anatomy or the reconstruction boundary. Reported
-                            volume includes observed voxels only and may be truncated.
-                          </div>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <SvrAppearanceControls model={model} />
+          <SvrSeededSegmentationControls model={model} />
 
           {!wantsSliceInspectorPortal ? (
             <div className="border-t border-[var(--border-color)] pt-4">{sliceInspectorCard}</div>

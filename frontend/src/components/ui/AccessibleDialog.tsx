@@ -30,7 +30,7 @@ export function AccessibleDialog({
 }: AccessibleDialogProps) {
   const titleId = useId();
   const descriptionId = useId();
-  const panelRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDialogElement | null>(null);
   const onCloseRef = useRef(onClose);
 
   useEffect(() => {
@@ -89,14 +89,15 @@ export function AccessibleDialog({
 
   return createPortal(
     <div
+      role="presentation"
       className="instrument-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-6"
       onClick={(event) => {
         if (closeOnBackdrop && event.target === event.currentTarget) onClose();
       }}
     >
-      <div
+      <dialog
         ref={panelRef}
-        role="dialog"
+        open
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
@@ -106,6 +107,7 @@ export function AccessibleDialog({
           'instrument-dialog flex max-h-[min(88vh,48rem)] w-full max-w-xl flex-col overflow-hidden ' +
             'rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)]'
         }
+        style={{ margin: 0, padding: 0, position: 'relative' }}
       >
         <div className="flex min-h-[4.25rem] shrink-0 items-center justify-between gap-5 border-b border-[var(--border-color)] px-5 py-3 sm:px-7">
           <div className="min-w-0">
@@ -132,7 +134,7 @@ export function AccessibleDialog({
           </button>
         </div>
         {children}
-      </div>
+      </dialog>
     </div>,
     document.body,
   );

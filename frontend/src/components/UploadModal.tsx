@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import type { ChangeEvent, DragEvent } from 'react';
 import { AlertCircle, ArchiveRestore, CheckCircle2, Files, FolderOpen, Loader2 } from 'lucide-react';
 import { getStorageHealth, subscribeStorageHealth } from '../db/db';
@@ -76,9 +76,30 @@ type IntakeOperation = {
   progressTimer?: number;
 };
 
+type IntakeState = {
+  phase: IntakePhase;
+  source: IntakeSource | null;
+  progress: IntakeProgress | null;
+  summary: ImportSummary | null;
+  errorMessage: string | null;
+  restoreConfirmed: boolean;
+};
+
 const MAX_DIRECTORY_DEPTH = 48;
 const MAX_DIRECTORY_FILES = 100_000;
 const PROGRESS_INTERVAL_MS = 120;
+const INITIAL_INTAKE_STATE: IntakeState = {
+  phase: 'idle',
+  source: null,
+  progress: null,
+  summary: null,
+  errorMessage: null,
+  restoreConfirmed: false,
+};
+
+function reduceIntakeState(state: IntakeState, updates: Partial<IntakeState>): IntakeState {
+  return { ...state, ...updates };
+}
 
 function isAbortError(error: unknown): boolean {
   return (error as { name?: string })?.name === 'AbortError';
@@ -140,13 +161,160 @@ async function* iterateDirectory(
   }
 }
 
-export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
-  const [phase, setPhase] = useState<IntakePhase>('idle');
-  const [source, setSource] = useState<IntakeSource | null>(null);
-  const [progress, setProgress] = useState<IntakeProgress | null>(null);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [restoreConfirmed, setRestoreConfirmed] = useState(false);
+function IntakeManifest({
+  source,
+  backupExceedsLimit,
+  busy,
+  restoreConfirmed,
+  onRestoreConfirmed,
+}: {
+  source: IntakeSource;
+  backupExceedsLimit: boolean;
+  busy: boolean;
+  restoreConfirmed: boolean;
+  onRestoreConfirmed: (confirmed: boolean) => void;
+}) {
+  return (
+    <section className="intake-manifest" aria-label="Selected acquisition">
+      <div className="intake-manifest-heading">
+        <span className="intake-eyebrow">
+          {source.kind === 'complete-backup' ? 'COMPLETE BACKUP' : 'ACQUISITION MANIFEST'}
+        </span>
+        <span className="text-[0.7rem] text-[var(--text-secondary)]">
+          {source.kind === 'complete-backup'
+            ? 'Backup archive'
+            : source.kind === 'image-archive'
+              ? 'Image archive'
+              : source.kind === 'folder'
+                ? 'Local folder'
+                : 'Local files'}
+        </span>
+      </div>
+      <div className="intake-manifest-grid">
+        <div className="intake-manifest-source">
+          <span>Source</span>
+          <strong title={source.label}>{source.label}</strong>
+        </div>
+        <div>
+          <span>Images</span>
+          <strong>{source.imageCount.toLocaleString()}</strong>
+        </div>
+        <div>
+          <span>{source.kind === 'image-archive' || source.kind === 'complete-backup' ? 'Archive size' : 'Size'}</span>
+          <strong>{formatBytes(source.totalBytes)}</strong>
+        </div>
+      </div>
+      {source.ignoredCount > 0 && (
+        <p className="intake-manifest-note">
+          {source.ignoredCount.toLocaleString()} non-image sidecars will be ignored.
+        </p>
+      )}
+
+      {source.manifest && (
+        <div className="intake-backup-review">
+          <p>This backup also restores saved work and may update the active patient.</p>
+          <p>
+            Restore size: {formatBytes(source.restoreBytes ?? 0)} · complete backup safety limit:{' '}
+            {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)}
+          </p>
+          {backupExceedsLimit && (
+            <div className="intake-notice intake-notice-error" role="alert">
+              This complete backup exceeds the 512 MiB safe restore limit. Import the original DICOM files instead.
+            </div>
+          )}
+          <ul>
+            {[
+              ['Examinations', source.manifest.records.studies.length],
+              ['Series', source.manifest.records.series.length],
+              ['Viewer settings', source.manifest.records.panelSettings.length],
+              [
+                '2D annotations',
+                source.manifest.records.tumorSegmentations.length + source.manifest.records.tumorGroundTruth.length,
+              ],
+              ['3D segmentations', source.manifest.records.volumeSegmentations.length],
+              ['Aligned images', source.manifest.records.derivedAlignmentFrames?.length ?? 0],
+              ['Local AI models', source.manifest.records.models.length],
+            ]
+              .filter(([, count]) => Number(count) > 0)
+              .map(([label, count]) => (
+                <li key={label}>
+                  {label} <strong>{Number(count).toLocaleString()}</strong>
+                </li>
+              ))}
+          </ul>
+          <label className="intake-confirmation">
+            <input
+              type="checkbox"
+              checked={restoreConfirmed}
+              disabled={busy}
+              onChange={(event) => onRestoreConfirmed(event.target.checked)}
+            />
+            I understand this will restore saved work and can update the selected patient.
+          </label>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function IntakeProgressIndicator({ phase, progress }: { phase: IntakePhase; progress: IntakeProgress }) {
+  return (
+    <section className="intake-progress" aria-label="Import progress">
+      <div className="intake-progress-copy">
+        <span className="flex items-center gap-2">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          {phase === 'canceling' ? 'Canceling safely' : progress.label}
+        </span>
+        <span>
+          {progress.total > 0
+            ? `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+            : `${progress.current.toLocaleString()} discovered`}
+        </span>
+      </div>
+      <div
+        className="intake-progress-track"
+        role="progressbar"
+        aria-label={phase === 'discovering' ? 'Discovering acquisition images' : 'Importing acquisition images'}
+        aria-valuemin={0}
+        aria-valuemax={progress.total > 0 ? progress.total : undefined}
+        aria-valuenow={progress.total > 0 ? Math.min(progress.current, progress.total) : undefined}
+      >
+        <span
+          className="intake-progress-fill"
+          data-indeterminate={progress.total === 0 || undefined}
+          style={
+            progress.total > 0 ? { width: `${Math.min(100, (progress.current / progress.total) * 100)}%` } : undefined
+          }
+        />
+      </div>
+      <p className="sr-only" aria-live="polite" aria-atomic="true">
+        {phase === 'canceling'
+          ? 'Canceling import safely.'
+          : progress.total > 0
+            ? `${progress.current} of ${progress.total} images processed.`
+            : `${progress.current} images discovered.`}
+      </p>
+    </section>
+  );
+}
+
+function IntakePrivacyRail({ availableBytes }: { availableBytes: number | null }) {
+  return (
+    <div className="intake-privacy-rail" aria-label="Privacy and device storage">
+      <span className="intake-privacy-label">
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" aria-hidden="true" />
+        Processed locally · never uploaded
+      </span>
+      <span className="intake-storage-label">
+        {availableBytes === null ? 'Storage capacity unavailable' : `${formatBytes(availableBytes)} available`}
+      </span>
+    </div>
+  );
+}
+
+function useUploadIntake(onUploadComplete: UploadModalProps['onUploadComplete']) {
+  const [intake, updateIntake] = useReducer(reduceIntakeState, INITIAL_INTAKE_STATE);
+  const { phase, source, restoreConfirmed } = intake;
   const [dragActive, setDragActive] = useState(false);
   const [storageHealth, setStorageHealth] = useState(getStorageHealth);
 
@@ -170,13 +338,11 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   const terminal = phase === 'complete' || phase === 'partial' || phase === 'canceled' || phase === 'failed';
   const busy = phase !== 'idle' && phase !== 'reviewing' && !terminal;
 
-  const beginOperation = (nextPhase: IntakePhase): IntakeOperation | null => {
+  const beginOperation = (nextPhase: IntakePhase, updates?: Partial<IntakeState>): IntakeOperation | null => {
     if (operationRef.current) return null;
     const operation = { controller: new AbortController(), committing: false };
     operationRef.current = operation;
-    setPhase(nextPhase);
-    setErrorMessage(null);
-    setSummary(null);
+    updateIntake({ phase: nextPhase, errorMessage: null, summary: null, ...updates });
     return operation;
   };
 
@@ -185,7 +351,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     operation.pendingProgress = next;
     if (!immediate && operation.progressTimer !== undefined) return;
     if (operation.progressTimer !== undefined) window.clearTimeout(operation.progressTimer);
-    setProgress(next);
+    updateIntake({ progress: next });
     operation.pendingProgress = undefined;
     operation.progressTimer = window.setTimeout(() => {
       operation.progressTimer = undefined;
@@ -204,44 +370,54 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     const canceled = isAbortError(error) || operation.controller.signal.aborted;
     if (operation.committed && operation.committed.ingested > 0) {
       const { ingested, duplicates, skipped, errors } = operation.committed;
-      setSummary({
-        total: operation.total ?? ingested + duplicates + skipped + errors,
-        ingested,
-        duplicates,
-        skipped,
-        errors: errors + (canceled ? 0 : 1),
-        errorSamples: [],
-        cancelled: canceled,
+      updateIntake({
+        summary: {
+          total: operation.total ?? ingested + duplicates + skipped + errors,
+          ingested,
+          duplicates,
+          skipped,
+          errors: errors + (canceled ? 0 : 1),
+          errorSamples: [],
+          cancelled: canceled,
+        },
+        phase: canceled ? 'canceled' : 'partial',
+        errorMessage: canceled
+          ? null
+          : 'Some images were saved before this import stopped. Review or retry the source.',
       });
-      setPhase(canceled ? 'canceled' : 'partial');
-      setErrorMessage(
-        canceled ? null : 'Some images were saved before this import stopped. Review or retry the source.',
-      );
       endOperation(operation);
       void onUploadComplete?.();
       return;
     }
-    setPhase(canceled ? 'canceled' : 'failed');
-    setErrorMessage(
-      canceled ? null : error instanceof Error ? error.message : 'The selected acquisition could not be imported.',
-    );
+    updateIntake({
+      phase: canceled ? 'canceled' : 'failed',
+      errorMessage: canceled
+        ? null
+        : error instanceof Error
+          ? error.message
+          : 'The selected acquisition could not be imported.',
+    });
     endOperation(operation);
   };
 
   const reviewFiles = (selected: File[], folderLabel?: string): void => {
     if (operationRef.current) return;
     if (selected.length === 0) {
-      setSource(null);
-      setPhase('failed');
-      setErrorMessage('No files were selected. Choose DICOM images, an acquisition folder, or a ZIP archive.');
+      updateIntake({
+        source: null,
+        phase: 'failed',
+        errorMessage: 'No files were selected. Choose DICOM images, an acquisition folder, or a ZIP archive.',
+      });
       return;
     }
 
     const archives = selected.filter((file) => file.name.toLowerCase().endsWith('.zip'));
     if (archives.length > 0 && selected.length !== 1) {
-      setSource(null);
-      setPhase('failed');
-      setErrorMessage('Import a ZIP archive separately from individual DICOM files.');
+      updateIntake({
+        source: null,
+        phase: 'failed',
+        errorMessage: 'Import a ZIP archive separately from individual DICOM files.',
+      });
       return;
     }
     if (archives.length === 1) {
@@ -261,32 +437,34 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       }
     }
     if (candidates.length === 0) {
-      setSource(null);
-      setPhase('failed');
-      setErrorMessage('The selected source contains no files that could be DICOM images.');
+      updateIntake({
+        source: null,
+        phase: 'failed',
+        errorMessage: 'The selected source contains no files that could be DICOM images.',
+      });
       return;
     }
 
-    setSource({
-      kind: folderLabel ? 'folder' : 'files',
-      label: folderLabel ?? (candidates.length === 1 ? candidates[0]!.name : `${candidates.length} selected files`),
-      imageCount: candidates.length,
-      totalBytes,
-      ignoredCount,
-      files: candidates,
+    updateIntake({
+      source: {
+        kind: folderLabel ? 'folder' : 'files',
+        label: folderLabel ?? (candidates.length === 1 ? candidates[0]!.name : `${candidates.length} selected files`),
+        imageCount: candidates.length,
+        totalBytes,
+        ignoredCount,
+        files: candidates,
+      },
+      summary: null,
+      progress: null,
+      restoreConfirmed: false,
+      errorMessage: null,
+      phase: 'reviewing',
     });
-    setSummary(null);
-    setProgress(null);
-    setRestoreConfirmed(false);
-    setErrorMessage(null);
-    setPhase('reviewing');
   };
 
   const reviewArchive = async (file: File): Promise<void> => {
-    const operation = beginOperation('preparing');
+    const operation = beginOperation('preparing', { source: null, restoreConfirmed: false });
     if (!operation) return;
-    setSource(null);
-    setRestoreConfirmed(false);
     publishProgress(operation, { current: 0, total: 0, label: 'Inspecting archive safely' }, true);
     try {
       const archive = await loadSafeArchive(file, {
@@ -305,18 +483,20 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         throw new Error('This archive contains no files that could be DICOM images.');
       }
       const restoreBytes = manifest ? getSnapshotRestoreBytes(manifest) : undefined;
-      setSource({
-        kind: manifest ? 'complete-backup' : 'image-archive',
-        label: file.name,
-        imageCount: manifest?.records.instances.length ?? entries.length,
-        totalBytes: file.size,
-        restoreBytes,
-        ignoredCount: manifest ? 0 : archive.entries.length - entries.length,
-        archive,
-        manifest: manifest ?? undefined,
+      updateIntake({
+        source: {
+          kind: manifest ? 'complete-backup' : 'image-archive',
+          label: file.name,
+          imageCount: manifest?.records.instances.length ?? entries.length,
+          totalBytes: file.size,
+          restoreBytes,
+          ignoredCount: manifest ? 0 : archive.entries.length - entries.length,
+          archive,
+          manifest: manifest ?? undefined,
+        },
+        progress: null,
+        phase: 'reviewing',
       });
-      setProgress(null);
-      setPhase('reviewing');
       endOperation(operation);
     } catch (error) {
       reportFailure(operation, error);
@@ -324,10 +504,8 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   };
 
   const reviewDirectory = async (directory: DirectoryHandle): Promise<void> => {
-    const operation = beginOperation('discovering');
+    const operation = beginOperation('discovering', { source: null, restoreConfirmed: false });
     if (!operation) return;
-    setSource(null);
-    setRestoreConfirmed(false);
     publishProgress(operation, { current: 0, total: 0, label: 'Discovering acquisition images' }, true);
     let imageCount = 0;
     let totalBytes = 0;
@@ -344,16 +522,18 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       throwIfAborted(operation.controller.signal);
       if (imageCount === 0) throw new Error('The selected folder contains no files that could be DICOM images.');
       if (operationRef.current !== operation) return;
-      setSource({
-        kind: 'folder',
-        label: directory.name || 'Selected acquisition folder',
-        imageCount,
-        totalBytes,
-        ignoredCount,
-        directory,
+      updateIntake({
+        source: {
+          kind: 'folder',
+          label: directory.name || 'Selected acquisition folder',
+          imageCount,
+          totalBytes,
+          ignoredCount,
+          directory,
+        },
+        progress: null,
+        phase: 'reviewing',
       });
-      setProgress(null);
-      setPhase('reviewing');
       endOperation(operation);
     } catch (error) {
       reportFailure(operation, error);
@@ -378,8 +558,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       await reviewDirectory(directory);
     } catch (error) {
       if (!isAbortError(error)) {
-        setPhase('failed');
-        setErrorMessage('The folder could not be opened. Grant browser access or choose individual DICOM files.');
+        updateIntake({
+          phase: 'failed',
+          errorMessage: 'The folder could not be opened. Grant browser access or choose individual DICOM files.',
+        });
       }
     }
   };
@@ -397,8 +579,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     if (busy || operationRef.current) return;
     const items = Array.from(event.dataTransfer.items ?? []);
     if (items.some((item) => item.kind !== 'file')) {
-      setPhase('failed');
-      setErrorMessage('Only local DICOM files and folders can be imported. External links are not supported.');
+      updateIntake({
+        phase: 'failed',
+        errorMessage: 'Only local DICOM files and folders can be imported. External links are not supported.',
+      });
       return;
     }
 
@@ -414,8 +598,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
           }
         } catch (error) {
           if (!isAbortError(error)) {
-            setPhase('failed');
-            setErrorMessage('The dropped folder could not be opened. Use Choose folder instead.');
+            updateIntake({
+              phase: 'failed',
+              errorMessage: 'The dropped folder could not be opened. Use Choose folder instead.',
+            });
           }
           return;
         }
@@ -424,8 +610,10 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
 
     const dropped = Array.from(event.dataTransfer.files);
     if (dropped.length === 0) {
-      setPhase('failed');
-      setErrorMessage('This browser could not open the dropped folder. Use Choose folder or Choose files instead.');
+      updateIntake({
+        phase: 'failed',
+        errorMessage: 'This browser could not open the dropped folder. Use Choose folder or Choose files instead.',
+      });
       return;
     }
     reviewFiles(dropped);
@@ -460,7 +648,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
             onCommitStart: () => {
               if (operationRef.current !== operation) return;
               operation.committing = true;
-              setPhase('finishing');
+              updateIntake({ phase: 'finishing' });
               publishProgress(
                 operation,
                 { current: source.imageCount, total: source.imageCount, label: 'Finishing safely' },
@@ -526,31 +714,33 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       }
 
       if (operationRef.current !== operation) return;
-      setSummary(result);
+      let nextPhase: IntakePhase;
+      let nextErrorMessage: string | null = null;
       if (result.cancelled || (operation.controller.signal.aborted && !operation.committing)) {
-        setPhase('canceled');
+        nextPhase = 'canceled';
       } else if (result.ingested === 0 && result.duplicates === 0) {
-        setPhase('failed');
-        setErrorMessage(
-          'No displayable DICOM images were imported. Choose another acquisition or review the issues below.',
-        );
+        nextPhase = 'failed';
+        nextErrorMessage =
+          'No displayable DICOM images were imported. Choose another acquisition or review the issues below.';
       } else if (
         result.errors > 0 ||
         (result.skipReasons?.['excluded-localizer-orientation'] ?? 0) > 0 ||
         (result.skipReasons?.['excluded-incompatible-series-orientation'] ?? 0) > 0
       ) {
-        setPhase('partial');
+        nextPhase = 'partial';
       } else {
-        setPhase('complete');
+        nextPhase = 'complete';
       }
+      updateIntake({ summary: result, phase: nextPhase, errorMessage: nextErrorMessage });
       if (result.ingested > 0) {
         try {
           await onUploadComplete?.();
         } catch {
           if (operationRef.current === operation) {
-            setErrorMessage(
-              'Images were saved, but the viewer could not refresh. Close and reopen the app to see them.',
-            );
+            updateIntake({
+              errorMessage:
+                'Images were saved, but the viewer could not refresh. Close and reopen the app to see them.',
+            });
           }
         }
       }
@@ -564,8 +754,49 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     const operation = operationRef.current;
     if (!operation || operation.committing) return;
     operation.controller.abort();
-    setPhase('canceling');
+    updateIntake({ phase: 'canceling' });
   };
+
+  return {
+    intake,
+    updateIntake,
+    dragActive,
+    setDragActive,
+    storageHealth,
+    fileInputRef,
+    backupInputRef,
+    folderInputRef,
+    terminal,
+    busy,
+    openInput,
+    openFolderPicker,
+    handleFilesChange,
+    handleDrop,
+    handleUpload,
+    cancelOperation,
+  };
+}
+
+export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
+  const {
+    intake,
+    updateIntake,
+    dragActive,
+    setDragActive,
+    storageHealth,
+    fileInputRef,
+    backupInputRef,
+    folderInputRef,
+    terminal,
+    busy,
+    openInput,
+    openFolderPicker,
+    handleFilesChange,
+    handleDrop,
+    handleUpload,
+    cancelOperation,
+  } = useUploadIntake(onUploadComplete);
+  const { phase, source, progress, summary, errorMessage, restoreConfirmed } = intake;
 
   const availableBytes =
     typeof storageHealth.quota === 'number' && typeof storageHealth.usage === 'number'
@@ -592,15 +823,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       closeDisabled={phase === 'finishing'}
       className="intake-console flex max-h-[min(92vh,54rem)] w-full max-w-[48rem] flex-col overflow-hidden rounded-[4px] border"
     >
-      <div className="intake-privacy-rail" aria-label="Privacy and device storage">
-        <span className="intake-privacy-label">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" aria-hidden="true" />
-          Processed locally · never uploaded
-        </span>
-        <span className="intake-storage-label">
-          {availableBytes === null ? 'Storage capacity unavailable' : `${formatBytes(availableBytes)} available`}
-        </span>
-      </div>
+      <IntakePrivacyRail availableBytes={availableBytes} />
 
       <div className="intake-content overflow-y-auto">
         <div className="intake-intro">
@@ -708,131 +931,16 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         )}
 
         {source && (
-          <section className="intake-manifest" aria-label="Selected acquisition">
-            <div className="intake-manifest-heading">
-              <span className="intake-eyebrow">
-                {source.kind === 'complete-backup' ? 'COMPLETE BACKUP' : 'ACQUISITION MANIFEST'}
-              </span>
-              <span className="text-[0.7rem] text-[var(--text-secondary)]">
-                {source.kind === 'complete-backup'
-                  ? 'Backup archive'
-                  : source.kind === 'image-archive'
-                    ? 'Image archive'
-                    : source.kind === 'folder'
-                      ? 'Local folder'
-                      : 'Local files'}
-              </span>
-            </div>
-            <div className="intake-manifest-grid">
-              <div className="intake-manifest-source">
-                <span>Source</span>
-                <strong title={source.label}>{source.label}</strong>
-              </div>
-              <div>
-                <span>Images</span>
-                <strong>{source.imageCount.toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>
-                  {source.kind === 'image-archive' || source.kind === 'complete-backup' ? 'Archive size' : 'Size'}
-                </span>
-                <strong>{formatBytes(source.totalBytes)}</strong>
-              </div>
-            </div>
-            {source.ignoredCount > 0 && (
-              <p className="intake-manifest-note">
-                {source.ignoredCount.toLocaleString()} non-image sidecars will be ignored.
-              </p>
-            )}
-
-            {source.manifest && (
-              <div className="intake-backup-review">
-                <p>This backup also restores saved work and may update the active patient.</p>
-                <p>
-                  Restore size: {formatBytes(source.restoreBytes ?? 0)} · complete backup safety limit:{' '}
-                  {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)}
-                </p>
-                {backupExceedsLimit && (
-                  <div className="intake-notice intake-notice-error" role="alert">
-                    This complete backup exceeds the 512 MiB safe restore limit. Import the original DICOM files
-                    instead.
-                  </div>
-                )}
-                <ul>
-                  {[
-                    ['Examinations', source.manifest.records.studies.length],
-                    ['Series', source.manifest.records.series.length],
-                    ['Viewer settings', source.manifest.records.panelSettings.length],
-                    [
-                      '2D annotations',
-                      source.manifest.records.tumorSegmentations.length +
-                        source.manifest.records.tumorGroundTruth.length,
-                    ],
-                    ['3D segmentations', source.manifest.records.volumeSegmentations.length],
-                    ['Aligned images', source.manifest.records.derivedAlignmentFrames?.length ?? 0],
-                    ['Local AI models', source.manifest.records.models.length],
-                  ]
-                    .filter(([, count]) => Number(count) > 0)
-                    .map(([label, count]) => (
-                      <li key={label}>
-                        {label} <strong>{Number(count).toLocaleString()}</strong>
-                      </li>
-                    ))}
-                </ul>
-                <label className="intake-confirmation">
-                  <input
-                    type="checkbox"
-                    checked={restoreConfirmed}
-                    disabled={busy}
-                    onChange={(event) => setRestoreConfirmed(event.target.checked)}
-                  />
-                  I understand this will restore saved work and can update the selected patient.
-                </label>
-              </div>
-            )}
-          </section>
+          <IntakeManifest
+            source={source}
+            backupExceedsLimit={backupExceedsLimit}
+            busy={busy}
+            restoreConfirmed={restoreConfirmed}
+            onRestoreConfirmed={(confirmed) => updateIntake({ restoreConfirmed: confirmed })}
+          />
         )}
 
-        {busy && progress && (
-          <section className="intake-progress" aria-label="Import progress">
-            <div className="intake-progress-copy">
-              <span className="flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                {phase === 'canceling' ? 'Canceling safely' : progress.label}
-              </span>
-              <span>
-                {progress.total > 0
-                  ? `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
-                  : `${progress.current.toLocaleString()} discovered`}
-              </span>
-            </div>
-            <div
-              className="intake-progress-track"
-              role="progressbar"
-              aria-label={phase === 'discovering' ? 'Discovering acquisition images' : 'Importing acquisition images'}
-              aria-valuemin={0}
-              aria-valuemax={progress.total > 0 ? progress.total : undefined}
-              aria-valuenow={progress.total > 0 ? Math.min(progress.current, progress.total) : undefined}
-            >
-              <span
-                className="intake-progress-fill"
-                data-indeterminate={progress.total === 0 || undefined}
-                style={
-                  progress.total > 0
-                    ? { width: `${Math.min(100, (progress.current / progress.total) * 100)}%` }
-                    : undefined
-                }
-              />
-            </div>
-            <p className="sr-only" aria-live="polite" aria-atomic="true">
-              {phase === 'canceling'
-                ? 'Canceling import safely.'
-                : progress.total > 0
-                  ? `${progress.current} of ${progress.total} images processed.`
-                  : `${progress.current} images discovered.`}
-            </p>
-          </section>
-        )}
+        {busy && progress && <IntakeProgressIndicator phase={phase} progress={progress} />}
 
         {terminal && (summary || phase === 'canceled') && (
           <section

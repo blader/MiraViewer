@@ -131,9 +131,10 @@ export function useComparisonFilters(data: ComparisonData | null) {
 
   const selectedSeqId = useMemo(() => {
     if (!data || !selectedPlane) return null;
-    const seqIdsForPlane = new Set(
-      data.sequences.filter((s) => normalizePlane(s.plane) === selectedPlane).map((s) => s.id),
-    );
+    const seqIdsForPlane = new Set<string>();
+    for (const sequence of data.sequences) {
+      if (normalizePlane(sequence.plane) === selectedPlane) seqIdsForPlane.add(sequence.id);
+    }
     return filters.seqId && seqIdsForPlane.has(filters.seqId)
       ? filters.seqId
       : pickDefaultSequence(data, selectedPlane);

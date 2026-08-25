@@ -641,14 +641,18 @@ export async function densifyLongitudinalRegistration(
       );
     }
     const decodedSourceUids = dense.sourceIndices.map((index) => targetManifest.frames[index]!.sopInstanceUid);
-    if (result.contributingSourceSopInstanceUids?.some((uid) => !decodedSourceUids.includes(uid))) {
+    const decodedSourceUidSet = new Set(decodedSourceUids);
+    if (result.contributingSourceSopInstanceUids?.some((uid) => !decodedSourceUidSet.has(uid))) {
       return longitudinalRegistrationFailure(
         'invalid-geometry',
         'The native worker returned an unverified contributing source image',
       );
     }
-    const contributors = result.contributingSourceSopInstanceUids
-      ? decodedSourceUids.filter((uid) => result.contributingSourceSopInstanceUids!.includes(uid))
+    const contributingSourceUidSet = result.contributingSourceSopInstanceUids
+      ? new Set(result.contributingSourceSopInstanceUids)
+      : null;
+    const contributors = contributingSourceUidSet
+      ? decodedSourceUids.filter((uid) => contributingSourceUidSet.has(uid))
       : decodedSourceUids;
     return {
       ...registration,

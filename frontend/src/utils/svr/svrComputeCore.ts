@@ -467,8 +467,9 @@ async function rigidAlignSeriesInRoi(params: {
       continue;
     }
 
-    const rot = mat3FromEulerXYZ(opt.best.rx, opt.best.ry, opt.best.rz);
-    const tMm = v3(opt.best.tx, opt.best.ty, opt.best.tz);
+    const { rx, ry, rz, tx, ty, tz } = opt.best;
+    const rot = mat3FromEulerXYZ(rx, ry, rz);
+    const tMm = v3(tx, ty, tz);
 
     applyRigidToSeriesSlices({ slices: movingSlices, centerMm, rot, tMm });
 
@@ -480,14 +481,14 @@ async function rigidAlignSeriesInRoi(params: {
       usedSamples: after.used,
       evals: opt.evals,
       translateMm: {
-        x: Number(opt.best.tx.toFixed(3)),
-        y: Number(opt.best.ty.toFixed(3)),
-        z: Number(opt.best.tz.toFixed(3)),
+        x: Number(tx.toFixed(3)),
+        y: Number(ty.toFixed(3)),
+        z: Number(tz.toFixed(3)),
       },
       rotateDeg: {
-        x: Number((opt.best.rx * (180 / Math.PI)).toFixed(3)),
-        y: Number((opt.best.ry * (180 / Math.PI)).toFixed(3)),
-        z: Number((opt.best.rz * (180 / Math.PI)).toFixed(3)),
+        x: Number((rx * (180 / Math.PI)).toFixed(3)),
+        y: Number((ry * (180 / Math.PI)).toFixed(3)),
+        z: Number((rz * (180 / Math.PI)).toFixed(3)),
       },
     });
 
@@ -501,8 +502,8 @@ async function rigidAlignSeriesInRoi(params: {
         nccBefore: before.ncc,
         nccAfter: after.ncc,
         evals: opt.evals,
-        translateMm: { x: opt.best.tx, y: opt.best.ty, z: opt.best.tz },
-        rotateRad: { x: opt.best.rx, y: opt.best.ry, z: opt.best.rz },
+        translateMm: { x: tx, y: ty, z: tz },
+        rotateRad: { x: rx, y: ry, z: rz },
       },
       debug,
     );

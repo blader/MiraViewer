@@ -135,6 +135,299 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
   );
 }
 
+type DicomViewerHandleOptions = {
+  ref: React.ForwardedRef<DicomViewerHandle>;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  imgRef: React.RefObject<HTMLImageElement | null>;
+  displayedContentKeyRef: React.RefObject<string | null>;
+  derivedFrame: ReturnType<typeof getDerivedAlignmentFrame>;
+  seriesUid: string;
+  effectiveInstanceIndex: number;
+  affine00: number;
+  affine01: number;
+  affine10: number;
+  affine11: number;
+  brightness: number;
+  contrast: number;
+  panX: number;
+  panY: number;
+  rotation: number;
+  zoom: number;
+};
+
+function useDicomViewerHandle({
+  ref,
+  containerRef,
+  imgRef,
+  displayedContentKeyRef,
+  derivedFrame,
+  seriesUid,
+  effectiveInstanceIndex,
+  affine00,
+  affine01,
+  affine10,
+  affine11,
+  brightness,
+  contrast,
+  panX,
+  panY,
+  rotation,
+  zoom,
+}: DicomViewerHandleOptions) {
+  const waitForImageLoad = useCallback(async (): Promise<HTMLImageElement> => {
+    const img = imgRef.current;
+    if (!img) {
+      throw new Error('Image element not available');
+    }
+
+    if (img.complete && img.naturalWidth > 0) {
+      return img;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const onLoad = () => {
+        img.removeEventListener('load', onLoad);
+        img.removeEventListener('error', onError);
+        resolve();
+      };
+      const onError = () => {
+        img.removeEventListener('load', onLoad);
+        img.removeEventListener('error', onError);
+        reject(new Error('Failed to load image'));
+      };
+      img.addEventListener('load', onLoad);
+      img.addEventListener('error', onError);
+    });
+
+    return img;
+  }, [imgRef]);
+
+  const getDisplayedContentKey = useCallback((): string | null => {
+    return displayedContentKeyRef.current;
+  }, [displayedContentKeyRef]);
+
+  const getDecodedFrame = useCallback(async () => {
+    if (derivedFrame) {
+      throw new Error('Segmentation is unavailable on a derived alignment plane; return to a native acquired slice');
+    }
+    const frame = await loadDecodedFrame(seriesUid, effectiveInstanceIndex);
+    const element = containerRef.current;
+    const rect = element?.getBoundingClientRect();
+    return {
+      ...frame,
+      viewportSize: {
+        w: element?.clientWidth || rect?.width || 0,
+        h: element?.clientHeight || rect?.height || 0,
+      },
+    };
+  }, [containerRef, derivedFrame, effectiveInstanceIndex, seriesUid]);
+
+  const waitForDisplayedContentKey = useCallback(
+    async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
+      const t0 = performance.now();
+
+      // Fast path.
+      if (displayedContentKeyRef.current === expectedKey) return;
+
+      while (performance.now() - t0 < timeoutMs) {
+        if (displayedContentKeyRef.current === expectedKey) return;
+        // Yield so we don't block the UI thread.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+
+      throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
+    },
+    [displayedContentKeyRef],
+  );
+
+  const captureVisiblePng = useCallback(
+    async (options?: DicomViewerCaptureOptions): Promise<Blob> => {
+      const container = containerRef.current;
+      if (!container) {
+        throw new Error('Viewer not mounted');
+      }
+
+      const cssWidth = container.clientWidth;
+      const cssHeight = container.clientHeight;
+      if (cssWidth <= 0 || cssHeight <= 0) {
+        throw new Error('Viewer has zero size');
+      }
+
+      // Determine our render source:
+      // - If ImageContent is used, we capture from the <img>
+      // - If CornerstoneImage is used, we capture from its internal <canvas>
+      const img = imgRef.current;
+      const cornerstoneCanvas = container.querySelector('canvas') as HTMLCanvasElement | null;
+
+      const maxSize = options?.maxSize ?? 512;
+      const maxCssDim = Math.max(cssWidth, cssHeight);
+      const deviceScale = window.devicePixelRatio || 1;
+      const renderScale = Math.min(deviceScale, maxSize / maxCssDim);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(cssWidth * renderScale));
+      canvas.height = Math.max(1, Math.round(cssHeight * renderScale));
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error('Failed to create canvas context');
+      }
+
+      // Draw in CSS pixel units; scale up to device pixels.
+      ctx.scale(renderScale, renderScale);
+
+      // Background (matches viewer)
+      ctx.fillStyle = 'black';
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+      // Match the CSS transform applied in the DOM.
+      //
+      // Note: Canvas 2D uses post-multiplication for transforms, so the last call is applied first.
+      // The order below mirrors:
+      //   transform: translate(pan) scale(zoom) rotate(rotation) matrix(affine)
+      const panXPx = panX * cssWidth;
+      const panYPx = panY * cssHeight;
+
+      ctx.save();
+      ctx.translate(cssWidth / 2, cssHeight / 2);
+      ctx.translate(panXPx, panYPx);
+      ctx.scale(zoom, zoom);
+      ctx.rotate((rotation * Math.PI) / 180);
+
+      // JSDOM's mocked canvas context (used in tests) may not implement ctx.transform.
+      // We only need this when the affine residual is non-identity.
+      const isIdentityAffine = affine00 === 1 && affine01 === 0 && affine10 === 0 && affine11 === 1;
+      if (!isIdentityAffine && typeof ctx.transform === 'function') {
+        ctx.transform(affine00, affine10, affine01, affine11, 0, 0);
+      }
+
+      ctx.translate(-cssWidth / 2, -cssHeight / 2);
+
+      // Apply brightness/contrast like CSS filters.
+      ctx.filter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
+
+      if (img) {
+        const loadedImg = await waitForImageLoad();
+
+        // Draw the image with object-contain semantics inside the viewport.
+        const iw = loadedImg.naturalWidth;
+        const ih = loadedImg.naturalHeight;
+        const scale = Math.min(cssWidth / iw, cssHeight / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const dx = (cssWidth - dw) / 2;
+        const dy = (cssHeight - dh) / 2;
+
+        ctx.drawImage(loadedImg, dx, dy, dw, dh);
+      } else if (cornerstoneCanvas) {
+        // Cornerstone renders directly into a canvas sized to the viewport.
+        // We draw it 1:1 into our capture canvas.
+        ctx.drawImage(cornerstoneCanvas, 0, 0, cssWidth, cssHeight);
+      } else {
+        ctx.restore();
+        throw new Error('No render source available for capture');
+      }
+
+      ctx.restore();
+
+      return new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('Failed to encode capture'));
+        }, 'image/png');
+      });
+    },
+    [
+      affine00,
+      affine01,
+      affine10,
+      affine11,
+      brightness,
+      containerRef,
+      contrast,
+      imgRef,
+      panX,
+      panY,
+      rotation,
+      waitForImageLoad,
+      zoom,
+    ],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      captureVisiblePng,
+      getDecodedFrame,
+      getDisplayedContentKey,
+      waitForDisplayedContentKey,
+    }),
+    [captureVisiblePng, getDecodedFrame, getDisplayedContentKey, waitForDisplayedContentKey],
+  );
+}
+
+function DicomAlignmentDiagnostics({ sliceScore }: { sliceScore: ReturnType<typeof getAlignmentSliceScore> }) {
+  return (
+    <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
+      <div className="rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[10px] tabular-nums leading-snug text-[var(--text-primary)]">
+        {sliceScore?.coverage != null ? (
+          <>
+            <div>
+              Stage: {sliceScore.stage ?? '—'}
+              {sliceScore.selected ? ' · selected' : sliceScore.retainedForFine ? ' · shortlisted' : ''}
+            </div>
+            <div>Coverage: {sliceScore.coverage.toFixed(4)}</div>
+            <div>CS: {sliceScore.ssim.toFixed(6)}</div>
+            <div>LNCC: {sliceScore.lncc.toFixed(6)}</div>
+            <div>MIND: {sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
+            <div>MIND rank: {formatDebugRank(sliceScore.mindRank, sliceScore.mindActive)}</div>
+            <div>NGF: {sliceScore.ngf.toFixed(6)}</div>
+            <div>Boundary rank: {formatDebugRank(sliceScore.boundaryRank, sliceScore.boundaryActive)}</div>
+            <div>Structural rank: {formatDebugRank(sliceScore.structuralRank, sliceScore.structuralActive)}</div>
+            <div>Appearance rank: {formatDebugRank(sliceScore.appearanceRank, sliceScore.appearanceActive)}</div>
+            <div>Perceptual rank: {sliceScore.perceptualRank?.toFixed(4) ?? '—'}</div>
+            <div>Phase input: {sliceScore.phaseInput?.replaceAll('-', ' ') ?? '—'}</div>
+            {sliceScore.finalAffineSelected != null ? (
+              <div>Final affine: {sliceScore.finalAffineSelected.replaceAll('-', ' ')}</div>
+            ) : null}
+            {sliceScore.finalAffineStructuralScore != null && sliceScore.finalAffineSeedStructuralScore != null ? (
+              <div>
+                Final affine structure: {sliceScore.finalAffineStructuralScore.toFixed(6)} (seed{' '}
+                {sliceScore.finalAffineSeedStructuralScore.toFixed(6)})
+              </div>
+            ) : null}
+            {sliceScore.coarseStage && sliceScore.fineStage ? (
+              <div>
+                Rank coarse→fine: {sliceScore.coarseStage.perceptualRank.toFixed(4)}→
+                {sliceScore.fineStage.perceptualRank.toFixed(4)}
+              </div>
+            ) : null}
+            <div>
+              Phase δ: {sliceScore.correctionX?.toFixed(2) ?? '—'}, {sliceScore.correctionY?.toFixed(2) ?? '—'}
+            </div>
+            <div>
+              Peak / PSR: {sliceScore.phase?.toFixed(4) ?? '—'} /{' '}
+              {sliceScore.phasePeakToSidelobeRatio?.toFixed(2) ?? '—'}
+            </div>
+          </>
+        ) : (
+          <>
+            <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
+            <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
+            <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
+            <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
+            <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
+            <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
+            <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
+            <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
+            <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(function DicomViewer(
   {
     studyId,
@@ -302,179 +595,25 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // and finally pan translation in display space.
   const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg) matrix(${affine00}, ${affine10}, ${affine01}, ${affine11}, 0, 0)`;
 
-  const waitForImageLoad = useCallback(async (): Promise<HTMLImageElement> => {
-    const img = imgRef.current;
-    if (!img) {
-      throw new Error('Image element not available');
-    }
-
-    if (img.complete && img.naturalWidth > 0) {
-      return img;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const onLoad = () => {
-        img.removeEventListener('load', onLoad);
-        img.removeEventListener('error', onError);
-        resolve();
-      };
-      const onError = () => {
-        img.removeEventListener('load', onLoad);
-        img.removeEventListener('error', onError);
-        reject(new Error('Failed to load image'));
-      };
-      img.addEventListener('load', onLoad);
-      img.addEventListener('error', onError);
-    });
-
-    return img;
-  }, []);
-
-  const getDisplayedContentKey = useCallback((): string | null => {
-    return displayedContentKeyRef.current;
-  }, []);
-
-  const getDecodedFrame = useCallback(async () => {
-    if (derivedFrame) {
-      throw new Error('Segmentation is unavailable on a derived alignment plane; return to a native acquired slice');
-    }
-    const frame = await loadDecodedFrame(seriesUid, effectiveInstanceIndex);
-    const element = containerRef.current;
-    const rect = element?.getBoundingClientRect();
-    return {
-      ...frame,
-      viewportSize: {
-        w: element?.clientWidth || rect?.width || 0,
-        h: element?.clientHeight || rect?.height || 0,
-      },
-    };
-  }, [derivedFrame, effectiveInstanceIndex, seriesUid]);
-
-  const waitForDisplayedContentKey = useCallback(async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
-    const t0 = performance.now();
-
-    // Fast path.
-    if (displayedContentKeyRef.current === expectedKey) return;
-
-    while (performance.now() - t0 < timeoutMs) {
-      if (displayedContentKeyRef.current === expectedKey) return;
-      // Yield so we don't block the UI thread.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-    }
-
-    throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
-  }, []);
-
-  const captureVisiblePng = useCallback(
-    async (options?: DicomViewerCaptureOptions): Promise<Blob> => {
-      const container = containerRef.current;
-      if (!container) {
-        throw new Error('Viewer not mounted');
-      }
-
-      const cssWidth = container.clientWidth;
-      const cssHeight = container.clientHeight;
-      if (cssWidth <= 0 || cssHeight <= 0) {
-        throw new Error('Viewer has zero size');
-      }
-
-      // Determine our render source:
-      // - If ImageContent is used, we capture from the <img>
-      // - If CornerstoneImage is used, we capture from its internal <canvas>
-      const img = imgRef.current;
-      const cornerstoneCanvas = container.querySelector('canvas') as HTMLCanvasElement | null;
-
-      const maxSize = options?.maxSize ?? 512;
-      const maxCssDim = Math.max(cssWidth, cssHeight);
-      const deviceScale = window.devicePixelRatio || 1;
-      const renderScale = Math.min(deviceScale, maxSize / maxCssDim);
-
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(cssWidth * renderScale));
-      canvas.height = Math.max(1, Math.round(cssHeight * renderScale));
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        throw new Error('Failed to create canvas context');
-      }
-
-      // Draw in CSS pixel units; scale up to device pixels.
-      ctx.scale(renderScale, renderScale);
-
-      // Background (matches viewer)
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-      // Match the CSS transform applied in the DOM.
-      //
-      // Note: Canvas 2D uses post-multiplication for transforms, so the last call is applied first.
-      // The order below mirrors:
-      //   transform: translate(pan) scale(zoom) rotate(rotation) matrix(affine)
-      const panXPx = panX * cssWidth;
-      const panYPx = panY * cssHeight;
-
-      ctx.save();
-      ctx.translate(cssWidth / 2, cssHeight / 2);
-      ctx.translate(panXPx, panYPx);
-      ctx.scale(zoom, zoom);
-      ctx.rotate((rotation * Math.PI) / 180);
-
-      // JSDOM's mocked canvas context (used in tests) may not implement ctx.transform.
-      // We only need this when the affine residual is non-identity.
-      const isIdentityAffine = affine00 === 1 && affine01 === 0 && affine10 === 0 && affine11 === 1;
-      if (!isIdentityAffine && typeof ctx.transform === 'function') {
-        ctx.transform(affine00, affine10, affine01, affine11, 0, 0);
-      }
-
-      ctx.translate(-cssWidth / 2, -cssHeight / 2);
-
-      // Apply brightness/contrast like CSS filters.
-      ctx.filter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
-
-      if (img) {
-        const loadedImg = await waitForImageLoad();
-
-        // Draw the image with object-contain semantics inside the viewport.
-        const iw = loadedImg.naturalWidth;
-        const ih = loadedImg.naturalHeight;
-        const scale = Math.min(cssWidth / iw, cssHeight / ih);
-        const dw = iw * scale;
-        const dh = ih * scale;
-        const dx = (cssWidth - dw) / 2;
-        const dy = (cssHeight - dh) / 2;
-
-        ctx.drawImage(loadedImg, dx, dy, dw, dh);
-      } else if (cornerstoneCanvas) {
-        // Cornerstone renders directly into a canvas sized to the viewport.
-        // We draw it 1:1 into our capture canvas.
-        ctx.drawImage(cornerstoneCanvas, 0, 0, cssWidth, cssHeight);
-      } else {
-        ctx.restore();
-        throw new Error('No render source available for capture');
-      }
-
-      ctx.restore();
-
-      return new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob((blob) => {
-          if (blob) resolve(blob);
-          else reject(new Error('Failed to encode capture'));
-        }, 'image/png');
-      });
-    },
-    [affine00, affine01, affine10, affine11, brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom],
-  );
-
-  useImperativeHandle(
+  useDicomViewerHandle({
     ref,
-    () => ({
-      captureVisiblePng,
-      getDecodedFrame,
-      getDisplayedContentKey,
-      waitForDisplayedContentKey,
-    }),
-    [captureVisiblePng, getDecodedFrame, getDisplayedContentKey, waitForDisplayedContentKey],
-  );
+    containerRef,
+    imgRef,
+    displayedContentKeyRef,
+    derivedFrame,
+    seriesUid,
+    effectiveInstanceIndex,
+    affine00,
+    affine01,
+    affine10,
+    affine11,
+    brightness,
+    contrast,
+    panX,
+    panY,
+    rotation,
+    zoom,
+  });
 
   // Click to set center - calculates offset to move clicked point to viewport center
   const handleClick = useCallback(
@@ -518,14 +657,28 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     [interactionBlocked, onPanChange],
   );
 
+  const handleViewportKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (interactionBlocked || !onPanChange || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+      onPanChange(0, 0);
+    },
+    [interactionBlocked, onPanChange],
+  );
+
   return (
     <div className="h-full bg-black">
       {/* Viewport */}
       <div
         ref={containerRef}
         className="h-full overflow-hidden relative cursor-crosshair"
+        role="button"
+        tabIndex={interactionBlocked || !onPanChange ? -1 : 0}
+        aria-label={`Recenter MRI slice ${instanceIndex + 1}`}
+        aria-disabled={interactionBlocked || !onPanChange}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
+        onKeyDown={handleViewportKeyDown}
       >
         {imageUrlOverride ? (
           <ImageContent
@@ -565,66 +718,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
           </div>
         ) : null}
 
-        {debugSliceScores && isZHeld ? (
-          <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
-            <div className="rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[10px] tabular-nums leading-snug text-[var(--text-primary)]">
-              {sliceScore?.coverage != null ? (
-                <>
-                  <div>
-                    Stage: {sliceScore.stage ?? '—'}
-                    {sliceScore.selected ? ' · selected' : sliceScore.retainedForFine ? ' · shortlisted' : ''}
-                  </div>
-                  <div>Coverage: {sliceScore.coverage.toFixed(4)}</div>
-                  <div>CS: {sliceScore.ssim.toFixed(6)}</div>
-                  <div>LNCC: {sliceScore.lncc.toFixed(6)}</div>
-                  <div>MIND: {sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
-                  <div>MIND rank: {formatDebugRank(sliceScore.mindRank, sliceScore.mindActive)}</div>
-                  <div>NGF: {sliceScore.ngf.toFixed(6)}</div>
-                  <div>Boundary rank: {formatDebugRank(sliceScore.boundaryRank, sliceScore.boundaryActive)}</div>
-                  <div>Structural rank: {formatDebugRank(sliceScore.structuralRank, sliceScore.structuralActive)}</div>
-                  <div>Appearance rank: {formatDebugRank(sliceScore.appearanceRank, sliceScore.appearanceActive)}</div>
-                  <div>Perceptual rank: {sliceScore.perceptualRank?.toFixed(4) ?? '—'}</div>
-                  <div>Phase input: {sliceScore.phaseInput?.replaceAll('-', ' ') ?? '—'}</div>
-                  {sliceScore.finalAffineSelected != null ? (
-                    <div>Final affine: {sliceScore.finalAffineSelected.replaceAll('-', ' ')}</div>
-                  ) : null}
-                  {sliceScore.finalAffineStructuralScore != null &&
-                  sliceScore.finalAffineSeedStructuralScore != null ? (
-                    <div>
-                      Final affine structure: {sliceScore.finalAffineStructuralScore.toFixed(6)} (seed{' '}
-                      {sliceScore.finalAffineSeedStructuralScore.toFixed(6)})
-                    </div>
-                  ) : null}
-                  {sliceScore.coarseStage && sliceScore.fineStage ? (
-                    <div>
-                      Rank coarse→fine: {sliceScore.coarseStage.perceptualRank.toFixed(4)}→
-                      {sliceScore.fineStage.perceptualRank.toFixed(4)}
-                    </div>
-                  ) : null}
-                  <div>
-                    Phase δ: {sliceScore.correctionX?.toFixed(2) ?? '—'}, {sliceScore.correctionY?.toFixed(2) ?? '—'}
-                  </div>
-                  <div>
-                    Peak / PSR: {sliceScore.phase?.toFixed(4) ?? '—'} /{' '}
-                    {sliceScore.phasePeakToSidelobeRatio?.toFixed(2) ?? '—'}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
-                  <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
-                  <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
-                  <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
-                  <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
-                  <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
-                  <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
-                  <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
-                  <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
-                </>
-              )}
-            </div>
-          </div>
-        ) : null}
+        {debugSliceScores && isZHeld ? <DicomAlignmentDiagnostics sliceScore={sliceScore} /> : null}
       </div>
     </div>
   );
@@ -695,14 +789,13 @@ function CornerstoneImage({
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
-  const enabledDeferredRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null);
-  if (enabledDeferredRef.current == null) {
+  const [enabledDeferred] = useState(() => {
     let resolve!: () => void;
     const promise = new Promise<void>((r) => {
       resolve = r;
     });
-    enabledDeferredRef.current = { promise, resolve };
-  }
+    return { promise, resolve };
+  });
 
   // Track which imageId has been loaded to derive status.
   // Note: we intentionally do NOT clear `loadedImageId` when navigating so the previous
@@ -764,7 +857,7 @@ function CornerstoneImage({
     }
 
     enabledRef.current = true;
-    enabledDeferredRef.current?.resolve();
+    enabledDeferred.resolve();
 
     return () => {
       try {
@@ -774,7 +867,7 @@ function CornerstoneImage({
         // ignore
       }
     };
-  }, []);
+  }, [enabledDeferred]);
 
   // Load image when imageId changes
   useEffect(() => {
@@ -787,7 +880,7 @@ function CornerstoneImage({
 
     const load = async () => {
       try {
-        await enabledDeferredRef.current!.promise;
+        await enabledDeferred.promise;
         if (cancelled) return;
 
         const image = await loadCornerstoneImage(imageId);
@@ -812,7 +905,7 @@ function CornerstoneImage({
     return () => {
       cancelled = true;
     };
-  }, [imageId]);
+  }, [enabledDeferred, imageId]);
 
   // Handle resize
   useEffect(() => {

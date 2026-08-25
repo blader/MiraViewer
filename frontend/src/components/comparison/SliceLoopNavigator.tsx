@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
 import { CONTROL_LIMITS } from '../../utils/constants';
 import { clamp01 } from '../../utils/math';
@@ -30,6 +30,70 @@ export type SliceLoopNavigatorProps = {
   /** Modal dialogs and active registration own navigation until they complete. */
   interactionBlocked?: boolean;
 };
+
+type LoopRangeHandlesProps = {
+  loopStart: number;
+  loopEnd: number;
+  playbackInstanceCount: number;
+  interactionBlocked: boolean;
+  draggingPointerIdRef: React.MutableRefObject<number | null>;
+  setDraggingHandle: (handle: 'start' | 'end') => void;
+  updateLoop: (nextStart: number, nextEnd: number) => void;
+};
+
+function LoopRangeHandles({
+  loopStart,
+  loopEnd,
+  playbackInstanceCount,
+  interactionBlocked,
+  draggingPointerIdRef,
+  setDraggingHandle,
+  updateLoop,
+}: LoopRangeHandlesProps) {
+  return (['start', 'end'] as const).map((handle) => {
+    const pos = handle === 'start' ? loopStart : loopEnd;
+
+    return (
+      <button
+        key={handle}
+        type="button"
+        role="slider"
+        aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pos * 100)}
+        disabled={interactionBlocked}
+        className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+        style={{ left: `${pos * 100}%` }}
+        onPointerDown={(event) => {
+          if (interactionBlocked || (event.button !== undefined && event.button !== 0)) return;
+          event.preventDefault();
+          draggingPointerIdRef.current = event.pointerId ?? null;
+          setDraggingHandle(handle);
+        }}
+        onKeyDown={(event) => {
+          const direction =
+            event.key === 'ArrowLeft' || event.key === 'ArrowDown'
+              ? -1
+              : event.key === 'ArrowRight' || event.key === 'ArrowUp'
+                ? 1
+                : 0;
+          if (direction === 0) return;
+          event.preventDefault();
+          const step = direction / Math.max(1, playbackInstanceCount - 1);
+          if (handle === 'start') updateLoop(loopStart + step, loopEnd);
+          else updateLoop(loopStart, loopEnd + step);
+        }}
+        title={handle === 'start' ? 'Loop start' : 'Loop end'}
+      >
+        <span
+          aria-hidden="true"
+          className="h-6 w-2 rounded-[2px] border border-[var(--signal-metal)] bg-[var(--bg-secondary)]"
+        />
+      </button>
+    );
+  });
+}
 
 export function SliceLoopNavigator({
   selectedSeqId,
@@ -105,6 +169,15 @@ export function SliceLoopNavigator({
     },
     [progressRef, setProgress],
   );
+
+  const moveDraggedHandle = useEffectEvent((event: PointerEvent) => {
+    if (draggingPointerIdRef.current !== null && event.pointerId !== draggingPointerIdRef.current) return;
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const position = clamp01((event.clientX - rect.left) / rect.width);
+    if (draggingHandle === 'start') updateLoop(position, loopEnd);
+    else if (draggingHandle === 'end') updateLoop(loopStart, position);
+  });
 
   // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
   useEffect(() => {
@@ -189,17 +262,7 @@ export function SliceLoopNavigator({
   useEffect(() => {
     if (!draggingHandle) return;
 
-    const handleMove = (e: PointerEvent) => {
-      if (draggingPointerIdRef.current !== null && e.pointerId !== draggingPointerIdRef.current) return;
-      const rect = trackRef.current?.getBoundingClientRect();
-      if (!rect || rect.width <= 0) return;
-      const pct = clamp01((e.clientX - rect.left) / rect.width);
-      if (draggingHandle === 'start') {
-        updateLoop(pct, loopEnd);
-      } else {
-        updateLoop(loopStart, pct);
-      }
-    };
+    const handleMove = (event: PointerEvent) => moveDraggedHandle(event);
 
     const handleUp = (e: PointerEvent) => {
       if (draggingPointerIdRef.current !== null && e.pointerId !== draggingPointerIdRef.current) return;
@@ -215,7 +278,7 @@ export function SliceLoopNavigator({
       window.removeEventListener('pointerup', handleUp);
       window.removeEventListener('pointercancel', handleUp);
     };
-  }, [draggingHandle, loopEnd, loopStart, updateLoop]);
+  }, [draggingHandle]);
 
   const currentSlice =
     playbackInstanceCount > 0 ? Math.round(clamp01(progress) * (playbackInstanceCount - 1)) + 1 : null;
@@ -302,49 +365,17 @@ export function SliceLoopNavigator({
           />
         ) : null}
 
-        {currentSlice !== null &&
-          (['start', 'end'] as const).map((handle) => {
-            const pos = handle === 'start' ? loopStart : loopEnd;
-            return (
-              <button
-                key={handle}
-                type="button"
-                role="slider"
-                aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(pos * 100)}
-                disabled={interactionBlocked}
-                className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
-                style={{ left: `${pos * 100}%` }}
-                onPointerDown={(e) => {
-                  if (interactionBlocked || (e.button !== undefined && e.button !== 0)) return;
-                  e.preventDefault();
-                  draggingPointerIdRef.current = e.pointerId ?? null;
-                  setDraggingHandle(handle);
-                }}
-                onKeyDown={(event) => {
-                  const direction =
-                    event.key === 'ArrowLeft' || event.key === 'ArrowDown'
-                      ? -1
-                      : event.key === 'ArrowRight' || event.key === 'ArrowUp'
-                        ? 1
-                        : 0;
-                  if (direction === 0) return;
-                  event.preventDefault();
-                  const step = direction / Math.max(1, playbackInstanceCount - 1);
-                  if (handle === 'start') updateLoop(loopStart + step, loopEnd);
-                  else updateLoop(loopStart, loopEnd + step);
-                }}
-                title={handle === 'start' ? 'Loop start' : 'Loop end'}
-              >
-                <span
-                  aria-hidden="true"
-                  className="h-6 w-2 rounded-[2px] border border-[var(--signal-metal)] bg-[var(--bg-secondary)]"
-                />
-              </button>
-            );
-          })}
+        {currentSlice !== null ? (
+          <LoopRangeHandles
+            loopStart={loopStart}
+            loopEnd={loopEnd}
+            playbackInstanceCount={playbackInstanceCount}
+            interactionBlocked={interactionBlocked}
+            draggingPointerIdRef={draggingPointerIdRef}
+            setDraggingHandle={setDraggingHandle}
+            updateLoop={updateLoop}
+          />
+        ) : null}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import cornerstone from 'cornerstone-core';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
@@ -412,6 +412,88 @@ type SvrSourceReadiness = {
   error: string | null;
 };
 
+type SvrWorkspaceState = {
+  identity: string | null;
+  showAcquiredStack: boolean;
+  roiSeriesUid: string | null;
+  roiSeriesSopUids: string[] | null;
+  roiSeriesSopUidsError: string | null;
+  // Use -1 as a sentinel meaning "auto (middle slice)".
+  roiSliceIndex: number;
+  roiSliceGeom: SliceGeometry | null;
+  roiSliceGeomError: string | null;
+  // Keep a stable preview slice so we don't clear the canvas between fast slice changes.
+  roiPreviewSliceStable: { sopInstanceUid: string; geom: SliceGeometry } | null;
+  roiRect: RoiRect01 | null;
+  // Canonical ROI used for reconstruction (stays valid even if the user scrolls away from the selection slice).
+  roiWorld: SvrRoi | null;
+};
+
+type SvrWorkspaceUpdate =
+  | Partial<Omit<SvrWorkspaceState, 'identity'>>
+  | ((state: SvrWorkspaceState) => Partial<Omit<SvrWorkspaceState, 'identity'>>);
+
+function initialSvrWorkspaceState(identity: string | null): SvrWorkspaceState {
+  return {
+    identity,
+    showAcquiredStack: false,
+    roiSeriesUid: null,
+    roiSeriesSopUids: null,
+    roiSeriesSopUidsError: null,
+    roiSliceIndex: -1,
+    roiSliceGeom: null,
+    roiSliceGeomError: null,
+    roiPreviewSliceStable: null,
+    roiRect: null,
+    roiWorld: null,
+  };
+}
+
+function useSvrWorkspaceState(identity: string | null) {
+  const [stored, dispatch] = useReducer(
+    (
+      previous: SvrWorkspaceState,
+      action: { identity: string | null; update: SvrWorkspaceUpdate },
+    ): SvrWorkspaceState => {
+      const current = previous.identity === action.identity ? previous : initialSvrWorkspaceState(action.identity);
+      return { ...current, ...(typeof action.update === 'function' ? action.update(current) : action.update) };
+    },
+    identity,
+    initialSvrWorkspaceState,
+  );
+  const state = stored.identity === identity ? stored : initialSvrWorkspaceState(identity);
+  const update = useCallback((next: SvrWorkspaceUpdate) => dispatch({ identity, update: next }), [identity]);
+
+  return {
+    ...state,
+    setShowAcquiredStack: useCallback(
+      (next: boolean | ((previous: boolean) => boolean)) =>
+        update(
+          typeof next === 'function'
+            ? (current) => ({ showAcquiredStack: next(current.showAcquiredStack) })
+            : { showAcquiredStack: next },
+        ),
+      [update],
+    ),
+    setRoiSeriesUid: useCallback((roiSeriesUid: string | null) => update({ roiSeriesUid }), [update]),
+    setRoiSeriesSopUids: useCallback((roiSeriesSopUids: string[] | null) => update({ roiSeriesSopUids }), [update]),
+    setRoiSeriesSopUidsError: useCallback(
+      (roiSeriesSopUidsError: string | null) => update({ roiSeriesSopUidsError }),
+      [update],
+    ),
+    setRoiSliceIndex: useCallback((roiSliceIndex: number) => update({ roiSliceIndex }), [update]),
+    setRoiSliceGeom: useCallback((roiSliceGeom: SliceGeometry | null) => update({ roiSliceGeom }), [update]),
+    setRoiSliceGeomError: useCallback((roiSliceGeomError: string | null) => update({ roiSliceGeomError }), [update]),
+    setRoiPreviewSliceStable: useCallback(
+      (roiPreviewSliceStable: { sopInstanceUid: string; geom: SliceGeometry } | null) =>
+        update({ roiPreviewSliceStable }),
+      [update],
+    ),
+    setRoiRect: useCallback((roiRect: RoiRect01 | null) => update({ roiRect }), [update]),
+    setRoiWorld: useCallback((roiWorld: SvrRoi | null) => update({ roiWorld }), [update]),
+  };
+}
+
 function countIndependentOrientations(manifests: SeriesFrameManifest[]): number {
   const normals: SliceGeometry['normalDir'][] = [];
 
@@ -543,13 +625,14 @@ export type Svr3DViewProps = {
   fallbackRoiSliceIndex?: number | null;
 };
 
-export function Svr3DView({
+function useSvrReconstructionWorkspace({
   data,
   defaultDateIso,
   defaultSeqId,
   fallbackRoiSeriesUid,
   fallbackRoiSliceIndex,
 }: Svr3DViewProps) {
+  const roiSeriesSelectId = useId();
   const dates = useMemo(() => sortedDatesDesc(data.dates), [data.dates]);
   const dateIso = defaultDateIso && dates.includes(defaultDateIso) ? defaultDateIso : dates[0] || null;
 
@@ -671,9 +754,10 @@ export function Svr3DView({
   const volumeIdentity = useMemo(() => {
     if (selectedSeries.length === 0) return null;
     const seriesUids = selectedSeries.map((series) => series.seriesUid);
+    const selectedSeriesUids = new Set(seriesUids);
     const matchingReference = Object.values(data.series_map)
       .map((byDate) => (dateIso ? byDate[dateIso] : undefined))
-      .find((ref) => ref && seriesUids.includes(ref.series_uid));
+      .find((ref) => ref && selectedSeriesUids.has(ref.series_uid));
 
     return {
       patientKey: data.selected_patient_key ?? matchingReference?.patient_key,
@@ -697,8 +781,29 @@ export function Svr3DView({
   }, [selectedSequenceKey, volumeIdentity]);
 
   const acceptedResult = resultIdentity === workspaceIdentity ? result : null;
+  const {
+    showAcquiredStack,
+    setShowAcquiredStack,
+    roiSeriesUid,
+    setRoiSeriesUid,
+    roiSeriesSopUids,
+    setRoiSeriesSopUids,
+    roiSeriesSopUidsError,
+    setRoiSeriesSopUidsError,
+    roiSliceIndex,
+    setRoiSliceIndex,
+    roiSliceGeom,
+    setRoiSliceGeom,
+    roiSliceGeomError,
+    setRoiSliceGeomError,
+    roiPreviewSliceStable,
+    setRoiPreviewSliceStable,
+    roiRect,
+    setRoiRect,
+    roiWorld,
+    setRoiWorld,
+  } = useSvrWorkspaceState(workspaceIdentity);
   const [sourceReadiness, setSourceReadiness] = useState<SvrSourceReadiness | null>(null);
-  const [showAcquiredStack, setShowAcquiredStack] = useState(false);
 
   useEffect(() => {
     if (!workspaceIdentity || selectedSeries.length === 0) {
@@ -766,8 +871,6 @@ export function Svr3DView({
   }, [selectedSeries, volumeIdentity?.patientKey, workspaceIdentity]);
 
   // ROI-first flow: pick a ROI on an input slice, then run SVR restricted to that cube.
-  const [roiSeriesUid, setRoiSeriesUid] = useState<string | null>(null);
-
   const preferredRoiSeriesUid = useMemo(() => {
     if (!defaultSeqId) return null;
     const seq = data.sequences.find((s) => s.id === defaultSeqId);
@@ -790,22 +893,6 @@ export function Svr3DView({
     return selectedSeries.find((s) => s.seriesUid === effectiveRoiSeriesUid) ?? null;
   }, [effectiveRoiSeriesUid, selectedSeries]);
 
-  const [roiSeriesSopUids, setRoiSeriesSopUids] = useState<string[] | null>(null);
-  const [roiSeriesSopUidsError, setRoiSeriesSopUidsError] = useState<string | null>(null);
-
-  // Use -1 as a sentinel meaning "auto (middle slice)".
-  const [roiSliceIndex, setRoiSliceIndex] = useState(-1);
-
-  const [roiSliceGeom, setRoiSliceGeom] = useState<SliceGeometry | null>(null);
-  const [roiSliceGeomError, setRoiSliceGeomError] = useState<string | null>(null);
-
-  // Keep a stable preview slice so we don't clear the canvas between fast slice changes.
-  const [roiPreviewSliceStable, setRoiPreviewSliceStable] = useState<{
-    sopInstanceUid: string;
-    geom: SliceGeometry;
-  } | null>(null);
-
-  const [roiRect, setRoiRect] = useState<RoiRect01 | null>(null);
   const roiDragRef = useRef<{ x0: number; y0: number } | null>(null);
 
   // Keep fallback slice inputs in refs so ROI-series effects don't retrigger on every slice tick.
@@ -816,22 +903,13 @@ export function Svr3DView({
     fallbackRoiSliceIndexRef.current = fallbackRoiSliceIndex;
   }, [fallbackRoiSeriesUid, fallbackRoiSliceIndex]);
 
-  // Canonical ROI used for reconstruction (stays valid even if the user scrolls away from the selection slice).
-  const [roiWorld, setRoiWorld] = useState<SvrRoi | null>(null);
-
   // Selection identity, not a date string, owns all patient-scoped SVR state.
   const previousWorkspaceIdentityRef = useRef<string | null>(workspaceIdentity);
   useEffect(() => {
     if (previousWorkspaceIdentityRef.current === workspaceIdentity) return;
     previousWorkspaceIdentityRef.current = workspaceIdentity;
 
-    setRoiSeriesUid(null);
-    setRoiRect(null);
     roiDragRef.current = null;
-    setRoiWorld(null);
-    setRoiPreviewSliceStable(null);
-    setShowAcquiredStack(false);
-
     clear();
   }, [clear, workspaceIdentity]);
 
@@ -891,7 +969,17 @@ export function Svr3DView({
     return () => {
       alive = false;
     };
-  }, [effectiveRoiSeriesUid]);
+  }, [
+    effectiveRoiSeriesUid,
+    setRoiPreviewSliceStable,
+    setRoiRect,
+    setRoiSeriesSopUids,
+    setRoiSeriesSopUidsError,
+    setRoiSliceGeom,
+    setRoiSliceGeomError,
+    setRoiSliceIndex,
+    setRoiWorld,
+  ]);
 
   // Persist explicit slice selection (>=0) so leaving/re-entering SVR preserves ROI preview position.
   const roiSeriesCount = roiSeriesSopUids?.length ?? 0;
@@ -916,7 +1004,7 @@ export function Svr3DView({
       const current = roiSliceIndex >= 0 ? roiSliceIndex : effectiveRoiSliceIndex;
       setRoiSliceIndex(clampInt(current + delta, 0, roiSeriesSopUids.length - 1));
     },
-    [effectiveRoiSliceIndex, roiSeriesSopUids, roiSliceIndex],
+    [effectiveRoiSliceIndex, roiSeriesSopUids, roiSliceIndex, setRoiSliceIndex],
   );
 
   const roiSopInstanceUid = roiSeriesSopUids ? (roiSeriesSopUids[effectiveRoiSliceIndex] ?? null) : null;
@@ -954,12 +1042,12 @@ export function Svr3DView({
     return () => {
       alive = false;
     };
-  }, [roiSopInstanceUid]);
+  }, [roiSopInstanceUid, setRoiRect, setRoiSliceGeom, setRoiSliceGeomError]);
 
   useEffect(() => {
     if (!roiSopInstanceUid || !roiSliceGeom) return;
     setRoiPreviewSliceStable({ sopInstanceUid: roiSopInstanceUid, geom: roiSliceGeom });
-  }, [roiSliceGeom, roiSopInstanceUid]);
+  }, [roiSliceGeom, roiSopInstanceUid, setRoiPreviewSliceStable]);
 
   const roiSideMm = useMemo(() => {
     if (!roiWorld) return null;
@@ -1044,6 +1132,587 @@ export function Svr3DView({
     void run(selectedSeries, paramsToRun, workspaceIdentity);
   }, [canRun, params, roiWorld, run, selectedSeries, workspaceIdentity]);
 
+  return {
+    acceptedResult,
+    canRun,
+    cancel,
+    clear,
+    currentReadiness,
+    displayedDate,
+    displayedPatient,
+    effectiveRoiSeriesUid,
+    effectiveRoiSliceIndex,
+    error,
+    estimatedPeakMemoryMiB,
+    exceedsMemoryBudget,
+    generationCollapsed,
+    isRunning,
+    params,
+    percent,
+    progress,
+    progressMessage,
+    roiDragRef,
+    roiPreviewSliceStable,
+    roiRect,
+    roiSeries,
+    roiSeriesSelectId,
+    roiSeriesSopUids,
+    roiSeriesSopUidsError,
+    roiSideMm,
+    roiSliceGeomError,
+    roiWorld,
+    selectedGroup,
+    selectedPlaneCount,
+    selectedSequenceKey,
+    selectedSeries,
+    sequenceGroupsForDate,
+    setGenerationCollapsed,
+    setParams,
+    setRoiRect,
+    setRoiSeriesUid,
+    setRoiWorld,
+    setSelectedSequenceKey,
+    setShowAcquiredStack,
+    showAcquiredStack,
+    sliceInspectorPortalRef,
+    sliceInspectorPortalTarget,
+    sourceFrameCount,
+    sourceMemoryMiB,
+    sourceReadinessMessage,
+    startReconstruction,
+    status,
+    stepRoiSlice,
+    volumeIdentity,
+    workspaceIdentity,
+  };
+}
+
+type SvrReconstructionWorkspace = ReturnType<typeof useSvrReconstructionWorkspace>;
+
+function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const {
+    currentReadiness,
+    estimatedPeakMemoryMiB,
+    exceedsMemoryBudget,
+    isRunning,
+    params,
+    selectedSequenceKey,
+    selectedSeries,
+    sequenceGroupsForDate,
+    setSelectedSequenceKey,
+    sourceMemoryMiB,
+  } = workspace;
+
+  return (
+    <>
+      <div className="space-y-3">
+        <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">
+          Acquired source sequences
+        </div>
+        <div className="max-h-[260px] overflow-auto">
+          {sequenceGroupsForDate.length === 0 ? (
+            <div className="py-2 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
+          ) : (
+            <div className="space-y-1">
+              {sequenceGroupsForDate.map((g) => {
+                const checked = selectedSequenceKey === g.key;
+
+                const planeLabel = `${g.planeCount} plane${g.planeCount === 1 ? '' : 's'}`;
+                const sliceLabel = `${g.sliceCount} slice${g.sliceCount === 1 ? '' : 's'}`;
+
+                return (
+                  <label
+                    key={g.key}
+                    className={`flex min-h-10 cursor-pointer items-center gap-2 border-l-2 py-2 pl-2 pr-1 text-xs transition-colors hover:bg-[var(--bg-tertiary)] ${
+                      checked
+                        ? 'border-l-[var(--signal-metal)] text-[var(--text-primary)]'
+                        : 'border-l-transparent text-[var(--text-secondary)]'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="svr-sequence"
+                      checked={checked}
+                      disabled={isRunning}
+                      onChange={() => setSelectedSequenceKey(g.key)}
+                    />
+                    <span className="flex-1 min-w-0 truncate">{g.label}</span>
+                    <span className="shrink-0 tabular-nums text-[var(--text-tertiary)]">
+                      {planeLabel} · {sliceLabel}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {currentReadiness?.manifests.length ? (
+        <div className="border-t border-[var(--border-color)] pt-4">
+          <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
+            Verified acquired evidence
+          </div>
+          <div className="mt-3 space-y-2.5 text-xs">
+            {currentReadiness.manifests.map((manifest, index) => {
+              const frame = manifest.frames[0]!;
+              const geometry = getSliceGeometryFromInstance(frame);
+              const series = selectedSeries[index];
+
+              return (
+                <div key={manifest.seriesUid} className="flex flex-col gap-1">
+                  <span className="min-w-0 truncate text-[var(--text-primary)]">
+                    {series?.plane ?? 'Acquired'} · {manifest.frames.length} slices
+                  </span>
+                  <span className="shrink-0 tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
+                    {geometry.rowSpacingMm.toFixed(2)} × {geometry.colSpacingMm.toFixed(2)} mm
+                  </span>
+                </div>
+              );
+            })}
+            <div className="border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
+              <div className="flex items-center justify-between gap-2">
+                <span>Acquired source data</span>
+                <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
+              </div>
+              {estimatedPeakMemoryMiB !== null ? (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span>Conservative peak</span>
+                  <span
+                    className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
+                  >
+                    {Math.ceil(estimatedPeakMemoryMiB)} MiB
+                  </span>
+                </div>
+              ) : null}
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span>Requested voxel spacing</span>
+                <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const { isRunning, params, setParams } = workspace;
+
+  return (
+    <details className="border-t border-[var(--border-color)] pt-3">
+      <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+        Advanced SVR settings
+      </summary>
+
+      <div className="mt-2 space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs text-[var(--text-secondary)]">
+            Voxel size (mm)
+            <input
+              type="number"
+              step={0.1}
+              min={0.1}
+              max={10}
+              value={params.targetVoxelSizeMm}
+              disabled={isRunning}
+              onChange={(e) =>
+                setParams((p) => ({
+                  ...p,
+                  targetVoxelSizeMm: clamp(Number(e.target.value) || 0.1, 0.1, 10),
+                }))
+              }
+              className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="text-xs text-[var(--text-secondary)]">
+            Iterations
+            <input
+              type="number"
+              step={1}
+              min={0}
+              max={10}
+              value={params.iterations}
+              disabled={isRunning}
+              onChange={(e) => setParams((p) => ({ ...p, iterations: clampInt(Number(e.target.value) || 0, 0, 10) }))}
+              className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="text-xs text-[var(--text-secondary)]">
+            Slice downsample max (px)
+            <input
+              type="number"
+              step={16}
+              min={32}
+              max={512}
+              value={params.sliceDownsampleMaxSize}
+              disabled={isRunning}
+              onChange={(e) =>
+                setParams((p) => ({
+                  ...p,
+                  sliceDownsampleMaxSize: clampInt(Number(e.target.value) || 32, 32, 512),
+                }))
+              }
+              className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="text-xs text-[var(--text-secondary)]">
+            Max volume dim (vox)
+            <input
+              type="number"
+              step={16}
+              min={64}
+              max={384}
+              value={params.maxVolumeDim}
+              disabled={isRunning}
+              onChange={(e) =>
+                setParams((p) => ({ ...p, maxVolumeDim: clampInt(Number(e.target.value) || 64, 64, 384) }))
+              }
+              className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
+            />
+          </label>
+        </div>
+
+        <div className="space-y-1 text-xs text-[var(--text-tertiary)] leading-snug">
+          <div>
+            <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing. Smaller =
+            more detail but slower/heavier. The voxel size may be increased automatically to respect{' '}
+            <span className="text-[var(--text-secondary)]">Max volume dim</span>.
+          </div>
+          <div>
+            <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to run. 0 =
+            quick “splat/average only”; higher can reduce slice-to-slice inconsistency but costs time.
+          </div>
+          <div>
+            <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be
+            downsampled before reconstruction, but we won't downsample so far that in-plane spacing becomes worse than
+            the target voxel size.
+          </div>
+          <div>
+            <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid dimension (in
+            voxels) by increasing voxel size if needed. Lower = faster/smaller; higher = more memory/time.
+          </div>
+          <div>
+            Tip: draw a box on an input slice and run{' '}
+            <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller + faster.
+          </div>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const {
+    effectiveRoiSeriesUid,
+    effectiveRoiSliceIndex,
+    isRunning,
+    roiDragRef,
+    roiPreviewSliceStable,
+    roiRect,
+    roiSeries,
+    roiSeriesSelectId,
+    roiSeriesSopUids,
+    roiSeriesSopUidsError,
+    roiSideMm,
+    roiSliceGeomError,
+    roiWorld,
+    selectedSeries,
+    setRoiRect,
+    setRoiSeriesUid,
+    setRoiWorld,
+    stepRoiSlice,
+  } = workspace;
+
+  return (
+    <details className="border-t border-[var(--border-color)] pt-3">
+      <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+        Focus box (optional)
+      </summary>
+      <div className="mt-2 space-y-2">
+        <div className="flex items-center gap-2">
+          <label htmlFor={roiSeriesSelectId} className="text-xs text-[var(--text-secondary)] w-16">
+            Draw on
+          </label>
+          <select
+            id={roiSeriesSelectId}
+            value={effectiveRoiSeriesUid ?? ''}
+            onChange={(e) => {
+              const next = e.target.value || null;
+              setRoiSeriesUid(next);
+            }}
+            disabled={isRunning || selectedSeries.length === 0}
+            className="flex-1 px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] disabled:opacity-50"
+          >
+            {selectedSeries.length === 0 ? <option value="">Select a sequence above</option> : null}
+            {selectedSeries.map((s) => (
+              <option key={s.seriesUid} value={s.seriesUid}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {roiSeriesSopUidsError ? (
+          <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
+            {roiSeriesSopUidsError}
+          </div>
+        ) : roiSliceGeomError ? (
+          <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
+            {roiSliceGeomError}
+          </div>
+        ) : null}
+
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs text-[var(--text-tertiary)]">
+            {roiSeriesSopUids && roiSeriesSopUids.length > 0
+              ? `Slice ${effectiveRoiSliceIndex + 1} / ${roiSeriesSopUids.length}`
+              : roiSeries
+                ? 'Loading slices…'
+                : 'Select a series to preview'}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+            <button
+              type="button"
+              aria-label="Previous acquired source slice"
+              disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
+              onClick={() => stepRoiSlice(-1)}
+              className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+            >
+              ◀
+            </button>
+
+            <button
+              type="button"
+              aria-label="Next acquired source slice"
+              disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
+              onClick={() => stepRoiSlice(1)}
+              className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+            >
+              ▶
+            </button>
+          </div>
+        </div>
+
+        <DicomRoiSlicePreview
+          slice={roiPreviewSliceStable}
+          sourceSeriesUid={effectiveRoiSeriesUid}
+          maxSize={512}
+          roiRect={roiRect}
+          setRoiRect={setRoiRect}
+          roiDragRef={roiDragRef}
+          onSliceDelta={stepRoiSlice}
+          onRoiFinalized={(roi) => {
+            setRoiWorld(roi);
+          }}
+          disabled={isRunning}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={isRunning || (!roiRect && !roiWorld)}
+            onClick={() => {
+              setRoiRect(null);
+              roiDragRef.current = null;
+              setRoiWorld(null);
+            }}
+            className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
+          >
+            Clear box
+          </button>
+
+          {roiWorld && roiSideMm ? (
+            <div className="text-xs text-[var(--text-tertiary)]">
+              Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
+            </div>
+          ) : null}
+        </div>
+
+        <div className="text-xs text-[var(--text-tertiary)]">
+          Drag to draw a box on an input slice. When a box is set,{' '}
+          <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting with a
+          smaller box lets you decrease voxel size for more detail without making the volume huge.
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const {
+    acceptedResult,
+    canRun,
+    cancel,
+    clear,
+    currentReadiness,
+    error,
+    exceedsMemoryBudget,
+    isRunning,
+    percent,
+    progress,
+    progressMessage,
+    roiDragRef,
+    roiWorld,
+    setRoiRect,
+    setRoiSeriesUid,
+    setRoiWorld,
+    setSelectedSequenceKey,
+    sliceInspectorPortalRef,
+    sourceReadinessMessage,
+    startReconstruction,
+    status,
+  } = workspace;
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
+        <button
+          type="button"
+          disabled={isRunning}
+          onClick={() => {
+            setSelectedSequenceKey(null);
+            setRoiSeriesUid(null);
+            setRoiRect(null);
+            roiDragRef.current = null;
+            setRoiWorld(null);
+            clear();
+          }}
+          className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
+        >
+          Clear
+        </button>
+
+        <div className="flex items-center gap-2">
+          {isRunning ? (
+            <button
+              type="button"
+              onClick={cancel}
+              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-tertiary)]"
+            >
+              Cancel
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            disabled={!canRun}
+            onClick={startReconstruction}
+            aria-describedby={sourceReadinessMessage ? 'svr-source-readiness' : undefined}
+            className="min-h-9 rounded-[4px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
+          </button>
+        </div>
+      </div>
+
+      {sourceReadinessMessage && !isRunning ? (
+        <div
+          id="svr-source-readiness"
+          role={currentReadiness?.error ? 'alert' : 'status'}
+          className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
+            currentReadiness?.error || exceedsMemoryBudget
+              ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
+              : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
+          }`}
+        >
+          {sourceReadinessMessage}
+        </div>
+      ) : null}
+
+      {isRunning && progress ? (
+        <div
+          role="progressbar"
+          aria-label={progressMessage}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          className="border-t border-[var(--border-color)] pt-3"
+        >
+          <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+            <span className="truncate">{progressMessage}</span>
+            <span className="ml-auto tabular-nums">{percent}%</span>
+          </div>
+          <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
+            <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
+          </div>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div
+          role="alert"
+          className="border-l-2 border-l-[var(--danger)] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]"
+        >
+          {error}
+        </div>
+      ) : null}
+
+      {acceptedResult ? (
+        <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
+          <div className="font-medium text-[var(--text-primary)]">Accepted reconstruction</div>
+          <div className="mt-1 tabular-nums">
+            {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]} voxels ·{' '}
+            {acceptedResult.volume.voxelSizeMm[0].toFixed(2)} mm
+          </div>
+          {acceptedResult.volume.observedSupport ? (
+            <div className="mt-1 text-[var(--evidence)]">
+              {typeof acceptedResult.volume.supportedVoxelCount === 'number'
+                ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
+                : 'Acquired-voxel support preserved'}
+            </div>
+          ) : null}
+        </div>
+      ) : status === 'canceled' ? (
+        <div role="status" className="text-xs text-[var(--text-secondary)]">
+          Reconstruction canceled. Verified source images remain available.
+        </div>
+      ) : null}
+
+      <div ref={sliceInspectorPortalRef} className="border-t border-[var(--border-color)] pt-4" />
+    </>
+  );
+}
+
+export function Svr3DView(props: Svr3DViewProps) {
+  const workspace = useSvrReconstructionWorkspace(props);
+  const {
+    acceptedResult,
+    canRun,
+    currentReadiness,
+    displayedDate,
+    displayedPatient,
+    effectiveRoiSeriesUid,
+    exceedsMemoryBudget,
+    generationCollapsed,
+    isRunning,
+    params,
+    percent,
+    progress,
+    progressMessage,
+    roiDragRef,
+    roiPreviewSliceStable,
+    roiRect,
+    selectedGroup,
+    selectedPlaneCount,
+    selectedSeries,
+    setGenerationCollapsed,
+    setRoiRect,
+    setRoiWorld,
+    setShowAcquiredStack,
+    showAcquiredStack,
+    sliceInspectorPortalTarget,
+    sourceFrameCount,
+    sourceReadinessMessage,
+    startReconstruction,
+    stepRoiSlice,
+    volumeIdentity,
+    workspaceIdentity,
+  }: SvrReconstructionWorkspace = workspace;
+
   return (
     <section
       aria-label="MRI reconstruction workspace"
@@ -1086,414 +1755,10 @@ export function Svr3DView({
             aria-label="Reconstruction sources and quality"
             className="space-y-5 overflow-auto border-r border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5"
           >
-            <div className="space-y-3">
-              <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">
-                Acquired source sequences
-              </div>
-              <div className="max-h-[260px] overflow-auto">
-                {sequenceGroupsForDate.length === 0 ? (
-                  <div className="py-2 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
-                ) : (
-                  <div className="space-y-1">
-                    {sequenceGroupsForDate.map((g) => {
-                      const checked = selectedSequenceKey === g.key;
-
-                      const planeLabel = `${g.planeCount} plane${g.planeCount === 1 ? '' : 's'}`;
-                      const sliceLabel = `${g.sliceCount} slice${g.sliceCount === 1 ? '' : 's'}`;
-
-                      return (
-                        <label
-                          key={g.key}
-                          className={`flex min-h-10 cursor-pointer items-center gap-2 border-l-2 py-2 pl-2 pr-1 text-xs transition-colors hover:bg-[var(--bg-tertiary)] ${
-                            checked
-                              ? 'border-l-[var(--signal-metal)] text-[var(--text-primary)]'
-                              : 'border-l-transparent text-[var(--text-secondary)]'
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="svr-sequence"
-                            checked={checked}
-                            disabled={isRunning}
-                            onChange={() => setSelectedSequenceKey(g.key)}
-                          />
-                          <span className="flex-1 min-w-0 truncate">{g.label}</span>
-                          <span className="shrink-0 tabular-nums text-[var(--text-tertiary)]">
-                            {planeLabel} · {sliceLabel}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {currentReadiness?.manifests.length ? (
-              <div className="border-t border-[var(--border-color)] pt-4">
-                <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
-                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
-                  Verified acquired evidence
-                </div>
-                <div className="mt-3 space-y-2.5 text-xs">
-                  {currentReadiness.manifests.map((manifest, index) => {
-                    const frame = manifest.frames[0]!;
-                    const geometry = getSliceGeometryFromInstance(frame);
-                    const series = selectedSeries[index];
-
-                    return (
-                      <div key={manifest.seriesUid} className="flex flex-col gap-1">
-                        <span className="min-w-0 truncate text-[var(--text-primary)]">
-                          {series?.plane ?? 'Acquired'} · {manifest.frames.length} slices
-                        </span>
-                        <span className="shrink-0 tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
-                          {geometry.rowSpacingMm.toFixed(2)} × {geometry.colSpacingMm.toFixed(2)} mm
-                        </span>
-                      </div>
-                    );
-                  })}
-                  <div className="border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
-                    <div className="flex items-center justify-between gap-2">
-                      <span>Acquired source data</span>
-                      <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
-                    </div>
-                    {estimatedPeakMemoryMiB !== null ? (
-                      <div className="mt-1 flex items-center justify-between gap-2">
-                        <span>Conservative peak</span>
-                        <span
-                          className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
-                        >
-                          {Math.ceil(estimatedPeakMemoryMiB)} MiB
-                        </span>
-                      </div>
-                    ) : null}
-                    <div className="mt-1 flex items-center justify-between gap-2">
-                      <span>Requested voxel spacing</span>
-                      <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            <details className="border-t border-[var(--border-color)] pt-3">
-              <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-                Advanced SVR settings
-              </summary>
-
-              <div className="mt-2 space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="text-xs text-[var(--text-secondary)]">
-                    Voxel size (mm)
-                    <input
-                      type="number"
-                      step={0.1}
-                      min={0.1}
-                      max={10}
-                      value={params.targetVoxelSizeMm}
-                      disabled={isRunning}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          targetVoxelSizeMm: clamp(Number(e.target.value) || 0.1, 0.1, 10),
-                        }))
-                      }
-                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                    />
-                  </label>
-                  <label className="text-xs text-[var(--text-secondary)]">
-                    Iterations
-                    <input
-                      type="number"
-                      step={1}
-                      min={0}
-                      max={10}
-                      value={params.iterations}
-                      disabled={isRunning}
-                      onChange={(e) =>
-                        setParams((p) => ({ ...p, iterations: clampInt(Number(e.target.value) || 0, 0, 10) }))
-                      }
-                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                    />
-                  </label>
-                  <label className="text-xs text-[var(--text-secondary)]">
-                    Slice downsample max (px)
-                    <input
-                      type="number"
-                      step={16}
-                      min={32}
-                      max={512}
-                      value={params.sliceDownsampleMaxSize}
-                      disabled={isRunning}
-                      onChange={(e) =>
-                        setParams((p) => ({
-                          ...p,
-                          sliceDownsampleMaxSize: clampInt(Number(e.target.value) || 32, 32, 512),
-                        }))
-                      }
-                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                    />
-                  </label>
-                  <label className="text-xs text-[var(--text-secondary)]">
-                    Max volume dim (vox)
-                    <input
-                      type="number"
-                      step={16}
-                      min={64}
-                      max={384}
-                      value={params.maxVolumeDim}
-                      disabled={isRunning}
-                      onChange={(e) =>
-                        setParams((p) => ({ ...p, maxVolumeDim: clampInt(Number(e.target.value) || 64, 64, 384) }))
-                      }
-                      className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
-                    />
-                  </label>
-                </div>
-
-                <div className="space-y-1 text-xs text-[var(--text-tertiary)] leading-snug">
-                  <div>
-                    <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing.
-                    Smaller = more detail but slower/heavier. The voxel size may be increased automatically to respect{' '}
-                    <span className="text-[var(--text-secondary)]">Max volume dim</span>.
-                  </div>
-                  <div>
-                    <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to
-                    run. 0 = quick “splat/average only”; higher can reduce slice-to-slice inconsistency but costs time.
-                  </div>
-                  <div>
-                    <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be
-                    downsampled before reconstruction, but we won't downsample so far that in-plane spacing becomes
-                    worse than the target voxel size.
-                  </div>
-                  <div>
-                    <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid
-                    dimension (in voxels) by increasing voxel size if needed. Lower = faster/smaller; higher = more
-                    memory/time.
-                  </div>
-                  <div>
-                    Tip: draw a box on an input slice and run{' '}
-                    <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller +
-                    faster.
-                  </div>
-                </div>
-              </div>
-            </details>
-
-            <details className="border-t border-[var(--border-color)] pt-3">
-              <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-                Focus box (optional)
-              </summary>
-              <div className="mt-2 space-y-2">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-[var(--text-secondary)] w-16">Draw on</label>
-                  <select
-                    value={effectiveRoiSeriesUid ?? ''}
-                    onChange={(e) => {
-                      const next = e.target.value || null;
-                      setRoiSeriesUid(next);
-                    }}
-                    disabled={isRunning || selectedSeries.length === 0}
-                    className="flex-1 px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)] disabled:opacity-50"
-                  >
-                    {selectedSeries.length === 0 ? <option value="">Select a sequence above</option> : null}
-                    {selectedSeries.map((s) => (
-                      <option key={s.seriesUid} value={s.seriesUid}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {roiSeriesSopUidsError ? (
-                  <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-                    {roiSeriesSopUidsError}
-                  </div>
-                ) : roiSliceGeomError ? (
-                  <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-                    {roiSliceGeomError}
-                  </div>
-                ) : null}
-
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs text-[var(--text-tertiary)]">
-                    {roiSeriesSopUids && roiSeriesSopUids.length > 0
-                      ? `Slice ${effectiveRoiSliceIndex + 1} / ${roiSeriesSopUids.length}`
-                      : roiSeries
-                        ? 'Loading slices…'
-                        : 'Select a series to preview'}
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
-                    <button
-                      type="button"
-                      aria-label="Previous acquired source slice"
-                      disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                      onClick={() => stepRoiSlice(-1)}
-                      className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                    >
-                      ◀
-                    </button>
-
-                    <button
-                      type="button"
-                      aria-label="Next acquired source slice"
-                      disabled={isRunning || !roiSeriesSopUids || roiSeriesSopUids.length === 0}
-                      onClick={() => stepRoiSlice(1)}
-                      className="inline-flex min-h-9 min-w-9 items-center justify-center rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
-                    >
-                      ▶
-                    </button>
-                  </div>
-                </div>
-
-                <DicomRoiSlicePreview
-                  slice={roiPreviewSliceStable}
-                  sourceSeriesUid={effectiveRoiSeriesUid}
-                  maxSize={512}
-                  roiRect={roiRect}
-                  setRoiRect={setRoiRect}
-                  roiDragRef={roiDragRef}
-                  onSliceDelta={stepRoiSlice}
-                  onRoiFinalized={(roi) => {
-                    setRoiWorld(roi);
-                  }}
-                  disabled={isRunning}
-                />
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isRunning || (!roiRect && !roiWorld)}
-                    onClick={() => {
-                      setRoiRect(null);
-                      roiDragRef.current = null;
-                      setRoiWorld(null);
-                    }}
-                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-50"
-                  >
-                    Clear box
-                  </button>
-
-                  {roiWorld && roiSideMm ? (
-                    <div className="text-xs text-[var(--text-tertiary)]">
-                      Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="text-xs text-[var(--text-tertiary)]">
-                  Drag to draw a box on an input slice. When a box is set,{' '}
-                  <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting
-                  with a smaller box lets you decrease voxel size for more detail without making the volume huge.
-                </div>
-              </div>
-            </details>
-
-            <div className="flex items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
-              <button
-                type="button"
-                disabled={isRunning}
-                onClick={() => {
-                  setSelectedSequenceKey(null);
-                  setRoiSeriesUid(null);
-                  setRoiRect(null);
-                  roiDragRef.current = null;
-                  setRoiWorld(null);
-                  clear();
-                }}
-                className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
-              >
-                Clear
-              </button>
-
-              <div className="flex items-center gap-2">
-                {isRunning ? (
-                  <button
-                    type="button"
-                    onClick={cancel}
-                    className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-tertiary)]"
-                  >
-                    Cancel
-                  </button>
-                ) : null}
-
-                <button
-                  type="button"
-                  disabled={!canRun}
-                  onClick={startReconstruction}
-                  aria-describedby={sourceReadinessMessage ? 'svr-source-readiness' : undefined}
-                  className="min-h-9 rounded-[4px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
-                </button>
-              </div>
-            </div>
-
-            {sourceReadinessMessage && !isRunning ? (
-              <div
-                id="svr-source-readiness"
-                role={currentReadiness?.error ? 'alert' : 'status'}
-                className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
-                  currentReadiness?.error || exceedsMemoryBudget
-                    ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
-                    : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
-                }`}
-              >
-                {sourceReadinessMessage}
-              </div>
-            ) : null}
-
-            {isRunning && progress ? (
-              <div
-                role="progressbar"
-                aria-label={progressMessage}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={percent}
-                className="border-t border-[var(--border-color)] pt-3"
-              >
-                <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                  <span className="truncate">{progressMessage}</span>
-                  <span className="ml-auto tabular-nums">{percent}%</span>
-                </div>
-                <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
-                  <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
-                </div>
-              </div>
-            ) : null}
-
-            {error ? (
-              <div
-                role="alert"
-                className="border-l-2 border-l-[var(--danger)] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]"
-              >
-                {error}
-              </div>
-            ) : null}
-
-            {acceptedResult ? (
-              <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
-                <div className="font-medium text-[var(--text-primary)]">Accepted reconstruction</div>
-                <div className="mt-1 tabular-nums">
-                  {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]}{' '}
-                  voxels · {acceptedResult.volume.voxelSizeMm[0].toFixed(2)} mm
-                </div>
-                {acceptedResult.volume.observedSupport ? (
-                  <div className="mt-1 text-[var(--evidence)]">
-                    {typeof acceptedResult.volume.supportedVoxelCount === 'number'
-                      ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
-                      : 'Acquired-voxel support preserved'}
-                  </div>
-                ) : null}
-              </div>
-            ) : status === 'canceled' ? (
-              <div role="status" className="text-xs text-[var(--text-secondary)]">
-                Reconstruction canceled. Verified source images remain available.
-              </div>
-            ) : null}
-
-            <div ref={sliceInspectorPortalRef} className="border-t border-[var(--border-color)] pt-4" />
+            <SvrSourceEvidence workspace={workspace} />
+            <SvrAdvancedSettings workspace={workspace} />
+            <SvrFocusBox workspace={workspace} />
+            <SvrReconstructionActions workspace={workspace} />
           </aside>
         )}
 

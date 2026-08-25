@@ -398,6 +398,9 @@ export function DragRectActionOverlay({
       onPointerUpCapture={onPointerUpCapture}
       onPointerCancelCapture={onPointerCancelCapture}
       onClickCapture={onClickCapture}
+      onKeyDownCapture={(event) => {
+        if (event.key === 'Escape' && selection) clearSelection();
+      }}
     >
       {children}
 

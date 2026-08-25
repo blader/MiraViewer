@@ -397,9 +397,12 @@ export function preparePerceptualReference(
     throw new Error('preparePerceptualReference: validity does not match reference image dimensions');
   }
   const requestedScales = options.scales ?? [256, 128, 64];
-  const scaleSizes = [...new Set(requestedScales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
-    (a, b) => b - a,
-  );
+  const uniqueScales = new Set<number>();
+  for (const requestedScale of requestedScales) {
+    const roundedScale = Math.round(requestedScale);
+    if (roundedScale > 0 && roundedScale <= size) uniqueScales.add(roundedScale);
+  }
+  const scaleSizes = [...uniqueScales].sort((a, b) => b - a);
   if (scaleSizes.length === 0) scaleSizes.push(size);
 
   const scales = scaleSizes.map((scaleSize): PreparedPerceptualScale => {

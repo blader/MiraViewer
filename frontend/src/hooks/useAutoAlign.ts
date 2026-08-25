@@ -373,10 +373,7 @@ export function useAutoAlign() {
           });
 
         // In-memory store used by the per-cell debug overlay (SSIM/LNCC + MI/NMI breakdown).
-        resetAlignmentSliceScoreStore({
-          referenceSeriesUid: reference.seriesUid,
-          referenceSliceIndex: reference.sliceIndex,
-        });
+        resetAlignmentSliceScoreStore();
 
         // Score the exact visible reference tissue while preserving its acquired physical-plane authority.
         const referenceRender = await captureReferenceSlice(ALIGNMENT_IMAGE_SIZE);

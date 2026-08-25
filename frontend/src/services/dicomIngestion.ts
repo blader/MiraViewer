@@ -539,16 +539,16 @@ async function probeDicomIdentity(file: File): Promise<ProbedDicom | undefined> 
 
 async function readPersistedOwnership(
   candidates: readonly (PreparedDicom | ProbedDicom)[],
+  database?: Awaited<ReturnType<typeof getDB>>,
 ): Promise<Map<string, DicomInstance | undefined>> {
-  const db = await getDB();
+  const db = database ?? (await getDB());
   const transaction = db.transaction('instances', 'readonly');
-  const ownership = new Map<string, DicomInstance | undefined>();
-  for (const candidate of candidates) {
-    const uid = candidate.instance.sopInstanceUid;
-    if (!ownership.has(uid)) ownership.set(uid, await transaction.store.get(uid));
-  }
-  await transaction.done;
-  return ownership;
+  const instanceUids = Array.from(new Set(candidates.map((candidate) => candidate.instance.sopInstanceUid)));
+  const [instances] = await Promise.all([
+    Promise.all(instanceUids.map((instanceUid) => transaction.store.get(instanceUid))),
+    transaction.done,
+  ]);
+  return new Map(instanceUids.map((instanceUid, index) => [instanceUid, instances[index]]));
 }
 
 function missingCanonicalValue(value: unknown): boolean {
@@ -687,7 +687,7 @@ function isImportAbort(error: unknown): boolean {
 async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSignal): Promise<DicomIngestResult[]> {
   if (!candidates.length || signal?.aborted) return [];
   const db = await getDB();
-  const ownership = await readPersistedOwnership(candidates);
+  const ownership = await readPersistedOwnership(candidates, db);
   if (signal?.aborted) return [];
 
   const results: (DicomIngestResult | undefined)[] = Array(candidates.length);
@@ -695,13 +695,14 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
   let incrementalBytes = 0;
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
-    const existing = ownership.get(candidate.instance.sopInstanceUid);
+    const instanceUid = candidate.instance.sopInstanceUid;
+    const existing = ownership.get(instanceUid);
     if (existing) {
       results[index] = persistedOwnershipResult(existing, candidate);
       continue;
     }
-    if (!incoming.has(candidate.instance.sopInstanceUid)) {
-      incoming.add(candidate.instance.sopInstanceUid);
+    if (!incoming.has(instanceUid)) {
+      incoming.add(instanceUid);
       incrementalBytes += candidate.file.size + ESTIMATED_IMAGE_METADATA_BYTES;
     }
   }
@@ -827,6 +828,7 @@ export async function processFiles(
   onProgress?: (current: number, total: number, detail?: ProcessFilesProgress) => void,
   options: ProcessFilesOptions = {},
 ): Promise<ProcessFilesResult> {
+  const { signal } = options;
   const knownTotal = options.total ?? (Array.isArray(files) ? files.length : undefined);
   const result: ProcessFilesResult = {
     total: knownTotal ?? 0,
@@ -836,7 +838,7 @@ export async function processFiles(
     errors: 0,
     errorSamples: [],
   };
-  if (options.signal?.aborted) return { ...result, cancelled: true };
+  if (signal?.aborted) return { ...result, cancelled: true };
   const maxItems = Math.max(1, Math.floor(options.batchMaxItems ?? DEFAULT_BATCH_MAX_ITEMS));
   const maxBytes = Math.max(1, Math.floor(options.batchMaxBytes ?? DEFAULT_BATCH_MAX_BYTES));
   const affectedSeries = new Set<string>();
@@ -901,12 +903,12 @@ export async function processFiles(
     let written: DicomIngestResult[] = [];
     if (prepared.length) {
       try {
-        written = await writePreparedBatch(prepared, options.signal);
+        written = await writePreparedBatch(prepared, signal);
       } catch (error) {
         if (isImportAbort(error)) return;
         written = prepared.map((candidate) => databaseError(candidate.fileName, error));
       }
-      if (!written.length && options.signal?.aborted) return;
+      if (!written.length && signal?.aborted) return;
     }
     let writtenIndex = 0;
     for (const candidate of pending) {
@@ -925,11 +927,11 @@ export async function processFiles(
   let iteratorCancelled = false;
   try {
     for await (const file of files) {
-      if (options.signal?.aborted) break;
+      throwIfImportAborted(signal);
       if (knownTotal === undefined) result.total += 1;
       if (pending.length && (pending.length >= maxItems || pendingBytes + file.size > maxBytes)) {
         await flush();
-        if (options.signal?.aborted) break;
+        throwIfImportAborted(signal);
       }
 
       let candidate: PreparedDicom | ProbedDicom | DicomIngestResult;
@@ -944,18 +946,18 @@ export async function processFiles(
           message: 'Invalid or unsupported DICOM data.',
         };
       }
-      if (options.signal?.aborted) break;
+      throwIfImportAborted(signal);
       pending.push(candidate);
       if (candidate.status === 'prepared' || candidate.status === 'probed') pendingBytes += file.size;
       if (pending.length >= maxItems || pendingBytes >= maxBytes) await flush();
-      if (options.signal?.aborted) break;
+      throwIfImportAborted(signal);
     }
-    if (!options.signal?.aborted) await flush();
+    if (!signal?.aborted) await flush();
   } catch (error) {
     if (!isImportAbort(error)) throw error;
     iteratorCancelled = true;
   }
-  if (iteratorCancelled || options.signal?.aborted) result.cancelled = true;
+  if (iteratorCancelled || signal?.aborted) result.cancelled = true;
   if (affectedSeries.size) result.affectedSeriesUids = [...affectedSeries];
   return result;
 }

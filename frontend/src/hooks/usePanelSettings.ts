@@ -84,11 +84,10 @@ export function usePanelSettings(
       const seqId = selectedSeqIdRef.current;
       if (!seqId || !settingsBelongToPatient) return;
 
-      setPanelSettings((prev) => {
-        const next = new Map(prev);
-        next.set(date, settings);
-        return next;
-      });
+      const next = new Map(panelSettingsRef.current);
+      next.set(date, settings);
+      panelSettingsRef.current = next;
+      setPanelSettings(next);
 
       // Persist to local storage (fire-and-forget)
       savePanelSettings(seqId, date, settings, patientKey).catch(reportPersistenceFailure);
@@ -270,7 +269,7 @@ export function usePanelSettings(
         reportPersistenceFailure(error);
         // A failed patient-scoped read must never inherit another patient's settings.
         setPanelSettings((prev) => {
-          const next = scopeChanged ? new Map<string, PanelSettings>() : new Map(prev);
+          const next = new Map<string, PanelSettings>(scopeChanged ? [] : prev);
           for (const date of newDates) {
             if (!next.has(date)) {
               next.set(date, { ...DEFAULT_PANEL_SETTINGS });
@@ -295,38 +294,37 @@ export function usePanelSettings(
       const updateKeys = Object.keys(update);
       const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
 
-      setPanelSettings((prev) => {
-        const current = prev.get(date) || { ...DEFAULT_PANEL_SETTINGS };
-        const updated = { ...current, ...update };
+      const current = panelSettingsRef.current.get(date) || { ...DEFAULT_PANEL_SETTINGS };
+      const updated = { ...current, ...update };
 
-        // Avoid pushing no-ops into history (e.g., clamped buttons).
-        const updatedAny = updated as unknown as Record<string, unknown>;
-        const currentAny = current as unknown as Record<string, unknown>;
-        const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
+      // Avoid pushing no-ops into history (e.g., clamped buttons).
+      const updatedAny = updated as unknown as Record<string, unknown>;
+      const currentAny = current as unknown as Record<string, unknown>;
+      const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
 
-        if (shouldRecordHistory && isMeaningfulChange) {
-          undoStackRef.current.push({
-            date,
-            before: { ...current },
-            after: { ...updated },
-          });
+      if (shouldRecordHistory && isMeaningfulChange) {
+        undoStackRef.current.push({
+          date,
+          before: { ...current },
+          after: { ...updated },
+        });
 
-          // New action invalidates redo stack.
-          redoStackRef.current.length = 0;
+        // New action invalidates redo stack.
+        redoStackRef.current.length = 0;
 
-          // Cap memory.
-          if (undoStackRef.current.length > MAX_HISTORY) {
-            undoStackRef.current.shift();
-          }
+        // Cap memory.
+        if (undoStackRef.current.length > MAX_HISTORY) {
+          undoStackRef.current.shift();
         }
+      }
 
-        // Persist to local storage (fire-and-forget)
-        savePanelSettings(selectedSeqId, date, updated, patientKey).catch(reportPersistenceFailure);
+      const next = new Map(panelSettingsRef.current);
+      next.set(date, updated);
+      panelSettingsRef.current = next;
+      setPanelSettings(next);
 
-        const next = new Map(prev);
-        next.set(date, updated);
-        return next;
-      });
+      // Persist to local storage (fire-and-forget)
+      savePanelSettings(selectedSeqId, date, updated, patientKey).catch(reportPersistenceFailure);
     },
     [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
   );
@@ -355,11 +353,10 @@ export function usePanelSettings(
       redoStackRef.current.length = 0;
       while (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
 
-      setPanelSettings((prev) => {
-        const next = new Map(prev);
-        for (const { date, after } of historyEntries) next.set(date, after);
-        return next;
-      });
+      const next = new Map(panelSettingsRef.current);
+      for (const { date, after } of historyEntries) next.set(date, after);
+      panelSettingsRef.current = next;
+      setPanelSettings(next);
 
       for (const { date, after } of historyEntries) {
         savePanelSettings(selectedSeqId, date, after, patientKey).catch(reportPersistenceFailure);

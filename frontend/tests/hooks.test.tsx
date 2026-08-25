@@ -169,6 +169,24 @@ describe('useOverlayNavigation', () => {
     expect(result.current.displayedOverlayIndex).toBe(2);
   });
 
+  it('retains the immediately preceding comparison target across same-event navigation', () => {
+    const columns = [
+      { date: '2024-01-01', ref: { study_id: 'one', series_uid: 'one', instance_count: 1 } },
+      { date: '2024-02-01', ref: { study_id: 'two', series_uid: 'two', instance_count: 1 } },
+      { date: '2024-03-01', ref: { study_id: 'three', series_uid: 'three', instance_count: 1 } },
+    ];
+    const { result } = renderHook(() => useOverlayNavigation(columns));
+
+    act(() => {
+      result.current.setViewMode('overlay');
+      result.current.setOverlayDateIndex(1);
+      result.current.setOverlayDateIndex(2);
+    });
+
+    expect(result.current.overlayDateIndex).toBe(2);
+    expect(result.current.compareTargetIndex).toBe(1);
+  });
+
   it('blocks overlay keyboard shortcuts and playback while a modal owns interaction', () => {
     const columns = [
       { date: 'first', ref: { study_id: 'one', series_uid: 'one', instance_count: 2 } },
@@ -235,6 +253,31 @@ describe('usePanelSettings', () => {
 
     const settings = result.current.panelSettings.get('2024-01-01T00:00:00') || DEFAULT_PANEL_SETTINGS;
     expect(settings.brightness).toBe(120);
+    unmount();
+  });
+
+  it('preserves same-event panel edits and their independent undo/redo history', async () => {
+    const date = '2024-01-01T00:00:00';
+    const { result, unmount } = renderHook(() => usePanelSettings('seq-1', date));
+    await act(async () => {});
+
+    act(() => {
+      result.current.updatePanelSetting(date, { brightness: 135 });
+      result.current.updatePanelSetting(date, { zoom: 2 });
+    });
+    expect(result.current.panelSettings.get(date)).toMatchObject({ brightness: 135, zoom: 2 });
+
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true })));
+    expect(result.current.panelSettings.get(date)).toMatchObject({ brightness: 135, zoom: 1 });
+
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true })));
+    expect(result.current.panelSettings.get(date)).toMatchObject({ brightness: 100, zoom: 1 });
+
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true })));
+    expect(result.current.panelSettings.get(date)).toMatchObject({ brightness: 135, zoom: 1 });
+
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true })));
+    expect(result.current.panelSettings.get(date)).toMatchObject({ brightness: 135, zoom: 2 });
     unmount();
   });
 

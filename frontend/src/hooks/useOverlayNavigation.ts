@@ -53,8 +53,10 @@ export function useOverlayNavigation(
   }, []);
 
   const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(initialPersistedNav.viewMode ?? 'grid');
-  const [overlayDateIndex, setOverlayDateIndexState] = useState(0);
-  const [previousOverlayDateIndex, setPreviousOverlayDateIndex] = useState<number | null>(null);
+  const [overlayDateNavigation, setOverlayDateNavigation] = useState<{ current: number; previous: number | null }>({
+    current: 0,
+    previous: null,
+  });
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeedState] = useState(initialPersistedNav.playSpeed ?? 1000); // ms between frames
 
@@ -97,21 +99,18 @@ export function useOverlayNavigation(
 
   const setOverlayDateIndex = useCallback(
     (next: number | ((prev: number) => number)) => {
-      setOverlayDateIndexState((prev) => {
-        const safePrev = Math.max(0, Math.min(maxOverlayIndex, prev));
+      setOverlayDateNavigation((previous) => {
+        const safePrev = Math.max(0, Math.min(maxOverlayIndex, previous.current));
         const resolved = typeof next === 'function' ? next(safePrev) : next;
         const clamped = Math.max(0, Math.min(maxOverlayIndex, resolved));
-        if (clamped !== safePrev) {
-          setPreviousOverlayDateIndex(safePrev);
-        }
-        return clamped;
+        return clamped === safePrev ? previous : { current: clamped, previous: safePrev };
       });
     },
     [maxOverlayIndex],
   );
 
   // Read-only, clamped indices (avoid setState in effects when columns shrink).
-  const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateIndex));
+  const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.current));
 
   // Hydrate the overlay date from storage (once) after we know which dates are available.
   // If we do restore, skip the first persist pass so we don't overwrite the stored value
@@ -137,11 +136,13 @@ export function useOverlayNavigation(
     const idx = overlayColumns.findIndex((c) => c.date === stored);
     if (idx >= 0 && idx !== safeOverlayDateIndex) {
       skipNextPersistOverlayDateRef.current = true;
-      setOverlayDateIndexState(idx);
+      setOverlayDateNavigation((previous) => ({ ...previous, current: idx }));
     }
   }, [overlayColumns, safeOverlayDateIndex]);
   const safePreviousOverlayDateIndex =
-    previousOverlayDateIndex === null ? null : Math.max(0, Math.min(maxOverlayIndex, previousOverlayDateIndex));
+    overlayDateNavigation.previous === null
+      ? null
+      : Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.previous));
 
   // Space-hold compare behavior:
   // - Prefer the actual navigation history (previousOverlayDateIndex)

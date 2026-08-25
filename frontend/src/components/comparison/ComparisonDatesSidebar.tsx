@@ -41,9 +41,8 @@ export function ComparisonDatesSidebar({
         {open ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
       </button>
 
-      <div
+      <aside
         id="comparison-dates-panel"
-        role="complementary"
         aria-label="Examination dates"
         data-open={open}
         data-side="right"
@@ -118,7 +117,7 @@ export function ComparisonDatesSidebar({
             })}
           </div>
         </div>
-      </div>
+      </aside>
     </>
   );
 }

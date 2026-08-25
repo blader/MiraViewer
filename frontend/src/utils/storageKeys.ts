@@ -37,12 +37,6 @@ export const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Legacy v1 playback storage key.
- * @deprecated Users may still have this data - kept so ClearDataModal can remove it.
- */
-export const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-
-/**
  * Legacy v1 playback cookie name.
  * @deprecated Users may still have this cookie - kept so ClearDataModal can remove it.
  */

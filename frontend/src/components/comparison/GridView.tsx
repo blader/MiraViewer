@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { MouseEvent } from 'react';
+import type { FocusEvent, MouseEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import { GridCell } from './GridCell';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
@@ -40,7 +40,7 @@ export function GridView({
 }: GridViewProps) {
   const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
 
-  const updateHoveredCellFromEvent = useCallback((e: MouseEvent<HTMLDivElement>) => {
+  const updateHoveredCellFromEvent = useCallback((e: MouseEvent<HTMLDivElement> | FocusEvent<HTMLDivElement>) => {
     const target = e.target;
     if (!(target instanceof Element)) return;
 
@@ -107,6 +107,7 @@ export function GridView({
         onMouseOver={onMouseOverGrid}
         onMouseMove={onMouseMoveGrid}
         onMouseLeave={onMouseLeaveGrid}
+        onFocus={updateHoveredCellFromEvent}
       >
         {columns.map(({ date, ref }) => {
           const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;

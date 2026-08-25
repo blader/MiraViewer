@@ -39,16 +39,6 @@ export function writeLocalStorageJson(key: string, value: unknown): void {
   }
 }
 
-export function removeLocalStorageItem(key: string): void {
-  if (typeof window === 'undefined') return;
-
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    // Ignore quota/blocked storage.
-  }
-}
-
 export function safeDecodeURIComponent(raw: string): string | null {
   try {
     return decodeURIComponent(raw);

@@ -91,31 +91,11 @@ export type AlignmentSliceScoreMetrics = {
   finalAffineProposals?: AlignmentFinalAffineProposalMetrics[];
 };
 
-export type AlignmentSliceScoreContext = {
-  referenceSeriesUid: string;
-  referenceSliceIndex: number;
-  startedAtMs: number;
-};
-
-let context: AlignmentSliceScoreContext | null = null;
-
 // Keyed by series UID (moving series), then by instance index (0..instance_count-1).
 const scoresBySeries = new Map<string, Map<number, AlignmentSliceScoreMetrics>>();
 
-export function resetAlignmentSliceScoreStore(nextContext: {
-  referenceSeriesUid: string;
-  referenceSliceIndex: number;
-}): void {
+export function resetAlignmentSliceScoreStore(): void {
   scoresBySeries.clear();
-  context = {
-    referenceSeriesUid: nextContext.referenceSeriesUid,
-    referenceSliceIndex: nextContext.referenceSliceIndex,
-    startedAtMs: Date.now(),
-  };
-}
-
-export function getAlignmentSliceScoreContext(): AlignmentSliceScoreContext | null {
-  return context;
 }
 
 export function recordAlignmentSliceScore(

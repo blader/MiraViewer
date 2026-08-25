@@ -37,9 +37,8 @@ export function ComparisonFiltersSidebar({
 }: ComparisonFiltersSidebarProps) {
   return (
     <>
-      <div
+      <aside
         id="comparison-filters-panel"
-        role="complementary"
         aria-label="Scan filters"
         data-open={open}
         data-side="left"
@@ -135,7 +134,7 @@ export function ComparisonFiltersSidebar({
             ) : null}
           </div>
         </div>
-      </div>
+      </aside>
 
       <button
         type="button"

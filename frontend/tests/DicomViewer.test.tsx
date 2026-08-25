@@ -99,10 +99,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   act(() => clearDerivedAlignmentFrames());
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
-  resetAlignmentSliceScoreStore({
-    referenceSeriesUid: 'reference-series',
-    referenceSliceIndex: 10,
-  });
+  resetAlignmentSliceScoreStore();
 
   Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
     width: 500,
@@ -121,10 +118,7 @@ afterEach(() => {
   act(() => clearDerivedAlignmentFrames());
   fireEvent.keyUp(window, { key: 'z' });
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
-  resetAlignmentSliceScoreStore({
-    referenceSeriesUid: 'reference-series',
-    referenceSliceIndex: 10,
-  });
+  resetAlignmentSliceScoreStore();
 });
 
 describe('DicomViewer', () => {

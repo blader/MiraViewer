@@ -227,9 +227,12 @@ export function selectFinalAffineProposal(options: {
   if (movingValidity) assertSquare(movingValidity, size, 'selectFinalAffineProposal movingValidity');
   validateOptimizerProposals(optimizerProposals);
 
-  const scaleSizes = [...new Set(scales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
-    (a, b) => b - a,
-  );
+  const uniqueScales = new Set<number>();
+  for (const scale of scales) {
+    const roundedScale = Math.round(scale);
+    if (roundedScale > 0 && roundedScale <= size) uniqueScales.add(roundedScale);
+  }
+  const scaleSizes = [...uniqueScales].sort((a, b) => b - a);
   if (scaleSizes.length === 0) scaleSizes.push(size);
   // MIND uses a fixed one-pixel patch plus one-pixel offset; constructing an entire unused
   // reference pyramid solely to rediscover its two-pixel footprint was unnecessary.

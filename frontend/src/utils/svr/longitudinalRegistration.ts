@@ -505,11 +505,12 @@ function prepareNativeSliceStack(slices: readonly SvrReconstructionSlice[]): Nat
   if (!first) throw new Error('Cannot sample an empty acquired slice stack');
   const normal = first.normalDir;
   const ordered = slices.map((slice) => ({ slice, depth: dot(slice.ippMm, normal) })).sort((a, b) => a.depth - b.depth);
-  const separations = ordered
-    .slice(1)
-    .map((slice, index) => slice.depth - ordered[index]!.depth)
-    .filter((separation) => separation > COORDINATE_EPSILON_MM)
-    .sort((a, b) => a - b);
+  const separations: number[] = [];
+  for (let index = 1; index < ordered.length; index++) {
+    const separation = ordered[index]!.depth - ordered[index - 1]!.depth;
+    if (separation > COORDINATE_EPSILON_MM) separations.push(separation);
+  }
+  separations.sort((a, b) => a - b);
   return {
     normal,
     ordered,
@@ -1299,11 +1300,13 @@ export async function registerAndResliceLongitudinal(
       minimumSamples,
     };
     const reverse = { samples: referenceSamples, ...targetDomain };
-    const scoredSeeds = candidates
-      .map((rigid) => ({ rigid, evidence: scoreBidirectionalNcc({ ...common, rigid, reverse }) }))
-      .filter(({ evidence }) => Number.isFinite(evidence.ncc))
-      .sort((first, second) => second.evidence.ncc - first.evidence.ncc)
-      .slice(0, 3);
+    const scoredSeeds: Array<{ rigid: RigidParams; evidence: ReturnType<typeof scoreBidirectionalNcc> }> = [];
+    for (const rigid of candidates) {
+      const evidence = scoreBidirectionalNcc({ ...common, rigid, reverse });
+      if (Number.isFinite(evidence.ncc)) scoredSeeds.push({ rigid, evidence });
+    }
+    scoredSeeds.sort((first, second) => second.evidence.ncc - first.evidence.ncc);
+    scoredSeeds.length = Math.min(scoredSeeds.length, 3);
     if (scoredSeeds.length === 0) {
       return failure('insufficient-coverage', 'No physically justified initial pose retains enough supported anatomy');
     }

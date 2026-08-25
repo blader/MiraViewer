@@ -35,7 +35,12 @@ export type GroundTruthPolygonOverlayProps = {
   imageSize?: { w: number; h: number };
 };
 
-export function GroundTruthPolygonOverlay({
+export function GroundTruthPolygonOverlay(props: GroundTruthPolygonOverlayProps) {
+  if (!props.enabled) return null;
+  return <GroundTruthPolygonEditor key={`${props.seriesUid}:${props.effectiveInstanceIndex}`} {...props} />;
+}
+
+function useGroundTruthPolygonEditor({
   enabled,
   onRequestClose,
   comboId,
@@ -103,13 +108,7 @@ export function GroundTruthPolygonOverlay({
   }, [enabled, seriesUid, effectiveInstanceIndex, imageSize]);
 
   // Reset draft state when turning on.
-  useEffect(() => {
-    if (!enabled) return;
-    setDraftPoints([]);
-    setIsClosed(false);
-    setDraftViewTransform({ ...viewerTransformRef.current });
-    setError(null);
-  }, [enabled]);
+  // The keyed editor is recreated for each enabled acquired slice.
 
   // Track container size (used for hit-testing / close threshold).
   useEffect(() => {
@@ -175,7 +174,7 @@ export function GroundTruthPolygonOverlay({
       // when the user pans/zooms/rotates.
       let baseView = draftViewTransform;
       if (!baseView) {
-        baseView = { ...viewerTransform };
+        baseView = { ...viewerTransformRef.current };
         setDraftViewTransform(baseView);
       }
 
@@ -185,34 +184,31 @@ export function GroundTruthPolygonOverlay({
           ? remapPointBetweenViewerTransforms(pCurrent, size, viewerTransform, baseView)
           : pCurrent;
 
-      setDraftPoints((prev) => {
-        if (prev.length >= 3) {
-          const firstDraft = prev[0]!;
-          const firstCurrent =
-            size.w > 0 && size.h > 0
-              ? remapPointBetweenViewerTransforms(firstDraft, size, baseView!, viewerTransform)
-              : firstDraft;
+      if (draftPoints.length >= 3) {
+        const firstDraft = draftPoints[0]!;
+        const firstCurrent =
+          size.w > 0 && size.h > 0
+            ? remapPointBetweenViewerTransforms(firstDraft, size, baseView, viewerTransform)
+            : firstDraft;
 
-          if (isNearFirstPoint(pCurrent, firstCurrent)) {
-            // Close polygon by clicking near the first point.
-            setIsClosed(true);
-            return prev;
-          }
+        if (isNearFirstPoint(pCurrent, firstCurrent)) {
+          // Close polygon by clicking near the first point.
+          setIsClosed(true);
+          return;
         }
+      }
 
-        // Avoid adding duplicate points (in draft/view space).
-        const last = prev[prev.length - 1];
-        if (last && Math.hypot(last.x - pDraft.x, last.y - pDraft.y) < 0.0015) {
-          return prev;
-        }
+      // Avoid adding duplicate points (in draft/view space).
+      const last = draftPoints[draftPoints.length - 1];
+      if (last && Math.hypot(last.x - pDraft.x, last.y - pDraft.y) < 0.0015) return;
 
-        return [...prev, pDraft];
-      });
+      setDraftPoints([...draftPoints, pDraft]);
     },
     [
       containerSize.h,
       containerSize.w,
       didClickRef,
+      draftPoints,
       draftViewTransform,
       enabled,
       getLocalNormPoint,
@@ -288,7 +284,7 @@ export function GroundTruthPolygonOverlay({
       console.error(err);
       setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
-      if (generation === sliceGenerationRef.current) setBusy(false);
+      setBusy((current) => (generation === sliceGenerationRef.current ? false : current));
     }
   }, [
     comboId,
@@ -329,7 +325,7 @@ export function GroundTruthPolygonOverlay({
       console.error(err);
       setError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
-      if (generation === sliceGenerationRef.current) setBusy(false);
+      setBusy((current) => (generation === sliceGenerationRef.current ? false : current));
     }
   }, [effectiveInstanceIndex, enabled, seriesUid]);
 
@@ -421,11 +417,52 @@ export function GroundTruthPolygonOverlay({
     return polygonToSvgPath({ points: draftPointsDisplay });
   }, [draftPointsDisplay, isClosed]);
 
-  if (!enabled) return null;
-
   const canUndo = draftPoints.length > 0 && !busy;
   const canClear = (draftPoints.length > 0 || isClosed) && !busy;
   const canSave = isClosed && draftPoints.length >= 3 && !busy;
+
+  return {
+    containerRef,
+    onPointerDown,
+    onClickCapture,
+    onUndo,
+    onClear,
+    onSave,
+    onDelete,
+    busy,
+    error,
+    isClosed,
+    draftPointsDisplay,
+    savedPolygon,
+    savedPath,
+    draftPath,
+    canUndo,
+    canClear,
+    canSave,
+  };
+}
+
+function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
+  const { enabled, onRequestClose } = props;
+  const {
+    containerRef,
+    onPointerDown,
+    onClickCapture,
+    onUndo,
+    onClear,
+    onSave,
+    onDelete,
+    busy,
+    error,
+    isClosed,
+    draftPointsDisplay,
+    savedPolygon,
+    savedPath,
+    draftPath,
+    canUndo,
+    canClear,
+    canSave,
+  } = useGroundTruthPolygonEditor(props);
 
   return (
     <div

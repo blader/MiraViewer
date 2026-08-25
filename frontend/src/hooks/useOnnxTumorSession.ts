@@ -94,7 +94,15 @@ export function useOnnxTumorSession(
   const segRunIdRef = useRef(0);
   const inferenceTaskRef = useRef<Promise<void> | null>(null);
   const [segRunning, setSegRunning] = useState(false);
-  const [allowUnsafeFullRes, setAllowUnsafeFullRes] = useState(false);
+  const [unsafeFullResOverride, setUnsafeFullResOverride] = useState<{ volume: SvrVolume | null; allowed: boolean }>({
+    volume: null,
+    allowed: false,
+  });
+  const allowUnsafeFullRes = unsafeFullResOverride.volume === volume && unsafeFullResOverride.allowed;
+  const setAllowUnsafeFullRes = useCallback(
+    (allowed: boolean) => setUnsafeFullResOverride({ volume, allowed }),
+    [volume],
+  );
 
   // A new volume invalidates any in-flight segmentation (its labels would belong to the
   // old grid — the run-id bump makes the late result a no-op) and resets the user's
@@ -103,7 +111,6 @@ export function useOnnxTumorSession(
   useEffect(() => {
     segRunIdRef.current++;
     setSegRunning(inferenceTaskRef.current !== null);
-    setAllowUnsafeFullRes(false);
     setStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
 

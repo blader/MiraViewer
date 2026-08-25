@@ -108,14 +108,17 @@ export async function getImageCounts(series: readonly DicomSeries[]): Promise<Re
 
 export async function getStudies() {
   const db = await getDB();
-  const selectedPatientKey = await getSelectedPatientKey();
-  const allStudies = await db.getAll('studies');
+  const [selectedPatientKey, allStudies, availableSeries] = await Promise.all([
+    getSelectedPatientKey(),
+    db.getAll('studies'),
+    db.getAll('series'),
+  ]);
   const patientIdentityKeys = getPatientIdentityKeys(allStudies);
   const studies = allStudies.filter(
     (study) => !selectedPatientKey || patientIdentityKeys.get(study.studyInstanceUid) === selectedPatientKey,
   );
   const selectedStudyUids = new Set(studies.map((study) => study.studyInstanceUid));
-  const allSeries = (await db.getAll('series')).filter((series) => selectedStudyUids.has(series.studyInstanceUid));
+  const allSeries = availableSeries.filter((series) => selectedStudyUids.has(series.studyInstanceUid));
 
   // Aggregate counts without loading instance Blob payloads.
   const seriesByStudy: Record<string, DicomSeries[]> = {};
@@ -129,10 +132,12 @@ export async function getStudies() {
   return studies
     .map((study) => {
       const series = seriesByStudy[study.studyInstanceUid] || [];
-      const seriesList = series
-        .map((s) => {
-          const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
-          return {
+      const seriesList = series.flatMap((s) => {
+        const instanceCount = instanceCountsBySeries[s.seriesInstanceUid] || 0;
+        if (instanceCount === 0) return [];
+        const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
+        return [
+          {
             series_uid: s.seriesInstanceUid,
             series_description: s.seriesDescription,
             series_number: s.seriesNumber,
@@ -140,10 +145,10 @@ export async function getStudies() {
             plane: s.plane || parsed.plane,
             weight: s.weight || parsed.weight,
             sequence_type: s.sequenceType || parsed.sequenceType,
-            instance_count: instanceCountsBySeries[s.seriesInstanceUid] || 0,
-          };
-        })
-        .filter((s) => s.instance_count > 0);
+            instance_count: instanceCount,
+          },
+        ];
+      });
 
       const totalInstances = seriesList.reduce((acc, s) => acc + s.instance_count, 0);
 
@@ -163,8 +168,11 @@ export async function getStudies() {
 
 export async function getComparisonData(requestedPatientKey?: string | null): Promise<PatientScopedComparisonData> {
   const db = await getDB();
-  const allSeries = await db.getAll('series');
-  const allStudies = await db.getAll('studies');
+  const [allSeries, allStudies, storedPatientKey] = await Promise.all([
+    db.getAll('series'),
+    db.getAll('studies'),
+    getSelectedPatientKey(),
+  ]);
   const patientIdentityKeys = getPatientIdentityKeys(allStudies);
 
   const patientMap = new Map<string, PatientSummary>();
@@ -183,7 +191,6 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
   const patients = Array.from(patientMap.values()).sort((a, b) =>
     (a.patient_name || a.patient_id || a.key).localeCompare(b.patient_name || b.patient_id || b.key),
   );
-  const storedPatientKey = await getSelectedPatientKey();
   const candidatePatientKey = requestedPatientKey ?? storedPatientKey;
   const selectedPatientKey =
     candidatePatientKey && patientMap.has(candidatePatientKey) ? candidatePatientKey : (patients[0]?.key ?? null);
@@ -822,8 +829,11 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
   if (frame.sourceImageId !== `miradb:${targetSop}`) {
     throw new Error('A derived alignment frame does not match its source image');
   }
-  if (frame.contributingSourceSopInstanceUids?.some((uid) => !orderedUids.includes(uid))) {
-    throw new Error('A derived alignment frame includes a contributing image from another examination');
+  if (frame.contributingSourceSopInstanceUids?.length) {
+    const targetSourceUids = new Set(orderedUids);
+    if (frame.contributingSourceSopInstanceUids.some((uid) => !targetSourceUids.has(uid))) {
+      throw new Error('A derived alignment frame includes a contributing image from another examination');
+    }
   }
   const targetFrame = frame.targetFrameOfReferenceUid ?? frame.sourceFrameOfReferenceUid;
   if (targetFrame && targetSeries.frameOfReferenceUid && targetFrame !== targetSeries.frameOfReferenceUid) {
@@ -895,9 +905,9 @@ export async function saveDerivedAlignmentFrame(frame: DerivedAlignmentFrameRow)
   const store = tx.objectStore('derived_alignment_frames');
   await store.put(normalized);
   const entries = await store.index('by-created-at').getAll();
-  for (const stale of entries.slice(0, Math.max(0, entries.length - MAX_DERIVED_ALIGNMENT_FRAMES))) {
-    await store.delete(stale.id);
-  }
+  await Promise.all(
+    entries.slice(0, Math.max(0, entries.length - MAX_DERIVED_ALIGNMENT_FRAMES)).map((stale) => store.delete(stale.id)),
+  );
   await tx.done;
 }
 
@@ -905,10 +915,12 @@ export async function loadDerivedAlignmentFrames(
   patientKey: string,
   datasetRevision?: number,
 ): Promise<DerivedAlignmentFrameRow[]> {
-  const db = await getDB();
-  const currentRevision = await getDatasetRevision();
+  const [db, currentRevision, selectedPatient] = await Promise.all([
+    getDB(),
+    getDatasetRevision(),
+    getSelectedPatientKey(),
+  ]);
   if (datasetRevision !== undefined && datasetRevision !== currentRevision) return [];
-  const selectedPatient = await getSelectedPatientKey();
   if (selectedPatient && selectedPatient !== patientKey) return [];
   const candidates = await db.getAllFromIndex('derived_alignment_frames', 'by-patient', patientKey);
   const frames: DerivedAlignmentFrameRow[] = [];
@@ -937,9 +949,11 @@ export async function clearPersistedDerivedAlignmentFrames(
   }
   const tx = db.transaction('derived_alignment_frames', 'readwrite');
   const store = tx.objectStore('derived_alignment_frames');
+  const deletions: Promise<void>[] = [];
   for (const frame of await store.index('by-patient').getAll(patientKey)) {
     if (targetSeriesUid && frame.targetSeriesUid !== targetSeriesUid) continue;
-    await store.delete(frame.id);
+    deletions.push(store.delete(frame.id));
   }
+  await Promise.all(deletions);
   await tx.done;
 }

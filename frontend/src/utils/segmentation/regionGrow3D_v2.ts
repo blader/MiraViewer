@@ -39,12 +39,6 @@ export type RegionGrow3DOptions = {
   debug?: boolean;
 };
 
-export function computeSeedRange01(params: { seedValue: number; tolerance: number }): { min: number; max: number } {
-  const tol = Math.max(0, params.tolerance);
-  const c01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
-  return { min: c01(params.seedValue - tol), max: c01(params.seedValue + tol) };
-}
-
 type HeapItem = { i: number; d: number };
 
 class MinHeap {
