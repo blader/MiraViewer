@@ -295,6 +295,56 @@ describe('svr/computeCore', () => {
     expect(volume[0]).toBeCloseTo(100 / (1 + 64 / 255), 5);
   });
 
+  it.each(['none', 'huber', 'tukey'] as const)(
+    'matches the independently computed fractional-support residual for %s robust loss',
+    async (robustLoss) => {
+      const observations = [0.9, 0.1];
+      const weights = [1, 64 / 255];
+      const initial = (observations[0]! * weights[0]! + observations[1]! * weights[1]!) / (weights[0]! + weights[1]!);
+      const delta = 0.2;
+      let weightedResidual = 0;
+      let residualWeight = 0;
+      for (let index = 0; index < observations.length; index++) {
+        const residual = observations[index]! - initial;
+        const absoluteResidual = Math.abs(residual);
+        const robustWeight =
+          robustLoss === 'none'
+            ? 1
+            : robustLoss === 'huber'
+              ? absoluteResidual <= delta
+                ? 1
+                : delta / absoluteResidual
+              : absoluteResidual >= delta
+                ? 0
+                : (1 - (absoluteResidual / delta) ** 2) ** 2;
+        weightedResidual += robustWeight * weights[index]! * residual;
+        residualWeight += robustWeight * weights[index]!;
+      }
+      const expected = initial + 0.6 * (weightedResidual / residualWeight);
+
+      const volume = await reconstructVolumeFromSlices({
+        slices: observations.map((observation, index) => ({
+          ...axialSliceGeometry(),
+          pixels: new Float32Array([observation]),
+          valid: new Uint8Array([index === 0 ? 255 : 64]),
+          validScale: 255,
+        })),
+        grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+        occupancy: new Uint8Array(1),
+        options: {
+          ...RECONSTRUCTION_OPTIONS,
+          iterations: 1,
+          stepSize: 0.6,
+          robustLoss,
+          robustDelta: delta,
+          clampOutput: false,
+        },
+      });
+
+      expect(volume[0]).toBeCloseTo(expected, 6);
+    },
+  );
+
   it('does not reinterpret inter-slice spacing as acquired slice thickness', async () => {
     const dims = { nx: 1, ny: 1, nz: 15 };
     const observedSupport = new Uint8Array(15);
@@ -604,6 +654,40 @@ describe('svr/computeCore', () => {
     }
   });
 
+  it('preserves supported anatomical intensity when multiresolution interpolation crosses empty coarse voxels', async () => {
+    const allSlices = makeAllSlices();
+    for (const slice of allSlices) {
+      slice.pixels.fill(0.75);
+      slice.valid = new Uint8Array(slice.pixels.length).fill(1);
+    }
+
+    const result = await computeSyntheticSvr(allSlices, {
+      ...SVR_PARAMS,
+      iterations: 1,
+      stepSize: 0,
+      robustLoss: 'none',
+      laplacianWeight: 0,
+      multiResolution: true,
+      multiResolutionFactor: 2,
+      multiResolutionCoarseIterations: 1,
+    });
+
+    let supportedVoxels = 0;
+    let unsupportedNonzeroVoxels = 0;
+    let maximumSupportedError = 0;
+    for (let index = 0; index < result.volume.length; index++) {
+      if (!result.observedSupport[index]) {
+        if (result.volume[index] !== 0) unsupportedNonzeroVoxels++;
+        continue;
+      }
+      supportedVoxels++;
+      maximumSupportedError = Math.max(maximumSupportedError, Math.abs(result.volume[index]! - 0.75));
+    }
+    expect(supportedVoxels).toBeGreaterThan(0);
+    expect(maximumSupportedError).toBeLessThan(1e-5);
+    expect(unsupportedNonzeroVoxels).toBe(0);
+  });
+
   it('preserves production support through physical ROI cropping and refinement', async () => {
     const allSlices = makeAllSlices();
     for (const slice of allSlices) {
@@ -668,6 +752,31 @@ describe('svr/computeCore', () => {
         debug: false,
       }),
     ).rejects.toThrow('SVR cancelled');
+  });
+
+  it('observes cancellation at a reconstruction yield before accepting another acquired slice', async () => {
+    const controller = new AbortController();
+    let yields = 0;
+
+    await expect(
+      reconstructVolumeFromSlices({
+        slices: [
+          { ...axialSliceGeometry(), pixels: new Float32Array([0.25]) },
+          { ...axialSliceGeometry(), pixels: new Float32Array([0.75]) },
+        ],
+        grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
+        options: { ...RECONSTRUCTION_OPTIONS, iterations: 1 },
+        hooks: {
+          signal: controller.signal,
+          yieldToMain: async () => {
+            yields++;
+            controller.abort();
+          },
+        },
+      }),
+    ).rejects.toThrow('SVR cancelled');
+
+    expect(yields).toBe(1);
   });
 
   it('preserves correctly positioned partial-FOV series under the default ROI-rigid mode without an ROI', async () => {

@@ -192,6 +192,37 @@ async function loadSeriesSlices(params: {
     !!debug,
   );
 
+  type PrefetchedImage =
+    | { ok: true; image: Awaited<ReturnType<typeof loadCornerstoneImage>> }
+    | { ok: false; error: unknown };
+  const maximumWorkers =
+    typeof navigator === 'undefined' ? 1 : Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1));
+  const prefetchedImages: Array<Promise<PrefetchedImage>> = [];
+  let nextImageIndex = 0;
+  const prefetchNextImage = () => {
+    if (signal?.aborted || nextImageIndex >= manifest.frames.length) return;
+
+    const frame = manifest.frames[nextImageIndex++]!;
+    // The bounded Cornerstone cache remains the sole decoded-image owner.
+    // Settling failures here also prevents an unconsumed prefetched rejection
+    // from escaping after an earlier image fails or reconstruction is aborted.
+    prefetchedImages.push(
+      Promise.resolve()
+        .then(() => {
+          assertNotAborted(signal);
+          return loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`);
+        })
+        .then(
+          (image): PrefetchedImage => ({ ok: true, image }),
+          (error: unknown): PrefetchedImage => ({ ok: false, error }),
+        ),
+    );
+  };
+
+  while (prefetchedImages.length < maximumWorkers && nextImageIndex < manifest.frames.length) {
+    prefetchNextImage();
+  }
+
   for (let i = 0; i < manifest.frames.length; i++) {
     assertNotAborted(signal);
 
@@ -220,11 +251,14 @@ async function loadSeriesSlices(params: {
     const colSpacingDsMm = geom.colSpacingMm * (geom.cols / dsCols);
 
     // Decode pixels via Cornerstone (uses our miradb: loader + codecs).
-    const imageId = `miradb:${sopInstanceUid}`;
-    const image = (await loadCornerstoneImage(imageId)) as unknown as Parameters<typeof decodeImageWithValidity>[0];
+    const prefetchedImage = await prefetchedImages.shift()!;
+    assertNotAborted(signal);
+    if (!prefetchedImage.ok) throw prefetchedImage.error;
+    const image = prefetchedImage.image as unknown as Parameters<typeof decodeImageWithValidity>[0];
     if ((image.rows ?? image.height) !== geom.rows || (image.columns ?? image.width) !== geom.cols) {
       throw new Error('A decoded SVR source frame no longer matches its admitted image dimensions');
     }
+    prefetchNextImage();
 
     // Higher-fidelity downsampling (anti-aliasing) to reduce aliasing.
     // Default is box/area averaging; Lanczos is available behind a debug flag.

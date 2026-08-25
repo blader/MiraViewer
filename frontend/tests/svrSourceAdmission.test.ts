@@ -594,6 +594,70 @@ describe('SVR canonical source admission and acquired support', () => {
     );
   });
 
+  it('keeps all configured image workers busy while consuming acquired frames in exact physical-manifest order', async () => {
+    vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(4);
+    const axial = await seedSeries({ seriesUid: 'parallel-axial', count: 8 });
+    const coronal = await seedSeries({ seriesUid: 'parallel-coronal', count: 4, orientation: 'coronal' });
+    let activeDecodes = 0;
+    let maximumActiveDecodes = 0;
+    let consumedSourceFrames: string[] = [];
+
+    cornerstone.loadAndCacheImage.mockImplementation(async (imageId: string) => {
+      activeDecodes++;
+      maximumActiveDecodes = Math.max(maximumActiveDecodes, activeDecodes);
+      const frameIndex = Number(imageId.split('.').at(-1));
+      await new Promise((resolve) => setTimeout(resolve, 3 + (3 - (frameIndex % 4)) * 2));
+      activeDecodes--;
+      return images.get(imageId)!;
+    });
+    vi.spyOn(computeCore, 'computeSvrFromLoadedSlices').mockImplementation(async (input) => {
+      consumedSourceFrames = input.allSlices.map((slice) => slice.sopInstanceUid!);
+      return syntheticComputeResult('synthetic-parallel-acquisition');
+    });
+
+    await reconstruct([axial, coronal]);
+
+    expect(maximumActiveDecodes).toBe(4);
+    expect(consumedSourceFrames).toEqual([
+      ...Array.from({ length: 8 }, (_, index) => `parallel-axial.${index}`),
+      ...Array.from({ length: 4 }, (_, index) => `parallel-coronal.${index}`),
+    ]);
+    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).toEqual(
+      consumedSourceFrames.map((sopInstanceUid) => `miradb:${sopInstanceUid}`),
+    );
+  });
+
+  it('never schedules more image decodes after cancellation of a bounded in-flight worker batch', async () => {
+    vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(4);
+    const axial = await seedSeries({ seriesUid: 'cancel-prefetch-axial', count: 8 });
+    const coronal = await seedSeries({ seriesUid: 'cancel-prefetch-coronal', count: 4, orientation: 'coronal' });
+    const releaseDecodes: Array<() => void> = [];
+    const controller = new AbortController();
+
+    cornerstone.loadAndCacheImage.mockImplementation(
+      (imageId: string) =>
+        new Promise((resolve) => {
+          releaseDecodes.push(() => resolve(images.get(imageId)!));
+        }),
+    );
+
+    const reconstruction = reconstructVolumeMultiPlane({
+      selectedSeries: [axial, coronal],
+      svrParams: params,
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(cornerstone.loadAndCacheImage).toHaveBeenCalledTimes(4);
+    });
+
+    controller.abort();
+    for (const release of releaseDecodes) release();
+
+    await expect(reconstruction).rejects.toThrow(/cancelled/i);
+    expect(cornerstone.loadAndCacheImage).toHaveBeenCalledTimes(4);
+  });
+
   it('rejects a dataset revision that changes while admitted source frames are decoding', async () => {
     const axial = await seedSeries({ seriesUid: 'mutated-axial' });
     const coronal = await seedSeries({ seriesUid: 'mutated-coronal', orientation: 'coronal' });

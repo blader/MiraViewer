@@ -4,6 +4,7 @@ import type { ComparisonData } from '../src/types/api';
 import type { SvrResult } from '../src/types/svr';
 
 const mocks = vi.hoisted(() => ({
+  cacheInfo: vi.fn(),
   manifests: vi.fn(),
   sortedSopUids: vi.fn(),
   run: vi.fn(),
@@ -42,7 +43,7 @@ vi.mock('../src/components/SvrVolume3DViewer', () => ({
 }));
 
 vi.mock('cornerstone-core', () => ({
-  default: { loadImage: vi.fn() },
+  default: { loadImage: vi.fn(), imageCache: { getCacheInfo: mocks.cacheInfo } },
 }));
 
 import { Svr3DView } from '../src/components/Svr3DView';
@@ -50,7 +51,12 @@ import { Svr3DView } from '../src/components/Svr3DView';
 const EXAMINATION = '2035-01-15T12:00:00';
 
 function data(patient = 'patient-a', orientationCount = 2, unclassified = false): ComparisonData {
-  const sourcePlanes = orientationCount === 1 ? ['Axial'] : ['Axial', 'Coronal'];
+  const sourcePlanes =
+    orientationCount === 1
+      ? ['Axial']
+      : orientationCount === 3
+        ? ['Axial', 'Coronal', 'Sagittal']
+        : ['Axial', 'Coronal'];
   const studyUid = 'study-' + patient;
   const sequences = sourcePlanes.map((plane) => ({
     id: plane.toLowerCase() + '-' + patient,
@@ -88,7 +94,12 @@ function data(patient = 'patient-a', orientationCount = 2, unclassified = false)
 
 function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = false, frame = 'frame-' + patient) {
   const isCoronal = seriesUid.startsWith('coronal') && !sameOrientation;
-  const orientation = isCoronal ? '1\\\\0\\\\0\\\\0\\\\0\\\\1' : '1\\\\0\\\\0\\\\0\\\\1\\\\0';
+  const isSagittal = seriesUid.startsWith('sagittal') && !sameOrientation;
+  const orientation = isCoronal
+    ? '1\\\\0\\\\0\\\\0\\\\0\\\\1'
+    : isSagittal
+      ? '0\\\\1\\\\0\\\\0\\\\0\\\\1'
+      : '1\\\\0\\\\0\\\\0\\\\1\\\\0';
 
   return {
     seriesUid,
@@ -105,7 +116,11 @@ function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = fa
       instanceNumber: index + 1,
       rows: 8,
       columns: 8,
-      imagePositionPatient: isCoronal ? '0\\\\' + index + '\\\\0' : '0\\\\0\\\\' + index,
+      imagePositionPatient: isCoronal
+        ? '0\\\\' + index + '\\\\0'
+        : isSagittal
+          ? index + '\\\\0\\\\0'
+          : '0\\\\0\\\\' + index,
       imageOrientationPatient: orientation,
       pixelSpacing: '1\\\\1',
       frameOfReferenceUid: frame,
@@ -145,6 +160,7 @@ function acceptedResult(): SvrResult {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
   mocks.sortedSopUids.mockResolvedValue([]);
   mocks.manifests.mockImplementation(async (seriesUid: string) => manifest(seriesUid));
   mocks.hook.status = 'idle';
@@ -254,6 +270,53 @@ describe('SVR reconstruction workspace', () => {
     expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
   });
 
+  it('automatically admits 702 acquired source frames at the nearest memory-safe effective voxel spacing', async () => {
+    const comparisonData = data('patient-a', 3);
+    const sourceFrameCounts = { axial: 221, coronal: 221, sagittal: 260 };
+
+    for (const sequence of comparisonData.sequences) {
+      const plane = sequence.plane!.toLowerCase() as keyof typeof sourceFrameCounts;
+      comparisonData.series_map[sequence.id]![EXAMINATION]!.instance_count = sourceFrameCounts[plane];
+    }
+
+    mocks.manifests.mockImplementation(async (seriesUid: string) => {
+      const source = manifest(seriesUid);
+      const plane = seriesUid.split('-')[0] as keyof typeof sourceFrameCounts;
+      const frame = source.frames[0]!;
+
+      return {
+        ...source,
+        frames: Array.from({ length: sourceFrameCounts[plane] }, (_, index) => ({
+          ...frame,
+          sopInstanceUid: `${seriesUid}-frame-${index}`,
+          instanceNumber: index + 1,
+          rows: 512,
+          columns: 512,
+          pixelSpacing: '0.43,0.43',
+          imagePositionPatient:
+            plane === 'coronal' ? `0,${index},0` : plane === 'sagittal' ? `${index},0,0` : `0,0,${index}`,
+          physicalSlicePosition: index,
+        })),
+      };
+    });
+
+    render(<Svr3DView data={comparisonData} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/(?:[1-4]\d\d|50\d|51[0-2]) MiB/);
+    });
+
+    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
+    expect(screen.getByText('Requested voxel spacing').parentElement).toHaveTextContent('1.00 mm');
+    expect(screen.getByText('Effective voxel spacing').parentElement).not.toHaveTextContent('1.00 mm');
+    expect(screen.getByText(/automatically adjusted to stay within the 512 mib memory budget/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
+
+    const effectiveParams = mocks.run.mock.calls[0]?.[1];
+    expect(effectiveParams.targetVoxelSizeMm).toBe(1.02);
+    expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
+  });
+
   it('never renders the previous patient volume after a patient switch', async () => {
     const first = data('patient-a');
     mocks.hook.status = 'ready';
@@ -272,6 +335,26 @@ describe('SVR reconstruction workspace', () => {
     await waitFor(() => {
       expect(mocks.manifests).toHaveBeenCalledWith('axial-patient-b');
     });
+  });
+
+  it('distinguishes next-run estimates from the immutable accepted reconstruction', async () => {
+    const comparisonData = data('patient-a');
+    mocks.hook.status = 'ready';
+    mocks.hook.result = acceptedResult();
+    mocks.hook.resultIdentity = identity(comparisonData);
+
+    render(<Svr3DView data={comparisonData} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Next source data')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Next conservative peak')).toBeInTheDocument();
+    expect(screen.getByText('Next effective spacing')).toBeInTheDocument();
+    expect(screen.getByText('Accepted reconstruction').parentElement).toHaveTextContent('1 × 1 × 1 voxels · 1.00 mm');
+    expect(screen.queryByText('Acquired source data')).not.toBeInTheDocument();
+    expect(screen.queryByText('Conservative peak')).not.toBeInTheDocument();
+    expect(screen.queryByText('Effective voxel spacing')).not.toBeInTheDocument();
   });
 
   it('never renders an accepted volume against a changed source-data revision', async () => {
@@ -293,7 +376,7 @@ describe('SVR reconstruction workspace', () => {
     });
   });
 
-  it('discloses and rejects output quality beyond the canonical browser-memory budget', async () => {
+  it('automatically admits recoverable output quality without changing the requested manual settings', async () => {
     mocks.manifests.mockImplementation(async (seriesUid: string) => {
       const source = manifest(seriesUid);
       return {
@@ -310,10 +393,35 @@ describe('SVR reconstruction workspace', () => {
     fireEvent.change(screen.getByLabelText(/max volume dim/i), { target: { value: '384' } });
 
     await waitFor(() => {
+      expect(screen.getByText(/automatically adjusted to stay within the 512 mib memory budget/i)).toBeInTheDocument();
+    });
+
+    expect(screen.getByLabelText(/voxel size/i)).toHaveValue(1);
+    expect(screen.getByLabelText(/max volume dim/i)).toHaveValue(384);
+    expect(screen.queryByText(/exceeds the safe browser-memory budget/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
+
+    expect(mocks.run).toHaveBeenCalledOnce();
+    expect(mocks.run.mock.calls[0]?.[1].targetVoxelSizeMm).toBeGreaterThan(1);
+    expect(mocks.run.mock.calls[0]?.[1].maxVolumeDim).toBe(384);
+  });
+
+  it('still rejects reconstruction when the independently resident decoded cache cannot fit at any quality', async () => {
+    mocks.cacheInfo.mockReturnValue({
+      cacheSizeInBytes: 513 * 1024 * 1024,
+      maximumSizeInBytes: 768 * 1024 * 1024,
+    });
+
+    render(<Svr3DView data={data('patient-a')} />);
+
+    await waitFor(() => {
       expect(screen.getAllByText(/exceeds the safe browser-memory budget/i).length).toBeGreaterThan(0);
     });
 
     expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
+    expect(screen.queryByText(/automatically adjusted/i)).not.toBeInTheDocument();
     expect(mocks.run).not.toHaveBeenCalled();
   });
 

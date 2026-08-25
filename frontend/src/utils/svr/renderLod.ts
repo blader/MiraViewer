@@ -349,6 +349,7 @@ export async function buildRenderVolumeTexData(params: {
       `Render volume acquired-support length mismatch: expected ${sourceLength}, got ${srcObservedSupport.length}.`,
     );
   }
+  if (isCancelled()) throw new Error('Render volume build cancelled');
 
   const dstDims = plan.dims;
 
@@ -365,25 +366,44 @@ export async function buildRenderVolumeTexData(params: {
     });
   }
 
-  if (plan.kind === 'u8') {
-    const data = toUint8Volume(src, srcObservedSupport);
-    return { kind: 'u8', dims: dstDims, data, ...(srcObservedSupport ? { observedSupport: srcObservedSupport } : {}) };
-  }
+  let data: Float32Array | Uint8Array = plan.kind === 'u8' ? new Uint8Array(src.length) : src;
+  if (plan.kind === 'u8' || srcObservedSupport) {
+    let lastYield = performance.now();
+    const chunkSize = 131_072;
 
-  let data = src;
-  if (srcObservedSupport) {
-    for (let index = 0; index < src.length; index++) {
-      if (!srcObservedSupport[index] && src[index] !== 0) {
-        data = new Float32Array(src);
-        for (let masked = index; masked < data.length; masked++) {
-          if (!srcObservedSupport[masked]) data[masked] = 0;
+    for (let start = 0; start < src.length; start += chunkSize) {
+      if (isCancelled()) throw new Error('Render volume build cancelled');
+      const end = Math.min(src.length, start + chunkSize);
+
+      if (plan.kind === 'u8') {
+        for (let index = start; index < end; index++) {
+          if (!srcObservedSupport || srcObservedSupport[index]) {
+            data[index] = Math.round(clamp(src[index] ?? 0, 0, 1) * 255);
+          }
         }
-        break;
+      } else if (srcObservedSupport) {
+        for (let index = start; index < end; index++) {
+          if (!srcObservedSupport[index] && src[index] !== 0) {
+            if (data === src) data = new Float32Array(src);
+            data[index] = 0;
+          }
+        }
+      }
+
+      if (end < src.length && performance.now() - lastYield >= 8) {
+        await yieldToMain();
+        if (isCancelled()) throw new Error('Render volume build cancelled');
+        lastYield = performance.now();
       }
     }
   }
 
-  return { kind: 'f32', dims: dstDims, data, ...(srcObservedSupport ? { observedSupport: srcObservedSupport } : {}) };
+  return {
+    kind: plan.kind,
+    dims: dstDims,
+    data,
+    ...(srcObservedSupport ? { observedSupport: srcObservedSupport } : {}),
+  };
 }
 
 export type RegionBox = { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };

@@ -1125,6 +1125,7 @@ export async function computeSvrFromLoadedSlices(
 
     volume = await resampleVolumeToGridTrilinear({
       src: coarse,
+      srcOccupancy: coarseSupport,
       srcGrid: coarseGrid,
       dstGrid: fineGrid,
       hooks: {

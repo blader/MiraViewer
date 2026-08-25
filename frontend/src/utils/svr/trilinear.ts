@@ -58,6 +58,74 @@ export function sampleTrilinear(
   return v0 * wz0 + v1 * wz1;
 }
 
+/** Interpolate signal and acquired support together without per-sample allocations. */
+export function sampleTrilinearWithSupport(
+  volume: Float32Array,
+  support: Uint8Array,
+  dims: VolumeDims,
+  x: number,
+  y: number,
+  z: number,
+  output: Float64Array,
+): void {
+  const { nx, ny, nz } = dims;
+  if (x < 0 || y < 0 || z < 0 || x > nx - 1 || y > ny - 1 || z > nz - 1) {
+    output[0] = 0;
+    output[1] = 0;
+    return;
+  }
+
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const z0 = Math.floor(z);
+  const xStep = x0 + 1 < nx ? 1 : 0;
+  const yStep = y0 + 1 < ny ? nx : 0;
+  const zStep = z0 + 1 < nz ? nx * ny : 0;
+  const wx1 = x - x0;
+  const wy1 = y - y0;
+  const wz1 = z - z0;
+  const wx0 = 1 - wx1;
+  const wy0 = 1 - wy1;
+  const wz0 = 1 - wz1;
+  const i000 = x0 + y0 * nx + z0 * nx * ny;
+  const i100 = i000 + xStep;
+  const i010 = i000 + yStep;
+  const i110 = i010 + xStep;
+  const i001 = i000 + zStep;
+  const i101 = i001 + xStep;
+  const i011 = i001 + yStep;
+  const i111 = i011 + xStep;
+
+  const s000 = support[i000];
+  const s100 = support[i100];
+  const s010 = support[i010];
+  const s110 = support[i110];
+  const s001 = support[i001];
+  const s101 = support[i101];
+  const s011 = support[i011];
+  const s111 = support[i111];
+
+  if (s000 === 1 && s100 === 1 && s010 === 1 && s110 === 1 && s001 === 1 && s101 === 1 && s011 === 1 && s111 === 1) {
+    output[1] = 1;
+  } else {
+    const s00 = s000 * wx0 + s100 * wx1;
+    const s10 = s010 * wx0 + s110 * wx1;
+    const s01 = s001 * wx0 + s101 * wx1;
+    const s11 = s011 * wx0 + s111 * wx1;
+    const s0 = s00 * wy0 + s10 * wy1;
+    const s1 = s01 * wy0 + s11 * wy1;
+    output[1] = s0 * wz0 + s1 * wz1;
+  }
+
+  const v00 = volume[i000] * wx0 + volume[i100] * wx1;
+  const v10 = volume[i010] * wx0 + volume[i110] * wx1;
+  const v01 = volume[i001] * wx0 + volume[i101] * wx1;
+  const v11 = volume[i011] * wx0 + volume[i111] * wx1;
+  const v0 = v00 * wy0 + v10 * wy1;
+  const v1 = v01 * wy0 + v11 * wy1;
+  output[0] = v0 * wz0 + v1 * wz1;
+}
+
 export function splatTrilinear(
   accum: Float32Array,
   weight: Float32Array,

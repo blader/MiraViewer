@@ -236,16 +236,26 @@ type OccupancyMaxGridParams = {
   data: Float32Array | Uint8Array;
   dims: { nx: number; ny: number; nz: number };
   blockSize?: number;
+  observedSupport?: Uint8Array;
+  visibilityThreshold?: number;
 };
 
 export type OccupancyMaxGrid = {
   data: Uint8Array;
   dims: { nx: number; ny: number; nz: number };
+  visibleBounds?: {
+    min: [number, number, number];
+    max: [number, number, number];
+  };
 };
 
 function* prepareOccupancyMaxGrid(params: OccupancyMaxGridParams): Generator<void, OccupancyMaxGrid, void> {
-  const { data, dims } = params;
+  const { data, dims, observedSupport } = params;
   const B = Math.max(2, Math.round(params.blockSize ?? SVR3D_OCC_BLOCK));
+
+  if (observedSupport && observedSupport.length !== data.length) {
+    throw new Error('Acquired-support evidence does not match the displayed reconstruction.');
+  }
 
   const ox = Math.max(1, Math.ceil(dims.nx / B));
   const oy = Math.max(1, Math.ceil(dims.ny / B));
@@ -254,6 +264,16 @@ function* prepareOccupancyMaxGrid(params: OccupancyMaxGridParams): Generator<voi
   // Uint8Array sources are raw R8 texel bytes (the GPU sees byte/255); Float32Array
   // sources are normalized intensities. Track the max in source units, quantize at the end.
   const isU8 = data instanceof Uint8Array;
+  const visibilityThreshold =
+    typeof params.visibilityThreshold === 'number' && Number.isFinite(params.visibilityThreshold)
+      ? params.visibilityThreshold * (isU8 ? 255 : 1)
+      : undefined;
+  let minVisibleX = dims.nx;
+  let minVisibleY = dims.ny;
+  let minVisibleZ = dims.nz;
+  let maxVisibleX = -1;
+  let maxVisibleY = -1;
+  let maxVisibleZ = -1;
 
   // Pass 1: plain per-cell max — every voxel visits exactly one cell (O(nvox)).
   const rawMax = new Float32Array(ox * oy * oz);
@@ -273,9 +293,23 @@ function* prepareOccupancyMaxGrid(params: OccupancyMaxGridParams): Generator<voi
       const oBase = ozBase + cy * occStrideY;
 
       for (let x = 0; x < dims.nx; x++) {
-        const v = data[base + x] ?? 0;
+        const sourceIndex = base + x;
+        const v = data[sourceIndex] ?? 0;
         const oi = oBase + ((x / B) | 0);
         if (v > rawMax[oi]!) rawMax[oi] = v;
+
+        if (
+          visibilityThreshold !== undefined &&
+          v >= visibilityThreshold &&
+          (!observedSupport || observedSupport[sourceIndex])
+        ) {
+          if (x < minVisibleX) minVisibleX = x;
+          if (x > maxVisibleX) maxVisibleX = x;
+          if (y < minVisibleY) minVisibleY = y;
+          if (y > maxVisibleY) maxVisibleY = y;
+          if (z < minVisibleZ) minVisibleZ = z;
+          if (z > maxVisibleZ) maxVisibleZ = z;
+        }
       }
     }
     yield;
@@ -317,7 +351,12 @@ function* prepareOccupancyMaxGrid(params: OccupancyMaxGridParams): Generator<voi
     yield;
   }
 
-  return { data: out, dims: { nx: ox, ny: oy, nz: oz } };
+  const visibleBounds: OccupancyMaxGrid['visibleBounds'] =
+    maxVisibleX >= 0
+      ? { min: [minVisibleX, minVisibleY, minVisibleZ], max: [maxVisibleX, maxVisibleY, maxVisibleZ] }
+      : undefined;
+
+  return { data: out, dims: { nx: ox, ny: oy, nz: oz }, ...(visibleBounds ? { visibleBounds } : {}) };
 }
 
 export function buildOccupancyMaxGrid(params: OccupancyMaxGridParams): OccupancyMaxGrid {
@@ -461,17 +500,12 @@ void main() {
     // Map object-space box to texture coords [0,1]
     vec3 tc = pos / u_box + 0.5;
 
-    // Acquired bytes are 0/1; normalized R8 turns supported 1 into 1/255,
-    // so any positive value is evidence. Never infer support from intensity.
-    if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) {
-      continue;
-    }
-
     if (u_occEnabled != 0) {
       // Empty-space skipping: if even the lowest threshold anywhere in this occupancy
       // cell exceeds the cell's conservative max, no sample in the cell can pass the
       // visibility test below — leap the ray to the cell exit instead of sampling the
-      // full-res volume texture step by step through background.
+      // full-res volume texture step by step through background. Check this before
+      // categorical support so unsupported background can also be crossed by whole cells.
       ivec3 vox = ivec3(clamp(tc, 0.0, 1.0) / u_texel);
       ivec3 cell = clamp(vox / u_occBlock, ivec3(0), u_occMaxCell);
       float occMax = texelFetch(u_occ, cell, 0).r;
@@ -488,6 +522,12 @@ void main() {
         i += int(floor(tExit / dt));
         continue;
       }
+    }
+
+    // Acquired bytes are 0/1; normalized R8 turns supported 1 into 1/255,
+    // so any positive value is evidence. Never infer support from intensity.
+    if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) {
+      continue;
     }
 
     float v = saturate(texture(u_vol, tc).r);

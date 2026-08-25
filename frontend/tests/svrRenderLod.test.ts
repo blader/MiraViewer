@@ -189,6 +189,80 @@ describe('svr/renderLod', () => {
     expect(tex.data).toEqual(toUint8Volume(src));
   });
 
+  it('buildRenderVolumeTexData: preserves supported full-resolution bytes without copying valid float anatomy', async () => {
+    const src = new Float32Array([0, 0.2, 0, 1]);
+    const observedSupport = new Uint8Array([1, 1, 0, 1]);
+    const dims = { nx: 4, ny: 1, nz: 1 };
+
+    const floatVolume = await buildRenderVolumeTexData({
+      src,
+      srcObservedSupport: observedSupport,
+      srcDims: dims,
+      plan: { dims, kind: 'f32' },
+      isCancelled: () => false,
+    });
+    const byteVolume = await buildRenderVolumeTexData({
+      src,
+      srcObservedSupport: observedSupport,
+      srcDims: dims,
+      plan: { dims, kind: 'u8' },
+      isCancelled: () => false,
+    });
+
+    expect(floatVolume.data).toBe(src);
+    expect(floatVolume.observedSupport).toBe(observedSupport);
+    expect(Array.from(byteVolume.data)).toEqual([0, 51, 0, 255]);
+    expect(byteVolume.observedSupport).toBe(observedSupport);
+  });
+
+  it.each(['f32', 'u8'] as const)(
+    'buildRenderVolumeTexData: rejects a cancelled full-resolution %s preparation before staging',
+    async (kind) => {
+      await expect(
+        buildRenderVolumeTexData({
+          src: new Float32Array([0.2, 0.8]),
+          srcDims: { nx: 2, ny: 1, nz: 1 },
+          plan: { dims: { nx: 2, ny: 1, nz: 1 }, kind },
+          isCancelled: () => true,
+        }),
+      ).rejects.toThrow(/cancelled/i);
+    },
+  );
+
+  it.each(['f32', 'u8'] as const)(
+    'buildRenderVolumeTexData: cooperatively cancels full-resolution %s staging between bounded chunks',
+    async (kind) => {
+      const length = 512 * 512;
+      const src = new Float32Array(length).fill(0.5);
+      const observedSupport = new Uint8Array(length).fill(1);
+      let cancelled = false;
+      let clock = 0;
+      const schedulerYield = vi.fn(async () => {
+        cancelled = true;
+      });
+      vi.stubGlobal('scheduler', { yield: schedulerYield });
+      const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 10));
+
+      try {
+        const outcome = await buildRenderVolumeTexData({
+          src,
+          srcObservedSupport: observedSupport,
+          srcDims: { nx: 512, ny: 512, nz: 1 },
+          plan: { dims: { nx: 512, ny: 512, nz: 1 }, kind },
+          isCancelled: () => cancelled,
+        }).then(
+          () => 'completed',
+          (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        );
+        expect(outcome).toMatch(/cancelled/i);
+        expect(schedulerYield).toHaveBeenCalledOnce();
+      } finally {
+        now.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it('buildRenderVolumeTexData: downsampling integrates each destination voxel footprint', async () => {
     const srcDims = { nx: 4, ny: 2, nz: 2 };
     const src = new Float32Array(srcDims.nx * srcDims.ny * srcDims.nz);

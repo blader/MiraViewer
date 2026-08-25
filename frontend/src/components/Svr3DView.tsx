@@ -562,11 +562,11 @@ function estimateSourceMemory(
 }
 
 /** Mirror the solver's physical output grid instead of budgeting a fictional max-dimension cube. */
-function estimateReconstructionVoxelCount(
+function estimateReconstructionGrid(
   manifests: SeriesFrameManifest[],
   params: SvrParams,
   roi: SvrRoi | null,
-): number {
+): { voxelCount: number; effectiveVoxelSizeMm: number } {
   const minimum = roi ? [...roi.boundsMm.min] : [Infinity, Infinity, Infinity];
   const maximum = roi ? [...roi.boundsMm.max] : [-Infinity, -Infinity, -Infinity];
 
@@ -597,11 +597,11 @@ function estimateReconstructionVoxelCount(
   }
 
   const maximumDimension = Math.max(2, Math.floor(params.maxVolumeDim));
+  let voxelSize = Math.max(0.001, params.targetVoxelSizeMm);
   if (minimum.some((value, axis) => !Number.isFinite(value) || !Number.isFinite(maximum[axis]!))) {
-    return maximumDimension ** 3;
+    return { voxelCount: maximumDimension ** 3, effectiveVoxelSizeMm: voxelSize };
   }
 
-  let voxelSize = Math.max(0.001, params.targetVoxelSizeMm);
   let dimensions = [2, 2, 2];
   for (let attempt = 0; attempt < 10; attempt++) {
     dimensions = minimum.map((value, axis) => Math.max(2, Math.ceil((maximum[axis]! - value) / voxelSize) + 1));
@@ -610,7 +610,10 @@ function estimateReconstructionVoxelCount(
     voxelSize *= largestDimension / maximumDimension;
   }
 
-  return dimensions.reduce((count, dimension) => count * dimension, 1);
+  return {
+    voxelCount: dimensions.reduce((count, dimension) => count * dimension, 1),
+    effectiveVoxelSizeMm: voxelSize,
+  };
 }
 
 export type Svr3DViewProps = {
@@ -1059,17 +1062,9 @@ function useSvrReconstructionWorkspace({
 
   const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
-  const { sourceBytes: sourceMemoryBytes, decodedSourceCacheBytes } = useMemo(
-    () =>
-      currentReadiness?.manifests.length
-        ? estimateSourceMemory(currentReadiness.manifests, params, roiWorld)
-        : { sourceBytes: 0, decodedSourceCacheBytes: 0 },
-    [currentReadiness, params, roiWorld],
-  );
-  const memoryPlan = useMemo(() => {
+  const plannedReconstruction = useMemo(() => {
     if (!currentReadiness?.manifests.length) return null;
 
-    const voxelCount = estimateReconstructionVoxelCount(currentReadiness.manifests, params, roiWorld);
     const retainedVolume = acceptedResult?.volume;
     const retainedVoxelCount = retainedVolume?.data.length ?? 0;
     // Recomputing deliberately preserves the prior Float32 result and its
@@ -1080,18 +1075,73 @@ function useSvrReconstructionWorkspace({
         retainedVoxelCount * (Uint16Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
       : 0;
 
-    return estimateSvrPeakMemoryBytes({
-      voxelCount,
-      sourceBytes: sourceMemoryBytes,
-      iterations: params.iterations,
-      retainedBytes: retainedBytes + decodedSourceCacheBytes,
-      // Reserve independently owned CPU/GPU labels for both the incoming
-      // result and any already-annotated retained reconstruction.
-      labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
-      registrationBytes:
-        roiWorld && params.seriesRegistrationMode === 'roi-rigid' ? estimateSvrRegistrationBytes(voxelCount) : 0,
-    });
-  }, [acceptedResult, currentReadiness, decodedSourceCacheBytes, params, roiWorld, sourceMemoryBytes]);
+    const evaluate = (targetVoxelSizeMm: number) => {
+      const effectiveParams = { ...params, targetVoxelSizeMm };
+      const { sourceBytes, decodedSourceCacheBytes } = estimateSourceMemory(
+        currentReadiness.manifests,
+        effectiveParams,
+        roiWorld,
+      );
+      const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(
+        currentReadiness.manifests,
+        effectiveParams,
+        roiWorld,
+      );
+
+      return {
+        effectiveParams,
+        effectiveVoxelSizeMm,
+        sourceBytes,
+        memoryPlan: estimateSvrPeakMemoryBytes({
+          voxelCount,
+          sourceBytes,
+          iterations: effectiveParams.iterations,
+          retainedBytes: retainedBytes + decodedSourceCacheBytes,
+          // Reserve independently owned CPU/GPU labels for both the incoming
+          // result and any already-annotated retained reconstruction.
+          labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
+          registrationBytes:
+            roiWorld && effectiveParams.seriesRegistrationMode === 'roi-rigid'
+              ? estimateSvrRegistrationBytes(voxelCount)
+              : 0,
+        }),
+      };
+    };
+
+    const requested = evaluate(params.targetVoxelSizeMm);
+    if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
+
+    let lower = Math.floor(params.targetVoxelSizeMm * 100);
+    let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
+    let nearestSafe = evaluate(upper / 100);
+
+    while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
+      lower = upper;
+      upper = Math.min(1000, Math.ceil(upper * 1.5));
+      nearestSafe = evaluate(upper / 100);
+    }
+
+    if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
+
+    while (upper - lower > 1) {
+      const midpoint = Math.floor((lower + upper) / 2);
+      const candidate = evaluate(midpoint / 100);
+      if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
+        lower = midpoint;
+      } else {
+        upper = midpoint;
+        nearestSafe = candidate;
+      }
+    }
+
+    return nearestSafe;
+  }, [acceptedResult, currentReadiness, params, roiWorld]);
+  const memoryPlan = plannedReconstruction?.memoryPlan ?? null;
+  const sourceMemoryBytes = plannedReconstruction?.sourceBytes ?? 0;
+  const effectiveVoxelSizeMm = plannedReconstruction?.effectiveVoxelSizeMm ?? params.targetVoxelSizeMm;
+  const automaticallyAdjustedVoxelSpacing = Boolean(
+    plannedReconstruction && plannedReconstruction.effectiveParams.targetVoxelSizeMm > params.targetVoxelSizeMm,
+  );
   const exceedsMemoryBudget = Boolean(memoryPlan && memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES);
 
   const sourceReadinessMessage = !selectedGroup
@@ -1128,9 +1178,9 @@ function useSvrReconstructionWorkspace({
 
   const startReconstruction = useCallback(() => {
     if (!canRun || !workspaceIdentity) return;
-    const paramsToRun: SvrParams = { ...params, roi: roiWorld ?? null };
+    const paramsToRun: SvrParams = { ...(plannedReconstruction?.effectiveParams ?? params), roi: roiWorld ?? null };
     void run(selectedSeries, paramsToRun, workspaceIdentity);
-  }, [canRun, params, roiWorld, run, selectedSeries, workspaceIdentity]);
+  }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
 
   return {
     acceptedResult,
@@ -1140,6 +1190,7 @@ function useSvrReconstructionWorkspace({
     currentReadiness,
     displayedDate,
     displayedPatient,
+    effectiveVoxelSizeMm,
     effectiveRoiSeriesUid,
     effectiveRoiSliceIndex,
     error,
@@ -1182,6 +1233,7 @@ function useSvrReconstructionWorkspace({
     startReconstruction,
     status,
     stepRoiSlice,
+    automaticallyAdjustedVoxelSpacing,
     volumeIdentity,
     workspaceIdentity,
   };
@@ -1191,7 +1243,10 @@ type SvrReconstructionWorkspace = ReturnType<typeof useSvrReconstructionWorkspac
 
 function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const {
+    acceptedResult,
+    automaticallyAdjustedVoxelSpacing,
     currentReadiness,
+    effectiveVoxelSizeMm,
     estimatedPeakMemoryMiB,
     exceedsMemoryBudget,
     isRunning,
@@ -1273,12 +1328,12 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
             })}
             <div className="border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
               <div className="flex items-center justify-between gap-2">
-                <span>Acquired source data</span>
+                <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
                 <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
               </div>
               {estimatedPeakMemoryMiB !== null ? (
                 <div className="mt-1 flex items-center justify-between gap-2">
-                  <span>Conservative peak</span>
+                  <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
                   <span
                     className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
                   >
@@ -1290,6 +1345,15 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 <span>Requested voxel spacing</span>
                 <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
               </div>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span>{acceptedResult ? 'Next effective spacing' : 'Effective voxel spacing'}</span>
+                <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
+              </div>
+              {automaticallyAdjustedVoxelSpacing ? (
+                <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
+                  Source sampling automatically adjusted to stay within the 512 MiB memory budget.
+                </div>
+              ) : null}
             </div>
           </div>
         </div>

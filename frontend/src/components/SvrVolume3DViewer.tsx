@@ -56,6 +56,7 @@ const COARSE_POINTER_CONTROL_TARGETS =
 const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
 const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
 const INITIAL_VOLUME_VIEWPORT_FILL = 0.9;
+const INITIAL_VOLUME_VISIBILITY_THRESHOLD = 0.05;
 const INSPECTOR_AXES = {
   axial: { slice: 'z', row: 'y', column: 'x' },
   coronal: { slice: 'y', row: 'z', column: 'x' },
@@ -82,10 +83,28 @@ function computeVolumeViewportZoom(
   viewportWidth: number,
   viewportHeight: number,
   relativeZoom = 1,
+  visibleBounds?: OccupancyMaxGrid['visibleBounds'],
+  volumeDims?: RenderDims,
 ): number {
   const aspect = Math.max(1, viewportWidth) / Math.max(1, viewportHeight);
-  const nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - boxScale[2] * 0.5);
-  const limitingExtent = Math.max(1e-6, boxScale[1], boxScale[0] / aspect);
+  let nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - boxScale[2] * 0.5);
+  let limitingExtent = Math.max(1e-6, boxScale[1], boxScale[0] / aspect);
+
+  if (visibleBounds && volumeDims) {
+    const xMin = (visibleBounds.min[0] / volumeDims.nx - 0.5) * boxScale[0];
+    const xMax = ((visibleBounds.max[0] + 1) / volumeDims.nx - 0.5) * boxScale[0];
+    const yMin = (visibleBounds.min[1] / volumeDims.ny - 0.5) * boxScale[1];
+    const yMax = ((visibleBounds.max[1] + 1) / volumeDims.ny - 0.5) * boxScale[1];
+    const nearestVisibleZ = ((visibleBounds.max[2] + 1) / volumeDims.nz - 0.5) * boxScale[2];
+
+    nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - nearestVisibleZ);
+    limitingExtent = Math.max(
+      1e-6,
+      2 * Math.max(Math.abs(yMin), Math.abs(yMax)),
+      (2 * Math.max(Math.abs(xMin), Math.abs(xMax))) / aspect,
+    );
+  }
+
   return (2 * nearestDepth * INITIAL_VOLUME_VIEWPORT_FILL * relativeZoom) / (SVR3D_FOCAL_Z * limitingExtent);
 }
 
@@ -607,7 +626,7 @@ function useSvrVolumeViewerModel({
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   // One spatially neutral threshold preserves equal peripheral and central tissue.
-  const [threshold, setThreshold] = useState(0.05);
+  const [threshold, setThreshold] = useState(INITIAL_VOLUME_VISIBILITY_THRESHOLD);
   const THRESHOLD_MAX = 0.3;
   // Always use max raymarch samples for quality; no UI control.
   const steps = 256;
@@ -862,7 +881,15 @@ function useSvrVolumeViewerModel({
           tex.kind === 'f32' ? await float32ToFloat16BitsAsync(tex.data as Float32Array, isCancelled) : undefined;
         if (renderBuildIdRef.current !== buildId) return;
 
-        const occupancy = await buildOccupancyMaxGridAsync({ data: tex.data, dims: tex.dims }, isCancelled);
+        const occupancy = await buildOccupancyMaxGridAsync(
+          {
+            data: tex.data,
+            dims: tex.dims,
+            observedSupport: tex.observedSupport,
+            visibilityThreshold: INITIAL_VOLUME_VISIBILITY_THRESHOLD,
+          },
+          isCancelled,
+        );
         if (renderBuildIdRef.current !== buildId) return;
 
         preparedRenderRef.current = { data: tex, halfFloatBits, occupancy };
@@ -1702,6 +1729,7 @@ function useSvrVolumeViewerModel({
       });
     }
   }, [
+    controlsCollapsed,
     growRoiBounds,
     growRoiDraftBounds,
     hasLabels,
@@ -1713,6 +1741,7 @@ function useSvrVolumeViewerModel({
     labels,
     labelsEnabled,
     seedVoxel,
+    sliceInspectorPortalTarget,
     volume,
   ]);
 
@@ -1884,7 +1913,14 @@ function useSvrVolumeViewerModel({
       // render volume, built once per upload from the same data the volume texture holds.
       // Rays leap blocks whose conservative max can't pass the threshold test (the bulk of
       // the box on a typical brain scan), trading a full-res tap for a tiny-texture tap.
-      const occGrid = preparedRender?.occupancy ?? buildOccupancyMaxGrid({ data: renderTex.data, dims: texDims });
+      const occGrid =
+        preparedRender?.occupancy ??
+        buildOccupancyMaxGrid({
+          data: renderTex.data,
+          dims: texDims,
+          observedSupport: renderTex.observedSupport,
+          visibilityThreshold: INITIAL_VOLUME_VISIBILITY_THRESHOLD,
+        });
       occMaxCell = [occGrid.dims.nx - 1, occGrid.dims.ny - 1, occGrid.dims.nz - 1];
 
       texOcc = gl.createTexture();
@@ -1914,6 +1950,9 @@ function useSvrVolumeViewerModel({
         gl.UNSIGNED_BYTE,
         occGrid.data,
       );
+      if (gl.getError() !== gl.NO_ERROR) {
+        throw new Error('The GPU could not upload the empty-space acceleration grid.');
+      }
 
       gl.bindTexture(gl.TEXTURE_3D, null);
 
@@ -2093,7 +2132,10 @@ function useSvrVolumeViewerModel({
         gl.uniformMatrix3fv(u.invRot, false, invRotMat);
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
-        gl.uniform1f(u.zoom, computeVolumeViewportZoom(boxScale, canvas.width, canvas.height, zoom));
+        gl.uniform1f(
+          u.zoom,
+          computeVolumeViewportZoom(boxScale, canvas.width, canvas.height, zoom, occGrid.visibleBounds, texDims),
+        );
         gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_MAX));
         // Fewer steps while interacting (banding hidden by the jittered ray start); the
         // settled frame always marches the full configured step count.

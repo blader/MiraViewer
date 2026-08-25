@@ -112,6 +112,36 @@ describe('svr/occupancy grid', () => {
     }
   });
 
+  it('records exact threshold-visible acquired bounds during the existing occupancy pass', () => {
+    const dims = { nx: 10, ny: 9, nz: 6 };
+    const data = new Float32Array(dims.nx * dims.ny * dims.nz);
+    const observedSupport = new Uint8Array(data.length);
+    const index = (x: number, y: number, z: number) => z * dims.nx * dims.ny + y * dims.nx + x;
+
+    data[index(2, 3, 1)] = 0.8;
+    observedSupport[index(2, 3, 1)] = 1;
+    data[index(8, 7, 4)] = 0.05;
+    observedSupport[index(8, 7, 4)] = 1;
+    data[index(0, 0, 5)] = 0.99;
+    data[index(9, 8, 0)] = 0.049;
+    observedSupport[index(9, 8, 0)] = 1;
+
+    const occupancy = buildOccupancyMaxGrid({ data, dims, observedSupport, visibilityThreshold: 0.05 });
+
+    expect(occupancy.visibleBounds).toEqual({ min: [2, 3, 1], max: [8, 7, 4] });
+  });
+
+  it('applies normalized visibility thresholds to 8-bit data without inventing unsupported zero tissue', () => {
+    const occupancy = buildOccupancyMaxGrid({
+      data: new Uint8Array([255, 12, 13, 0]),
+      dims: { nx: 4, ny: 1, nz: 1 },
+      observedSupport: new Uint8Array([0, 1, 1, 1]),
+      visibilityThreshold: 0.05,
+    });
+
+    expect(occupancy.visibleBounds).toEqual({ min: [2, 0, 0], max: [2, 0, 0] });
+  });
+
   it('cooperative occupancy staging produces the identical conservative display grid', async () => {
     const dims = { nx: 21, ny: 13, nz: 10 };
     const data = new Float32Array(dims.nx * dims.ny * dims.nz);
@@ -225,14 +255,81 @@ describe('svr/acquired-support texture', () => {
     expect(gl.bindTexture).toHaveBeenLastCalledWith(gl.TEXTURE_3D, null);
   });
 
-  it('rejects unsupported ray positions before linear intensity can bleed across an acquired boundary', () => {
+  it('skips unsupported empty space before fetching support while still rejecting it before anatomical sampling', () => {
     const supportGate = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_support, tc).r <= 0.0');
     const occupancyLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texelFetch(u_occ, cell, 0)');
     const intensityLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_vol, tc).r');
 
     expect(supportGate).toBeGreaterThan(0);
-    expect(supportGate).toBeLessThan(occupancyLookup);
+    expect(occupancyLookup).toBeGreaterThan(0);
+    expect(occupancyLookup).toBeLessThan(supportGate);
     expect(supportGate).toBeLessThan(intensityLookup);
     expect(RAYMARCH_FRAGMENT_SHADER.slice(supportGate, supportGate + 90)).toContain('continue;');
+  });
+
+  it('restores conservative cell skipping through sparse acquired MRI support without changing visible anatomy', () => {
+    const size = 96;
+    const dims = { nx: size, ny: size, nz: size };
+    const data = new Float32Array(size ** 3);
+    const support = new Uint8Array(data.length);
+
+    for (let z = 0; z < size; z++) {
+      const depth = (z - size * 0.51) / (size * 0.35);
+      for (let y = 0; y < size; y++) {
+        const row = (y - size * 0.5) / (size * 0.39);
+        for (let x = 0; x < size; x++) {
+          const column = (x - size * 0.5) / (size * 0.34);
+          if (column * column + row * row + depth * depth > 1) continue;
+          const index = z * size * size + y * size + x;
+          support[index] = 1;
+          data[index] = 0.6;
+        }
+      }
+    }
+
+    const occupancy = buildOccupancyMaxGrid({ data, dims });
+    const countRayWork = (skipBeforeSupport: boolean) => {
+      let samples = 0;
+      let supportFetches = 0;
+      let visible = 0;
+
+      for (let y = 0; y < size; y += 4) {
+        for (let x = 0; x < size; x += 4) {
+          for (let z = 0; z < size; z++) {
+            samples++;
+            const index = z * size * size + y * size + x;
+            if (!skipBeforeSupport) {
+              supportFetches++;
+              if (!support[index]) continue;
+            }
+
+            const cell =
+              Math.floor(z / SVR3D_OCC_BLOCK) * occupancy.dims.nx * occupancy.dims.ny +
+              Math.floor(y / SVR3D_OCC_BLOCK) * occupancy.dims.nx +
+              Math.floor(x / SVR3D_OCC_BLOCK);
+            if (occupancy.data[cell]! / 255 < 0.05) {
+              z = Math.min(size - 1, (Math.floor(z / SVR3D_OCC_BLOCK) + 1) * SVR3D_OCC_BLOCK - 1);
+              continue;
+            }
+
+            if (skipBeforeSupport) {
+              supportFetches++;
+              if (!support[index]) continue;
+            }
+
+            if (data[index]! >= 0.05) visible++;
+          }
+        }
+      }
+
+      return { samples, supportFetches, visible };
+    };
+
+    const previous = countRayWork(false);
+    const optimized = countRayWork(true);
+
+    expect(optimized.visible).toBe(previous.visible);
+    expect(optimized.samples).toBeLessThan(previous.samples * 0.7);
+    expect(optimized.supportFetches).toBeLessThan(previous.supportFetches * 0.65);
   });
 });

@@ -6,6 +6,7 @@ import {
   type RigidParams,
   type SeriesSamples,
 } from '../src/utils/svr/rigidRegistration';
+import { reconstructVolumeFromSlices, type SvrReconstructionSlice } from '../src/utils/svr/reconstructionCore';
 import { sampleTrilinear, type VolumeDims } from '../src/utils/svr/trilinear';
 import { v3 } from '../src/utils/svr/vec3';
 
@@ -14,6 +15,46 @@ const SAMPLE_COUNT = 40_000;
 function median(values: readonly number[]): number {
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.floor(sorted.length / 2)] ?? 0;
+}
+
+function makeSingleSamplePsfSlices(size: number, slicesPerOrientation?: number): SvrReconstructionSlice[] {
+  const slices: SvrReconstructionSlice[] = [];
+  const positions = slicesPerOrientation
+    ? Array.from({ length: slicesPerOrientation }, (_, index) => 2 + (index * (size - 4)) / (slicesPerOrientation - 1))
+    : Array.from({ length: Math.ceil((size - 3) / 3) }, (_, index) => 2 + index * 3);
+  for (const plane of ['axial', 'coronal', 'sagittal'] as const) {
+    for (const position of positions) {
+      const pixels = new Float32Array(size * size);
+      for (let row = 0; row < size; row++) {
+        for (let column = 0; column < size; column++) {
+          const x = plane === 'sagittal' ? position : column;
+          const y = plane === 'axial' ? row : plane === 'coronal' ? position : column;
+          const z = plane === 'axial' ? position : row;
+          const sourceBias = plane === 'axial' ? 0.012 : plane === 'coronal' ? -0.01 : 0;
+          pixels[row * size + column] = 0.2 + (0.6 * (x + 2 * y + 3 * z)) / (6 * (size - 1)) + sourceBias;
+        }
+      }
+
+      const axial = plane === 'axial';
+      const coronal = plane === 'coronal';
+      slices.push({
+        pixels,
+        valid: new Uint8Array(pixels.length).fill(255),
+        validScale: 255,
+        dsRows: size,
+        dsCols: size,
+        ippMm: axial ? v3(0, 0, position) : coronal ? v3(0, position, 0) : v3(position, 0, 0),
+        rowDir: plane === 'sagittal' ? v3(0, 1, 0) : v3(1, 0, 0),
+        colDir: axial ? v3(0, 1, 0) : v3(0, 0, 1),
+        normalDir: axial ? v3(0, 0, 1) : coronal ? v3(0, -1, 0) : v3(1, 0, 0),
+        rowSpacingDsMm: 1,
+        colSpacingDsMm: 1,
+        sliceThicknessMm: 0.8,
+        spacingBetweenSlicesMm: 3,
+      });
+    }
+  }
+  return slices;
 }
 
 /** Independent copy of the allocation-heavy scorer replaced by scalar transforms. */
@@ -145,4 +186,61 @@ describe('svr/registration performance', () => {
       );
     }
   });
+
+  it('reconstructs representative three-orientation thin-slice MRI without inventing anatomy', async () => {
+    const largeBenchmark = process.env.MIRAVIEWER_SVR_BENCHMARK_LARGE === '1';
+    const size = largeBenchmark ? 128 : 64;
+    const dims = { nx: size, ny: size, nz: size };
+    const slices = makeSingleSamplePsfSlices(size, largeBenchmark ? 234 : undefined);
+    const timings: number[] = [];
+    let supportedVoxels = 0;
+    let unsupportedNonzeroVoxels = 0;
+
+    for (let iteration = 0; iteration < (largeBenchmark ? 2 : 6); iteration++) {
+      const support = new Uint8Array(size ** 3);
+      const started = performance.now();
+      const volume = await reconstructVolumeFromSlices({
+        slices,
+        grid: { dims, originMm: v3(0, 0, 0), voxelSizeMm: 1 },
+        occupancy: support,
+        options: {
+          iterations: 2,
+          stepSize: 0.6,
+          clampOutput: true,
+          psfMode: 'gaussian',
+          robustLoss: 'huber',
+          robustDelta: 0.1,
+          laplacianWeight: 0.02,
+        },
+      });
+      if (iteration > 0) timings.push(performance.now() - started);
+
+      if (iteration === 0) {
+        for (let index = 0; index < volume.length; index++) {
+          if (support[index]) supportedVoxels++;
+          else if (volume[index] !== 0) unsupportedNonzeroVoxels++;
+        }
+      }
+    }
+
+    expect(supportedVoxels).toBeGreaterThan(0);
+    expect(supportedVoxels).toBeLessThan(size ** 3);
+    expect(unsupportedNonzeroVoxels).toBe(0);
+
+    if (process.env.MIRAVIEWER_SVR_BENCHMARK === '1') {
+      console.info(
+        '[svr-solver-benchmark]',
+        JSON.stringify({
+          orientations: 3,
+          slices: slices.length,
+          observations: slices.length * size ** 2,
+          iterations: 2,
+          outputVoxels: size ** 3,
+          supportedVoxels,
+          repetitions: timings.length,
+          medianMilliseconds: Number(median(timings).toFixed(3)),
+        }),
+      );
+    }
+  }, 30_000);
 });

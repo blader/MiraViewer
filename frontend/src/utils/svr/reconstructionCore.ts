@@ -1,5 +1,5 @@
 import type { VolumeDims } from './trilinear';
-import { sampleTrilinear, splatTrilinearScaled } from './trilinear';
+import { sampleTrilinear, sampleTrilinearWithSupport, splatTrilinearScaled } from './trilinear';
 import type { Vec3 } from './vec3';
 import { assertNotAborted, clamp01, withinTrilinearSupport } from './svrUtils';
 
@@ -69,7 +69,7 @@ export function acquiredObservationWeight(
   const encoded = slice.valid[index] ?? 0;
   if (encoded === 0) return 0;
   const scale = slice.validScale;
-  return typeof scale === 'number' && scale > 0 ? Math.min(1, encoded / scale) : 1;
+  return typeof scale === 'number' && scale > 0 && encoded < scale ? encoded / scale : 1;
 }
 
 type SlicePsf = {
@@ -80,18 +80,18 @@ type SlicePsf = {
   count: number;
 };
 
+const SINGLE_SAMPLE_PSF: SlicePsf = {
+  offsetsXMm: new Float32Array([0]),
+  offsetsYMm: new Float32Array([0]),
+  offsetsZMm: new Float32Array([0]),
+  weights: new Float32Array([1]),
+  count: 1,
+};
+
 function buildSlicePsf(params: { slice: SvrReconstructionSlice; voxelSizeMm: number; mode: SvrPsfMode }): SlicePsf {
   const { slice, voxelSizeMm, mode } = params;
 
-  if (mode === 'none') {
-    return {
-      offsetsXMm: new Float32Array([0]),
-      offsetsYMm: new Float32Array([0]),
-      offsetsZMm: new Float32Array([0]),
-      weights: new Float32Array([1]),
-      count: 1,
-    };
-  }
+  if (mode === 'none') return SINGLE_SAMPLE_PSF;
 
   // Inter-slice center spacing describes sampling cadence, not the excitation
   // profile: using it as thickness would turn an unobserved slab into anatomy.
@@ -115,6 +115,7 @@ function buildSlicePsf(params: { slice: SvrReconstructionSlice; voxelSizeMm: num
   if (normalCount < 1) normalCount = 1;
   if (normalCount > 15) normalCount = 15;
   if (normalCount % 2 === 0) normalCount += 1;
+  if (rowCount === 1 && colCount === 1 && normalCount === 1) return SINGLE_SAMPLE_PSF;
 
   const normalOffsetsMm = new Float32Array(normalCount);
   const normalWeights = new Float32Array(normalCount);
@@ -181,24 +182,29 @@ function robustResidualWeight(residual: number, mode: SvrRobustLoss, delta: numb
   if (mode === 'none') return 1;
 
   const a = Math.abs(residual);
-  const d = Number.isFinite(delta) && delta > 1e-12 ? delta : 0.1;
-
   if (mode === 'huber') {
-    return a <= d ? 1 : d / a;
+    return a <= delta ? 1 : delta / a;
   }
 
   // Tukey's biweight.
-  if (a >= d) return 0;
-  const r = a / d;
+  if (a >= delta) return 0;
+  const r = a / delta;
   const t = 1 - r * r;
   return t * t;
 }
 
-function normalizeVolumeInPlace(volume: Float32Array, weight: Float32Array): void {
+function normalizeVolumeInPlace(volume: Float32Array, weight: Float32Array, observedSupport?: Uint8Array): number {
+  let supportedVoxelCount = 0;
   for (let i = 0; i < volume.length; i++) {
     const w = weight[i];
-    volume[i] = w > 1e-12 ? volume[i] / w : 0;
+    const supported = w > 1e-12;
+    volume[i] = supported ? volume[i] / w : 0;
+    if (observedSupport) {
+      observedSupport[i] = supported ? 1 : 0;
+      if (supported) supportedVoxelCount++;
+    }
   }
+  return supportedVoxelCount;
 }
 
 function markTrilinearObservedSupport(
@@ -472,16 +478,8 @@ export async function reconstructVolumeFromSlices(params: {
   }
 
   const observedSupport = params.occupancy ?? (options.iterations > 0 ? new Uint8Array(nvox) : undefined);
-  if (observedSupport) {
-    let supportedVoxelCount = 0;
-    for (let i = 0; i < nvox; i++) {
-      const supported = weight[i] > 1e-12 ? 1 : 0;
-      observedSupport[i] = supported;
-      supportedVoxelCount += supported;
-    }
-    params.onObservedSupport?.(supportedVoxelCount);
-  }
-  normalizeVolumeInPlace(volume, weight);
+  const supportedVoxelCount = normalizeVolumeInPlace(volume, weight, observedSupport);
+  if (observedSupport) params.onObservedSupport?.(supportedVoxelCount);
 
   // Memory optimization: the `weight` buffer is only needed for the initial splat normalization.
   // After that, we can reuse it as the per-iteration `updateW` accumulator to avoid allocating
@@ -544,6 +542,7 @@ export async function refineVolumeInPlace(params: {
   }
 
   const stepSize = options.stepSize;
+  const robustDelta = Number.isFinite(options.robustDelta) && options.robustDelta > 1e-12 ? options.robustDelta : 0.1;
 
   // Scratch reused for update accumulation and regularization.
   // Allow callers to provide/reuse buffers so peak memory doesn't scale as badly for large volumes.
@@ -562,6 +561,7 @@ export async function refineVolumeInPlace(params: {
   // overpay on small volumes. ~16ms keeps the page at interactive frame cadence.
   const YIELD_BUDGET_MS = 16;
   let lastYieldMs = performance.now();
+  const interpolatedObservation = new Float64Array(2);
 
   for (let iter = 0; iter < iterations; iter++) {
     assertNotAborted(hooks?.signal);
@@ -596,6 +596,9 @@ export async function refineVolumeInPlace(params: {
           // Forward projection: integrate the volume along the slice normal.
           let pred = 0;
           let wUsed = 0;
+          let vx = 0;
+          let vy = 0;
+          let vz = 0;
 
           for (let k = 0; k < psf.count; k++) {
             const w = psf.weights[k] ?? 0;
@@ -605,18 +608,26 @@ export async function refineVolumeInPlace(params: {
             const wy = wy0 + (psf.offsetsYMm[k] ?? 0);
             const wz = wz0 + (psf.offsetsZMm[k] ?? 0);
 
-            const vx = (wx - originMm.x) * invVox;
-            const vy = (wy - originMm.y) * invVox;
-            const vz = (wz - originMm.z) * invVox;
+            vx = (wx - originMm.x) * invVox;
+            vy = (wy - originMm.y) * invVox;
+            vz = (wz - originMm.z) * invVox;
 
             if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
 
-            const sampleSupport = occupancy ? sampleTrilinear(occupancy, dims, vx, vy, vz) : 1;
+            let sampleSupport = 1;
+            let sampledIntensity: number;
+            if (occupancy) {
+              sampleTrilinearWithSupport(volume, occupancy, dims, vx, vy, vz, interpolatedObservation);
+              sampleSupport = interpolatedObservation[1]!;
+              sampledIntensity = interpolatedObservation[0]!;
+            } else {
+              sampledIntensity = sampleTrilinear(volume, dims, vx, vy, vz);
+            }
             if (!(sampleSupport > 1e-12)) continue;
 
             // Unsupported interpolation corners represent missing evidence,
             // never zero-intensity tissue. Renormalize the matched observation.
-            pred += (sampleTrilinear(volume, dims, vx, vy, vz) / sampleSupport) * w * sampleSupport;
+            pred += sampledIntensity * w;
             wUsed += w * sampleSupport;
           }
 
@@ -624,11 +635,19 @@ export async function refineVolumeInPlace(params: {
           pred /= wUsed;
 
           const residual = obs - pred;
-          const rW = robustResidualWeight(residual, options.robustLoss, options.robustDelta);
+          const rW = robustResidualWeight(residual, options.robustLoss, robustDelta);
           if (!(rW > 0)) continue;
 
           // Backproject residual into volume using the same PSF weights.
           const scaleBase = (rW * observationWeight) / wUsed;
+
+          // Thin native slices at or below the output resolution have one PSF
+          // sample. Its accepted voxel coordinates already belong to the
+          // matched forward projection, so do not recompute or retest them.
+          if (psf.count === 1) {
+            splatTrilinearScaled(update, updateW, dims, vx, vy, vz, residual, (psf.weights[0] ?? 0) * scaleBase);
+            continue;
+          }
 
           for (let k = 0; k < psf.count; k++) {
             const w = psf.weights[k] ?? 0;
@@ -694,13 +713,19 @@ export async function refineVolumeInPlace(params: {
 
 export async function resampleVolumeToGridTrilinear(params: {
   src: Float32Array;
+  /** Canonical acquired support for the source lattice; unsupported zeros are not anatomy. */
+  srcOccupancy?: Uint8Array;
   srcGrid: SvrReconstructionGrid;
   dstGrid: SvrReconstructionGrid;
   hooks?: SvrCoreHooks;
 }): Promise<Float32Array> {
-  const { src, srcGrid, dstGrid, hooks } = params;
+  const { src, srcOccupancy, srcGrid, dstGrid, hooks } = params;
   const { dims: sDims, originMm: sOrigin, voxelSizeMm: sVox } = srcGrid;
   const { dims: dDims, originMm: dOrigin, voxelSizeMm: dVox } = dstGrid;
+
+  if (srcOccupancy && srcOccupancy.length !== src.length) {
+    throw new Error('SVR acquired support does not match its source volume');
+  }
 
   const yieldToMain = hooks?.yieldToMain ?? (async () => {});
 
@@ -710,6 +735,7 @@ export async function resampleVolumeToGridTrilinear(params: {
 
   const strideY = dDims.nx;
   const strideZ = dDims.nx * dDims.ny;
+  const interpolatedObservation = new Float64Array(2);
 
   for (let z = 0; z < dDims.nz; z++) {
     assertNotAborted(hooks?.signal);
@@ -727,7 +753,19 @@ export async function resampleVolumeToGridTrilinear(params: {
         const sy = (wy - sOrigin.y) * invSrcVox;
         const sz = (wz - sOrigin.z) * invSrcVox;
 
-        out[base + x] = withinTrilinearSupport(sDims, sx, sy, sz) ? sampleTrilinear(src, sDims, sx, sy, sz) : 0;
+        if (!withinTrilinearSupport(sDims, sx, sy, sz)) continue;
+        let support = 1;
+        let sampledIntensity: number;
+        if (srcOccupancy) {
+          sampleTrilinearWithSupport(src, srcOccupancy, sDims, sx, sy, sz, interpolatedObservation);
+          support = interpolatedObservation[1]!;
+          sampledIntensity = interpolatedObservation[0]!;
+        } else {
+          sampledIntensity = sampleTrilinear(src, sDims, sx, sy, sz);
+        }
+        if (support > 1e-12) {
+          out[base + x] = sampledIntensity / support;
+        }
       }
     }
 
