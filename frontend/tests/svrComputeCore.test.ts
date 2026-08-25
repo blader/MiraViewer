@@ -213,6 +213,21 @@ function axialSliceGeometry() {
   };
 }
 
+function computeSyntheticSvr(
+  allSlices: LoadedSlice[],
+  svrParams: SvrParams,
+  options: Partial<Parameters<typeof computeSvrFromLoadedSlices>[0]> = {},
+) {
+  return computeSvrFromLoadedSlices({
+    allSlices,
+    intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
+    intensitySamplesBySeries: new Map(),
+    svrParams,
+    debug: false,
+    ...options,
+  });
+}
+
 describe('svr/computeCore', () => {
   it('reconstructs valid zero and negative observations while rejecting explicitly invalid positive pixels', async () => {
     const occupancy = new Uint8Array(4);
@@ -428,14 +443,11 @@ describe('svr/computeCore', () => {
     const allSlices = makeAllSlices();
 
     await expect(
-      computeSvrFromLoadedSlices({
+      computeSyntheticSvr(
         allSlices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: { ...SVR_PARAMS, iterations: 0 },
-        residentCacheBytes: SVR_MEMORY_BUDGET_BYTES - 1_000,
-        debug: false,
-      }),
+        { ...SVR_PARAMS, iterations: 0 },
+        { residentCacheBytes: SVR_MEMORY_BUDGET_BYTES - 1_000 },
+      ),
     ).rejects.toThrow(/cache.*budget|budget.*cache/i);
 
     expect(allSlices).toHaveLength(18);
@@ -449,28 +461,21 @@ describe('svr/computeCore', () => {
       boundsMm: { min: [0, 0, 0], max: [32, 32, 32] },
     };
     const residentCacheBytes = SVR_MEMORY_BUDGET_BYTES - 1_000_000;
-    const withoutRegistration = await computeSvrFromLoadedSlices({
-      allSlices: makeAllSlices(),
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'none', roi },
-      residentCacheBytes,
-      debug: false,
-    });
+    const withoutRegistration = await computeSyntheticSvr(
+      makeAllSlices(),
+      { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'none', roi },
+      { residentCacheBytes },
+    );
     const allSlices = makeAllSlices();
     const progress: string[] = [];
 
     expect(withoutRegistration.volume.length).toBeGreaterThan(0);
     await expect(
-      computeSvrFromLoadedSlices({
+      computeSyntheticSvr(
         allSlices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'roi-rigid', roi },
-        residentCacheBytes,
-        onProgress: (event) => progress.push(event.message),
-        debug: false,
-      }),
+        { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'roi-rigid', roi },
+        { residentCacheBytes, onProgress: (event) => progress.push(event.message) },
+      ),
     ).rejects.toThrow(/registration.*budget|budget.*registration/i);
 
     expect(progress).not.toContain('ROI rigid alignment…');
@@ -483,15 +488,7 @@ describe('svr/computeCore', () => {
       slice.frameOfReferenceUid = slice.seriesUid === 's-ax' ? 'frame-one' : 'frame-two';
     }
 
-    await expect(
-      computeSvrFromLoadedSlices({
-        allSlices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: SVR_PARAMS,
-        debug: false,
-      }),
-    ).rejects.toThrow(/frame.*reference|coordinate frame/i);
+    await expect(computeSyntheticSvr(allSlices, SVR_PARAMS)).rejects.toThrow(/frame.*reference|coordinate frame/i);
     expect(allSlices).toHaveLength(18);
   });
 
@@ -500,13 +497,7 @@ describe('svr/computeCore', () => {
     allSlices[0]!.frameOfReferenceUid = 'shared-frame';
     allSlices[1]!.frameOfReferenceUid = 'shared-frame';
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices,
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, iterations: 0 },
-      debug: false,
-    });
+    const result = await computeSyntheticSvr(allSlices, { ...SVR_PARAMS, iterations: 0 });
 
     expect(result.supportedVoxelCount).toBeGreaterThan(0);
   });
@@ -523,13 +514,7 @@ describe('svr/computeCore', () => {
     slice.sliceThicknessMm = 3;
     slice.spacingBetweenSlicesMm = 8;
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices: [slice],
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, targetVoxelSizeMm: 0.5, iterations: 0 },
-      debug: false,
-    });
+    const result = await computeSyntheticSvr([slice], { ...SVR_PARAMS, targetVoxelSizeMm: 0.5, iterations: 0 });
 
     expect(result.acquiredOrientationCount).toBe(1);
     expect(result.sliceProfileSource).toBe('declared');
@@ -544,13 +529,7 @@ describe('svr/computeCore', () => {
     slices[1]!.sliceThicknessMm = null;
     slices[1]!.normalDir = { x: 0, y: 0, z: -1 };
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices: slices,
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, iterations: 0 },
-      debug: false,
-    });
+    const result = await computeSyntheticSvr(slices, { ...SVR_PARAMS, iterations: 0 });
 
     expect(result.acquiredOrientationCount).toBe(1);
     expect(result.sliceProfileSource).toBe('mixed');
@@ -558,13 +537,7 @@ describe('svr/computeCore', () => {
 
   it('binds reconstructed annotation identity to source SOPs and accepted solver settings', async () => {
     const reconstruct = (slices: LoadedSlice[], iterations: number) =>
-      computeSvrFromLoadedSlices({
-        allSlices: slices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: { ...SVR_PARAMS, iterations },
-        debug: false,
-      });
+      computeSyntheticSvr(slices, { ...SVR_PARAMS, iterations });
 
     const first = await reconstruct(makeAllSlices(), 0);
     const identical = await reconstruct(makeAllSlices(), 0);
@@ -615,12 +588,11 @@ describe('svr/computeCore', () => {
       slice.pixels[0] = 1;
     }
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices,
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, multiResolution: true, multiResolutionFactor: 2, multiResolutionCoarseIterations: 1 },
-      debug: false,
+    const result = await computeSyntheticSvr(allSlices, {
+      ...SVR_PARAMS,
+      multiResolution: true,
+      multiResolutionFactor: 2,
+      multiResolutionCoarseIterations: 1,
     });
 
     expect(result.observedSupport).toHaveLength(result.volume.length);
@@ -639,20 +611,14 @@ describe('svr/computeCore', () => {
       slice.valid[11 * slice.dsCols + 11] = 0;
     }
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices,
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: {
-        ...SVR_PARAMS,
-        roi: {
-          mode: 'cube',
-          sourcePlane: 'axial',
-          sourceSeriesUid: 's-ax',
-          boundsMm: { min: [9, 9, 9], max: [21, 21, 21] },
-        },
+    const result = await computeSyntheticSvr(allSlices, {
+      ...SVR_PARAMS,
+      roi: {
+        mode: 'cube',
+        sourcePlane: 'axial',
+        sourceSeriesUid: 's-ax',
+        boundsMm: { min: [9, 9, 9], max: [21, 21, 21] },
       },
-      debug: false,
     });
 
     expect(result.supportedVoxelCount).toBeGreaterThan(0);
@@ -678,13 +644,7 @@ describe('svr/computeCore', () => {
     slice.sliceThicknessMm = 6;
     slice.spacingBetweenSlicesMm = 20;
 
-    const result = await computeSvrFromLoadedSlices({
-      allSlices: [slice],
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, iterations: 0 },
-      debug: false,
-    });
+    const result = await computeSyntheticSvr([slice], { ...SVR_PARAMS, iterations: 0 });
 
     expect(result.bounds.min.x).toBeCloseTo(-10 * Math.SQRT2, 6);
     expect(result.bounds.max.x).toBeCloseTo(10 * Math.SQRT2, 6);
@@ -716,12 +676,11 @@ describe('svr/computeCore', () => {
     const reference = slices.filter((slice) => slice.seriesUid === 's-cor');
     const original = partial.map((slice) => ({ ...slice.ippMm }));
 
-    await computeSvrFromLoadedSlices({
-      allSlices: [...reference, ...partial],
-      intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
-      svrParams: { ...SVR_PARAMS, seriesRegistrationMode: 'roi-rigid', roi: null, iterations: 0 },
-      debug: false,
+    await computeSyntheticSvr([...reference, ...partial], {
+      ...SVR_PARAMS,
+      seriesRegistrationMode: 'roi-rigid',
+      roi: null,
+      iterations: 0,
     });
 
     expect(partial.map((slice) => slice.ippMm)).toEqual(original);
@@ -749,14 +708,11 @@ describe('svr/computeCore', () => {
     const progress: string[] = [];
 
     try {
-      await computeSvrFromLoadedSlices({
+      await computeSyntheticSvr(
         allSlices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'bounds-center' },
-        onProgress: (event) => progress.push(event.message),
-        debug: true,
-      });
+        { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'bounds-center' },
+        { onProgress: (event) => progress.push(event.message), debug: true },
+      );
 
       const diagnostics = JSON.stringify({ calls: spies.flatMap((spy) => spy.mock.calls), progress });
       expect(diagnostics).toContain('referenceSource');
@@ -787,11 +743,9 @@ describe('svr/computeCore', () => {
     const progress: string[] = [];
 
     try {
-      await computeSvrFromLoadedSlices({
+      await computeSyntheticSvr(
         allSlices,
-        intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
-        svrParams: {
+        {
           ...SVR_PARAMS,
           iterations: 0,
           seriesRegistrationMode: 'roi-rigid',
@@ -802,9 +756,8 @@ describe('svr/computeCore', () => {
             boundsMm: { min: [10, 10, 10], max: [14, 14, 14] },
           },
         },
-        onProgress: (event) => progress.push(event.message),
-        debug: true,
-      });
+        { onProgress: (event) => progress.push(event.message), debug: true },
+      );
 
       const diagnostics = JSON.stringify({ calls: spies.flatMap((spy) => spy.mock.calls), progress });
       expect(diagnostics).toContain('registration.roi-rigid.plan');
