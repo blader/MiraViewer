@@ -58,6 +58,7 @@ export function ComparisonFiltersSidebar({
                 <button
                   key={p}
                   type="button"
+                  disabled={alignmentInProgress}
                   aria-pressed={selectedPlane === p}
                   onClick={() => onSelectPlane(p)}
                   className={`min-h-10 w-full truncate border-l-2 px-3 text-left text-[13px] transition-colors ${
@@ -85,6 +86,7 @@ export function ComparisonFiltersSidebar({
                   <button
                     key={seq.id}
                     type="button"
+                    disabled={alignmentInProgress}
                     aria-pressed={isSelected}
                     onClick={() => onSelectSequence(seq.id)}
                     className={`min-h-10 w-full cursor-pointer truncate border-l-2 px-3 text-left text-[13px] transition-colors ${
@@ -137,6 +139,7 @@ export function ComparisonFiltersSidebar({
 
       <button
         type="button"
+        disabled={alignmentInProgress}
         onClick={onToggleOpen}
         aria-label={open ? 'Hide scan filters' : 'Show scan filters'}
         aria-expanded={open}

@@ -208,7 +208,9 @@ export async function initStoragePersistence() {
 }
 
 function publishStorageHealth() {
-  for (const listener of storageHealthListeners) listener(storageHealth);
+  for (const listener of [...storageHealthListeners]) {
+    if (storageHealthListeners.has(listener)) listener(storageHealth);
+  }
 }
 
 export function getStorageHealth(): StorageHealth {
@@ -236,7 +238,9 @@ export async function assertStorageHeadroom(requiredBytes: number): Promise<void
 }
 
 export function notifyDatasetMutation(seriesUid?: string): void {
-  for (const listener of datasetMutationListeners) listener(seriesUid);
+  for (const listener of [...datasetMutationListeners]) {
+    if (datasetMutationListeners.has(listener)) listener(seriesUid);
+  }
 }
 
 export function subscribeDatasetMutations(listener: (seriesUid?: string) => void): () => void {

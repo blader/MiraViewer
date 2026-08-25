@@ -132,6 +132,10 @@ export function OverlayView({
     overlayCompareRef ? getDerivedAlignmentFrame(overlayCompareRef.series_uid, compareEffectiveSliceIndex) : null,
   );
   const displayedDerivedFrame = isOverlayComparing ? compareDerivedFrame : selectedDerivedFrame;
+  const displayedImageSize = {
+    width: displayedDerivedFrame?.columns ?? overlayDisplayedRef?.columns ?? 512,
+    height: displayedDerivedFrame?.rows ?? overlayDisplayedRef?.rows ?? 512,
+  };
   const nativeAnnotationsAvailable = displayedDerivedFrame === null;
 
   return (
@@ -165,7 +169,7 @@ export function OverlayView({
             </div>
 
             <div
-              inert={isOverlayComparing}
+              inert={isOverlayComparing || isAligning}
               className={`ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100 ${
                 isOverlayComparing ? 'pointer-events-none opacity-40' : 'study-controls'
               }`}
@@ -237,7 +241,7 @@ export function OverlayView({
           >
             <DragRectActionOverlay
               className="absolute inset-0 cursor-crosshair"
-              imageSize={{ width: overlayDisplayedRef.columns ?? 512, height: overlayDisplayedRef.rows ?? 512 }}
+              imageSize={displayedImageSize}
               geometry={{
                 panX: overlayDisplayedSettings.panX,
                 panY: overlayDisplayedSettings.panY,
@@ -269,10 +273,7 @@ export function OverlayView({
                         patientKey: overlayDisplayedRef.patient_key,
                         studyUid: overlayDisplayedRef.study_uid ?? overlayDisplayedRef.study_id,
                         frameOfReferenceUid: overlayDisplayedRef.frame_of_reference_uid,
-                        imageSize: {
-                          width: overlayDisplayedRef.columns ?? 512,
-                          height: overlayDisplayedRef.rows ?? 512,
-                        },
+                        imageSize: displayedImageSize,
                         viewportSize:
                           bounds && bounds.width > 0 && bounds.height > 0
                             ? { width: bounds.width, height: bounds.height }
@@ -494,7 +495,10 @@ export function OverlayView({
                   ? 'Aligned presentation'
                   : 'Acquired image'}
             </span>
-            <div inert={isOverlayComparing} className={isOverlayComparing ? 'pointer-events-none opacity-40' : ''}>
+            <div
+              inert={isOverlayComparing || isAligning}
+              className={isOverlayComparing ? 'pointer-events-none opacity-40' : ''}
+            >
               <StepControl
                 title="Slice offset"
                 value={`${overlayDisplayedSliceIndex + 1}/${overlayDisplayedRef.instance_count}`}

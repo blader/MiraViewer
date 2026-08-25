@@ -13,7 +13,9 @@ let debugKeyHeld = false;
 function publishDebugKey(held: boolean): void {
   if (debugKeyHeld === held) return;
   debugKeyHeld = held;
-  for (const listener of debugKeyListeners) listener();
+  for (const listener of [...debugKeyListeners]) {
+    if (debugKeyListeners.has(listener)) listener();
+  }
 }
 
 function onDebugKeyDown(event: KeyboardEvent): void {

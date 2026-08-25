@@ -155,19 +155,6 @@ export function ComparisonMatrix() {
     };
   }, [headerMenuOpen]);
 
-  // Custom hooks
-  const {
-    panelSettings,
-    progress,
-    setProgress,
-    updatePanelSetting,
-    batchUpdateSettings,
-    persistenceError,
-    clearPersistenceError,
-    reportPersistenceError,
-  } = usePanelSettings(selectedSeqId, enabledDatesKey, data?.selected_patient_key ?? null);
-
-  // Alignment hooks
   const {
     isAligning,
     progress: alignmentProgress,
@@ -177,6 +164,17 @@ export function ComparisonMatrix() {
     alignAllDates,
     abort: abortAlignment,
   } = useAutoAlign();
+
+  const {
+    panelSettings,
+    progress,
+    setProgress,
+    updatePanelSetting,
+    batchUpdateSettings,
+    persistenceError,
+    clearPersistenceError,
+    reportPersistenceError,
+  } = usePanelSettings(selectedSeqId, enabledDatesKey, data?.selected_patient_key ?? null, isAligning);
 
   const interactionBlocked = helpOpen || uploadModalOpen || exportModalOpen || clearDataModalOpen || isAligning;
 
@@ -539,6 +537,13 @@ export function ComparisonMatrix() {
   const selectedSequence = data?.sequences.find((sequence) => sequence.id === selectedSeqId);
   const activeExaminationDate = overlayDisplayedDate ?? columns.find((column) => column.ref)?.date ?? null;
   const showStudyFilmstrip = viewMode === 'overlay' || viewMode === 'svr3d';
+  const unsuccessfulAlignmentResults =
+    !isAligning && !alignmentError
+      ? alignmentResults.filter((result) => result.outcome && result.outcome !== 'aligned')
+      : [];
+  const hasInstrumentNotices = Boolean(
+    persistenceError || (alignmentError && !isAligning) || unsuccessfulAlignmentResults.length > 0,
+  );
 
   return (
     <div className="instrument-shell flex flex-col">
@@ -567,6 +572,7 @@ export function ComparisonMatrix() {
             <nav className="instrument-mode-nav" aria-label="Viewing mode">
               <button
                 type="button"
+                disabled={isAligning}
                 onClick={() => setViewMode('grid')}
                 aria-pressed={viewMode === 'grid'}
                 className="instrument-mode-tab"
@@ -576,6 +582,7 @@ export function ComparisonMatrix() {
               </button>
               <button
                 type="button"
+                disabled={isAligning}
                 onClick={() => setViewMode('overlay')}
                 aria-pressed={viewMode === 'overlay'}
                 className="instrument-mode-tab"
@@ -585,6 +592,7 @@ export function ComparisonMatrix() {
               </button>
               <button
                 type="button"
+                disabled={isAligning}
                 onClick={() => setViewMode('svr3d')}
                 aria-pressed={viewMode === 'svr3d'}
                 className="instrument-mode-tab"
@@ -600,6 +608,7 @@ export function ComparisonMatrix() {
               <span className="instrument-patient-label">Patient</span>
               <select
                 aria-label="Selected patient"
+                disabled={isAligning}
                 value={data?.selected_patient_key ?? ''}
                 onChange={(event) => {
                   abortAlignment();
@@ -629,6 +638,7 @@ export function ComparisonMatrix() {
             {hasData ? (
               <button
                 type="button"
+                disabled={isAligning}
                 onClick={() => {
                   setHeaderMenuOpen(false);
                   setUploadModalOpen(true);
@@ -642,6 +652,7 @@ export function ComparisonMatrix() {
             ) : null}
             <button
               type="button"
+              disabled={isAligning}
               onClick={() => {
                 setHeaderMenuOpen(false);
                 setHelpOpen(true);
@@ -656,6 +667,7 @@ export function ComparisonMatrix() {
             <div className="relative" ref={headerMenuRef}>
               <button
                 type="button"
+                disabled={isAligning}
                 onClick={() => setHeaderMenuOpen((value) => !value)}
                 className="instrument-icon-button"
                 title="Menu"
@@ -669,6 +681,7 @@ export function ComparisonMatrix() {
                 <div className="instrument-menu">
                   <button
                     type="button"
+                    disabled={isAligning}
                     onClick={() => {
                       setHeaderMenuOpen(false);
                       setUploadModalOpen(true);
@@ -681,6 +694,7 @@ export function ComparisonMatrix() {
                   {hasData ? (
                     <button
                       type="button"
+                      disabled={isAligning}
                       onClick={() => {
                         setHeaderMenuOpen(false);
                         setExportModalOpen(true);
@@ -694,6 +708,7 @@ export function ComparisonMatrix() {
                   {hasData ? (
                     <button
                       type="button"
+                      disabled={isAligning}
                       onClick={() => {
                         setHeaderMenuOpen(false);
                         setClearDataModalOpen(true);
@@ -711,8 +726,12 @@ export function ComparisonMatrix() {
           </div>
         </div>
 
-        {hasData ? (
-          <div className="instrument-context-rail" aria-label="Selected examination and image context">
+        {hasData || hasInstrumentNotices ? (
+          <div
+            className="instrument-context-rail"
+            aria-label="Selected examination and image context"
+            data-notices-visible={hasInstrumentNotices || undefined}
+          >
             <div className="instrument-context-summary">
               <span className="instrument-context-value">{selectedPlane}</span>
               {selectedSequence ? (
@@ -738,7 +757,7 @@ export function ComparisonMatrix() {
                 <button
                   type="button"
                   onClick={() => setIsPlaying(!isPlaying)}
-                  disabled={overlayColumns.length < 2}
+                  disabled={isAligning || overlayColumns.length < 2}
                   className="instrument-icon-button disabled:cursor-not-allowed disabled:opacity-50"
                   title={isPlaying ? 'Pause' : 'Play'}
                   aria-label={isPlaying ? 'Pause comparison playback' : 'Start comparison playback'}
@@ -753,7 +772,7 @@ export function ComparisonMatrix() {
                   aria-label="Comparison playback speed"
                   value={playSpeed}
                   onChange={(event) => setPlaySpeed(parseInt(event.target.value, 10))}
-                  disabled={overlayColumns.length < 2}
+                  disabled={isAligning || overlayColumns.length < 2}
                   className="disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {OVERLAY.PLAY_SPEEDS.map((speed) => (
@@ -771,6 +790,7 @@ export function ComparisonMatrix() {
                   <button
                     key={column.date}
                     type="button"
+                    disabled={isAligning}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
                       setOverlayDateIndex(index);
@@ -783,6 +803,44 @@ export function ComparisonMatrix() {
                   </button>
                 ))}
               </nav>
+            ) : null}
+
+            {hasInstrumentNotices ? (
+              <div className="instrument-notice-rail">
+                {persistenceError ? (
+                  <div role="alert" className="instrument-notice" data-severity="error">
+                    <span>Changes could not be saved: {persistenceError}</span>
+                    <button type="button" className="instrument-notice-button" onClick={clearPersistenceError}>
+                      Dismiss
+                    </button>
+                  </div>
+                ) : null}
+                {alignmentError && !isAligning ? (
+                  <div role="alert" className="instrument-notice" data-severity="error">
+                    <span>
+                      <span className="font-medium">Alignment failed:</span> {alignmentError}
+                    </span>
+                    <button type="button" className="instrument-notice-button" onClick={clearAlignmentState}>
+                      Dismiss
+                    </button>
+                  </div>
+                ) : null}
+                {unsuccessfulAlignmentResults.length > 0 ? (
+                  <div role="status" aria-live="polite" className="instrument-notice">
+                    <span className="font-medium">Some examinations could not be aligned safely.</span>
+                    <ul className="instrument-notice-details">
+                      {unsuccessfulAlignmentResults.map((result) => (
+                        <li key={`${result.runId ?? 'alignment'}:${result.date}`}>
+                          {formatDate(result.date)}: {result.message ?? result.outcome?.replaceAll('-', ' ')}
+                        </li>
+                      ))}
+                    </ul>
+                    <button type="button" className="instrument-notice-button" onClick={clearAlignmentState}>
+                      Dismiss
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -809,55 +867,6 @@ export function ComparisonMatrix() {
 
         {/* Main content area - Grid / Overlay / SVR 3D */}
         <div ref={setCenterPaneRef} className="instrument-stage relative flex min-w-0 flex-1 flex-col overflow-hidden">
-          {persistenceError ? (
-            <div
-              role="alert"
-              className="instrument-notice flex items-center justify-between gap-3"
-              data-severity="error"
-            >
-              <span>Changes could not be saved: {persistenceError}</span>
-              <button type="button" className="instrument-notice-button" onClick={clearPersistenceError}>
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-          {alignmentError && !isAligning ? (
-            <div
-              role="alert"
-              className="instrument-notice flex items-center justify-between gap-3"
-              data-severity="error"
-            >
-              <div className="min-w-0 truncate">
-                <span className="font-medium">Alignment failed:</span> {alignmentError}
-              </div>
-              <button type="button" className="instrument-notice-button" onClick={() => clearAlignmentState()}>
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-          {!isAligning &&
-          !alignmentError &&
-          alignmentResults.some((result) => result.outcome && result.outcome !== 'aligned') ? (
-            <div role="status" aria-live="polite" className="instrument-notice">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="font-medium">Some examinations could not be aligned safely.</p>
-                  <ul className="mt-1 space-y-1 text-xs text-[var(--text-secondary)]">
-                    {alignmentResults
-                      .filter((result) => result.outcome && result.outcome !== 'aligned')
-                      .map((result) => (
-                        <li key={`${result.runId ?? 'alignment'}:${result.date}`}>
-                          {formatDate(result.date)}: {result.message ?? result.outcome?.replaceAll('-', ' ')}
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-                <button type="button" className="instrument-notice-button" onClick={clearAlignmentState}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ) : null}
           {!hasData ? (
             <div className="instrument-empty">
               <div className="instrument-empty-inner">
@@ -946,6 +955,7 @@ export function ComparisonMatrix() {
             onSelectAllDates={selectAllDates}
             onSelectNoDates={selectNoDates}
             onToggleDate={toggleDate}
+            alignmentInProgress={isAligning}
           />
         ) : null}
       </div>

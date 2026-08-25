@@ -923,15 +923,22 @@ export async function loadDerivedAlignmentFrames(
   return frames.sort((a, b) => a.createdAt - b.createdAt).slice(-MAX_DERIVED_ALIGNMENT_FRAMES);
 }
 
-export async function clearPersistedDerivedAlignmentFrames(patientKey?: string): Promise<void> {
+export async function clearPersistedDerivedAlignmentFrames(
+  patientKey?: string,
+  targetSeriesUid?: string,
+): Promise<void> {
   const db = await getDB();
   if (!patientKey) {
+    if (targetSeriesUid) {
+      throw new Error('Cannot clear a registered examination without its verified patient identity');
+    }
     await db.clear('derived_alignment_frames');
     return;
   }
   const tx = db.transaction('derived_alignment_frames', 'readwrite');
   const store = tx.objectStore('derived_alignment_frames');
   for (const frame of await store.index('by-patient').getAll(patientKey)) {
+    if (targetSeriesUid && frame.targetSeriesUid !== targetSeriesUid) continue;
     await store.delete(frame.id);
   }
   await tx.done;

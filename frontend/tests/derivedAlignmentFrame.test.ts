@@ -16,11 +16,13 @@ vi.mock('../src/utils/localApi', () => ({
 }));
 
 import {
+  clearDerivedAlignmentFrame,
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
   getDerivedAlignmentFrameByImageId,
   hydrateDerivedAlignmentFrames,
   persistDerivedAlignmentFrame,
+  retainDerivedAlignmentReference,
   setDerivedAlignmentFrame,
   subscribeToDerivedAlignmentFrames,
 } from '../src/utils/derivedAlignmentFrame';
@@ -90,6 +92,124 @@ describe('verified derived alignment frame cache', () => {
     expect(getDerivedAlignmentFrame('other-series', 12)).toBeNull();
     expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
+  });
+
+  it('delivers a frame update once when a synchronous viewer re-subscribes during notification', () => {
+    let unsubscribe = () => undefined;
+    const listener = vi.fn(() => {
+      if (listener.mock.calls.length >= 5) return;
+      unsubscribe();
+      unsubscribe = subscribeToDerivedAlignmentFrames(listener);
+    });
+    unsubscribe = subscribeToDerivedAlignmentFrames(listener);
+
+    try {
+      setDerivedAlignmentFrame(result());
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('preserves patient, sequence, and dataset ownership alongside a displayed derived plane', async () => {
+    setDerivedAlignmentFrame(result());
+
+    expect(getDerivedAlignmentFrame('target-series', 12)).toMatchObject({
+      patientKey: 'verified-patient',
+      sequenceId: 'verified-sequence',
+      datasetRevision: 7,
+    });
+
+    await persistDerivedAlignmentFrame(result());
+    const saved = storage.save.mock.calls[0]![0] as DerivedAlignmentFrameRow;
+    clearDerivedAlignmentFrames();
+    storage.load.mockResolvedValue([saved]);
+    await hydrateDerivedAlignmentFrames('verified-patient', 7, 'verified-sequence', new Set(['target-series']));
+
+    expect(getDerivedAlignmentFrame('target-series', 12)).toMatchObject({
+      patientKey: 'verified-patient',
+      sequenceId: 'verified-sequence',
+      datasetRevision: 7,
+    });
+  });
+
+  it('clears only one replaced target series while preserving the selected reference and other examinations', () => {
+    const selected = result();
+    selected.seriesUid = 'selected-reference';
+    selected.bestSliceIndex = 3;
+    setDerivedAlignmentFrame(selected);
+
+    const firstTarget = result();
+    firstTarget.bestSliceIndex = 11;
+    setDerivedAlignmentFrame(firstTarget);
+    setDerivedAlignmentFrame(result());
+
+    const listener = vi.fn();
+    const unsubscribe = subscribeToDerivedAlignmentFrames(listener);
+    clearDerivedAlignmentFrame('target-series');
+
+    expect(getDerivedAlignmentFrame('target-series', 11)).toBeNull();
+    expect(getDerivedAlignmentFrame('target-series', 12)).toBeNull();
+    expect(getDerivedAlignmentFrame('selected-reference', 3)).not.toBeNull();
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('atomically replaces a stale target slice without exposing an intermediate native-image flash', () => {
+    const first = result();
+    first.bestSliceIndex = 11;
+    setDerivedAlignmentFrame(first);
+    const observed: Array<{ previous: boolean; current: boolean }> = [];
+    const unsubscribe = subscribeToDerivedAlignmentFrames(() => {
+      observed.push({
+        previous: getDerivedAlignmentFrame('target-series', 11) !== null,
+        current: getDerivedAlignmentFrame('target-series', 12) !== null,
+      });
+    });
+
+    setDerivedAlignmentFrame(result());
+
+    expect(getDerivedAlignmentFrame('target-series', 11)).toBeNull();
+    expect(getDerivedAlignmentFrame('target-series', 12)).not.toBeNull();
+    expect(observed).toEqual([{ previous: false, current: true }]);
+    unsubscribe();
+  });
+
+  it('can invalidate exactly one target slice without clearing an unrelated examination', () => {
+    const other = result();
+    other.seriesUid = 'other-examination';
+    setDerivedAlignmentFrame(other);
+    setDerivedAlignmentFrame(result());
+
+    clearDerivedAlignmentFrame('target-series', 12);
+
+    expect(getDerivedAlignmentFrame('target-series', 12)).toBeNull();
+    expect(getDerivedAlignmentFrame('other-examination', 12)).not.toBeNull();
+  });
+
+  it('never evicts an active selected reference when newly registered targets exceed the bounded cache', () => {
+    const selected = result();
+    selected.seriesUid = 'selected-reference';
+    selected.bestSliceIndex = 3;
+    setDerivedAlignmentFrame(selected);
+    const frame = getDerivedAlignmentFrame('selected-reference', 3)!;
+    const release = retainDerivedAlignmentReference(frame);
+
+    for (let index = 0; index < 20; index++) {
+      const target = result();
+      target.seriesUid = `replacement-${index}`;
+      setDerivedAlignmentFrame(target);
+    }
+
+    expect(getDerivedAlignmentFrame('selected-reference', 3)).toBe(frame);
+    expect(getDerivedAlignmentFrame('replacement-19', 12)).not.toBeNull();
+    expect(getDerivedAlignmentFrame('replacement-0', 12)).toBeNull();
+    release();
+
+    const replacement = result();
+    replacement.seriesUid = 'replacement-after-release';
+    setDerivedAlignmentFrame(replacement);
+    expect(getDerivedAlignmentFrame('selected-reference', 3)).toBeNull();
   });
 
   it('never exposes derived pixels for ambiguous or failed results', () => {

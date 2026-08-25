@@ -39,7 +39,37 @@ vi.mock('../src/components/DicomViewer', () => ({
 }));
 
 vi.mock('../src/components/DragRectActionOverlay', () => ({
-  DragRectActionOverlay: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DragRectActionOverlay: ({
+    children,
+    imageSize,
+    actions,
+  }: {
+    children: ReactNode;
+    imageSize?: { width: number; height: number };
+    actions?: Array<{
+      key: string;
+      onConfirm: (masks: {
+        base: { x: number; y: number; width: number; height: number };
+        screen: { x: number; y: number; width: number; height: number };
+      }) => void;
+    }>;
+  }) => (
+    <div
+      data-testid="diagnostic-drag-overlay"
+      data-image-width={imageSize?.width}
+      data-image-height={imageSize?.height}
+      onDoubleClick={() =>
+        actions
+          ?.find((action) => action.key === 'align-all')
+          ?.onConfirm({
+            base: { x: 0.2, y: 0.3, width: 0.4, height: 0.2 },
+            screen: { x: 0.2, y: 0.3, width: 0.4, height: 0.2 },
+          })
+      }
+    >
+      {children}
+    </div>
+  ),
 }));
 
 vi.mock('../src/components/comparison/LazyStudyOverlays', () => ({
@@ -302,6 +332,78 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(container.querySelector('[data-registration-datum="verified"]')).toBeNull();
   });
 
+  it('makes grid examination geometry and slice controls inert while alignment owns their presentation', () => {
+    const props = {
+      comboId: 'synthetic-sequence',
+      date: selectedDate,
+      refData: selectedSeries,
+      settings: DEFAULT_PANEL_SETTINGS,
+      progress: 0,
+      setProgress: vi.fn(),
+      updatePanelSetting: vi.fn(),
+      isHovered: true,
+      overlayColumns: [
+        { date: selectedDate, ref: selectedSeries },
+        { date: compareDate, ref: compareSeries },
+      ],
+      isAligning: true,
+      startAlignAll: vi.fn(async () => undefined),
+    };
+    const { container, rerender } = render(<GridCell {...props} />);
+    const zoom = container.querySelector<HTMLButtonElement>('[aria-label="Increase Zoom"]');
+    const slice = container.querySelector<HTMLButtonElement>('[aria-label="Increase Slice offset"]');
+
+    expect(zoom?.closest('[inert]')).not.toBeNull();
+    expect(slice?.closest('[inert]')).not.toBeNull();
+
+    rerender(<GridCell {...props} isAligning={false} />);
+
+    expect(zoom?.closest('[inert]')).toBeNull();
+    expect(slice?.closest('[inert]')).toBeNull();
+    fireEvent.mouseDown(zoom!);
+    fireEvent.mouseUp(zoom!);
+    expect(props.updatePanelSetting).toHaveBeenCalledWith(selectedDate, { zoom: 1.01 });
+  });
+
+  it('uses displayed derived-plane dimensions for grid exclusion geometry and reference metadata', () => {
+    const startAlignAll = vi.fn(async () => undefined);
+    const result = alignedResult(selectedSeries, selectedDate);
+    result.derivedFrame = {
+      ...result.derivedFrame!,
+      rows: 96,
+      columns: 384,
+      pixels: new Float32Array(96 * 384),
+    };
+    act(() => setDerivedAlignmentFrame(result));
+    render(
+      <GridCell
+        comboId="synthetic-sequence"
+        date={selectedDate}
+        refData={selectedSeries}
+        settings={DEFAULT_PANEL_SETTINGS}
+        progress={0}
+        setProgress={vi.fn()}
+        updatePanelSetting={vi.fn()}
+        isHovered
+        overlayColumns={[
+          { date: selectedDate, ref: selectedSeries },
+          { date: compareDate, ref: compareSeries },
+        ]}
+        isAligning={false}
+        startAlignAll={startAlignAll}
+      />,
+    );
+    const overlay = screen.getByTestId('diagnostic-drag-overlay');
+
+    expect(overlay).toHaveAttribute('data-image-width', '384');
+    expect(overlay).toHaveAttribute('data-image-height', '96');
+    fireEvent.doubleClick(overlay);
+    expect(startAlignAll).toHaveBeenCalledWith(
+      expect.objectContaining({ imageSize: { width: 384, height: 96 } }),
+      expect.objectContaining({ x: 0.2, y: 0.3 }),
+    );
+  });
+
   it('keeps both overlay image layers mounted while switching the active examination', () => {
     const props = {
       comboId: 'synthetic-sequence',
@@ -369,6 +471,80 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(props.updatePanelSetting).not.toHaveBeenCalled();
     expect(props.setProgress).not.toHaveBeenCalled();
     expect(container.innerHTML).not.toContain('backdrop-blur');
+
+    rerender(
+      <OverlayView
+        {...props}
+        isAligning
+        alignmentProgress={{
+          phase: 'capturing',
+          currentDate: null,
+          dateIndex: 0,
+          totalDates: 1,
+          slicesChecked: 0,
+          bestMiSoFar: 0,
+        }}
+      />,
+    );
+
+    expect(container.querySelector('[aria-label="Increase Zoom"]')?.closest('[inert]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Increase Slice offset"]')?.closest('[inert]')).not.toBeNull();
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel.closest('[inert]')).toBeNull();
+    fireEvent.click(cancel);
+    expect(props.abortAlignment).toHaveBeenCalledOnce();
+  });
+
+  it('uses displayed derived-plane dimensions for overlay exclusion geometry and reference metadata', () => {
+    const startAlignAll = vi.fn(async () => undefined);
+    const result = alignedResult(selectedSeries, selectedDate);
+    result.derivedFrame = {
+      ...result.derivedFrame!,
+      rows: 96,
+      columns: 384,
+      pixels: new Float32Array(96 * 384),
+    };
+    act(() => setDerivedAlignmentFrame(result));
+    render(
+      <OverlayView
+        comboId="synthetic-sequence"
+        overlayColumns={[
+          { date: selectedDate, ref: selectedSeries },
+          { date: compareDate, ref: compareSeries },
+        ]}
+        overlayViewerSize={420}
+        overlayDisplayedRef={selectedSeries}
+        overlayDisplayedDate={selectedDate}
+        overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
+        overlayDisplayedSliceIndex={0}
+        overlayDisplayedEffectiveSliceIndex={0}
+        overlaySelectedRef={selectedSeries}
+        overlaySelectedDate={selectedDate}
+        overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
+        overlaySelectedSliceIndex={0}
+        overlayCompareRef={compareSeries}
+        overlayCompareDate={compareDate}
+        overlayCompareSettings={DEFAULT_PANEL_SETTINGS}
+        overlayCompareSliceIndex={0}
+        isOverlayComparing={false}
+        hasOverlayCompareTarget
+        isAligning={false}
+        alignmentProgress={null}
+        abortAlignment={vi.fn()}
+        updatePanelSetting={vi.fn()}
+        startAlignAll={startAlignAll}
+        setProgress={vi.fn()}
+      />,
+    );
+    const overlay = screen.getByTestId('diagnostic-drag-overlay');
+
+    expect(overlay).toHaveAttribute('data-image-width', '384');
+    expect(overlay).toHaveAttribute('data-image-height', '96');
+    fireEvent.doubleClick(overlay);
+    expect(startAlignAll).toHaveBeenCalledWith(
+      expect.objectContaining({ imageSize: { width: 384, height: 96 } }),
+      expect.objectContaining({ x: 0.2, y: 0.3 }),
+    );
   });
 
   it('reports only the actual selected slice and exposes its precise accessible value', () => {

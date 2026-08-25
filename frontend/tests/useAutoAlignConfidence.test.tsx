@@ -37,7 +37,22 @@ vi.mock('../src/utils/alignmentScoringRunner', () => ({
   createAlignmentScoringRunner: async () => ({
     scoreCoarse: async (pixels: Float32Array) => score(pixels[0] ?? 0),
     scoreFine: async (pixels: Float32Array) => score(pixels[0] ?? 0),
-    scoreFinal: vi.fn(),
+    scoreFinal: async () => {
+      const identity = { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } };
+      const selected = {
+        kind: 'seed-only',
+        residualMovingToFixed: identity,
+        totalMovingToFixed: identity,
+        eligible: true,
+        components: { forward: score(0).components, sourceCoverage: 1 },
+        mindScore: 0.5,
+        ngfScore: 0.5,
+        structuralScore: 0.5,
+        bidirectionalCoverage: 1,
+        deformationMagnitude: 0,
+      };
+      return { selected, proposals: [selected] };
+    },
     close: vi.fn(),
   }),
 }));
@@ -111,12 +126,12 @@ describe('auto-alignment fail-closed clinical evidence', () => {
     return results;
   }
 
-  it('does not run affine optimization or apply a numerically indistinguishable ranked winner', async () => {
+  it('applies the best valid ranked winner even when another slice is numerically indistinguishable', async () => {
     const results = await run();
 
-    expect(results[0]).toMatchObject({ outcome: 'ambiguous' });
+    expect(results[0]).toMatchObject({ outcome: 'aligned', bestSliceIndex: 8 });
     expect(results[0]?.evidence?.runnerUpGap).toBeLessThan(0.0001);
-    expect(mocks.registerAffine).not.toHaveBeenCalled();
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(2);
   });
 
   it('reports partial reference anatomy as insufficient overlap instead of a confident match', async () => {

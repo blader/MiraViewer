@@ -544,6 +544,40 @@ describe('durable MRI storage and import contracts', () => {
     expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toEqual([]);
   });
 
+  it('removes only obsolete registered planes for the replaced examination', async () => {
+    await processDicomFile(makeImplicitDicom());
+    await processDicomFile(
+      makeImplicitDicom({
+        studyUid: '1.2.5',
+        seriesUid: '1.2.5.4',
+        instanceUid: '1.2.5.4.1',
+      }),
+    );
+    await getComparisonData();
+    await saveDerivedAlignmentFrame(makeDerivedFrame({ datasetRevision: 2 }));
+    await saveDerivedAlignmentFrame(
+      makeDerivedFrame({
+        id: 'derived-preserved-reference',
+        datasetRevision: 2,
+        targetStudyUid: '1.2.5',
+        targetSeriesUid: '1.2.5.4',
+        targetSopInstanceUid: '1.2.5.4.1',
+        sourceImageId: 'miradb:1.2.5.4.1',
+        createdAt: 2,
+      }),
+    );
+
+    await expect(clearPersistedDerivedAlignmentFrames(undefined, '1.2.3.4')).rejects.toThrow('verified patient');
+    expect(await loadDerivedAlignmentFrames('synthetic-patient', 2)).toHaveLength(2);
+
+    await clearPersistedDerivedAlignmentFrames('synthetic-patient', '1.2.3.4');
+    await resetDbForTests();
+
+    expect(await loadDerivedAlignmentFrames('synthetic-patient', 2)).toMatchObject([
+      { id: 'derived-preserved-reference', targetSeriesUid: '1.2.5.4' },
+    ]);
+  });
+
   it('round-trips a 1024-pixel physical output grid, support mask, and complete source provenance', async () => {
     await processDicomFile(makeImplicitDicom());
     const reference = (await (await getDB()).get('instances', '1.2.3.4.1'))!;

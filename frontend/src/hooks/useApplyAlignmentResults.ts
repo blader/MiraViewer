@@ -1,7 +1,12 @@
 import { useEffect, useRef } from 'react';
 import type { AlignmentResult, ComparisonData, PanelSettings } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
-import { persistDerivedAlignmentFrame, setDerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
+import {
+  clearDerivedAlignmentFrame,
+  persistDerivedAlignmentFrame,
+  setDerivedAlignmentFrame,
+} from '../utils/derivedAlignmentFrame';
+import { clearPersistedDerivedAlignmentFrames } from '../utils/localApi';
 import { outputGridFingerprint } from '../utils/outputPlaneGrid';
 
 export function useApplyAlignmentResults(opts: {
@@ -16,13 +21,14 @@ export function useApplyAlignmentResults(opts: {
   const { isAligning, alignmentResults, panelSettings, data, selectedSeqId, batchUpdateSettings, onPersistenceError } =
     opts;
 
-  // Track which dates we've already applied so we can update incrementally as each finishes.
-  const appliedAlignmentDatesRef = useRef(new Set<string>());
+  // A date can be aligned again when an in-flight run is superseded.
+  const appliedAlignmentResultsRef = useRef(new Set<string>());
+  const pendingPersistenceBySeriesRef = useRef(new Map<string, Promise<void>>());
   const wasAligningRef = useRef(false);
 
   useEffect(() => {
     if (isAligning && !wasAligningRef.current) {
-      appliedAlignmentDatesRef.current.clear();
+      appliedAlignmentResultsRef.current.clear();
     }
     wasAligningRef.current = isAligning;
   }, [isAligning]);
@@ -30,10 +36,27 @@ export function useApplyAlignmentResults(opts: {
   useEffect(() => {
     if (alignmentResults.length === 0) return;
 
+    const queuePersistence = (seriesUid: string, operation: () => Promise<void>) => {
+      const pendingPersistence = pendingPersistenceBySeriesRef.current;
+      const predecessor = pendingPersistence.get(seriesUid);
+      const next = predecessor ? predecessor.then(operation, operation) : operation();
+      pendingPersistence.set(seriesUid, next);
+      void next.then(
+        () => {
+          if (pendingPersistence.get(seriesUid) === next) pendingPersistence.delete(seriesUid);
+        },
+        (error: unknown) => {
+          if (pendingPersistence.get(seriesUid) === next) pendingPersistence.delete(seriesUid);
+          onPersistenceError?.(error);
+        },
+      );
+    };
+
     const pending = new Map<string, PanelSettings>();
     let operationId: string | undefined;
     for (const r of alignmentResults) {
-      if (appliedAlignmentDatesRef.current.has(r.date)) continue;
+      const applicationKey = `${r.runId ?? ''}:${r.date}`;
+      if (appliedAlignmentResultsRef.current.has(applicationKey)) continue;
 
       // The live dataset, selected patient, and current sequence are the only application authority.
       // An async result produced before a patient switch, re-import, or sequence change is stale.
@@ -52,6 +75,27 @@ export function useApplyAlignmentResults(opts: {
       const seriesRef = data.series_map[selectedSeqId]?.[r.date];
       if (!seriesRef || seriesRef.series_uid !== r.seriesUid) continue;
       if (r.patientKey && seriesRef.patient_key && r.patientKey !== seriesRef.patient_key) continue;
+      if (
+        r.derivedFrame &&
+        (!r.runId ||
+          r.outcome !== 'aligned' ||
+          !data.selected_patient_key ||
+          r.patientKey !== data.selected_patient_key ||
+          r.sequenceId !== selectedSeqId ||
+          data.dataset_revision === undefined ||
+          r.datasetRevision !== data.dataset_revision ||
+          !r.derivedFrame.targetStudyUid ||
+          r.derivedFrame.targetStudyUid !== (seriesRef.study_uid ?? seriesRef.study_id))
+      ) {
+        continue;
+      }
+      if (r.referenceSeriesUid === r.seriesUid) continue;
+      if (
+        !Number.isSafeInteger(r.bestSliceIndex) ||
+        r.bestSliceIndex < 0 ||
+        r.bestSliceIndex >= seriesRef.instance_count
+      )
+        continue;
       if (r.derivedFrame && (r.outputGrid || r.derivedFrame.outputGrid)) {
         const derivedGrid = r.derivedFrame.outputGrid;
         if (!r.outputGrid || !derivedGrid) continue;
@@ -91,14 +135,22 @@ export function useApplyAlignmentResults(opts: {
 
       // Always preserve the user's per-date slice order preference.
       pending.set(r.date, { ...next, reverseSliceOrder });
+      appliedAlignmentResultsRef.current.add(applicationKey);
+      const patientKey = data.selected_patient_key;
+      const verifiedPatient = patientKey && r.patientKey === patientKey ? patientKey : null;
       if (r.derivedFrame) {
         setDerivedAlignmentFrame(r);
-        persistDerivedAlignmentFrame(r).catch((error: unknown) => {
-          onPersistenceError?.(error);
+        queuePersistence(r.seriesUid, async () => {
+          if (verifiedPatient) await clearPersistedDerivedAlignmentFrames(verifiedPatient, r.seriesUid);
+          await persistDerivedAlignmentFrame(r);
         });
+      } else {
+        clearDerivedAlignmentFrame(r.seriesUid);
+        if (verifiedPatient) {
+          queuePersistence(r.seriesUid, () => clearPersistedDerivedAlignmentFrames(verifiedPatient, r.seriesUid));
+        }
       }
       operationId ??= r.runId;
-      appliedAlignmentDatesRef.current.add(r.date);
     }
 
     if (pending.size > 0) {

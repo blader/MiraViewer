@@ -1,5 +1,5 @@
 import { act, renderHook } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentReference, SeriesRef } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import {
@@ -7,6 +7,7 @@ import {
   getDerivedAlignmentFrame,
   setDerivedAlignmentFrame,
 } from '../src/utils/derivedAlignmentFrame';
+import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
 
 const mocks = vi.hoisted(() => ({
   getSeriesFrameManifest: vi.fn(),
@@ -163,6 +164,183 @@ describe('physically registered longitudinal auto-alignment', () => {
       },
     });
     mocks.densify.mockImplementation(async (_manifest, _reference, registration) => registration);
+  });
+
+  afterEach(() => clearDerivedAlignmentFrames());
+
+  it('keeps a selected derived reference stationary while registering against its verified displayed physical plane', async () => {
+    const originalManifest = manifest('original-reference-series', 'patient-a', 'original-frame');
+    const originalFrame = originalManifest.frames[2]!;
+    const outputGrid = buildOutputPlaneGrid(originalFrame, { frameOfReferenceUid: 'original-frame' });
+    setDerivedAlignmentFrame({
+      date: reference.date,
+      seriesUid: reference.seriesUid,
+      bestSliceIndex: reference.sliceIndex,
+      nmiScore: 1,
+      computedSettings: reference.settings,
+      slicesChecked: 3,
+      runId: 'previously-verified',
+      patientKey: reference.patientKey,
+      sequenceId: reference.sequenceId,
+      datasetRevision: reference.datasetRevision,
+      referenceSeriesUid: originalManifest.seriesUid,
+      outputGrid,
+      outcome: 'aligned',
+      derivedFrame: {
+        pixels: Float32Array.from({ length: 16 }, (_, index) => index + 1),
+        valid: new Uint8Array(16).fill(1),
+        rows: outputGrid.rows,
+        columns: outputGrid.columns,
+        sourceImageId: 'miradb:reference-series-1',
+        referenceStudyUid: originalManifest.studyUid,
+        referenceSeriesUid: originalManifest.seriesUid,
+        referenceSopInstanceUid: originalFrame.sopInstanceUid,
+        referenceFrameIndex: 2,
+        targetStudyUid: reference.studyUid,
+        targetSopInstanceUid: 'reference-series-1',
+        referenceFrameOfReferenceUid: 'original-frame',
+        targetFrameOfReferenceUid: 'selected-frame',
+        rigidTransform: [0, 0, 0, 0, 0, 0],
+        rotationCenterMm: [0, 0, 2],
+        outputGrid,
+        contributingSourceSopInstanceUids: ['reference-series-0', 'reference-series-1', 'reference-series-2'],
+      },
+    });
+    const displayedReference = getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)!;
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
+      seriesUid === originalManifest.seriesUid
+        ? originalManifest
+        : manifest(seriesUid, 'patient-a', seriesUid === reference.seriesUid ? 'selected-frame' : 'target-frame'),
+    );
+
+    const originalAnchor: SeriesRef = {
+      study_id: originalManifest.studyUid,
+      study_uid: originalManifest.studyUid,
+      series_uid: originalManifest.seriesUid,
+      instance_count: originalManifest.frames.length,
+      patient_key: 'patient-a',
+      frame_of_reference_uid: 'original-frame',
+    };
+    const { result } = renderHook(() => useAutoAlign());
+    let results: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+
+    await act(async () => {
+      const pending = result.current.alignAllDates(
+        reference,
+        ['original-examination', 'target-examination'],
+        { 'original-examination': originalAnchor, 'target-examination': target },
+        0.5,
+      );
+      expect(getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)?.imageId).toBe(
+        displayedReference.imageId,
+      );
+      results = await pending;
+    });
+
+    expect(getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)?.imageId).toBe(
+      displayedReference.imageId,
+    );
+    expect(mocks.captureSlice).not.toHaveBeenCalled();
+    expect(mocks.prepareReference).toHaveBeenCalledWith(
+      expect.objectContaining({ seriesUid: originalManifest.seriesUid, patientKey: 'patient-a' }),
+      2,
+      expect.objectContaining({ outputGrid }),
+    );
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      date: 'target-examination',
+      referenceSeriesUid: originalManifest.seriesUid,
+      outcome: 'aligned',
+      derivedFrame: {
+        referenceSeriesUid: originalManifest.seriesUid,
+        referenceSopInstanceUid: originalFrame.sopInstanceUid,
+      },
+    });
+    expect(outputGridFingerprint(results[0]!.outputGrid!)).toBe(outputGridFingerprint(displayedReference.outputGrid!));
+    expect(getDerivedAlignmentFrame(originalManifest.seriesUid, 2)).toBeNull();
+
+    const originalRegistration = await mocks.register3d();
+    mocks.register3d.mockClear();
+    mocks.register3d.mockResolvedValue({
+      ...originalRegistration,
+      pixels: new Float32Array(256 * 256).fill(1),
+      rows: 256,
+      cols: 256,
+    });
+    let resized: Awaited<ReturnType<typeof result.current.alignAllDates>> = [];
+    await act(async () => {
+      resized = await result.current.alignAllDates(
+        reference,
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+        { outputMode: 'fixed-256' },
+      );
+    });
+
+    expect(resized[0]?.outputGrid).toMatchObject({
+      mode: 'fixed-256',
+      rows: 256,
+      columns: 256,
+      fieldOfViewMm: displayedReference.outputGrid!.fieldOfViewMm,
+      rowDirection: displayedReference.outputGrid!.rowDirection,
+      columnDirection: displayedReference.outputGrid!.columnDirection,
+      referenceSopInstanceUid: displayedReference.outputGrid!.referenceSopInstanceUid,
+    });
+    expect(getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)?.imageId).toBe(
+      displayedReference.imageId,
+    );
+  });
+
+  it('refuses a displayed derived reference whose acquired anchor provenance no longer matches the live patient', async () => {
+    const originalManifest = manifest('original-reference-series', 'patient-b', 'original-frame');
+    const outputGrid = buildOutputPlaneGrid(originalManifest.frames[2]!, { frameOfReferenceUid: 'original-frame' });
+    setDerivedAlignmentFrame({
+      date: reference.date,
+      seriesUid: reference.seriesUid,
+      bestSliceIndex: reference.sliceIndex,
+      nmiScore: 1,
+      computedSettings: reference.settings,
+      slicesChecked: 1,
+      runId: 'previously-verified',
+      patientKey: 'patient-a',
+      sequenceId: reference.sequenceId,
+      datasetRevision: reference.datasetRevision,
+      referenceSeriesUid: originalManifest.seriesUid,
+      outputGrid,
+      outcome: 'aligned',
+      derivedFrame: {
+        pixels: new Float32Array(16),
+        rows: 4,
+        columns: 4,
+        sourceImageId: 'miradb:reference-series-1',
+        referenceStudyUid: originalManifest.studyUid,
+        referenceSeriesUid: originalManifest.seriesUid,
+        referenceSopInstanceUid: originalManifest.frames[2]!.sopInstanceUid,
+        referenceFrameIndex: 2,
+        targetStudyUid: reference.studyUid,
+        targetSopInstanceUid: 'reference-series-1',
+        referenceFrameOfReferenceUid: 'original-frame',
+        targetFrameOfReferenceUid: 'selected-frame',
+        outputGrid,
+      },
+    });
+    const displayedImageId = getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)!.imageId;
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
+      seriesUid === originalManifest.seriesUid ? originalManifest : manifest(seriesUid, 'patient-a', 'selected-frame'),
+    );
+    const { result } = renderHook(() => useAutoAlign());
+
+    await act(async () => {
+      await expect(
+        result.current.alignAllDates(reference, ['target-examination'], { 'target-examination': target }, 0.5),
+      ).rejects.toThrow(/patient/i);
+    });
+
+    expect(getDerivedAlignmentFrame(reference.seriesUid, reference.sliceIndex)?.imageId).toBe(displayedImageId);
+    expect(mocks.register3d).not.toHaveBeenCalled();
+    expect(mocks.captureSlice).not.toHaveBeenCalled();
   });
 
   it('uses rigid 3D reslicing, preserves lesion exclusion, and exposes verified derived-plane provenance', async () => {

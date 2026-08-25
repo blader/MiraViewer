@@ -32,6 +32,7 @@ export function usePanelSettings(
   selectedSeqId: string | null,
   enabledDatesKey: string,
   patientKey: string | null = null,
+  interactionBlocked = false,
 ) {
   // Per-panel settings: Map<date, PanelSettings>
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
@@ -157,6 +158,8 @@ export function usePanelSettings(
 
   // Keyboard shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redo.
   useEffect(() => {
+    if (interactionBlocked) return;
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target instanceof HTMLElement ? e.target : document.activeElement;
       if (
@@ -192,7 +195,7 @@ export function usePanelSettings(
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoLastPanelSetting, redoLastPanelSetting]);
+  }, [interactionBlocked, redoLastPanelSetting, undoLastPanelSetting]);
 
   // Load panel settings from local storage when the patient, sequence, or dates change.
   useEffect(() => {

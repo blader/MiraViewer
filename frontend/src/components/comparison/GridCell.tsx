@@ -61,6 +61,10 @@ export function GridCell({
   const derivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
     refData ? getDerivedAlignmentFrame(refData.series_uid, effectiveIdx) : null,
   );
+  const displayedImageSize = {
+    width: derivedFrame?.columns ?? nativeImageSize.w,
+    height: derivedFrame?.rows ?? nativeImageSize.h,
+  };
   const nativeAnnotationsAvailable = derivedFrame === null;
 
   if (!refData) {
@@ -98,7 +102,10 @@ export function GridCell({
           ) : null}
         </div>
 
-        <div className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100">
+        <div
+          inert={isAligning}
+          className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100"
+        >
           <button
             type="button"
             onClick={() => setShowSavedTumor((v) => !v)}
@@ -162,7 +169,7 @@ export function GridCell({
       <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
         <DragRectActionOverlay
           className="absolute inset-0 cursor-crosshair"
-          imageSize={{ width: refData.columns ?? 512, height: refData.rows ?? 512 }}
+          imageSize={displayedImageSize}
           geometry={{
             panX: settings.panX,
             panY: settings.panY,
@@ -194,7 +201,7 @@ export function GridCell({
                     patientKey: refData.patient_key,
                     studyUid: refData.study_uid ?? refData.study_id,
                     frameOfReferenceUid: refData.frame_of_reference_uid,
-                    imageSize: { width: refData.columns ?? 512, height: refData.rows ?? 512 },
+                    imageSize: displayedImageSize,
                     viewportSize:
                       bounds && bounds.width > 0 && bounds.height > 0
                         ? { width: bounds.width, height: bounds.height }
@@ -305,15 +312,17 @@ export function GridCell({
         <span className="truncate text-xs text-[var(--text-secondary)]">
           {derivedFrame ? 'Aligned presentation' : 'Acquired image'}
         </span>
-        <StepControl
-          title="Slice offset"
-          value={`${idx + 1}/${refData.instance_count}`}
-          valueWidth="w-16"
-          tabular
-          accent
-          onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}
-          onIncrement={() => updatePanelSetting(date, { offset: settings.offset + 1 })}
-        />
+        <div inert={isAligning}>
+          <StepControl
+            title="Slice offset"
+            value={`${idx + 1}/${refData.instance_count}`}
+            valueWidth="w-16"
+            tabular
+            accent
+            onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}
+            onIncrement={() => updatePanelSetting(date, { offset: settings.offset + 1 })}
+          />
+        </div>
       </div>
     </div>
   );

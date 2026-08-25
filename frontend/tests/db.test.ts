@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deleteAllStoredMriData, getDB, initStoragePersistence, resetDbForTests } from '../src/db/db';
+import {
+  deleteAllStoredMriData,
+  getDB,
+  initStoragePersistence,
+  notifyDatasetMutation,
+  resetDbForTests,
+  subscribeDatasetMutations,
+  subscribeStorageHealth,
+} from '../src/db/db';
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -58,4 +66,45 @@ describe('db', () => {
     expect(result).toBe(true);
     expect(persist).toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      name: 'storage health',
+      subscribe: (listener: () => void) => subscribeStorageHealth(listener),
+      publish: () => initStoragePersistence(),
+    },
+    {
+      name: 'dataset mutations',
+      subscribe: (listener: () => void) => subscribeDatasetMutations(listener),
+      publish: () => notifyDatasetMutation('changed-series'),
+    },
+  ])(
+    'notifies each $name subscriber once while honoring removals during publication',
+    async ({ subscribe, publish }) => {
+      const removed = vi.fn();
+      const stable = vi.fn();
+      let unsubscribeChanging = () => {};
+      let unsubscribeRemoved = () => {};
+      const changing = vi.fn(() => {
+        unsubscribeChanging();
+        unsubscribeRemoved();
+        if (changing.mock.calls.length < 4) unsubscribeChanging = subscribe(changing);
+      });
+      unsubscribeChanging = subscribe(changing);
+      unsubscribeRemoved = subscribe(removed);
+      const unsubscribeStable = subscribe(stable);
+
+      try {
+        await publish();
+
+        expect(changing).toHaveBeenCalledOnce();
+        expect(removed).not.toHaveBeenCalled();
+        expect(stable).toHaveBeenCalledOnce();
+      } finally {
+        unsubscribeChanging();
+        unsubscribeRemoved();
+        unsubscribeStable();
+      }
+    },
+  );
 });

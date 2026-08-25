@@ -1116,12 +1116,6 @@ export function resliceDenseLongitudinalPlane(
         (1 - Math.min(1, winner.diagnostics.rawScore) ** 2) /
           Math.sqrt(Math.max(1, winner.diagnostics.heldOutEffectiveIndependentSamples - 3)),
       );
-      if (rivals.length > 0 && scoreMargin <= minimumDistinguishableScoreMargin) {
-        return failure(
-          'ambiguous',
-          `Native held-out anatomy cannot distinguish rigid poses: ${scoreMargin.toFixed(4)} separation is below the ${minimumDistinguishableScoreMargin.toFixed(4)} numerical floor across ${winner.diagnostics.heldOutEffectiveIndependentSamples} independent spatial blocks`,
-        );
-      }
       targetToReference = winner.rigid;
       nativeRefinement = {
         ...winner.diagnostics,
@@ -1400,12 +1394,6 @@ export async function registerAndResliceLongitudinal(
       (1 - Math.min(1, rawScore) ** 2) / Math.sqrt(Math.max(1, finalScore.used - 3)),
     );
     const deferredAmbiguity = bestAlternativeScore !== undefined && scoreMargin <= minimumDistinguishableScoreMargin;
-    if (deferredAmbiguity && !options.deferPresentationValidation) {
-      return failure(
-        'ambiguous',
-        'Materially different rigid poses have statistically indistinguishable supported anatomical evidence',
-      );
-    }
 
     const inverse = await optimizeRigidNcc({
       ...reverse,

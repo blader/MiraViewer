@@ -535,7 +535,7 @@ describe('svr/longitudinalRegistration', () => {
     ).resolves.toMatchObject({ ok: false, reason: 'insufficient-evidence' });
   });
 
-  it('abstains when materially different rigid poses have indistinguishable supported anatomy', async () => {
+  it('selects the strongest valid rigid pose when supported alternatives are numerically indistinguishable', async () => {
     const symmetric = makeStack({ frameUid: 'shared' }).map((slice, depth) => {
       const pixels = new Float32Array(slice.pixels.length);
       for (let row = 0; row < slice.dsRows; row++) {
@@ -548,19 +548,23 @@ describe('svr/longitudinalRegistration', () => {
     });
     const reference = symmetric.map((slice) => ({ ...slice, pixels: new Float32Array(slice.pixels) }));
 
-    await expect(
-      registerAndResliceLongitudinal({
-        referenceSlices: reference,
-        targetSlices: symmetric,
-        referenceSliceIndex: 9,
-        initialTargetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: Math.PI / 2 },
-        maxDimension: 32,
-        maxSamples: 4000,
-      }),
-    ).resolves.toMatchObject({ ok: false, reason: 'ambiguous' });
+    const result = await registerAndResliceLongitudinal({
+      referenceSlices: reference,
+      targetSlices: symmetric,
+      referenceSliceIndex: 9,
+      initialTargetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: Math.PI / 2 },
+      maxDimension: 32,
+      maxSamples: 4000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.diagnostics.optimizedAlternativeCount).toBeGreaterThan(0);
+    expect(result.diagnostics.scoreMargin).toBeLessThanOrEqual(result.diagnostics.minimumDistinguishableScoreMargin);
+    expect(result.coverage).toBe(1);
   });
 
-  it('defers coarse pose ambiguity but still rejects indistinguishable alternatives on native held-out anatomy', async () => {
+  it('selects the best native held-out pose even when its supported alternative is numerically indistinguishable', async () => {
     const symmetric = makeStack({ frameUid: 'shared' }).map((slice, depth) => {
       const pixels = new Float32Array(slice.pixels.length);
       for (let row = 0; row < slice.dsRows; row++) {
@@ -595,6 +599,12 @@ describe('svr/longitudinalRegistration', () => {
       centerMm: coarse.centerMm,
     });
 
-    expect(result).toMatchObject({ ok: false, reason: 'ambiguous' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.nativeRefinement?.optimizedAlternativeCount).toBeGreaterThan(0);
+    expect(result.nativeRefinement?.scoreMargin).toBeLessThanOrEqual(
+      result.nativeRefinement!.minimumDistinguishableScoreMargin!,
+    );
+    expect(result.coverage).toBe(1);
   });
 });

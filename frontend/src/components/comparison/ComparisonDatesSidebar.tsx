@@ -12,6 +12,7 @@ type ComparisonDatesSidebarProps = {
   onSelectAllDates: () => void;
   onSelectNoDates: () => void;
   onToggleDate: (date: string) => void;
+  alignmentInProgress?: boolean;
 };
 
 export function ComparisonDatesSidebar({
@@ -23,11 +24,13 @@ export function ComparisonDatesSidebar({
   onSelectAllDates,
   onSelectNoDates,
   onToggleDate,
+  alignmentInProgress = false,
 }: ComparisonDatesSidebarProps) {
   return (
     <>
       <button
         type="button"
+        disabled={alignmentInProgress}
         onClick={onToggleOpen}
         aria-label={open ? 'Hide examination dates' : 'Show examination dates'}
         aria-expanded={open}
@@ -57,6 +60,7 @@ export function ComparisonDatesSidebar({
             <div className="flex items-center gap-1">
               <button
                 type="button"
+                disabled={alignmentInProgress}
                 onClick={onSelectAllDates}
                 className="min-h-8 rounded-[3px] px-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title="Select all dates"
@@ -65,6 +69,7 @@ export function ComparisonDatesSidebar({
               </button>
               <button
                 type="button"
+                disabled={alignmentInProgress}
                 onClick={onSelectNoDates}
                 className="min-h-8 rounded-[3px] px-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title="Deselect all dates"
@@ -83,7 +88,7 @@ export function ComparisonDatesSidebar({
                   key={d}
                   type="button"
                   onClick={() => onToggleDate(d)}
-                  disabled={!hasData && !enabled}
+                  disabled={alignmentInProgress || (!hasData && !enabled)}
                   aria-pressed={enabled}
                   data-study-state={enabled ? 'selected' : 'available'}
                   className={`relative flex min-h-11 w-full items-center gap-2 border-l-2 px-3 text-left text-[13px] transition-colors ${

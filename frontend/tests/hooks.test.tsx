@@ -293,6 +293,41 @@ describe('usePanelSettings', () => {
     unmount();
   });
 
+  it('blocks undo and redo from moving the reference while alignment owns viewer interaction', async () => {
+    const date = '2035-01-10T12:00:00';
+    const { result, rerender, unmount } = renderHook(
+      ({ blocked }) => usePanelSettings('synthetic-sequence', date, null, blocked),
+      { initialProps: { blocked: false } },
+    );
+    await act(async () => {});
+
+    act(() => result.current.updatePanelSetting(date, { zoom: 2 }));
+    rerender({ blocked: true });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(2);
+
+    rerender({ blocked: false });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(1);
+
+    rerender({ blocked: true });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true }));
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(1);
+
+    rerender({ blocked: false });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true }));
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(2);
+    unmount();
+  });
+
   it('does not undo viewer geometry when another keyboard owner already consumed the shortcut', async () => {
     const date = '2035-01-10T12:00:00';
     const { result, unmount } = renderHook(() => usePanelSettings('synthetic-sequence', date));

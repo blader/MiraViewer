@@ -4,14 +4,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComparisonMatrix } from '../src/components/ComparisonMatrix';
 
 const examinations = ['2025-01-01T00:00:00', '2025-02-01T00:00:00'];
-const { measuredPane } = vi.hoisted(() => ({ measuredPane: { width: 800, height: 600 } }));
+const { measuredPane, alignmentPresentation } = vi.hoisted(() => ({
+  measuredPane: { width: 800, height: 600 },
+  alignmentPresentation: {
+    isAligning: false,
+    multiplePatients: false,
+    error: null as string | null,
+    results: [] as Array<{ date: string; outcome: 'aligned' | 'failed'; message?: string; runId?: string }>,
+  },
+}));
 
 vi.mock('../src/hooks/useComparisonData', () => ({
   useComparisonData: () => ({
     data: {
       planes: ['Axial'],
       dates: examinations,
-      patients: [{ key: 'synthetic-patient', patient_name: 'Synthetic Patient', study_count: 2 }],
+      patients: [
+        { key: 'synthetic-patient', patient_name: 'Synthetic Patient', study_count: 2 },
+        ...(alignmentPresentation.multiplePatients
+          ? [{ key: 'second-synthetic-patient', patient_name: 'Second Synthetic Patient', study_count: 1 }]
+          : []),
+      ],
       selected_patient_key: 'synthetic-patient',
       sequences: [{ id: 'synthetic-sequence', plane: 'Axial', weight: 'T1', sequence: 'SE', label: 'T1' }],
       series_map: {
@@ -68,10 +81,12 @@ vi.mock('../src/hooks/useGridLayout', () => ({
 
 vi.mock('../src/hooks/useAutoAlign', () => ({
   useAutoAlign: () => ({
-    isAligning: false,
-    progress: null,
-    results: [],
-    error: null,
+    isAligning: alignmentPresentation.isAligning,
+    progress: alignmentPresentation.isAligning
+      ? { phase: 'capturing', currentDate: null, dateIndex: 0, totalDates: 1, slicesChecked: 0, bestMiSoFar: 0 }
+      : null,
+    results: alignmentPresentation.results,
+    error: alignmentPresentation.error,
     clearState: vi.fn(),
     alignAllDates: vi.fn(),
     abort: vi.fn(),
@@ -99,6 +114,10 @@ describe('Quiet Instrument visual system', () => {
     localStorage.clear();
     measuredPane.width = 800;
     measuredPane.height = 600;
+    alignmentPresentation.isAligning = false;
+    alignmentPresentation.multiplePatients = false;
+    alignmentPresentation.error = null;
+    alignmentPresentation.results = [];
   });
 
   it('keeps one clinical palette with distinct action, evidence, warning, and focus semantics', () => {
@@ -155,6 +174,134 @@ describe('Quiet Instrument visual system', () => {
     expect(stylesheet).toMatch(/@media\s*\(max-width:\s*1024px\)/);
     expect(stylesheet).not.toMatch(/https?:\/\//);
     expect(stylesheet).not.toMatch(/transition:\s*all/i);
+  });
+
+  it('keeps detailed accessible alignment notices outside the unchanged diagnostic stage across retries', () => {
+    alignmentPresentation.results = [
+      {
+        date: examinations[0]!,
+        outcome: 'failed',
+        message: 'The selected examination has insufficient acquired support',
+        runId: 'previous-run',
+      },
+      {
+        date: examinations[1]!,
+        outcome: 'failed',
+        message: 'The registration worker timed out',
+        runId: 'previous-run',
+      },
+    ];
+
+    const { container, rerender } = render(<ComparisonMatrix />);
+    const contextRail = screen.getByLabelText('Selected examination and image context');
+    const diagnosticStage = container.querySelector('.instrument-stage');
+    const diagnosticImages = screen.getByText('Acquired comparison images');
+    const warning = screen.getByRole('status');
+
+    expect(contextRail).toHaveAttribute('data-notices-visible', 'true');
+    expect(contextRail).toContainElement(warning);
+    expect(diagnosticStage).not.toContainElement(warning);
+    expect(within(warning).getAllByRole('listitem')).toHaveLength(2);
+    expect(warning).toHaveTextContent('The selected examination has insufficient acquired support');
+    expect(warning).toHaveTextContent('The registration worker timed out');
+    expect(Array.from(diagnosticStage?.children ?? [])).toEqual([diagnosticImages]);
+
+    alignmentPresentation.results = [];
+    alignmentPresentation.isAligning = true;
+    rerender(<ComparisonMatrix />);
+
+    expect(contextRail).not.toHaveAttribute('data-notices-visible');
+    expect(screen.queryByText('Some examinations could not be aligned safely.')).not.toBeInTheDocument();
+    expect(Array.from(diagnosticStage?.children ?? [])).toEqual([diagnosticImages]);
+
+    alignmentPresentation.isAligning = false;
+    alignmentPresentation.error = 'Unable to initialize the registration worker';
+    rerender(<ComparisonMatrix />);
+
+    const fatalError = screen.getByRole('alert');
+    expect(contextRail).toHaveAttribute('data-notices-visible', 'true');
+    expect(contextRail).toContainElement(fatalError);
+    expect(diagnosticStage).not.toContainElement(fatalError);
+    expect(fatalError).toHaveTextContent('Unable to initialize the registration worker');
+    expect(within(fatalError).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+    expect(Array.from(diagnosticStage?.children ?? [])).toEqual([diagnosticImages]);
+  });
+
+  it('keeps notice details horizontally accessible inside a stable compact context rail', () => {
+    const noticeRail = stylesheet.match(/\.instrument-notice-rail\s*\{([^}]+)\}/)?.[1];
+    const notice = stylesheet.match(/\.instrument-notice\s*\{([^}]+)\}/)?.[1];
+    const details = stylesheet.match(/\.instrument-notice-details\s*\{([^}]+)\}/)?.[1];
+
+    expect(noticeRail).toMatch(/overflow-x:\s*auto/);
+    expect(noticeRail).toMatch(/min-width:\s*0/);
+    expect(notice).toMatch(/white-space:\s*nowrap/);
+    expect(notice).toMatch(/flex:\s*0\s+0\s+auto/);
+    expect(details).toMatch(/display:\s*flex/);
+
+    const compactContext = stylesheet.slice(stylesheet.indexOf('@media (max-width: 760px)'));
+    expect(compactContext).toMatch(
+      /\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-context-summary\s*>\s*:not\(:first-child\)\s*\{\s*display:\s*none/,
+    );
+    expect(compactContext).toMatch(
+      /\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-context-playback,\s*\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-study-filmstrip\s*\{\s*display:\s*none/,
+    );
+  });
+
+  it('locks every patient, examination, filter, mode, drawer, and modal entry point during alignment', () => {
+    alignmentPresentation.isAligning = true;
+    alignmentPresentation.multiplePatients = true;
+    const { rerender } = render(<ComparisonMatrix />);
+
+    expect(screen.getByRole('button', { name: 'Compare' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Overlay' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '3D' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Selected patient' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Import additional scans' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Help and keyboard shortcuts' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Application menu' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Hide scan filters' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Show examination dates' })).toBeDisabled();
+
+    const filters = screen.getByRole('complementary', { name: 'Scan filters' });
+    expect(within(filters).getByRole('button', { name: 'Axial' })).toBeDisabled();
+    expect(within(filters).getByRole('button', { name: /T1/i })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Alignment output resolution' })).toBeDisabled();
+
+    const dates = screen.getByRole('complementary', { name: 'Examination dates' });
+    expect(within(dates).getByRole('button', { name: 'All' })).toBeDisabled();
+    expect(within(dates).getByRole('button', { name: 'None' })).toBeDisabled();
+    for (const examination of within(dates).getAllByRole('button', { name: /2025/i })) {
+      expect(examination).toBeDisabled();
+    }
+
+    alignmentPresentation.isAligning = false;
+    rerender(<ComparisonMatrix />);
+
+    expect(screen.getByRole('button', { name: 'Overlay' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Selected patient' })).toBeEnabled();
+    expect(within(filters).getByRole('button', { name: 'Axial' })).toBeEnabled();
+    expect(within(dates).getByRole('button', { name: 'All' })).toBeEnabled();
+  });
+
+  it('holds the active overlay examination and playback still until alignment completes', () => {
+    const { rerender } = render(<ComparisonMatrix />);
+    fireEvent.click(screen.getByRole('button', { name: 'Overlay' }));
+
+    alignmentPresentation.isAligning = true;
+    rerender(<ComparisonMatrix />);
+
+    expect(screen.getByRole('button', { name: 'Start comparison playback' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Comparison playback speed' })).toBeDisabled();
+    const chronology = screen.getByRole('navigation', { name: 'Available examinations' });
+    for (const examination of within(chronology).getAllByRole('button')) {
+      expect(examination).toBeDisabled();
+    }
+
+    alignmentPresentation.isAligning = false;
+    rerender(<ComparisonMatrix />);
+
+    expect(screen.getByRole('button', { name: 'Start comparison playback' })).toBeEnabled();
+    expect(within(chronology).getAllByRole('button')[0]).toBeEnabled();
   });
 
   it('preserves actual reconstruction examination selection without occupying a global date sidebar', async () => {

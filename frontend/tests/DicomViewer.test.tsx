@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { Profiler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DicomViewer } from '../src/components/DicomViewer';
-import { DEBUG_ALIGNMENT_STORAGE_KEY } from '../src/utils/debugAlignment';
+import { DEBUG_ALIGNMENT_STORAGE_KEY, subscribeToDebugAlignmentKey } from '../src/utils/debugAlignment';
 import {
   recordAlignmentSliceScore,
   resetAlignmentSliceScoreStore,
@@ -127,6 +128,33 @@ afterEach(() => {
 });
 
 describe('DicomViewer', () => {
+  it('publishes a debug-key change once when diagnostic subscribers change during notification', () => {
+    const removed = vi.fn();
+    const stable = vi.fn();
+    let unsubscribeChanging = () => {};
+    let unsubscribeRemoved = () => {};
+    const changing = vi.fn(() => {
+      unsubscribeChanging();
+      unsubscribeRemoved();
+      if (changing.mock.calls.length < 4) unsubscribeChanging = subscribeToDebugAlignmentKey(changing);
+    });
+    unsubscribeChanging = subscribeToDebugAlignmentKey(changing);
+    unsubscribeRemoved = subscribeToDebugAlignmentKey(removed);
+    const unsubscribeStable = subscribeToDebugAlignmentKey(stable);
+
+    try {
+      fireEvent.keyDown(window, { key: 'z' });
+
+      expect(changing).toHaveBeenCalledOnce();
+      expect(removed).not.toHaveBeenCalled();
+      expect(stable).toHaveBeenCalledOnce();
+    } finally {
+      unsubscribeChanging();
+      unsubscribeRemoved();
+      unsubscribeStable();
+    }
+  });
+
   it('shows fixed-precision structural diagnostics only while unmodified Z is held in debug mode', () => {
     localStorage.setItem(DEBUG_ALIGNMENT_STORAGE_KEY, '1');
     recordProductionViewerSliceScore();
@@ -321,6 +349,71 @@ describe('DicomViewer', () => {
     expect(img).toHaveAttribute('src', 'test.png');
   });
 
+  it('ignores duplicate viewport resize notifications while preserving real image geometry changes', () => {
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    let observedElement: Element | undefined;
+    let notifyResize: ResizeObserverCallback | undefined;
+    class CapturingResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        notifyResize = callback;
+      }
+
+      observe(element: Element) {
+        observedElement = element;
+      }
+
+      unobserve() {}
+
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = CapturingResizeObserver as unknown as typeof ResizeObserver;
+    const onRender = vi.fn();
+    let unmount: (() => void) | undefined;
+
+    try {
+      ({ unmount } = render(
+        <Profiler id="diagnostic-viewer" onRender={onRender}>
+          <DicomViewer
+            studyId="study"
+            seriesUid="series"
+            instanceIndex={0}
+            instanceCount={1}
+            onInstanceChange={() => {}}
+            imageUrlOverride="test.png"
+            panX={0.25}
+            panY={0.5}
+          />
+        </Profiler>,
+      ));
+
+      expect(observedElement).toBeDefined();
+      expect(notifyResize).toBeDefined();
+      Object.defineProperties(observedElement!, {
+        clientWidth: { configurable: true, value: 320 },
+        clientHeight: { configurable: true, value: 240 },
+      });
+      act(() => notifyResize!([], {} as ResizeObserver));
+      expect(screen.getByRole('img').parentElement?.style.transform).toContain('translate(80px, 120px)');
+
+      onRender.mockClear();
+      for (let index = 0; index < 5; index++) {
+        act(() => notifyResize!([], {} as ResizeObserver));
+      }
+      expect(onRender).not.toHaveBeenCalled();
+
+      Object.defineProperties(observedElement!, {
+        clientWidth: { configurable: true, value: 640 },
+        clientHeight: { configurable: true, value: 360 },
+      });
+      act(() => notifyResize!([], {} as ResizeObserver));
+      expect(onRender).toHaveBeenCalledOnce();
+      expect(screen.getByRole('img').parentElement?.style.transform).toContain('translate(160px, 180px)');
+    } finally {
+      unmount?.();
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    }
+  });
+
   it('loads Cornerstone image when no override', async () => {
     render(
       <DicomViewer
@@ -416,6 +509,7 @@ describe('DicomViewer', () => {
   it('blocks direct slice and zoom wheel gestures while alignment owns the displayed image', async () => {
     const onZoomChange = vi.fn();
     const onInstanceChange = vi.fn();
+    const onPanChange = vi.fn();
     const props = {
       studyId: 'study',
       seriesUid: 'series',
@@ -423,6 +517,7 @@ describe('DicomViewer', () => {
       instanceCount: 3,
       onInstanceChange,
       onZoomChange,
+      onPanChange,
       imageUrlOverride: 'test.png',
     };
     const { rerender } = render(<DicomViewer {...props} interactionBlocked />);
@@ -437,14 +532,20 @@ describe('DicomViewer', () => {
     });
     image.dispatchEvent(blockedSlice);
     image.dispatchEvent(blockedZoom);
+    fireEvent.click(image, { clientX: 100, clientY: 100 });
+    fireEvent.doubleClick(image);
 
     expect(onInstanceChange).not.toHaveBeenCalled();
     expect(onZoomChange).not.toHaveBeenCalled();
+    expect(onPanChange).not.toHaveBeenCalled();
     expect(blockedSlice.defaultPrevented).toBe(false);
 
     rerender(<DicomViewer {...props} interactionBlocked={false} />);
     image.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true, bubbles: true }));
     expect(onInstanceChange).toHaveBeenCalledWith(1);
+    fireEvent.click(image, { clientX: 100, clientY: 100 });
+    fireEvent.doubleClick(image);
+    expect(onPanChange).toHaveBeenCalledWith(0, 0);
   });
 
   it('zooms hovered images on Command+wheel', async () => {

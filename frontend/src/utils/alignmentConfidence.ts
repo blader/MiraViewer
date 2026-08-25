@@ -63,7 +63,7 @@ function intensityVariance(
  * descriptor difference can become a 50-percentile lead. Compare fixed-domain structural evidence
  * instead, and distinguish only slices separated by at least two acquired millimeters.
  *
- * The distinguishability floor is numerical, not clinically calibrated accuracy.
+ * The distinguishability floor is diagnostic, not a reason to discard the best valid candidate.
  */
 export function assessSliceAlignmentEvidence<T extends PerceptualCandidate>(options: {
   winner: RankedPerceptualCandidate<T>;
@@ -104,8 +104,7 @@ export function assessSliceAlignmentEvidence<T extends PerceptualCandidate>(opti
       ? 'insufficient-overlap'
       : structuralScore < MINIMUM_ABSOLUTE_STRUCTURAL_AGREEMENT ||
           referenceIntensityVariance <= MINIMUM_REFERENCE_INTENSITY_VARIANCE ||
-          !hasStructuralEvidence ||
-          (physicallyDistinctRivals.length > 0 && runnerUpGap <= minimumDistinguishableGap)
+          !hasStructuralEvidence
         ? 'ambiguous'
         : 'aligned';
 

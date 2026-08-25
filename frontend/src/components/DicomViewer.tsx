@@ -279,10 +279,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     if (!containerRef.current) return;
     const updateSize = () => {
       if (containerRef.current) {
-        setViewportSize({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        });
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        setViewportSize((previous) =>
+          previous.width === width && previous.height === height ? previous : { width, height },
+        );
       }
     };
     updateSize();
@@ -478,7 +479,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // Click to set center - calculates offset to move clicked point to viewport center
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (!containerRef.current || !onPanChange) return;
+      if (interactionBlocked || !containerRef.current || !onPanChange) return;
 
       const rect = containerRef.current.getBoundingClientRect();
       const viewportCenterX = rect.width / 2;
@@ -502,18 +503,19 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
       onPanChange(normalizedX, normalizedY);
     },
-    [onPanChange, panX, panY],
+    [interactionBlocked, onPanChange, panX, panY],
   );
 
   // Double-click to reset pan
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent) => {
+      if (interactionBlocked) return;
       e.stopPropagation();
       if (onPanChange) {
         onPanChange(0, 0);
       }
     },
-    [onPanChange],
+    [interactionBlocked, onPanChange],
   );
 
   return (

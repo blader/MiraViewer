@@ -20,7 +20,7 @@ function candidate(index: number, mind: number, options?: { coverage?: number; n
 const texturedReference = Float32Array.from({ length: 256 * 256 }, (_, index) => (index % 251) / 250);
 
 describe('absolute anatomical alignment confidence', () => {
-  it('rejects a 50-percentile rank lead when fixed-domain structure differs by only two millionths', () => {
+  it('accepts the best structurally valid candidate even when its lead is below the numerical floor', () => {
     const ranked = rankFixedCandidateSet([candidate(8, 0.500001), candidate(16, 0.500003)], 8);
     expect(ranked[1]!.perceptualRank - ranked[0]!.perceptualRank).toBeCloseTo(0.5);
 
@@ -31,7 +31,7 @@ describe('absolute anatomical alignment confidence', () => {
       imageSize: 256,
     });
 
-    expect(evidence.outcome).toBe('ambiguous');
+    expect(evidence.outcome).toBe('aligned');
     expect(evidence.runnerUpGap).toBeCloseTo(0.000001);
     expect(evidence.runnerUpGap).toBeLessThan(evidence.minimumDistinguishableGap);
   });

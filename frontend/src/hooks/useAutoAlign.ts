@@ -39,11 +39,12 @@ import { type FinalAffineProposalKind, type OptimizerFinalAffineProposal } from 
 import { createAlignmentScoringRunner, type AlignmentScoringRunner } from '../utils/alignmentScoringRunner';
 import { assessSliceAlignmentEvidence } from '../utils/alignmentConfidence';
 import { rasterizeImageExclusion, selectPhysicalTargetSlice } from '../utils/alignmentGeometry';
-import { clearDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
+import { getDerivedAlignmentFrame, retainDerivedAlignmentReference } from '../utils/derivedAlignmentFrame';
 import { getSeriesFrameManifest, type SeriesFrameManifest } from '../utils/localApi';
 import {
   buildOutputPlaneGrid,
   outputGridFingerprint,
+  validateOutputGridReference,
   type OutputGridMode,
   type OutputPlaneGrid,
 } from '../utils/outputPlaneGrid';
@@ -186,7 +187,7 @@ export function useAutoAlign() {
    */
   const alignAllDates = useCallback(
     async (
-      reference: AlignmentReference,
+      selectedReference: AlignmentReference,
       targetDates: string[],
       seriesMap: Record<string, SeriesRef>,
       currentProgress: number,
@@ -197,7 +198,14 @@ export function useAutoAlign() {
       abortControllerRef.current = alignmentAbortController;
       const runId =
         globalThis.crypto?.randomUUID?.() ?? `alignment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      clearDerivedAlignmentFrames();
+      let reference = selectedReference;
+      const displayedDerivedReference = getDerivedAlignmentFrame(
+        selectedReference.seriesUid,
+        selectedReference.sliceIndex,
+      );
+      const releaseDisplayedReference = displayedDerivedReference
+        ? retainDerivedAlignmentReference(displayedDerivedReference)
+        : undefined;
       const results: AlignmentResult[] = [];
       const setStateForCurrentRun = (nextState: Parameters<typeof setState>[0]) => {
         if (abortControllerRef.current === alignmentAbortController) setState(nextState);
@@ -242,6 +250,119 @@ export function useAutoAlign() {
           return captured;
         };
 
+        let verifiedReferenceManifest: SeriesFrameManifest | undefined;
+        if (displayedDerivedReference) {
+          const originalSeriesUid = displayedDerivedReference.referenceSeriesUid;
+          const originalSliceIndex = displayedDerivedReference.referenceFrameIndex;
+          const displayedGrid = displayedDerivedReference.outputGrid;
+          if (
+            !reference.patientKey ||
+            !reference.sequenceId ||
+            reference.datasetRevision === undefined ||
+            displayedDerivedReference.patientKey !== reference.patientKey ||
+            displayedDerivedReference.sequenceId !== reference.sequenceId ||
+            displayedDerivedReference.datasetRevision !== reference.datasetRevision ||
+            !reference.studyUid ||
+            displayedDerivedReference.targetStudyUid !== reference.studyUid ||
+            !originalSeriesUid ||
+            !displayedDerivedReference.referenceStudyUid ||
+            !displayedDerivedReference.referenceSopInstanceUid ||
+            !Number.isSafeInteger(originalSliceIndex) ||
+            !displayedGrid ||
+            displayedDerivedReference.rows !== displayedGrid.rows ||
+            displayedDerivedReference.columns !== displayedGrid.columns ||
+            displayedDerivedReference.pixels.length !== displayedGrid.rows * displayedGrid.columns ||
+            (displayedDerivedReference.valid &&
+              displayedDerivedReference.valid.length !== displayedDerivedReference.pixels.length)
+          ) {
+            throw new Error(
+              'The selected aligned reference lacks verified patient, examination, dataset, or acquired-plane provenance',
+            );
+          }
+
+          const displayedManifest = await getSeriesFrameManifest(selectedReference.seriesUid);
+          ensureNotAborted();
+          const displayedNativeFrame = displayedManifest.frames[selectedReference.sliceIndex];
+          if (displayedManifest.patientKey !== reference.patientKey) {
+            throw new Error('The selected aligned reference belongs to a different patient');
+          }
+          if (
+            displayedManifest.studyUid !== reference.studyUid ||
+            !displayedNativeFrame ||
+            displayedNativeFrame.sopInstanceUid !== displayedDerivedReference.targetSopInstanceUid ||
+            displayedDerivedReference.sourceImageId !== `miradb:${displayedNativeFrame.sopInstanceUid}` ||
+            (displayedDerivedReference.targetFrameOfReferenceUid &&
+              displayedDerivedReference.targetFrameOfReferenceUid !==
+                (displayedNativeFrame.frameOfReferenceUid ?? displayedManifest.frameOfReferenceUid))
+          ) {
+            throw new Error(
+              'The selected aligned reference no longer matches its acquired examination or source frame',
+            );
+          }
+
+          verifiedReferenceManifest = await getSeriesFrameManifest(originalSeriesUid);
+          ensureNotAborted();
+          if (verifiedReferenceManifest.patientKey !== reference.patientKey) {
+            throw new Error('The selected aligned reference and its acquired anchor belong to different patients');
+          }
+          const originalFrame = verifiedReferenceManifest.frames[originalSliceIndex!];
+          if (
+            verifiedReferenceManifest.studyUid !== displayedDerivedReference.referenceStudyUid ||
+            !verifiedReferenceManifest.geometryReliable ||
+            !originalFrame ||
+            originalFrame.sopInstanceUid !== displayedDerivedReference.referenceSopInstanceUid ||
+            (displayedDerivedReference.referenceFrameOfReferenceUid &&
+              displayedDerivedReference.referenceFrameOfReferenceUid !==
+                (originalFrame.frameOfReferenceUid ?? verifiedReferenceManifest.frameOfReferenceUid))
+          ) {
+            throw new Error('The selected aligned reference no longer matches its verified acquired physical anchor');
+          }
+          validateOutputGridReference(displayedGrid, originalFrame, verifiedReferenceManifest.frameOfReferenceUid);
+
+          // The selected examination supplies the visible tissue and panel settings. Its original
+          // acquired anchor remains the sole verified authority for the shared physical plane.
+          reference = {
+            ...reference,
+            seriesUid: verifiedReferenceManifest.seriesUid,
+            sliceIndex: originalSliceIndex!,
+            sliceCount: verifiedReferenceManifest.frames.length,
+            studyUid: verifiedReferenceManifest.studyUid,
+            frameOfReferenceUid: verifiedReferenceManifest.frameOfReferenceUid,
+            imageSize: { width: displayedDerivedReference.columns, height: displayedDerivedReference.rows },
+          };
+        }
+
+        const captureReferenceSlice = async (targetSize: number): Promise<RenderedSlice> => {
+          if (!displayedDerivedReference) return captureSlice(reference.seriesUid, reference.sliceIndex, targetSize);
+          ensureNotAborted();
+          const started = nowMs();
+          const captured = displayedDerivedReference.valid
+            ? resample2dAreaAverageWithValidity(
+                displayedDerivedReference.pixels,
+                displayedDerivedReference.valid,
+                displayedDerivedReference.rows,
+                displayedDerivedReference.columns,
+                targetSize,
+                targetSize,
+              )
+            : {
+                pixels: resample2dAreaAverage(
+                  displayedDerivedReference.pixels,
+                  displayedDerivedReference.rows,
+                  displayedDerivedReference.columns,
+                  targetSize,
+                  targetSize,
+                ),
+              };
+          ensureNotAborted();
+          const elapsed = nowMs() - started;
+          return {
+            ...captured,
+            imageId: displayedDerivedReference.imageId,
+            timingMs: { getImageId: 0, loadImage: 0, capture: elapsed, total: elapsed },
+          };
+        };
+
         const debugAlignment = isDebugAlignmentEnabled();
 
         if (debugAlignment)
@@ -261,8 +382,8 @@ export function useAutoAlign() {
           referenceSliceIndex: reference.sliceIndex,
         });
 
-        // Render the reference slice from DICOM directly (identity view space).
-        const referenceRender = await captureSlice(reference.seriesUid, reference.sliceIndex, ALIGNMENT_IMAGE_SIZE);
+        // Score the exact visible reference tissue while preserving its acquired physical-plane authority.
+        const referenceRender = await captureReferenceSlice(ALIGNMENT_IMAGE_SIZE);
 
         if (debugAlignment)
           console.info('[alignment] Reference slice rendered', {
@@ -305,17 +426,21 @@ export function useAutoAlign() {
         );
         const referenceDisplayedStats = supportedHistogramStats(referenceDisplayedPixels, referenceRender.validity);
         const referenceManifest: SeriesFrameManifest | null =
-          reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null;
+          verifiedReferenceManifest ??
+          (reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null);
         const targetManifests = new Map<string, SeriesFrameManifest>();
         let preparedPhysicalReference: Promise<PreparedLongitudinalReferenceInput> | undefined;
         const selectedReferenceFrame = referenceManifest?.frames[reference.sliceIndex];
         const operationOutputGrid: OutputPlaneGrid | null =
-          referenceManifest?.geometryReliable && selectedReferenceFrame
-            ? buildOutputPlaneGrid(selectedReferenceFrame, {
-                mode: options.outputMode ?? 'native',
-                frameOfReferenceUid: referenceManifest.frameOfReferenceUid,
-              })
-            : null;
+          displayedDerivedReference?.outputGrid &&
+          (!options.outputMode || options.outputMode === displayedDerivedReference.outputGrid.mode)
+            ? displayedDerivedReference.outputGrid
+            : referenceManifest?.geometryReliable && selectedReferenceFrame
+              ? buildOutputPlaneGrid(selectedReferenceFrame, {
+                  mode: options.outputMode ?? 'native',
+                  frameOfReferenceUid: referenceManifest.frameOfReferenceUid,
+                })
+              : null;
         const referenceAnalysisPixelSpacing: [number, number] | undefined = operationOutputGrid
           ? [
               operationOutputGrid.fieldOfViewMm[0] / ALIGNMENT_IMAGE_SIZE,
@@ -654,6 +779,10 @@ export function useAutoAlign() {
             continue;
           }
 
+          // A re-referenced derived panel already occupies this acquired anchor's physical plane.
+          // Preserve the anchor as an acquired image instead of registering its stack to itself.
+          if (seriesRef.series_uid === reference.seriesUid) continue;
+
           if (referenceManifest) {
             let physicalResult: AlignmentResult | null;
             try {
@@ -680,11 +809,7 @@ export function useAutoAlign() {
 
           try {
             if (!scoringRunner) {
-              const referenceCoarseRender = await captureSlice(
-                reference.seriesUid,
-                reference.sliceIndex,
-                COARSE_IMAGE_SIZE,
-              );
+              const referenceCoarseRender = await captureReferenceSlice(COARSE_IMAGE_SIZE);
               scoringRunner = await createAlignmentScoringRunner(
                 {
                   referenceFinePixels: referencePixels,
@@ -1672,6 +1797,7 @@ export function useAutoAlign() {
         if (cancelled) return results;
         throw err;
       } finally {
+        releaseDisplayedReference?.();
         scoringRunner?.close();
         if (abortControllerRef.current === alignmentAbortController) abortControllerRef.current = null;
       }
