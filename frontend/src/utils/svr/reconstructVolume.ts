@@ -8,7 +8,7 @@ import {
 } from '../localApi';
 import { decodeImageWithValidity, loadCornerstoneImage, type DecodedFrameResampleKernel } from '../decodedFrame';
 import type { SliceGeometry } from './dicomGeometry';
-import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomGeometry';
+import { downsampledSliceOriginMm, getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
 import { filterSvrManifestFramesForRoi } from './sliceRoiCrop';
 import { dot } from './vec3';
@@ -23,7 +23,6 @@ import type {
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 
-const MIN_INDEPENDENT_ORIENTATION_COSINE = Math.cos((10 * Math.PI) / 180);
 const DECODE_PROGRESS_START = 5;
 const DECODE_PROGRESS_END = 35;
 
@@ -105,7 +104,7 @@ async function admitSvrSeries(
     }
 
     const normal = getSliceGeometryFromInstance(manifest.frames[0]!).normalDir;
-    if (referenceNormal && Math.abs(dot(referenceNormal, normal)) < MIN_INDEPENDENT_ORIENTATION_COSINE) {
+    if (referenceNormal && Math.abs(dot(referenceNormal, normal)) < INDEPENDENT_NORMAL_COSINE) {
       independentOrientation = true;
     }
 

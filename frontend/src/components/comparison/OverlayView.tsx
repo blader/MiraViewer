@@ -1,9 +1,9 @@
 import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link2, Loader2, Pencil, ScanLine } from 'lucide-react';
+import { Link2, Loader2, ScanLine } from 'lucide-react';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls } from '../ImageControls';
+import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
@@ -156,16 +156,7 @@ export function OverlayView({
               <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
                 {formatDate(overlayDisplayedDate)}
               </span>
-              {displayedDerivedFrame ? (
-                <span
-                  data-registration-datum="verified"
-                  aria-label="Verified aligned presentation"
-                  className="flex items-center gap-1.5 text-xs text-[var(--signal-metal)]"
-                >
-                  <span aria-hidden="true" className="h-3 w-px bg-[var(--signal-metal)]" />
-                  <span className="hidden lg:inline">Aligned</span>
-                </span>
-              ) : null}
+              {displayedDerivedFrame ? <VerifiedAlignmentBadge /> : null}
             </div>
 
             <div
@@ -174,55 +165,15 @@ export function OverlayView({
                 isOverlayComparing ? 'pointer-events-none opacity-40' : 'study-controls'
               }`}
             >
-              <button
-                type="button"
-                onClick={() => setShowSavedTumor((v) => !v)}
-                disabled={tumorToolOpen || !nativeAnnotationsAvailable}
-                aria-pressed={showSavedTumor}
-                className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
-                  tumorToolOpen || !nativeAnnotationsAvailable
-                    ? 'text-[var(--text-tertiary)]'
-                    : showSavedTumor
-                      ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
-                }`}
-                title={
-                  !nativeAnnotationsAvailable
-                    ? 'Native annotations are unavailable on a derived alignment plane'
-                    : tumorToolOpen
-                      ? 'Close segmentation tool to view saved tumor overlay'
-                      : 'Toggle saved tumor segmentation overlay'
-                }
-              >
-                <ScanLine className="h-3.5 w-3.5" />
-                Tumor
-              </button>
-
-              <button
-                type="button"
-                aria-pressed={gtPolygonToolOpen}
-                disabled={!nativeAnnotationsAvailable}
-                onClick={() => {
-                  setGtPolygonToolOpen((v) => {
-                    const next = !v;
-                    if (next) setTumorToolOpen(false);
-                    return next;
-                  });
-                }}
-                className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
-                  gtPolygonToolOpen
-                    ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
-                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
-                }`}
-                title={
-                  nativeAnnotationsAvailable
-                    ? 'Ground truth polygon tool (debug)'
-                    : 'Native annotations are unavailable on a derived alignment plane'
-                }
-              >
-                <Pencil className="h-3.5 w-3.5" />
-                GT
-              </button>
+              <StudyAnnotationControls
+                showSavedTumor={showSavedTumor}
+                tumorToolOpen={tumorToolOpen}
+                gtPolygonToolOpen={gtPolygonToolOpen}
+                nativeAnnotationsAvailable={nativeAnnotationsAvailable}
+                setShowSavedTumor={setShowSavedTumor}
+                setTumorToolOpen={setTumorToolOpen}
+                setGtPolygonToolOpen={setGtPolygonToolOpen}
+              />
 
               <ImageControls
                 settings={overlayDisplayedSettings}

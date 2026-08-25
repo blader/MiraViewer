@@ -20,6 +20,7 @@ import {
   type SvrReconstructionGrid,
   type SvrReconstructionSlice,
 } from './reconstructionCore';
+import { boundsCornersMm } from './sliceRoiCrop';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { cross, dot, norm, v3, type Vec3 } from './vec3';
 
@@ -239,18 +240,13 @@ function maximumPoseDisplacementMm(first: RigidParams, second: RigidParams, boun
   const secondRotation = mat3FromEulerXYZ(second.rx, second.ry, second.rz);
   let maximum = 0;
 
-  for (const x of [bounds.min.x, bounds.max.x]) {
-    for (const y of [bounds.min.y, bounds.max.y]) {
-      for (const z of [bounds.min.z, bounds.max.z]) {
-        const point = v3(x, y, z);
-        const firstPoint = applyRigidToPoint(point, centerMm, firstRotation, v3(first.tx, first.ty, first.tz));
-        const secondPoint = applyRigidToPoint(point, centerMm, secondRotation, v3(second.tx, second.ty, second.tz));
-        maximum = Math.max(
-          maximum,
-          Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y, firstPoint.z - secondPoint.z),
-        );
-      }
-    }
+  for (const point of boundsCornersMm(bounds)) {
+    const firstPoint = applyRigidToPoint(point, centerMm, firstRotation, v3(first.tx, first.ty, first.tz));
+    const secondPoint = applyRigidToPoint(point, centerMm, secondRotation, v3(second.tx, second.ty, second.tz));
+    maximum = Math.max(
+      maximum,
+      Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y, firstPoint.z - secondPoint.z),
+    );
   }
 
   return maximum;

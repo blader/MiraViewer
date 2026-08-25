@@ -188,37 +188,47 @@ const SVR_PARAMS: SvrParams = {
   roi: null,
 };
 
+const RECONSTRUCTION_OPTIONS: SvrReconstructionOptions = Object.freeze({
+  iterations: 0,
+  stepSize: 0,
+  clampOutput: true,
+  psfMode: 'none',
+  robustLoss: 'none',
+  robustDelta: 0.1,
+  laplacianWeight: 0,
+});
+
+function axialSliceGeometry() {
+  return {
+    dsRows: 1,
+    dsCols: 1,
+    ippMm: { x: 0, y: 0, z: 0 },
+    rowDir: { x: 1, y: 0, z: 0 },
+    colDir: { x: 0, y: 1, z: 0 },
+    normalDir: { x: 0, y: 0, z: 1 },
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+    sliceThicknessMm: 1,
+    spacingBetweenSlicesMm: 1,
+  };
+}
+
 describe('svr/computeCore', () => {
   it('reconstructs valid zero and negative observations while rejecting explicitly invalid positive pixels', async () => {
     const occupancy = new Uint8Array(4);
     const volume = await reconstructVolumeFromSlices({
       slices: [
         {
+          ...axialSliceGeometry(),
           pixels: new Float32Array([-2, 0, 5, 999]),
           valid: new Uint8Array([1, 1, 1, 0]),
           dsRows: 2,
           dsCols: 2,
-          ippMm: { x: 0, y: 0, z: 0 },
-          rowDir: { x: 1, y: 0, z: 0 },
-          colDir: { x: 0, y: 1, z: 0 },
-          normalDir: { x: 0, y: 0, z: 1 },
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
         },
       ],
       grid: { dims: { nx: 2, ny: 2, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy,
-      options: {
-        iterations: 0,
-        stepSize: 0,
-        clampOutput: false,
-        psfMode: 'none',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, clampOutput: false },
     });
 
     expect(Array.from(occupancy)).toEqual([1, 1, 1, 0]);
@@ -227,14 +237,7 @@ describe('svr/computeCore', () => {
 
   it('preserves a supported intensity of 100 instead of averaging it with unsupported padding into 50', async () => {
     const source = {
-      dsRows: 1,
-      dsCols: 1,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      normalDir: { x: 0, y: 0, z: 1 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
+      ...axialSliceGeometry(),
       sliceThicknessMm: null,
       spacingBetweenSlicesMm: null,
     };
@@ -247,15 +250,7 @@ describe('svr/computeCore', () => {
       ],
       grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy: observedSupport,
-      options: {
-        iterations: 0,
-        stepSize: 0,
-        clampOutput: false,
-        psfMode: 'none',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, clampOutput: false },
     });
 
     expect(Array.from(observedSupport)).toEqual([1]);
@@ -264,14 +259,7 @@ describe('svr/computeCore', () => {
 
   it('weights a 25%-acquired footprint one quarter as strongly as fully acquired anatomy', async () => {
     const source = {
-      dsRows: 1,
-      dsCols: 1,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      normalDir: { x: 0, y: 0, z: 1 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
+      ...axialSliceGeometry(),
       sliceThicknessMm: null,
       spacingBetweenSlicesMm: null,
       validScale: 255,
@@ -285,15 +273,7 @@ describe('svr/computeCore', () => {
       ],
       grid: { dims: { nx: 1, ny: 1, nz: 1 }, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy: observedSupport,
-      options: {
-        iterations: 2,
-        stepSize: 0.6,
-        clampOutput: false,
-        psfMode: 'none',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, iterations: 2, stepSize: 0.6, clampOutput: false },
     });
 
     expect(observedSupport[0]).toBe(1);
@@ -307,31 +287,17 @@ describe('svr/computeCore', () => {
     await reconstructVolumeFromSlices({
       slices: [
         {
+          ...axialSliceGeometry(),
           pixels: new Float32Array([1]),
           valid: new Uint8Array([1]),
-          dsRows: 1,
-          dsCols: 1,
           ippMm: { x: 0, y: 0, z: 7 },
-          rowDir: { x: 1, y: 0, z: 0 },
-          colDir: { x: 0, y: 1, z: 0 },
-          normalDir: { x: 0, y: 0, z: 1 },
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
           sliceThicknessMm: null,
           spacingBetweenSlicesMm: 8,
         },
       ],
       grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy: observedSupport,
-      options: {
-        iterations: 0,
-        stepSize: 0,
-        clampOutput: true,
-        psfMode: 'box',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, psfMode: 'box' },
     });
 
     expect(observedSupport[7]).toBe(1);
@@ -345,29 +311,21 @@ describe('svr/computeCore', () => {
     const volume = await reconstructVolumeFromSlices({
       slices: [
         {
+          ...axialSliceGeometry(),
           pixels: new Float32Array([0.75]),
           valid: new Uint8Array([1]),
-          dsRows: 1,
-          dsCols: 1,
           ippMm: { x: 5, y: 5, z: 0 },
-          rowDir: { x: 1, y: 0, z: 0 },
-          colDir: { x: 0, y: 1, z: 0 },
-          normalDir: { x: 0, y: 0, z: 1 },
           rowSpacingDsMm: 4,
           colSpacingDsMm: 4,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
         },
       ],
       grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy: observedSupport,
       options: {
+        ...RECONSTRUCTION_OPTIONS,
         iterations: 2,
         stepSize: 0.6,
-        clampOutput: true,
         psfMode: 'box',
-        robustLoss: 'none',
-        robustDelta: 0.1,
         laplacianWeight: 0.02,
       },
     });
@@ -400,15 +358,7 @@ describe('svr/computeCore', () => {
       slices,
       grid,
       occupancy: expectedSupport,
-      options: {
-        iterations: 0,
-        stepSize: 0,
-        clampOutput: true,
-        psfMode: 'gaussian',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, psfMode: 'gaussian' },
     });
 
     let observedCount = -1;
@@ -637,31 +587,15 @@ describe('svr/computeCore', () => {
     const volume = await reconstructVolumeFromSlices({
       slices: [
         {
+          ...axialSliceGeometry(),
           pixels: new Float32Array([1]),
           valid: new Uint8Array([1]),
-          dsRows: 1,
-          dsCols: 1,
           ippMm: { x: 2, y: 2, z: 2 },
-          rowDir: { x: 1, y: 0, z: 0 },
-          colDir: { x: 0, y: 1, z: 0 },
-          normalDir: { x: 0, y: 0, z: 1 },
-          rowSpacingDsMm: 1,
-          colSpacingDsMm: 1,
-          sliceThicknessMm: 1,
-          spacingBetweenSlicesMm: 1,
         },
       ],
       grid: { dims, originMm: { x: 0, y: 0, z: 0 }, voxelSizeMm: 1 },
       occupancy,
-      options: {
-        iterations: 2,
-        stepSize: 0.6,
-        clampOutput: true,
-        psfMode: 'none',
-        robustLoss: 'none',
-        robustDelta: 0.1,
-        laplacianWeight: 0.2,
-      },
+      options: { ...RECONSTRUCTION_OPTIONS, iterations: 2, stepSize: 0.6, laplacianWeight: 0.2 },
     });
 
     expect(occupancy[centerIndex]).toBe(1);

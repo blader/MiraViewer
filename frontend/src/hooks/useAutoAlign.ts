@@ -8,11 +8,7 @@ import { clamp, nowMs } from '../utils/math';
 import { fillInvalidWarpWithValidMean } from '../utils/warpAffine';
 import { buildStructuralPhaseImageSquare, inpaintExclusionRectSquare } from '../utils/imageFeatures';
 import { affineAboutOriginToStandard, composeStandardAffine2D, standardToAffineAboutOrigin } from '../utils/affine2d';
-import {
-  affineAboutCenterToPanelGeometry,
-  panelGeometryToAffineAboutCenter,
-  type PanelGeometry,
-} from '../utils/panelTransform';
+import { affineAboutCenterToPanelGeometry, panelGeometryToAffineAboutCenter } from '../utils/panelTransform';
 import { isDebugAlignmentEnabled, debugAlignmentLog } from '../utils/debugAlignment';
 import {
   recordAlignmentSliceScore,
@@ -1670,17 +1666,6 @@ export function useAutoAlign() {
 
             // Compose recovered delta onto the reference geometry so the displayed target matches the
             // displayed reference (including reference zoom/rotation/pan and any stored shear).
-            const referenceGeometry: PanelGeometry = {
-              zoom: reference.settings.zoom,
-              rotation: reference.settings.rotation,
-              panX: reference.settings.panX,
-              panY: reference.settings.panY,
-              affine00: reference.settings.affine00,
-              affine01: reference.settings.affine01,
-              affine10: reference.settings.affine10,
-              affine11: reference.settings.affine11,
-            };
-
             const referenceMapping =
               reference.viewportSize && reference.imageSize
                 ? { viewportSize: reference.viewportSize, imageSize: reference.imageSize }
@@ -1695,7 +1680,7 @@ export function useAutoAlign() {
                 }
               : undefined;
             const refAffine = panelGeometryToAffineAboutCenter(
-              referenceGeometry,
+              reference.settings,
               ALIGNMENT_IMAGE_SIZE,
               referenceMapping,
             );

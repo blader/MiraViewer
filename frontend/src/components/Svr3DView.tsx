@@ -13,7 +13,7 @@ import { useSvrReconstruction } from '../hooks/useSvrReconstruction';
 import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../utils/localApi';
 import type { SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
-import { getSliceGeometryFromInstance, sliceCornersMm } from '../utils/svr/dicomGeometry';
+import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
 import { computeSvrDownsampleSize } from '../utils/svr/downsample';
 import { filterSvrManifestFramesForRoi } from '../utils/svr/sliceRoiCrop';
 import {
@@ -22,6 +22,7 @@ import {
   SVR_MEMORY_BUDGET_BYTES,
 } from '../utils/svr/svrMemoryPlan';
 import { quantileSorted } from '../utils/svr/svrUtils';
+import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
@@ -419,10 +420,7 @@ function countIndependentOrientations(manifests: SeriesFrameManifest[]): number 
     if (!frame) continue;
 
     const normal = getSliceGeometryFromInstance(frame).normalDir;
-    const alreadyRepresented = normals.some(
-      (existing) =>
-        Math.abs(existing.x * normal.x + existing.y * normal.y + existing.z * normal.z) >= Math.cos(Math.PI / 18),
-    );
+    const alreadyRepresented = normals.some((existing) => Math.abs(dot(existing, normal)) >= INDEPENDENT_NORMAL_COSINE);
 
     if (!alreadyRepresented) normals.push(normal);
   }

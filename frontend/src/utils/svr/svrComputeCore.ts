@@ -20,7 +20,7 @@
  */
 
 import type { SvrParams, SvrProgress, SvrRoi } from '../../types/svr';
-import { sliceCornersMm } from './dicomGeometry';
+import { INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from './dicomGeometry';
 import type { VolumeDims } from './trilinear';
 import type { SvrReconstructionGrid, SvrReconstructionOptions } from './reconstructionCore';
 import {
@@ -120,12 +120,11 @@ function deriveAcquisitionEvidence(
 ): Pick<SvrComputeResult, 'acquiredOrientationCount' | 'effectiveResolutionMm' | 'sliceProfileSource'> {
   const normals: Vec3[] = [];
   const positionsBySeries = new Map<string, number[]>();
-  const orientationThreshold = Math.cos((10 * Math.PI) / 180);
   let declaredProfiles = 0;
   let unknownProfiles = 0;
 
   for (const slice of slices) {
-    if (!normals.some((normal) => Math.abs(dot(normal, slice.normalDir)) >= orientationThreshold)) {
+    if (!normals.some((normal) => Math.abs(dot(normal, slice.normalDir)) >= INDEPENDENT_NORMAL_COSINE)) {
       normals.push(slice.normalDir);
     }
 

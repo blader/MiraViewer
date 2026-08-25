@@ -2,6 +2,8 @@ import type { DicomInstance } from '../../db/schema';
 import type { Vec3 } from './vec3';
 import { cross, dot, norm, normalize, v3 } from './vec3';
 
+export const INDEPENDENT_NORMAL_COSINE = Math.cos(Math.PI / 18);
+
 function parseMultiNumberString(value: string): number[] {
   // Multi-valued DICOM tags are typically separated by backslashes.
   // Some exporters use commas/spaces; accept those as well.

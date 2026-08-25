@@ -12,6 +12,79 @@ import {
 } from '../src/utils/derivedAlignmentFrame';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 
+function alignmentFixture({
+  date = '2024-01-01',
+  sequenceId = 'sequence-a',
+  seriesUid = 'target-series',
+  studyUid = 'target-study',
+  instanceCount = 10,
+}: {
+  date?: string;
+  sequenceId?: string;
+  seriesUid?: string;
+  studyUid?: string;
+  instanceCount?: number;
+} = {}) {
+  const patientKey = 'patient-a';
+  const datasetRevision = 7;
+  const data: ComparisonData = {
+    planes: ['Axial'],
+    dates: [date],
+    sequences: [],
+    selected_patient_key: patientKey,
+    dataset_revision: datasetRevision,
+    series_map: {
+      [sequenceId]: {
+        [date]: {
+          study_id: studyUid,
+          study_uid: studyUid,
+          series_uid: seriesUid,
+          instance_count: instanceCount,
+          patient_key: patientKey,
+        },
+      },
+    },
+  };
+  const frame = (
+    overrides: Partial<NonNullable<AlignmentResult['derivedFrame']>> = {},
+  ): NonNullable<AlignmentResult['derivedFrame']> => ({
+    rows: 2,
+    columns: 2,
+    pixels: new Float32Array([1, 2, 3, 4]),
+    sourceImageId: 'miradb:target-sop',
+    targetStudyUid: studyUid,
+    targetSopInstanceUid: 'target-sop',
+    ...overrides,
+  });
+  const result = (overrides: Partial<AlignmentResult> = {}): AlignmentResult => ({
+    date,
+    seriesUid,
+    bestSliceIndex: 1,
+    nmiScore: 1,
+    computedSettings: { ...DEFAULT_PANEL_SETTINGS },
+    slicesChecked: instanceCount,
+    runId: 'verified-run',
+    patientKey,
+    sequenceId,
+    datasetRevision,
+    referenceSeriesUid: 'fixed-reference-series',
+    outcome: 'aligned',
+    ...overrides,
+  });
+  const publishPreviousPlane = (previousSeriesUid: string, bestSliceIndex: number) =>
+    setDerivedAlignmentFrame(
+      result({
+        seriesUid: previousSeriesUid,
+        bestSliceIndex,
+        slicesChecked: 1,
+        runId: 'previous-derived-run',
+        derivedFrame: frame({ sourceImageId: `miradb:${previousSeriesUid}-${bestSliceIndex}` }),
+      }),
+    );
+
+  return { date, sequenceId, seriesUid, data, frame, result, publishPreviousPlane };
+}
+
 describe('useApplyAlignmentResults', () => {
   it('applies alignment results and preserves reverseSliceOrder (adjusting offset)', async () => {
     const date = '2024-01-01T00:00:00';
@@ -216,66 +289,18 @@ describe('useApplyAlignmentResults', () => {
   });
 
   it('discards obsolete target planes when a successful replacement presents acquired anatomy', () => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
+    const { sequenceId, data, result, publishPreviousPlane } = alignmentFixture();
     const clearPersisted = vi.spyOn(localApi, 'clearPersistedDerivedAlignmentFrames').mockResolvedValue();
-    const publishPreviousPlane = (seriesUid: string, bestSliceIndex: number) =>
-      setDerivedAlignmentFrame({
-        date,
-        seriesUid,
-        bestSliceIndex,
-        nmiScore: 1,
-        computedSettings: DEFAULT_PANEL_SETTINGS,
-        slicesChecked: 1,
-        runId: 'previous-derived-run',
-        outcome: 'aligned',
-        derivedFrame: {
-          rows: 2,
-          columns: 2,
-          pixels: new Float32Array([1, 2, 3, 4]),
-          sourceImageId: `miradb:${seriesUid}-${bestSliceIndex}`,
-        },
-      });
     publishPreviousPlane('target-series', 1);
     publishPreviousPlane('target-series', 4);
     publishPreviousPlane('fixed-reference-series', 2);
-
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'target-study',
-            series_uid: 'target-series',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
     const batchUpdateSettings = vi.fn();
 
     try {
       renderHook(() =>
         useApplyAlignmentResults({
           isAligning: true,
-          alignmentResults: [
-            {
-              date,
-              seriesUid: 'target-series',
-              bestSliceIndex: 1,
-              nmiScore: 1,
-              computedSettings: DEFAULT_PANEL_SETTINGS,
-              slicesChecked: 10,
-              runId: 'replacement-native-run',
-              patientKey: 'patient-a',
-              referenceSeriesUid: 'fixed-reference-series',
-              outcome: 'aligned',
-            },
-          ],
+          alignmentResults: [result({ runId: 'replacement-native-run' })],
           panelSettings: new Map(),
           data,
           selectedSeqId: sequenceId,
@@ -296,8 +321,7 @@ describe('useApplyAlignmentResults', () => {
   });
 
   it('atomically replaces obsolete target indices and persists only the newest derived plane', async () => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
+    const { sequenceId, data, frame, result, publishPreviousPlane } = alignmentFixture();
     const operations: string[] = [];
     const durableFrames = new Map([
       ['target-series:1', 'old-target-one'],
@@ -316,26 +340,9 @@ describe('useApplyAlignmentResults', () => {
       operations.push(`save:${frame.targetFrameIndex}`);
       durableFrames.set(`${frame.targetSeriesUid}:${frame.targetFrameIndex}`, frame.runId ?? 'saved');
     });
-    const previous = (seriesUid: string, bestSliceIndex: number) =>
-      setDerivedAlignmentFrame({
-        date,
-        seriesUid,
-        bestSliceIndex,
-        nmiScore: 1,
-        computedSettings: DEFAULT_PANEL_SETTINGS,
-        slicesChecked: 1,
-        runId: 'previous-derived-run',
-        outcome: 'aligned',
-        derivedFrame: {
-          rows: 2,
-          columns: 2,
-          pixels: new Float32Array([1, 2, 3, 4]),
-          sourceImageId: `miradb:${seriesUid}-${bestSliceIndex}`,
-        },
-      });
-    previous('target-series', 1);
-    previous('target-series', 4);
-    previous('fixed-reference-series', 2);
+    publishPreviousPlane('target-series', 1);
+    publishPreviousPlane('target-series', 4);
+    publishPreviousPlane('fixed-reference-series', 2);
     const observedPresentations: Array<{ current: boolean; obsolete: boolean; reference: boolean }> = [];
     const unsubscribe = subscribeToDerivedAlignmentFrames(() => {
       observedPresentations.push({
@@ -346,52 +353,20 @@ describe('useApplyAlignmentResults', () => {
         reference: getDerivedAlignmentFrame('fixed-reference-series', 2) !== null,
       });
     });
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'target-study',
-            study_uid: 'target-study',
-            series_uid: 'target-series',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
-
     try {
       renderHook(() =>
         useApplyAlignmentResults({
           isAligning: true,
           alignmentResults: [
-            {
-              date,
-              seriesUid: 'target-series',
+            result({
               bestSliceIndex: 6,
-              nmiScore: 1,
-              computedSettings: DEFAULT_PANEL_SETTINGS,
-              slicesChecked: 10,
               runId: 'replacement-derived-run',
-              patientKey: 'patient-a',
-              sequenceId,
-              datasetRevision: 7,
-              referenceSeriesUid: 'fixed-reference-series',
-              outcome: 'aligned',
-              derivedFrame: {
-                rows: 2,
-                columns: 2,
+              derivedFrame: frame({
                 pixels: new Float32Array([5, 6, 7, 8]),
                 sourceImageId: 'miradb:target-sop-six',
-                targetStudyUid: 'target-study',
                 targetSopInstanceUid: 'target-sop-six',
-              },
-            },
+              }),
+            }),
           ],
           panelSettings: new Map(),
           data,
@@ -417,8 +392,7 @@ describe('useApplyAlignmentResults', () => {
     { predecessor: 'finishes late', fails: false },
     { predecessor: 'fails late', fails: true },
   ])('does not resurrect an obsolete derived plane when its older durable write $predecessor', async ({ fails }) => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
+    const { sequenceId, data, frame, result } = alignmentFixture();
     const operations: string[] = [];
     const onPersistenceError = vi.fn();
     const predecessorError = new Error('Previous aligned-plane write failed');
@@ -442,46 +416,7 @@ describe('useApplyAlignmentResults', () => {
       persistedDerivedPlane = false;
       operations.push('clear-completed');
     });
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'target-study',
-            study_uid: 'target-study',
-            series_uid: 'target-series',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
-    const derivedResult: AlignmentResult = {
-      date,
-      seriesUid: 'target-series',
-      bestSliceIndex: 1,
-      nmiScore: 1,
-      computedSettings: DEFAULT_PANEL_SETTINGS,
-      slicesChecked: 10,
-      runId: 'previous-derived-run',
-      patientKey: 'patient-a',
-      sequenceId,
-      datasetRevision: 7,
-      referenceSeriesUid: 'fixed-reference-series',
-      outcome: 'aligned',
-      derivedFrame: {
-        rows: 2,
-        columns: 2,
-        pixels: new Float32Array([1, 2, 3, 4]),
-        sourceImageId: 'miradb:target-sop',
-        targetStudyUid: 'target-study',
-        targetSopInstanceUid: 'target-sop',
-      },
-    };
+    const derivedResult = result({ runId: 'previous-derived-run', derivedFrame: frame() });
 
     try {
       const { rerender } = renderHook(
@@ -529,8 +464,7 @@ describe('useApplyAlignmentResults', () => {
     { predecessor: 'completes late', fails: false },
     { predecessor: 'fails late', fails: true },
   ])('preserves a newer derived plane when an older durable deletion $predecessor', async ({ fails }) => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
+    const { sequenceId, data, frame, result } = alignmentFixture();
     const operations: string[] = [];
     const onPersistenceError = vi.fn();
     const predecessorError = new Error('Previous aligned-plane removal failed');
@@ -559,38 +493,7 @@ describe('useApplyAlignmentResults', () => {
       persistedDerivedPlane = true;
       operations.push('save-completed');
     });
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'target-study',
-            study_uid: 'target-study',
-            series_uid: 'target-series',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
-    const nativeResult: AlignmentResult = {
-      date,
-      seriesUid: 'target-series',
-      bestSliceIndex: 1,
-      nmiScore: 1,
-      computedSettings: DEFAULT_PANEL_SETTINGS,
-      slicesChecked: 10,
-      runId: 'previous-native-run',
-      patientKey: 'patient-a',
-      sequenceId,
-      datasetRevision: 7,
-      referenceSeriesUid: 'fixed-reference-series',
-      outcome: 'aligned',
-    };
+    const nativeResult = result({ runId: 'previous-native-run' });
 
     try {
       const { rerender } = renderHook(
@@ -614,14 +517,7 @@ describe('useApplyAlignmentResults', () => {
             {
               ...nativeResult,
               runId: 'replacement-derived-run',
-              derivedFrame: {
-                rows: 2,
-                columns: 2,
-                pixels: new Float32Array([1, 2, 3, 4]),
-                sourceImageId: 'miradb:target-sop',
-                targetStudyUid: 'target-study',
-                targetSopInstanceUid: 'target-sop',
-              },
+              derivedFrame: frame(),
             },
           ],
         });
@@ -659,45 +555,20 @@ describe('useApplyAlignmentResults', () => {
     { label: 'an ambiguous registration', result: { outcome: 'ambiguous' as const } },
     { label: 'insufficient physical overlap', result: { outcome: 'insufficient-overlap' as const } },
   ])('does not apply stale or unsafe results from $label', ({ result }) => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'study-a',
-            series_uid: 'series-a',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
+    const {
+      sequenceId,
+      data,
+      result: alignedResult,
+    } = alignmentFixture({
+      seriesUid: 'series-a',
+      studyUid: 'study-a',
+    });
     const batchUpdateSettings = vi.fn();
 
     renderHook(() =>
       useApplyAlignmentResults({
         isAligning: true,
-        alignmentResults: [
-          {
-            date,
-            seriesUid: 'series-a',
-            bestSliceIndex: 2,
-            nmiScore: 1,
-            computedSettings: DEFAULT_PANEL_SETTINGS,
-            slicesChecked: 10,
-            sequenceId,
-            patientKey: 'patient-a',
-            datasetRevision: 7,
-            outcome: 'aligned',
-            ...result,
-          },
-        ],
+        alignmentResults: [alignedResult({ bestSliceIndex: 2, ...result })],
         panelSettings: new Map(),
         data,
         selectedSeqId: sequenceId,
@@ -727,57 +598,27 @@ describe('useApplyAlignmentResults', () => {
     frame?: Partial<NonNullable<AlignmentResult['derivedFrame']>>;
     data?: Partial<ComparisonData>;
   }>)('rejects a derived plane with $label before changing displayed or durable anatomy', async (failure) => {
-    const date = 'target-date';
-    const sequenceId = 'target-sequence';
-    const patientKey = 'patient-a';
-    const seriesUid = 'target-series';
+    const { date, sequenceId, seriesUid, data, frame, result } = alignmentFixture({
+      date: 'target-date',
+      sequenceId: 'target-sequence',
+      instanceCount: 3,
+    });
+    data.series_map[sequenceId]![date]!.study_id = 'legacy-study-id';
+    Object.assign(data, failure.data);
     const clearPersisted = vi.spyOn(localApi, 'clearPersistedDerivedAlignmentFrames').mockResolvedValue();
     const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockResolvedValue();
     const batchUpdateSettings = vi.fn();
     const onPersistenceError = vi.fn();
-    const previousResult: AlignmentResult = {
-      date,
-      seriesUid,
-      bestSliceIndex: 1,
-      nmiScore: 1,
-      computedSettings: DEFAULT_PANEL_SETTINGS,
-      slicesChecked: 3,
+    const previousResult = result({
       runId: 'previously-verified-run',
-      patientKey,
-      sequenceId,
-      datasetRevision: 7,
       referenceSeriesUid: 'reference-series',
-      outcome: 'aligned',
-      derivedFrame: {
-        rows: 2,
-        columns: 2,
-        pixels: new Float32Array([1, 2, 3, 4]),
+      derivedFrame: frame({
         sourceImageId: 'miradb:target-sop-one',
-        targetStudyUid: 'target-study',
         targetSopInstanceUid: 'target-sop-one',
-      },
-    };
+      }),
+    });
     setDerivedAlignmentFrame(previousResult);
     const previousFrame = getDerivedAlignmentFrame(seriesUid, 1);
-    const data: ComparisonData = {
-      planes: [],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: patientKey,
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'legacy-study-id',
-            study_uid: 'target-study',
-            series_uid: seriesUid,
-            instance_count: 3,
-            patient_key: patientKey,
-          },
-        },
-      },
-      ...failure.data,
-    };
     const candidate: AlignmentResult = {
       ...previousResult,
       bestSliceIndex: 2,
@@ -828,8 +669,7 @@ describe('useApplyAlignmentResults', () => {
     'mismatched-pixel-lattice',
     'mismatched-validity-mask',
   ] as const)('does not apply an aligned result whose verified output authority is %s', (failure) => {
-    const date = '2024-01-01';
-    const sequenceId = 'sequence-a';
+    const { sequenceId, data, frame, result } = alignmentFixture({ seriesUid: 'series-a', studyUid: 'study-a' });
     const grid = buildOutputPlaneGrid({
       rows: 2,
       columns: 2,
@@ -846,54 +686,24 @@ describe('useApplyAlignmentResults', () => {
       pixelSpacing: '1\\1',
       sopInstanceUid: 'different-reference-sop',
     });
-    const data: ComparisonData = {
-      planes: ['Axial'],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'study-a',
-            series_uid: 'series-a',
-            instance_count: 10,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
     const batchUpdateSettings = vi.fn();
 
     renderHook(() =>
       useApplyAlignmentResults({
         isAligning: true,
         alignmentResults: [
-          {
-            date,
-            seriesUid: 'series-a',
+          result({
             bestSliceIndex: 2,
-            nmiScore: 1,
-            computedSettings: DEFAULT_PANEL_SETTINGS,
-            slicesChecked: 10,
             runId: 'verified-grid-run',
-            patientKey: 'patient-a',
-            sequenceId,
-            datasetRevision: 7,
-            outcome: 'aligned',
             outputGrid: grid,
-            derivedFrame: {
-              pixels: new Float32Array([1, 2, 3, 4]),
+            derivedFrame: frame({
               rows: failure === 'mismatched-pixel-lattice' ? 1 : 2,
-              columns: 2,
-              sourceImageId: 'miradb:target-sop',
-              targetStudyUid: 'study-a',
               ...(failure === 'mismatched-validity-mask' ? { valid: new Uint8Array([1, 0]) } : {}),
               ...(failure === 'missing-derived-grid'
                 ? {}
                 : { outputGrid: failure === 'mismatched-derived-grid' ? mismatchedGrid : grid }),
-            },
-          },
+            }),
+          }),
         ],
         panelSettings: new Map(),
         data,
@@ -907,54 +717,17 @@ describe('useApplyAlignmentResults', () => {
 
   it('surfaces verified-plane persistence errors instead of claiming aligned anatomy survives restart', async () => {
     const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockRejectedValue(new Error('Storage quota exceeded'));
-    const date = 'target-date';
-    const sequenceId = 'target-sequence';
+    const { sequenceId, data, frame, result } = alignmentFixture({
+      date: 'target-date',
+      sequenceId: 'target-sequence',
+      instanceCount: 3,
+    });
     const reportPersistenceError = vi.fn();
-    const data: ComparisonData = {
-      planes: [],
-      dates: [date],
-      sequences: [],
-      selected_patient_key: 'patient-a',
-      dataset_revision: 7,
-      series_map: {
-        [sequenceId]: {
-          [date]: {
-            study_id: 'target-study',
-            study_uid: 'target-study',
-            series_uid: 'target-series',
-            instance_count: 3,
-            patient_key: 'patient-a',
-          },
-        },
-      },
-    };
 
     renderHook(() =>
       useApplyAlignmentResults({
         isAligning: true,
-        alignmentResults: [
-          {
-            date,
-            seriesUid: 'target-series',
-            bestSliceIndex: 1,
-            nmiScore: 1,
-            computedSettings: DEFAULT_PANEL_SETTINGS,
-            slicesChecked: 3,
-            runId: 'verified-run',
-            patientKey: 'patient-a',
-            sequenceId,
-            datasetRevision: 7,
-            outcome: 'aligned',
-            derivedFrame: {
-              rows: 2,
-              columns: 2,
-              pixels: new Float32Array([1, 2, 3, 4]),
-              sourceImageId: 'miradb:target-sop',
-              targetStudyUid: 'target-study',
-              targetSopInstanceUid: 'target-sop',
-            },
-          },
-        ],
+        alignmentResults: [result({ derivedFrame: frame() })],
         panelSettings: new Map(),
         data,
         selectedSeqId: sequenceId,

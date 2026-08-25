@@ -1,4 +1,5 @@
-import { ArrowDownUp } from 'lucide-react';
+import type { Dispatch, SetStateAction } from 'react';
+import { ArrowDownUp, Pencil, ScanLine } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
 import { StepControl } from './StepControl';
 import { CONTROL_LIMITS } from '../utils/constants';
@@ -17,6 +18,89 @@ interface ImageControlsProps {
 const Divider = ({ wide = false }: { wide?: boolean }) => (
   <div aria-hidden="true" className={`h-4 w-px shrink-0 bg-[var(--border-color)] ${wide ? 'mx-2' : 'mx-1'}`} />
 );
+
+export const VerifiedAlignmentBadge = () => (
+  <span
+    data-registration-datum="verified"
+    aria-label="Verified aligned presentation"
+    className="flex items-center gap-1.5 text-xs text-[var(--signal-metal)]"
+  >
+    <span aria-hidden="true" className="h-3 w-px bg-[var(--signal-metal)]" />
+    <span className="hidden lg:inline">Aligned</span>
+  </span>
+);
+
+export function StudyAnnotationControls({
+  showSavedTumor,
+  tumorToolOpen,
+  gtPolygonToolOpen,
+  nativeAnnotationsAvailable,
+  setShowSavedTumor,
+  setTumorToolOpen,
+  setGtPolygonToolOpen,
+}: {
+  showSavedTumor: boolean;
+  tumorToolOpen: boolean;
+  gtPolygonToolOpen: boolean;
+  nativeAnnotationsAvailable: boolean;
+  setShowSavedTumor: Dispatch<SetStateAction<boolean>>;
+  setTumorToolOpen: Dispatch<SetStateAction<boolean>>;
+  setGtPolygonToolOpen: Dispatch<SetStateAction<boolean>>;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setShowSavedTumor((value) => !value)}
+        disabled={tumorToolOpen || !nativeAnnotationsAvailable}
+        aria-pressed={showSavedTumor}
+        className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
+          tumorToolOpen || !nativeAnnotationsAvailable
+            ? 'text-[var(--text-tertiary)]'
+            : showSavedTumor
+              ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
+              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+        }`}
+        title={
+          !nativeAnnotationsAvailable
+            ? 'Native annotations are unavailable on a derived alignment plane'
+            : tumorToolOpen
+              ? 'Close segmentation tool to view saved tumor overlay'
+              : 'Toggle saved tumor segmentation overlay'
+        }
+      >
+        <ScanLine className="h-3.5 w-3.5" />
+        Tumor
+      </button>
+
+      <button
+        type="button"
+        aria-pressed={gtPolygonToolOpen}
+        disabled={!nativeAnnotationsAvailable}
+        onClick={() => {
+          setGtPolygonToolOpen((value) => {
+            const next = !value;
+            if (next) setTumorToolOpen(false);
+            return next;
+          });
+        }}
+        className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
+          gtPolygonToolOpen
+            ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
+            : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+        }`}
+        title={
+          nativeAnnotationsAvailable
+            ? 'Ground truth polygon tool (debug)'
+            : 'Native annotations are unavailable on a derived alignment plane'
+        }
+      >
+        <Pencil className="h-3.5 w-3.5" />
+        GT
+      </button>
+    </>
+  );
+}
 
 export function ImageControls({
   settings,
