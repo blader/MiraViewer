@@ -7,7 +7,7 @@ import { useGridLayout } from '../src/hooks/useGridLayout';
 import { usePanelSettings } from '../src/hooks/usePanelSettings';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { ComparisonData, SeriesRef } from '../src/types/api';
-import { savePanelSettings } from '../src/utils/localApi';
+import { getPanelSettings, savePanelSettings } from '../src/utils/localApi';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn().mockResolvedValue({}),
@@ -103,6 +103,34 @@ describe('useOverlayNavigation', () => {
       expect(parsed.overlayDate).toBe('2024-02-01');
       expect(parsed.playSpeed).toBe(2000);
     });
+  });
+
+  it('compares against the closest full examination timestamp, including duplicate-study suffixes', async () => {
+    const selectedExamination = '2035-02-01T12:00:00#synthetic-selected-study';
+    localStorage.setItem(
+      'miraviewer:overlay-nav:v1',
+      JSON.stringify({ viewMode: 'overlay', overlayDate: selectedExamination }),
+    );
+
+    const columns = [
+      {
+        date: '2035-01-01T12:00:00#synthetic-older-study',
+        ref: { study_id: 'older', series_uid: 'older', instance_count: 1 },
+      },
+      {
+        date: selectedExamination,
+        ref: { study_id: 'selected', series_uid: 'selected', instance_count: 1 },
+      },
+      {
+        date: '2035-02-01T13:00:00#synthetic-nearer-study',
+        ref: { study_id: 'nearer', series_uid: 'nearer', instance_count: 1 },
+      },
+    ];
+
+    const { result } = renderHook(() => useOverlayNavigation(columns));
+
+    await waitFor(() => expect(result.current.overlayDateIndex).toBe(1));
+    expect(result.current.compareTargetIndex).toBe(2);
   });
 
   it('handles keyboard navigation and space compare', () => {
@@ -262,6 +290,147 @@ describe('usePanelSettings', () => {
 
     expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1);
     expect(result.current.panelSettings.get('2024-02-01')?.zoom).toBe(1);
+    unmount();
+  });
+
+  it('does not undo viewer geometry when another keyboard owner already consumed the shortcut', async () => {
+    const date = '2035-01-10T12:00:00';
+    const { result, unmount } = renderHook(() => usePanelSettings('synthetic-sequence', date));
+    await act(async () => {});
+
+    act(() => {
+      result.current.updatePanelSetting(date, { zoom: 2 });
+    });
+
+    const consumedShortcut = new KeyboardEvent('keydown', {
+      key: 'z',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    consumedShortcut.preventDefault();
+    act(() => {
+      window.dispatchEvent(consumedShortcut);
+    });
+
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(2);
+    unmount();
+  });
+
+  it('isolates settings, pending writes, progress, and undo history between patients with identical examinations', async () => {
+    const date = '2035-01-10T12:00:00';
+    let resolveSecondPatient!: (settings: Record<string, typeof DEFAULT_PANEL_SETTINGS>) => void;
+    vi.mocked(getPanelSettings)
+      .mockReset()
+      .mockResolvedValueOnce({
+        [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 2, brightness: 145, progress: 0.75 },
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecondPatient = resolve;
+          }),
+      );
+    vi.mocked(savePanelSettings).mockClear();
+
+    const { result, rerender, unmount } = renderHook(
+      ({ patientKey }) => usePanelSettings('shared-synthetic-sequence', date, patientKey),
+      { initialProps: { patientKey: 'synthetic-patient-a' } },
+    );
+    await act(async () => {});
+
+    expect(getPanelSettings).toHaveBeenLastCalledWith('shared-synthetic-sequence', 'synthetic-patient-a');
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(2);
+    expect(result.current.progress).toBe(0.75);
+
+    act(() => {
+      result.current.updatePanelSetting(date, { brightness: 190 });
+      result.current.setProgress(0.8);
+    });
+    expect(savePanelSettings).toHaveBeenLastCalledWith(
+      'shared-synthetic-sequence',
+      date,
+      expect.objectContaining({ brightness: 190 }),
+      'synthetic-patient-a',
+    );
+    const writesBeforePatientSwitch = vi.mocked(savePanelSettings).mock.calls.length;
+
+    rerender({ patientKey: 'synthetic-patient-b' });
+
+    expect(result.current.panelSettings.size).toBe(0);
+    expect(result.current.progress).toBe(0);
+
+    act(() => {
+      window.dispatchEvent(new Event('beforeunload'));
+      vi.advanceTimersByTime(250);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+    });
+    expect(vi.mocked(savePanelSettings).mock.calls).toHaveLength(writesBeforePatientSwitch);
+
+    await act(async () => {
+      resolveSecondPatient({
+        [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 1.25, brightness: 100, progress: 0.2 },
+      });
+    });
+
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(1.25);
+    expect(result.current.panelSettings.get(date)?.brightness).toBe(100);
+    expect(result.current.progress).toBe(0.2);
+    expect(getPanelSettings).toHaveBeenLastCalledWith('shared-synthetic-sequence', 'synthetic-patient-b');
+
+    act(() => {
+      result.current.setProgress(0.35);
+    });
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(savePanelSettings).toHaveBeenLastCalledWith(
+      'shared-synthetic-sequence',
+      date,
+      expect.objectContaining({ brightness: 100, progress: 0.35 }),
+      'synthetic-patient-b',
+    );
+
+    const writesBeforeUndo = vi.mocked(savePanelSettings).mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+    });
+    expect(vi.mocked(savePanelSettings).mock.calls).toHaveLength(writesBeforeUndo);
+
+    vi.mocked(getPanelSettings).mockResolvedValue({});
+    unmount();
+  });
+
+  it('discards late viewer-settings hydration belonging to a previously selected patient', async () => {
+    const date = '2035-01-10T12:00:00';
+    let resolvePreviousPatient!: (settings: Record<string, typeof DEFAULT_PANEL_SETTINGS>) => void;
+    vi.mocked(getPanelSettings)
+      .mockReset()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePreviousPatient = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 1.25, progress: 0.2 } });
+
+    const { result, rerender, unmount } = renderHook(
+      ({ patientKey }) => usePanelSettings('shared-synthetic-sequence', date, patientKey),
+      { initialProps: { patientKey: 'synthetic-patient-a' } },
+    );
+
+    await act(async () => {
+      rerender({ patientKey: 'synthetic-patient-b' });
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(1.25);
+
+    await act(async () => {
+      resolvePreviousPatient({ [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 4, progress: 0.9 } });
+    });
+
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(1.25);
+    expect(result.current.progress).toBe(0.2);
+    vi.mocked(getPanelSettings).mockResolvedValue({});
     unmount();
   });
 });

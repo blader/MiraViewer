@@ -338,6 +338,18 @@ export function GroundTruthPolygonOverlay({
     if (!enabled) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target instanceof HTMLElement ? e.target : document.activeElement;
+      if (
+        e.defaultPrevented ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest(
+              'input, select, textarea, [contenteditable=""], [contenteditable="true"], [role="dialog"], [aria-modal="true"]',
+            )))
+      ) {
+        return;
+      }
+
       if (e.key === 'Escape') {
         // If the user is mid-draw, Esc cancels the draft. Otherwise it closes the tool.
         if (draftPoints.length > 0 && !isClosed) {
@@ -371,8 +383,8 @@ export function GroundTruthPolygonOverlay({
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [draftPoints.length, enabled, isClosed, onClear, onRequestClose, onUndo]);
 
   const viewSize = useMemo(() => ({ w: containerSize.w, h: containerSize.h }), [containerSize.h, containerSize.w]);

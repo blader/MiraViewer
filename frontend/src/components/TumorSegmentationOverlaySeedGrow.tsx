@@ -1053,7 +1053,7 @@ export function TumorSegmentationOverlay({
   const AUTO_SAVE_DEBOUNCE_MS = 350;
   const autoSaveTimerRef = useRef<number | null>(null);
   const autoSaveInFlightRef = useRef(false);
-  const autoSaveNeedsFlushRef = useRef(false);
+  const mountedRef = useRef(true);
 
   type AutoSaveContext = {
     enabled: boolean;
@@ -1071,6 +1071,16 @@ export function TumorSegmentationOverlay({
     draftAreaPx: number | null;
     targetAreaPx: number;
   };
+
+  type AutoSaveSnapshot = {
+    context: AutoSaveContext;
+    grow: CostDistanceGrow2dResult;
+    capture: Capture;
+    generation: number;
+  };
+
+  const pendingAutoSaveRef = useRef<AutoSaveSnapshot | null>(null);
+  const queuedAutoSavesRef = useRef<AutoSaveSnapshot[]>([]);
 
   const autoSaveCtxRef = useRef<AutoSaveContext>({
     enabled,
@@ -1106,107 +1116,168 @@ export function TumorSegmentationOverlay({
     targetAreaPx,
   };
 
-  const flushAutoSave = useCallback(() => {
-    if (autoSaveInFlightRef.current) {
-      autoSaveNeedsFlushRef.current = true;
-      return;
-    }
-
-    const ctx = autoSaveCtxRef.current;
-    if (!ctx.enabled) return;
-    if (ctx.busy) {
-      autoSaveNeedsFlushRef.current = true;
-      return;
-    }
-
-    const grow = growRef.current;
-    const cap = capturedRef.current;
-    if (!grow || !cap) return;
-
-    const polygon = ctx.draftPolygon;
-    const seed = ctx.draftSeed;
-    if (!polygon || !seed) return;
-
-    autoSaveInFlightRef.current = true;
-    setSaving(true);
-    const saveGeneration = sliceGenerationRef.current;
-
-    void (async () => {
-      try {
-        const sop =
-          ctx.sopInstanceUid ?? (await getSopInstanceUidForInstanceIndex(ctx.seriesUid, ctx.effectiveInstanceIndex));
-
-        const view =
-          ctx.draftPolygonViewTransform ?? cap.viewTransform ?? ({ ...viewerTransformRef.current } as ViewerTransform);
-
-        const viewportSize =
-          ctx.viewSize.w > 0 && ctx.viewSize.h > 0
-            ? { w: Math.round(ctx.viewSize.w), h: Math.round(ctx.viewSize.h) }
-            : undefined;
-
-        // Keep threshold field conservative: store the seed-tumor intensity anchor.
-        const clamp8 = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-        const anchor = clamp8(grow.stats.tumor.mu);
-        const threshold: TumorThreshold = { low: anchor, high: anchor, anchor, tolerance: 0 };
-
-        const grow2d = toGrow2dMeta({
-          grow,
-          targetAreaPx: ctx.targetAreaPx,
-          maxTargetAreaPx: MAX_TARGET_AREA_PX,
-        });
-
-        const canonicalPolygon = viewerPolygonToImagePolygon(polygon, ctx.viewSize, cap.imageSize, view);
-        const canonicalSeed = viewerPointToImagePoint(seed, ctx.viewSize, cap.imageSize, view);
-
-        await saveTumorSegmentation({
-          comboId: ctx.comboId,
-          dateIso: ctx.dateIso,
-          studyId: ctx.studyId,
-          seriesUid: ctx.seriesUid,
-          sopInstanceUid: sop,
-          polygon: canonicalPolygon,
-          threshold,
-          seed: canonicalSeed,
-          meta: {
-            areaPx: ctx.draftAreaPx ?? undefined,
-            coordinateSpace: 'image-normalized',
-            imageSize: cap.imageSize,
-            viewTransform: view,
-            viewportSize,
-            grow2d,
-          },
-          algorithmVersion: 'v12-seedbox-areacap10000-costgrow2d-directional-v6-tensionq-step15',
-        });
-
-        if (sliceGenerationRef.current !== saveGeneration) return;
-        setSopInstanceUid(sop);
-        setSavedPolygon(canonicalPolygon);
-        setSavedImageSize(cap.imageSize);
-        setSavedPolygonViewTransform(view);
-        setSavedSeed(seed);
-        setSavedGrow2d(grow2d);
-      } catch (err) {
-        if (sliceGenerationRef.current !== saveGeneration) return;
-        console.error(err);
-        setError(err instanceof Error ? err.message : 'Save failed');
+  const flushAutoSave = useCallback(
+    (snapshot: AutoSaveSnapshot) => {
+      if (autoSaveInFlightRef.current) {
+        const queuedIndex = queuedAutoSavesRef.current.findIndex(
+          ({ context }) =>
+            context.comboId === snapshot.context.comboId &&
+            context.dateIso === snapshot.context.dateIso &&
+            context.studyId === snapshot.context.studyId &&
+            context.seriesUid === snapshot.context.seriesUid &&
+            context.effectiveInstanceIndex === snapshot.context.effectiveInstanceIndex,
+        );
+        if (queuedIndex < 0) queuedAutoSavesRef.current.push(snapshot);
+        else queuedAutoSavesRef.current[queuedIndex] = snapshot;
+        return;
       }
-    })().finally(() => {
-      autoSaveInFlightRef.current = false;
-      if (sliceGenerationRef.current === saveGeneration) setSaving(false);
 
-      if (autoSaveNeedsFlushRef.current) {
-        autoSaveNeedsFlushRef.current = false;
-        // Defer to avoid deep recursion if the UI is in a rapid-update loop.
-        window.setTimeout(() => flushAutoSave(), 0);
+      const ctx = snapshot.context;
+      if (!ctx.enabled) return;
+      if (ctx.busy) return;
+
+      const grow = snapshot.grow;
+      const cap = snapshot.capture;
+      const polygon = ctx.draftPolygon;
+      const seed = ctx.draftSeed;
+      if (!polygon || !seed) return;
+
+      const isCurrentSnapshot = () => {
+        const current = autoSaveCtxRef.current;
+        return (
+          mountedRef.current &&
+          current.enabled &&
+          sliceGenerationRef.current === snapshot.generation &&
+          current.comboId === ctx.comboId &&
+          current.dateIso === ctx.dateIso &&
+          current.studyId === ctx.studyId &&
+          current.seriesUid === ctx.seriesUid &&
+          current.effectiveInstanceIndex === ctx.effectiveInstanceIndex
+        );
+      };
+
+      autoSaveInFlightRef.current = true;
+      if (isCurrentSnapshot()) setSaving(true);
+
+      void (async () => {
+        try {
+          const sop =
+            ctx.sopInstanceUid ?? (await getSopInstanceUidForInstanceIndex(ctx.seriesUid, ctx.effectiveInstanceIndex));
+
+          const view =
+            ctx.draftPolygonViewTransform ??
+            cap.viewTransform ??
+            ({ ...viewerTransformRef.current } as ViewerTransform);
+
+          const viewportSize =
+            ctx.viewSize.w > 0 && ctx.viewSize.h > 0
+              ? { w: Math.round(ctx.viewSize.w), h: Math.round(ctx.viewSize.h) }
+              : undefined;
+
+          // Keep threshold field conservative: store the seed-tumor intensity anchor.
+          const clamp8 = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+          const anchor = clamp8(grow.stats.tumor.mu);
+          const threshold: TumorThreshold = { low: anchor, high: anchor, anchor, tolerance: 0 };
+
+          const grow2d = toGrow2dMeta({
+            grow,
+            targetAreaPx: ctx.targetAreaPx,
+            maxTargetAreaPx: MAX_TARGET_AREA_PX,
+          });
+
+          const canonicalPolygon = viewerPolygonToImagePolygon(polygon, ctx.viewSize, cap.imageSize, view);
+          const canonicalSeed = viewerPointToImagePoint(seed, ctx.viewSize, cap.imageSize, view);
+
+          await saveTumorSegmentation({
+            comboId: ctx.comboId,
+            dateIso: ctx.dateIso,
+            studyId: ctx.studyId,
+            seriesUid: ctx.seriesUid,
+            sopInstanceUid: sop,
+            polygon: canonicalPolygon,
+            threshold,
+            seed: canonicalSeed,
+            meta: {
+              areaPx: ctx.draftAreaPx ?? undefined,
+              coordinateSpace: 'image-normalized',
+              imageSize: cap.imageSize,
+              viewTransform: view,
+              viewportSize,
+              grow2d,
+            },
+            algorithmVersion: 'v12-seedbox-areacap10000-costgrow2d-directional-v6-tensionq-step15',
+          });
+
+          if (!isCurrentSnapshot()) return;
+          setSopInstanceUid(sop);
+          setSavedPolygon(canonicalPolygon);
+          setSavedImageSize(cap.imageSize);
+          setSavedPolygonViewTransform(view);
+          setSavedSeed(seed);
+          setSavedGrow2d(grow2d);
+        } catch (err) {
+          if (!isCurrentSnapshot()) return;
+          console.error(err);
+          setError(err instanceof Error ? err.message : 'Save failed');
+        }
+      })().finally(() => {
+        autoSaveInFlightRef.current = false;
+        if (isCurrentSnapshot()) setSaving(false);
+
+        const next = queuedAutoSavesRef.current.shift();
+        if (next) window.setTimeout(() => flushAutoSave(next), 0);
+      });
+    },
+    [MAX_TARGET_AREA_PX],
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const pending = pendingAutoSaveRef.current;
+      if (!pending) return;
+      pendingAutoSaveRef.current = null;
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
       }
-    });
-  }, [MAX_TARGET_AREA_PX]);
+      flushAutoSave(pending);
+    };
+  }, [comboId, dateIso, effectiveInstanceIndex, enabled, flushAutoSave, seriesUid, studyId]);
 
   useEffect(() => {
     const ctx = autoSaveCtxRef.current;
     if (!ctx.enabled) return;
     if (ctx.busy) return;
     if (!ctx.draftSeed || !ctx.draftPolygon) return;
+    const grow = growRef.current;
+    const capture = capturedRef.current;
+    if (!grow || !capture) return;
+
+    const snapshot: AutoSaveSnapshot = {
+      context: {
+        ...ctx,
+        viewSize: { ...ctx.viewSize },
+        draftSeed: { ...ctx.draftSeed },
+        draftPolygon: { points: ctx.draftPolygon.points.map((point) => ({ ...point })) },
+        draftPolygonViewTransform: ctx.draftPolygonViewTransform ? { ...ctx.draftPolygonViewTransform } : null,
+      },
+      grow,
+      capture: {
+        ...capture,
+        viewTransform: { ...capture.viewTransform },
+        viewportSize: { ...capture.viewportSize },
+        imageSize: { ...capture.imageSize },
+      },
+      generation: sliceGenerationRef.current,
+    };
+    pendingAutoSaveRef.current = snapshot;
 
     if (autoSaveTimerRef.current !== null) {
       window.clearTimeout(autoSaveTimerRef.current);
@@ -1214,7 +1285,9 @@ export function TumorSegmentationOverlay({
 
     autoSaveTimerRef.current = window.setTimeout(() => {
       autoSaveTimerRef.current = null;
-      flushAutoSave();
+      if (pendingAutoSaveRef.current !== snapshot) return;
+      pendingAutoSaveRef.current = null;
+      flushAutoSave(snapshot);
     }, AUTO_SAVE_DEBOUNCE_MS);
 
     return () => {

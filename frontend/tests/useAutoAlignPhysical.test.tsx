@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   register3d: vi.fn(),
   densify: vi.fn(),
   register2d: vi.fn(),
+  captureSlice: vi.fn(),
+  createScorer: vi.fn(),
   closeScorer: vi.fn(),
 }));
 
@@ -25,19 +27,11 @@ vi.mock('../src/utils/localApi', () => ({
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
-  renderSliceToPixels: async (series: string, index: number, size: number) => ({
-    pixels: Float32Array.from({ length: size * size }, (_, pixel) => (pixel % size) / Math.max(1, size - 1)),
-    imageId: `miradb:${series}-${index}`,
-    timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
-  }),
+  renderSliceToPixels: mocks.captureSlice,
 }));
 
 vi.mock('../src/utils/alignmentScoringRunner', () => ({
-  createAlignmentScoringRunner: async () => ({
-    scoreCoarse: vi.fn(),
-    scoreFine: vi.fn(),
-    close: mocks.closeScorer,
-  }),
+  createAlignmentScoringRunner: mocks.createScorer,
 }));
 
 vi.mock('../src/utils/elastixRegistration', () => ({
@@ -120,6 +114,17 @@ async function runPhysicalAlignment(
 describe('physically registered longitudinal auto-alignment', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.captureSlice.mockImplementation(async (series: string, index: number, size: number) => ({
+      pixels: Float32Array.from({ length: size * size }, (_, pixel) => (pixel % size) / Math.max(1, size - 1)),
+      imageId: `miradb:${series}-${index}`,
+      timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
+    }));
+    mocks.createScorer.mockResolvedValue({
+      scoreCoarse: vi.fn(),
+      scoreFine: vi.fn(),
+      scoreFinal: vi.fn(),
+      close: mocks.closeScorer,
+    });
     mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
       manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b'),
     );
@@ -182,7 +187,46 @@ describe('physically registered longitudinal auto-alignment', () => {
         targetFrameOfReferenceUid: 'frame-b',
       },
     });
-    expect(mocks.closeScorer).toHaveBeenCalledTimes(1);
+    expect(mocks.captureSlice).toHaveBeenCalledTimes(1);
+    expect(mocks.captureSlice.mock.calls[0]?.slice(0, 3)).toEqual(['reference-series', 1, 256]);
+    expect(mocks.createScorer).not.toHaveBeenCalled();
+    expect(mocks.closeScorer).not.toHaveBeenCalled();
+  });
+
+  it('aligns a verified physical volume without depending on an unavailable 2D scoring worker', async () => {
+    mocks.createScorer.mockRejectedValue(new Error('The independent 2D scoring worker could not start'));
+
+    const results = await runPhysicalAlignment();
+
+    expect(results[0]).toMatchObject({ outcome: 'aligned', evidence: { geometryMode: 'registered-3d' } });
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.createScorer).not.toHaveBeenCalled();
+    expect(mocks.closeScorer).not.toHaveBeenCalled();
+  });
+
+  it('keeps an earlier physical result when a later fallback cannot start its independent 2D worker', async () => {
+    const physical = { ...target, series_uid: 'physical-target-series' };
+    const fallback = { ...target, series_uid: 'fallback-target-series', frame_of_reference_uid: 'frame-a' };
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) =>
+      manifest(seriesUid, 'patient-a', seriesUid === 'physical-target-series' ? 'frame-b' : 'frame-a'),
+    );
+    mocks.planeDrift.mockImplementation((_reference, candidate) =>
+      candidate.seriesUid === physical.series_uid
+        ? { angleDegrees: 18, maximumThroughPlaneDriftMm: 34, frameRelationship: 'different' }
+        : { angleDegrees: 0, maximumThroughPlaneDriftMm: 0, frameRelationship: 'same' },
+    );
+    mocks.createScorer.mockRejectedValue(new Error('The independent 2D scoring worker could not start'));
+
+    const results = await runPhysicalAlignment({ 'physical-examination': physical, 'fallback-examination': fallback });
+
+    expect(results.map((result) => result.outcome)).toEqual(['aligned', 'failed']);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.createScorer).toHaveBeenCalledTimes(1);
+    expect(mocks.closeScorer).not.toHaveBeenCalled();
+    expect(mocks.captureSlice.mock.calls.map((call) => call.slice(0, 3))).toEqual([
+      ['reference-series', 1, 256],
+      ['reference-series', 1, 128],
+    ]);
   });
 
   it('binds the selected physical output lattice to preparation, both registration stages, and durable provenance', async () => {
@@ -443,6 +487,12 @@ describe('physically registered longitudinal auto-alignment', () => {
     });
     await runPhysicalAlignment({ 'target-examination': { ...target, frame_of_reference_uid: 'shared-frame' } });
 
+    expect(mocks.createScorer).toHaveBeenCalledTimes(1);
+    expect(mocks.closeScorer).toHaveBeenCalledTimes(1);
+    expect(mocks.captureSlice.mock.calls.slice(0, 2).map((call) => call.slice(0, 3))).toEqual([
+      ['reference-series', 1, 256],
+      ['reference-series', 1, 128],
+    ]);
     expect(mocks.register2d.mock.calls[0]?.[3]).toMatchObject({
       fixedPixelSpacing: [(4 * 0.4) / 256, (4 * 0.8) / 256],
       movingPixelSpacing: [(4 * 0.5) / 256, (4 * 1.2) / 256],

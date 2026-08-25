@@ -100,6 +100,18 @@ function miraDerivedLoader(imageId: string) {
         throw new Error('The derived registration frame contains no finite image samples');
       }
 
+      const intensityRange = maximum - minimum;
+      const intensityScale = intensityRange > 0 ? intensityRange / 65_534 : 1;
+      const preserveSourceWindow =
+        Number.isFinite(source.windowCenter) && Number.isFinite(source.windowWidth) && source.windowWidth > 0;
+      const presentationPixels = new Uint16Array(frame.pixels.length);
+      for (let index = 0; index < frame.pixels.length; index++) {
+        const pixel = frame.pixels[index]!;
+        if ((frame.valid && !frame.valid[index]) || !Number.isFinite(pixel)) continue;
+        presentationPixels[index] =
+          intensityRange > 0 ? 1 + Math.round(((pixel - minimum) / intensityRange) * 65_534) : 1;
+      }
+
       return {
         ...source,
         imageId,
@@ -113,14 +125,19 @@ function miraDerivedLoader(imageId: string) {
           imagePositionPatient: frame.outputGrid.originMm,
           imageOrientationPatient: [...frame.outputGrid.rowDirection, ...frame.outputGrid.columnDirection],
         }),
-        minPixelValue: minimum,
-        maxPixelValue: maximum,
-        windowCenter: (minimum + maximum) / 2,
-        windowWidth: Math.max(1, maximum - minimum),
-        slope: 1,
-        intercept: 0,
-        sizeInBytes: frame.pixels.byteLength,
-        getPixelData: () => frame.pixels,
+        minPixelValue: 1,
+        maxPixelValue: intensityRange > 0 ? 65_535 : 1,
+        windowCenter: preserveSourceWindow ? source.windowCenter : (minimum + maximum) / 2,
+        windowWidth: preserveSourceWindow ? source.windowWidth : Math.max(1, intensityRange),
+        slope: intensityScale,
+        intercept: minimum - intensityScale,
+        pixelPaddingValue: 0,
+        pixelPaddingRangeLimit: 0,
+        cachedLut: undefined,
+        modalityLUT: undefined,
+        voiLUT: undefined,
+        sizeInBytes: presentationPixels.byteLength,
+        getPixelData: () => presentationPixels,
       };
     })(),
   };

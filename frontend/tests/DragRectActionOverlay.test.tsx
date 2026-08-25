@@ -86,4 +86,41 @@ describe('DragRectActionOverlay', () => {
       screen: { x: 0.3, y: 0.2, width: 0.1, height: 0.3 },
     });
   });
+
+  it('clips both exclusion-mask endpoints when a selection begins outside letterboxed image content', () => {
+    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
+      width: 1000,
+      height: 500,
+      top: 0,
+      left: 0,
+      right: 1000,
+      bottom: 500,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    const onConfirm = vi.fn();
+    const { container } = render(
+      <DragRectActionOverlay
+        className="relative"
+        geometry={DEFAULT_PANEL_SETTINGS}
+        imageSize={{ width: 512, height: 512 }}
+        actions={[{ key: 'align', label: 'Align', onConfirm }]}
+      >
+        <div>Viewer</div>
+      </DragRectActionOverlay>,
+    );
+
+    const overlay = container.firstElementChild as HTMLElement;
+    fireEvent.pointerDown(overlay, { pointerId: 4, button: 0, isPrimary: true, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(overlay, { pointerId: 4, isPrimary: true, clientX: 350, clientY: 250 });
+    fireEvent.pointerUp(overlay, { pointerId: 4, button: 0, isPrimary: true, clientX: 350, clientY: 250 });
+    fireEvent.click(screen.getByRole('button', { name: 'Align' }));
+
+    expect(onConfirm).toHaveBeenCalledWith({
+      base: { x: 0, y: 0.2, width: expect.closeTo(0.2, 10), height: 0.3 },
+      screen: { x: 0.1, y: 0.2, width: 0.25, height: 0.3 },
+    });
+  });
 });

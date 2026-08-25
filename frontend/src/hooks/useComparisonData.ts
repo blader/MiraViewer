@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ComparisonData } from '../types/api';
 import { getComparisonData, setSelectedPatientKey } from '../utils/localApi';
 
@@ -6,41 +6,37 @@ export function useComparisonData() {
   const [data, setData] = useState<ComparisonData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestGeneration = useRef(0);
 
   const reload = useCallback(async (patientKey?: string, options?: { background?: boolean }) => {
+    const generation = ++requestGeneration.current;
     const background = options?.background === true;
     try {
       if (!background) setLoading(true);
       setError(null);
-      if (patientKey !== undefined) await setSelectedPatientKey(patientKey);
+      if (patientKey !== undefined) {
+        await setSelectedPatientKey(patientKey);
+        if (generation !== requestGeneration.current) return;
+      }
       const d = await getComparisonData(patientKey);
+      if (generation !== requestGeneration.current) return;
       setData(d);
     } catch (e) {
+      if (generation !== requestGeneration.current) return;
       const fallback = patientKey === undefined ? 'Failed to load comparison data' : 'Failed to select patient';
       if (background) throw e instanceof Error ? e : new Error(fallback);
       setError(e instanceof Error ? e.message : fallback);
     } finally {
-      if (!background) setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const d = await getComparisonData();
-        if (!cancelled) setData(d);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load comparison data');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+    void reload();
     return () => {
-      cancelled = true;
+      requestGeneration.current += 1;
     };
-  }, []);
+  }, [reload]);
 
   return { data, loading, error, reload, selectPatient: reload };
 }

@@ -165,7 +165,7 @@ export function ComparisonMatrix() {
     persistenceError,
     clearPersistenceError,
     reportPersistenceError,
-  } = usePanelSettings(selectedSeqId, enabledDatesKey);
+  } = usePanelSettings(selectedSeqId, enabledDatesKey, data?.selected_patient_key ?? null);
 
   // Alignment hooks
   const {
@@ -269,16 +269,19 @@ export function ComparisonMatrix() {
   }, [data, selectedSeqId]);
 
   const columns = useMemo(() => {
-    if (!data || !selectedSeqId) return [] as { date: string; ref?: SeriesRef }[];
+    if (!data || !selectedSeqId) return [] as { date: string; ref: SeriesRef }[];
     const map = data.series_map[selectedSeqId] || {};
     // Sort by date descending (newest first) to match sidebar
     const selectedDates = [...enabledDates].sort((a, b) => b.localeCompare(a));
-    return selectedDates.map((date) => ({ date, ref: map[date] }));
+    return selectedDates.flatMap((date) => {
+      const ref = map[date];
+      return ref ? [{ date, ref }] : [];
+    });
   }, [data, selectedSeqId, enabledDates]);
 
   // For overlay mode: columns sorted oldest to newest (earliest left, latest right)
   // Sort by date ascending (oldest first)
-  const overlayColumns = useMemo(() => [...columns].reverse().filter((column) => column.ref), [columns]);
+  const overlayColumns = useMemo(() => [...columns].reverse(), [columns]);
 
   // Hooks for layout and navigation
   const {

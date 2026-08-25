@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SvrVolume3DViewer } from '../src/components/SvrVolume3DViewer';
 import type { SvrVolume } from '../src/types/svr';
 import { getVolumeSegmentation } from '../src/utils/localApi';
+import { SVR3D_CAMERA_Z, SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
 
 vi.mock('../src/hooks/useOnnxTumorSession', () => ({
   useOnnxTumorSession: () => ({
@@ -36,6 +37,56 @@ const observedVolume: SvrVolume = {
   boundsMm: { min: [0, 0, 0], max: [2, 2, 3] },
 };
 
+function createViewportRecorder(viewport: { width: number; height: number }) {
+  const uniform1f = vi.fn<(location: unknown, value: number) => void>();
+  const methods = {
+    NO_ERROR: 0,
+    createShader: () => ({}),
+    createProgram: () => ({}),
+    createVertexArray: () => ({}),
+    createBuffer: () => ({}),
+    createTexture: () => ({}),
+    getShaderParameter: () => true,
+    getProgramParameter: () => true,
+    getAttribLocation: () => 0,
+    getUniformLocation: (_program: unknown, name: string) => name,
+    getError: () => 0,
+    isContextLost: () => false,
+    uniform1f,
+  };
+  const gl = new Proxy(methods, {
+    get(target, property: string) {
+      if (property in target) return target[property as keyof typeof target];
+      return property === property.toUpperCase() ? 1 : () => undefined;
+    },
+  }) as unknown as WebGL2RenderingContext;
+
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => viewport.width);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(() => viewport.height);
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) =>
+    window.setTimeout(() => callback(performance.now()), 0),
+  );
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => window.clearTimeout(id));
+  vi.spyOn(console, 'info').mockImplementation(() => undefined);
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(((id: string) =>
+    id === 'webgl2' ? gl : null) as typeof HTMLCanvasElement.prototype.getContext);
+
+  return {
+    uniform1f,
+    latestZoom: () => uniform1f.mock.calls.filter(([location]) => location === 'u_zoom').at(-1)?.[1],
+  };
+}
+
+function syntheticVolume(boxScale: readonly [number, number, number]): SvrVolume {
+  return {
+    ...observedVolume,
+    data: new Float32Array(64).fill(0.5),
+    observedSupport: new Uint8Array(64).fill(1),
+    dims: [4, 4, 4],
+    voxelSizeMm: [boxScale[0], boxScale[1], boxScale[2]],
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
@@ -47,6 +98,47 @@ afterEach(() => {
 });
 
 describe('SvrVolume3DViewer evidence-aware interaction', () => {
+  it('fits the physical reconstruction box to landscape and portrait viewports without clipping', async () => {
+    const viewport = { width: 1472, height: 972 };
+    const recorder = createViewportRecorder(viewport);
+    const view = render(<SvrVolume3DViewer volume={syntheticVolume([1, 1, 1])} />);
+
+    for (const [boxScale, width, height] of [
+      [[1, 1, 1], 1472, 972],
+      [[1, 0.25, 0.5], 1200, 800],
+      [[1, 0.45, 0.25], 500, 900],
+    ] as const) {
+      viewport.width = width;
+      viewport.height = height;
+      recorder.uniform1f.mockClear();
+      view.rerender(<SvrVolume3DViewer volume={syntheticVolume(boxScale)} />);
+      await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
+      const zoom = recorder.latestZoom()!;
+      const nearestDepth = SVR3D_CAMERA_Z - boxScale[2] / 2;
+      const projectedWidth = (boxScale[0] * SVR3D_FOCAL_Z * zoom) / (2 * nearestDepth * (width / height));
+      const projectedHeight = (boxScale[1] * SVR3D_FOCAL_Z * zoom) / (2 * nearestDepth);
+
+      expect(projectedWidth).toBeLessThanOrEqual(0.9 + Number.EPSILON);
+      expect(projectedHeight).toBeLessThanOrEqual(0.9 + Number.EPSILON);
+      expect(Math.max(projectedWidth, projectedHeight)).toBeCloseTo(0.9);
+    }
+  });
+
+  it('keeps later user zoom relative to the physically fitted diagnostic view', async () => {
+    const recorder = createViewportRecorder({ width: 1440, height: 900 });
+    render(<SvrVolume3DViewer volume={syntheticVolume([1, 0.75, 0.5])} />);
+    await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
+    const fittedZoom = recorder.latestZoom()!;
+    expect(fittedZoom).toBeGreaterThan(2);
+
+    const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
+    fireEvent.keyDown(viewer, { key: '+' });
+    await waitFor(() => expect(recorder.latestZoom()).toBeCloseTo(fittedZoom * 1.15));
+
+    fireEvent.keyDown(viewer, { key: '0' });
+    await waitFor(() => expect(recorder.latestZoom()).toBeCloseTo(fittedZoom));
+  });
+
   it('hides unavailable rendering, lesion, and ONNX controls before reconstruction exists', () => {
     render(<SvrVolume3DViewer volume={null} />);
 
@@ -125,6 +217,35 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       const unsupported = image.data.slice(unsupportedPixel * 4, unsupportedPixel * 4 + 4);
       expect(Array.from(unsupported)).toEqual([...unsupportedColor, 255]);
     }
+  });
+
+  it('preserves acquired intensity and footprint support when large inspection planes are downsampled', () => {
+    const observedSupport = Uint8Array.from({ length: 1024 }, (_, index) => (index % 2 === 0 ? 1 : 0));
+    observedSupport[2] = 0;
+    const context = {
+      createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
+      putImageData: vi.fn(),
+    };
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(((id: string) =>
+      id === '2d' ? context : null) as typeof HTMLCanvasElement.prototype.getContext);
+
+    render(
+      <SvrVolume3DViewer
+        volume={{
+          ...observedVolume,
+          data: new Float32Array(1024).fill(1),
+          observedSupport,
+          dims: [1024, 1, 1],
+          voxelSizeMm: [1, 1, 1],
+          boundsMm: { min: [0, 0, 0], max: [1024, 1, 1] },
+        }}
+      />,
+    );
+
+    const image = context.putImageData.mock.lastCall?.[0] as ImageData;
+    expect(Array.from(image.data.slice(0, 4))).toEqual([255, 255, 255, 255]);
+    expect(Array.from(image.data.slice(4, 8))).toEqual([108, 71, 27, 255]);
+    expect(Array.from(image.data.slice(256 * 4, 256 * 4 + 4))).toEqual([255, 255, 255, 255]);
   });
 
   it('preserves observed zero-valued anatomy and applies larger coarse-pointer control targets', async () => {
@@ -214,5 +335,30 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     await waitFor(() => expect(screen.getByText(/total labeled:/i)).toHaveTextContent('2 vox'));
     expect(screen.getByText(/observed lesion/i).parentElement).toHaveTextContent('2 vox');
     expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent('2 labeled boundary voxels');
+  });
+
+  it('warns when an otherwise supported lesion reaches the reconstruction boundary', async () => {
+    render(
+      <SvrVolume3DViewer
+        volume={{
+          ...observedVolume,
+          data: new Float32Array(27).fill(0.5),
+          observedSupport: new Uint8Array(27).fill(1),
+          dims: [3, 3, 3],
+          voxelSizeMm: [1, 1, 1],
+          boundsMm: { min: [0, 0, 0], max: [3, 3, 3] },
+        }}
+        labels={{
+          data: Uint8Array.from({ length: 27 }, (_, index) => (index === 13 || index === 14 ? 1 : 0)),
+          dims: [3, 3, 3],
+          meta: [{ id: 1, name: 'Boundary lesion', color: [255, 64, 64] }],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /segmentation/i }));
+    await waitFor(() => expect(screen.getByText(/total labeled:/i)).toHaveTextContent('2 vox'));
+    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent('1 labeled boundary voxel');
+    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent(/reconstruction boundary/i);
   });
 });

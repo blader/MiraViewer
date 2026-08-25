@@ -172,7 +172,9 @@ describe('SVR reconstruction workspace', () => {
     ).not.toHaveLength(0);
     expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
     expect(screen.queryByTestId('accepted-svr-volume')).not.toBeInTheDocument();
-    expect(screen.getByRole('complementary', { name: /reconstruction sources and quality/i })).toBeInTheDocument();
+    const sources = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
+    expect(sources).toBeInTheDocument();
+    expect(sources.parentElement).toHaveClass('grid-cols-[minmax(240px,304px)_minmax(0,1fr)]');
   });
 
   it('keeps unclassified but physically valid acquired sequences visible', async () => {
@@ -183,6 +185,17 @@ describe('SVR reconstruction workspace', () => {
     });
 
     expect(screen.getByRole('heading', { name: /one acquired orientation/i })).toBeInTheDocument();
+  });
+
+  it('refuses to fuse unclassified orientations without a verified shared contrast', async () => {
+    render(<Svr3DView data={data('patient-a', 2, true)} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/no verified shared contrast or sequence/i).length).toBeGreaterThan(0);
+    });
+
+    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
+    expect(mocks.run).not.toHaveBeenCalled();
   });
 
   it('rejects labels that describe different planes when their acquired normals are parallel', async () => {
@@ -317,6 +330,41 @@ describe('SVR reconstruction workspace', () => {
       expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
     });
     expect(screen.queryByText(/exceeds the safe browser-memory budget/i)).not.toBeInTheDocument();
+  });
+
+  it('enforces safe numeric reconstruction bounds even when typed values bypass input attributes', async () => {
+    render(<Svr3DView data={data('patient-a')} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
+    });
+
+    const voxelSize = screen.getByLabelText(/voxel size/i);
+    fireEvent.change(voxelSize, { target: { value: '0' } });
+    expect(voxelSize).toHaveValue(0.1);
+    fireEvent.change(voxelSize, { target: { value: '0.35' } });
+    expect(voxelSize).toHaveValue(0.35);
+    fireEvent.change(voxelSize, { target: { value: '999' } });
+    expect(voxelSize).toHaveValue(10);
+    expect(voxelSize).toHaveAttribute('max', '10');
+
+    const iterations = screen.getByLabelText(/iterations/i);
+    fireEvent.change(iterations, { target: { value: '99' } });
+    expect(iterations).toHaveValue(10);
+    fireEvent.change(iterations, { target: { value: '-2' } });
+    expect(iterations).toHaveValue(0);
+
+    const sliceDownsample = screen.getByLabelText(/slice downsample max/i);
+    fireEvent.change(sliceDownsample, { target: { value: '1' } });
+    expect(sliceDownsample).toHaveValue(32);
+    fireEvent.change(sliceDownsample, { target: { value: '1024' } });
+    expect(sliceDownsample).toHaveValue(512);
+
+    const maxVolumeDimension = screen.getByLabelText(/max volume dim/i);
+    fireEvent.change(maxVolumeDimension, { target: { value: '1' } });
+    expect(maxVolumeDimension).toHaveValue(64);
+    fireEvent.change(maxVolumeDimension, { target: { value: '1024' } });
+    expect(maxVolumeDimension).toHaveValue(384);
   });
 
   it('counts the retained prior reconstruction before admitting another same-patient run', async () => {

@@ -280,25 +280,6 @@ export function useAutoAlign() {
           exclusionRect: fineNormalizationExclusion,
           validity: referenceRender.validity,
         });
-        const referenceCoarseRender = await captureSlice(reference.seriesUid, reference.sliceIndex, COARSE_IMAGE_SIZE);
-        const referencePixelsCoarse = referenceCoarseRender.pixels;
-        scoringRunner = await createAlignmentScoringRunner(
-          {
-            referenceFinePixels: referencePixels,
-            referenceCoarsePixels: referencePixelsCoarse,
-            referenceFineValidity: referenceRender.validity,
-            referenceCoarseValidity: referenceCoarseRender.validity,
-            fineSize: ALIGNMENT_IMAGE_SIZE,
-            coarseSize: COARSE_IMAGE_SIZE,
-            fineScales: [...FINE_PERCEPTUAL_SCALES],
-            coarseScales: [...COARSE_PERCEPTUAL_SCALES],
-            phaseFftSize: PHASE_FFT_SIZE,
-            phaseMaxCorrectionPx: PHASE_MAX_CORRECTION_PX,
-            exclusionMask: reference.exclusionMask,
-          },
-          alignmentAbortController.signal,
-        );
-
         if (debugAlignment) {
           console.info('[alignment] Perceptual slice-search config', {
             coarseImageSize: COARSE_IMAGE_SIZE,
@@ -698,6 +679,32 @@ export function useAutoAlign() {
           }
 
           try {
+            if (!scoringRunner) {
+              const referenceCoarseRender = await captureSlice(
+                reference.seriesUid,
+                reference.sliceIndex,
+                COARSE_IMAGE_SIZE,
+              );
+              scoringRunner = await createAlignmentScoringRunner(
+                {
+                  referenceFinePixels: referencePixels,
+                  referenceCoarsePixels: referenceCoarseRender.pixels,
+                  referenceFineValidity: referenceRender.validity,
+                  referenceCoarseValidity: referenceCoarseRender.validity,
+                  fineSize: ALIGNMENT_IMAGE_SIZE,
+                  coarseSize: COARSE_IMAGE_SIZE,
+                  fineScales: [...FINE_PERCEPTUAL_SCALES],
+                  coarseScales: [...COARSE_PERCEPTUAL_SCALES],
+                  phaseFftSize: PHASE_FFT_SIZE,
+                  phaseMaxCorrectionPx: PHASE_MAX_CORRECTION_PX,
+                  exclusionMask: reference.exclusionMask,
+                },
+                alignmentAbortController.signal,
+              );
+              ensureNotAborted();
+            }
+            const activeScoringRunner = scoringRunner;
+
             setStateForCurrentRun((s) => ({
               ...s,
               progress: {
@@ -972,7 +979,7 @@ export function useAutoAlign() {
               sliceSearchRenderMs += rendered.timingMs.total;
 
               const tScore0 = nowMs();
-              const { phase, components } = await scoringRunner!.scoreCoarse(
+              const { phase, components } = await activeScoringRunner.scoreCoarse(
                 rendered.pixels,
                 seedTransform,
                 rendered.validity,
@@ -1075,7 +1082,7 @@ export function useAutoAlign() {
               const rendered = await captureSlice(seriesRef.series_uid, index, ALIGNMENT_IMAGE_SIZE);
               sliceSearchRenderMs += rendered.timingMs.total;
               const tScore0 = nowMs();
-              const { components } = await scoringRunner.scoreFine(
+              const { components } = await activeScoringRunner.scoreFine(
                 rendered.pixels,
                 seedTransform,
                 coarseCandidate.phase,
@@ -1400,7 +1407,7 @@ export function useAutoAlign() {
             await runOptimizerAttempt('structure-elastix', referenceStructure, prewarpedMovingStructure);
             ensureNotAborted();
 
-            const finalAffineSelection = await scoringRunner.scoreFinal({
+            const finalAffineSelection = await activeScoringRunner.scoreFinal({
               movingPixels: bestRender.pixels,
               movingValidity: bestRender.validity,
               winningWarp,

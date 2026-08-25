@@ -30,14 +30,12 @@ function readPersistedOverlayNav(): PersistedOverlayNav {
 }
 
 function getUtcDateMs(date: string) {
-  // Expecting YYYY-MM-DD. Use a UTC timestamp to avoid timezone shifts.
-  const parts = date.split('-');
-  if (parts.length !== 3) return null;
-  const year = Number(parts[0]);
-  const month = Number(parts[1]);
-  const day = Number(parts[2]);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
-  return Date.UTC(year, month - 1, day);
+  const timestamp = date.split('#', 1)[0];
+  if (!timestamp) return null;
+  const utcTimestamp =
+    timestamp.includes('T') && !/(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp) ? `${timestamp}Z` : timestamp;
+  const milliseconds = Date.parse(utcTimestamp);
+  return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
 export function useOverlayNavigation(

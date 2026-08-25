@@ -534,6 +534,19 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  button[aria-controls='comparison-filters-panel'],
+  button[aria-controls='comparison-dates-panel'] {
+    top: 0;
+    min-width: 44px;
+    min-height: 44px;
+    transform: none;
+    translate: none;
+  }
+
+  button[aria-controls='comparison-filters-panel'] ~ .instrument-stage {
+    padding-top: 44px;
+  }
+
   .instrument-identity-rail {
     min-height: 52px;
     grid-template-columns: auto minmax(0, 1fr) auto;

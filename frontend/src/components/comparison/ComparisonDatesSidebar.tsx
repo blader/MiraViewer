@@ -83,6 +83,7 @@ export function ComparisonDatesSidebar({
                   key={d}
                   type="button"
                   onClick={() => onToggleDate(d)}
+                  disabled={!hasData && !enabled}
                   aria-pressed={enabled}
                   data-study-state={enabled ? 'selected' : 'available'}
                   className={`relative flex min-h-11 w-full items-center gap-2 border-l-2 px-3 text-left text-[13px] transition-colors ${

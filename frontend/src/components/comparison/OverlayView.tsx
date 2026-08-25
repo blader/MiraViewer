@@ -412,7 +412,7 @@ export function OverlayView({
                   <DicomViewer
                     studyId={overlayCompareRef.study_id}
                     seriesUid={overlayCompareRef.series_uid}
-                    interactionBlocked={isAligning}
+                    interactionBlocked={isAligning || isOverlayComparing}
                     instanceIndex={overlayCompareSliceIndex}
                     instanceCount={overlayCompareRef.instance_count}
                     reverseSliceOrder={overlayCompareSettings.reverseSliceOrder}
@@ -433,9 +433,7 @@ export function OverlayView({
                     affine11={overlayCompareSettings.affine11}
                     // Compare mode is read-only for geometry edits.
                     onPanChange={undefined}
-                    onZoomChange={(newZoom) => {
-                      updatePanelSetting(overlayCompareDate, { zoom: newZoom });
-                    }}
+                    onZoomChange={undefined}
                   />
 
                   {!compareDerivedFrame && showSavedTumor && !tumorToolOpen && isOverlayComparing ? (

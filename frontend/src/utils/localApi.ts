@@ -294,9 +294,12 @@ export async function getComparisonData(requestedPatientKey?: string | null): Pr
   };
 }
 
-export async function getPanelSettings(comboId: string): Promise<Record<string, PanelSettingsPartial>> {
+export async function getPanelSettings(
+  comboId: string,
+  requestedPatientKey?: string | null,
+): Promise<Record<string, PanelSettingsPartial>> {
   const db = await getDB();
-  const patientKey = await getSelectedPatientKey();
+  const patientKey = requestedPatientKey === undefined ? await getSelectedPatientKey() : requestedPatientKey;
   const scopedComboId = patientKey ? `${patientKey}::${comboId}` : comboId;
   let row = await db.get('panel_settings', scopedComboId);
   if (!row && patientKey) {
@@ -316,9 +319,14 @@ export async function getPanelSettings(comboId: string): Promise<Record<string, 
   return result;
 }
 
-export async function savePanelSettings(comboId: string, dateIso: string, settings: PanelSettings): Promise<void> {
+export async function savePanelSettings(
+  comboId: string,
+  dateIso: string,
+  settings: PanelSettings,
+  requestedPatientKey?: string | null,
+): Promise<void> {
   const db = await getDB();
-  const patientKey = await getSelectedPatientKey();
+  const patientKey = requestedPatientKey === undefined ? await getSelectedPatientKey() : requestedPatientKey;
   const scopedComboId = patientKey ? `${patientKey}::${comboId}` : comboId;
   const tx = db.transaction('panel_settings', 'readwrite');
   const store = tx.objectStore('panel_settings');

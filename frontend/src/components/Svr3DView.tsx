@@ -23,7 +23,7 @@ import {
 } from '../utils/svr/svrMemoryPlan';
 import { quantileSorted } from '../utils/svr/svrUtils';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
-import { clamp01, clampInt } from '../utils/math';
+import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
   return [...dates].sort((a, b) => b.localeCompare(a));
@@ -1023,11 +1023,13 @@ export function Svr3DView({
         ? 'Verifying acquired frames and physical source geometry…'
         : currentReadiness.independentOrientationCount < 2
           ? 'A second independent acquisition orientation is required for multiplane reconstruction.'
-          : exceedsMemoryBudget
-            ? acceptedResult
-              ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
-              : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
-            : null;
+          : !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
+            ? 'The selected acquisitions have no verified shared contrast or sequence and cannot be fused safely.'
+            : exceedsMemoryBudget
+              ? acceptedResult
+                ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
+                : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
+              : null;
 
   const canRun =
     !isRunning &&
@@ -1086,7 +1088,7 @@ export function Svr3DView({
       </header>
       <div
         data-generation-open={!generationCollapsed}
-        className={`svr-generation-layout grid min-h-0 flex-1 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(208px,256px)_minmax(0,1fr)]'}`}
+        className={`svr-generation-layout grid min-h-0 flex-1 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(240px,304px)_minmax(0,1fr)]'}`}
       >
         {generationCollapsed ? null : (
           <aside
@@ -1196,9 +1198,15 @@ export function Svr3DView({
                       type="number"
                       step={0.1}
                       min={0.1}
+                      max={10}
                       value={params.targetVoxelSizeMm}
                       disabled={isRunning}
-                      onChange={(e) => setParams((p) => ({ ...p, targetVoxelSizeMm: Number(e.target.value) }))}
+                      onChange={(e) =>
+                        setParams((p) => ({
+                          ...p,
+                          targetVoxelSizeMm: clamp(Number(e.target.value) || 0.1, 0.1, 10),
+                        }))
+                      }
                       className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
                     />
                   </label>
@@ -1211,7 +1219,9 @@ export function Svr3DView({
                       max={10}
                       value={params.iterations}
                       disabled={isRunning}
-                      onChange={(e) => setParams((p) => ({ ...p, iterations: Number(e.target.value) }))}
+                      onChange={(e) =>
+                        setParams((p) => ({ ...p, iterations: clampInt(Number(e.target.value) || 0, 0, 10) }))
+                      }
                       className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
                     />
                   </label>
@@ -1224,7 +1234,12 @@ export function Svr3DView({
                       max={512}
                       value={params.sliceDownsampleMaxSize}
                       disabled={isRunning}
-                      onChange={(e) => setParams((p) => ({ ...p, sliceDownsampleMaxSize: Number(e.target.value) }))}
+                      onChange={(e) =>
+                        setParams((p) => ({
+                          ...p,
+                          sliceDownsampleMaxSize: clampInt(Number(e.target.value) || 32, 32, 512),
+                        }))
+                      }
                       className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
                     />
                   </label>
@@ -1237,7 +1252,9 @@ export function Svr3DView({
                       max={384}
                       value={params.maxVolumeDim}
                       disabled={isRunning}
-                      onChange={(e) => setParams((p) => ({ ...p, maxVolumeDim: Number(e.target.value) }))}
+                      onChange={(e) =>
+                        setParams((p) => ({ ...p, maxVolumeDim: clampInt(Number(e.target.value) || 64, 64, 384) }))
+                      }
                       className="mt-1 w-full px-2 py-1.5 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded text-[var(--text-primary)]"
                     />
                   </label>

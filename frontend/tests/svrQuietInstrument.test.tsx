@@ -149,7 +149,7 @@ describe('Quiet Instrument reconstruction lightbox', () => {
 
     expect(screen.getByText('Synthetic quiet instrument')).not.toHaveClass('hidden');
     const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
-    expect(sourceRail.parentElement?.className).toContain('minmax(208px,256px)');
+    expect(sourceRail.parentElement?.className).toContain('minmax(240px,304px)');
     expect(within(sourceRail).getByText('Verified acquired evidence')).toHaveClass('text-[var(--evidence)]');
     expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
   });

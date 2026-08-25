@@ -28,12 +28,18 @@ type PanelSettingsHistoryEntry = {
 
 const MAX_HISTORY = 200;
 
-export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: string) {
+export function usePanelSettings(
+  selectedSeqId: string | null,
+  enabledDatesKey: string,
+  patientKey: string | null = null,
+) {
   // Per-panel settings: Map<date, PanelSettings>
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
   const [activePanel, setActivePanel] = useState<string | null>(null); // date of panel being adjusted
   const [progress, setProgress] = useState(0); // 0..1 normalized
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const [settingsPatientKey, setSettingsPatientKey] = useState(patientKey);
+  const settingsBelongToPatient = settingsPatientKey === patientKey;
 
   const reportPersistenceFailure = useCallback((error: unknown) => {
     setPersistenceError(error instanceof Error ? error.message : 'Viewer settings could not be saved locally');
@@ -51,6 +57,7 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   // Refs for persistence
   const panelSettingsRef = useRef(panelSettings);
   const selectedSeqIdRef = useRef(selectedSeqId);
+  const prevPatientKeyRef = useRef(patientKey);
   const prevSeqIdRef = useRef<string | null>(null);
   const prevDatesRef = useRef<Set<string>>(new Set());
 
@@ -65,16 +72,16 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     selectedSeqIdRef.current = selectedSeqId;
   }, [panelSettings, selectedSeqId]);
 
-  // Clear undo/redo when the sequence changes (different settings universe).
+  // Clear undo/redo when the patient or sequence changes (different settings universe).
   useEffect(() => {
     undoStackRef.current.length = 0;
     redoStackRef.current.length = 0;
-  }, [selectedSeqId]);
+  }, [patientKey, selectedSeqId]);
 
   const applyPanelSettings = useCallback(
     (date: string, settings: PanelSettings) => {
       const seqId = selectedSeqIdRef.current;
-      if (!seqId) return;
+      if (!seqId || !settingsBelongToPatient) return;
 
       setPanelSettings((prev) => {
         const next = new Map(prev);
@@ -83,9 +90,9 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
       });
 
       // Persist to local storage (fire-and-forget)
-      savePanelSettings(seqId, date, settings).catch(reportPersistenceFailure);
+      savePanelSettings(seqId, date, settings, patientKey).catch(reportPersistenceFailure);
     },
-    [reportPersistenceFailure],
+    [patientKey, reportPersistenceFailure, settingsBelongToPatient],
   );
 
   const undoLastPanelSetting = useCallback(() => {
@@ -151,9 +158,15 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
   // Keyboard shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redo.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const tagName = target?.tagName;
-      if (tagName === 'INPUT' || tagName === 'SELECT' || tagName === 'TEXTAREA') {
+      const target = e.target instanceof HTMLElement ? e.target : document.activeElement;
+      if (
+        e.defaultPrevented ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest(
+              'input, select, textarea, [contenteditable=""], [contenteditable="true"], [role="dialog"], [aria-modal="true"]',
+            )))
+      ) {
         return;
       }
 
@@ -181,15 +194,19 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undoLastPanelSetting, redoLastPanelSetting]);
 
-  // Load panel settings from local storage when sequence or dates change
+  // Load panel settings from local storage when the patient, sequence, or dates change.
   useEffect(() => {
+    const patientChanged = patientKey !== prevPatientKeyRef.current;
+    prevPatientKeyRef.current = patientKey;
     if (!selectedSeqId) return;
     const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
     if (currentDates.size === 0) return;
 
-    // Determine if sequence changed or which dates are new
-    const seqChanged = selectedSeqId !== prevSeqIdRef.current;
-    const newDates = seqChanged ? currentDates : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
+    // Determine if the settings owner changed or which dates are new.
+    const scopeChanged = patientChanged || selectedSeqId !== prevSeqIdRef.current;
+    const newDates = scopeChanged
+      ? currentDates
+      : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
 
     // Update refs
     prevSeqIdRef.current = selectedSeqId;
@@ -203,14 +220,14 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
     let cancelled = false;
     (async () => {
       try {
-        const stored = await getPanelSettings(selectedSeqId);
+        const stored = await getPanelSettings(selectedSeqId, patientKey);
         if (cancelled) return;
 
         setPanelSettings((prev) => {
           const next = new Map<string, PanelSettings>();
 
-          // Keep existing settings for dates that are still enabled (unless seq changed)
-          if (!seqChanged) {
+          // Keep existing settings only when the same patient and sequence still own them.
+          if (!scopeChanged) {
             for (const [date, settings] of prev) {
               if (currentDates.has(date)) {
                 next.set(date, settings);
@@ -232,25 +249,25 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
 
           return next;
         });
+        setSettingsPatientKey(patientKey);
+        setPersistenceError(null);
 
-        // Set initial active panel if none or if seq changed
-        if (seqChanged) {
+        // Restore slice position only from settings belonging to the current owner.
+        if (scopeChanged) {
           const sortedDates = [...currentDates].sort((a, b) => b.localeCompare(a));
           const initial = sortedDates[0];
           if (initial) {
             setActivePanel(initial);
             const s = stored[initial] || {};
-            if (typeof s.progress === 'number') {
-              setProgress(Math.max(0, Math.min(1, s.progress)));
-            }
+            setProgress(typeof s.progress === 'number' ? Math.max(0, Math.min(1, s.progress)) : 0);
           }
         }
       } catch (error) {
         if (cancelled) return;
         reportPersistenceFailure(error);
-        // Fallback: add defaults for new dates only
+        // A failed patient-scoped read must never inherit another patient's settings.
         setPanelSettings((prev) => {
-          const next = new Map(prev);
+          const next = scopeChanged ? new Map<string, PanelSettings>() : new Map(prev);
           for (const date of newDates) {
             if (!next.has(date)) {
               next.set(date, { ...DEFAULT_PANEL_SETTINGS });
@@ -258,17 +275,19 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
           }
           return next;
         });
+        if (scopeChanged) setProgress(0);
+        setSettingsPatientKey(patientKey);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedSeqId, enabledDatesKey, reportPersistenceFailure]);
+  }, [patientKey, selectedSeqId, enabledDatesKey, reportPersistenceFailure]);
 
   // Update a panel's settings
   const updatePanelSetting = useCallback(
     (date: string, update: Partial<PanelSettings>) => {
-      if (!selectedSeqId) return;
+      if (!selectedSeqId || !settingsBelongToPatient) return;
 
       const updateKeys = Object.keys(update);
       const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
@@ -299,21 +318,21 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
         }
 
         // Persist to local storage (fire-and-forget)
-        savePanelSettings(selectedSeqId, date, updated).catch(reportPersistenceFailure);
+        savePanelSettings(selectedSeqId, date, updated, patientKey).catch(reportPersistenceFailure);
 
         const next = new Map(prev);
         next.set(date, updated);
         return next;
       });
     },
-    [selectedSeqId, reportPersistenceFailure],
+    [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
   );
 
   // Batch update multiple panels at once (for alignment results).
   // The undo stack groups all entries with the same batchId so Cmd/Ctrl+Z reverts the whole batch.
   const batchUpdateSettings = useCallback(
     (updates: Map<string, PanelSettings>, operationId?: string) => {
-      if (!selectedSeqId || updates.size === 0) return;
+      if (!selectedSeqId || !settingsBelongToPatient || updates.size === 0) return;
 
       const batchId = operationId ?? `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 
@@ -340,44 +359,49 @@ export function usePanelSettings(selectedSeqId: string | null, enabledDatesKey: 
       });
 
       for (const { date, after } of historyEntries) {
-        savePanelSettings(selectedSeqId, date, after).catch(reportPersistenceFailure);
+        savePanelSettings(selectedSeqId, date, after, patientKey).catch(reportPersistenceFailure);
       }
     },
-    [selectedSeqId, reportPersistenceFailure],
+    [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
   );
 
   // Debounced persistence of progress for the active panel
   useEffect(() => {
-    if (!selectedSeqId || !effectiveActivePanel) return;
+    if (!settingsBelongToPatient || !selectedSeqId || !effectiveActivePanel) return;
     const handle = setTimeout(() => {
       updatePanelSetting(effectiveActivePanel, { progress });
     }, 200);
     return () => clearTimeout(handle);
-  }, [progress, effectiveActivePanel, selectedSeqId, updatePanelSetting]);
+  }, [progress, effectiveActivePanel, selectedSeqId, settingsBelongToPatient, updatePanelSetting]);
 
   // Flush all in-memory settings on page unload (debounced progress writes may not have fired).
   useEffect(() => {
     const handleUnload = () => {
       const seqId = selectedSeqIdRef.current;
       const settings = panelSettingsRef.current;
-      if (!seqId || settings.size === 0) return;
+      if (!settingsBelongToPatient || !seqId || settings.size === 0) return;
       for (const [date, s] of settings) {
-        savePanelSettings(seqId, date, s).catch(reportPersistenceFailure);
+        savePanelSettings(seqId, date, s, patientKey).catch(reportPersistenceFailure);
       }
     };
     window.addEventListener('beforeunload', handleUnload);
     return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [reportPersistenceFailure]);
+  }, [patientKey, reportPersistenceFailure, settingsBelongToPatient]);
+
+  const scopedPanelSettings = useMemo(
+    () => (settingsBelongToPatient ? panelSettings : new Map<string, PanelSettings>()),
+    [panelSettings, settingsBelongToPatient],
+  );
 
   return {
-    panelSettings,
-    activePanel: effectiveActivePanel,
+    panelSettings: scopedPanelSettings,
+    activePanel: settingsBelongToPatient ? effectiveActivePanel : null,
     setActivePanel,
-    progress,
+    progress: settingsBelongToPatient ? progress : 0,
     setProgress,
     updatePanelSetting,
     batchUpdateSettings,
-    persistenceError,
+    persistenceError: settingsBelongToPatient ? persistenceError : null,
     reportPersistenceError: reportPersistenceFailure,
     clearPersistenceError: () => setPersistenceError(null),
   };

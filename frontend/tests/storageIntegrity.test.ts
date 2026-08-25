@@ -33,6 +33,7 @@ import {
   putModelBlob,
 } from '../src/utils/segmentation/onnx/modelCache';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
+import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { ClearDataModal } from '../src/components/ClearDataModal';
 
 type SyntheticDicomOptions = {
@@ -362,6 +363,49 @@ describe('durable MRI storage and import contracts', () => {
     expect(await getPanelSettings('axial-t2-flair')).toEqual({});
     await setSelectedPatientKey('patient-a');
     expect((await getPanelSettings('axial-t2-flair'))['synthetic-date']?.zoom).toBe(2);
+  });
+
+  it('keeps an in-flight viewer-settings write bound to its original patient after durable selection changes', async () => {
+    await processDicomFile(
+      makeImplicitDicom({
+        patientId: 'synthetic-patient-a',
+        studyUid: '1.2.15',
+        seriesUid: '1.2.15.1',
+        instanceUid: '1.2.15.1.1',
+      }),
+    );
+    await processDicomFile(
+      makeImplicitDicom({
+        patientId: 'synthetic-patient-b',
+        studyUid: '1.2.16',
+        seriesUid: '1.2.16.1',
+        instanceUid: '1.2.16.1.1',
+      }),
+    );
+
+    await setSelectedPatientKey('synthetic-patient-a');
+    const pendingFirstPatientWrite = savePanelSettings(
+      'shared-synthetic-sequence',
+      '2035-01-10T12:00:00',
+      { ...DEFAULT_PANEL_SETTINGS, zoom: 2, brightness: 145 },
+      'synthetic-patient-a',
+    );
+    await setSelectedPatientKey('synthetic-patient-b');
+    await pendingFirstPatientWrite;
+
+    expect(await getPanelSettings('shared-synthetic-sequence', 'synthetic-patient-b')).toEqual({});
+    expect((await getPanelSettings('shared-synthetic-sequence', 'synthetic-patient-a'))['2035-01-10T12:00:00']).toEqual(
+      expect.objectContaining({ zoom: 2, brightness: 145 }),
+    );
+
+    await savePanelSettings(
+      'explicitly-unscoped-sequence',
+      '2035-01-10T12:00:00',
+      { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 },
+      null,
+    );
+    expect((await getPanelSettings('explicitly-unscoped-sequence', null))['2035-01-10T12:00:00']?.zoom).toBe(1.5);
+    expect(await getPanelSettings('explicitly-unscoped-sequence', 'synthetic-patient-b')).toEqual({});
   });
 
   it('does not merge separate examinations with missing patient identities', async () => {

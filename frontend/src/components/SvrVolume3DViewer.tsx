@@ -9,7 +9,7 @@ import { RegionGrow3DWorkerController } from '../utils/segmentation/regionGrow3D
 import { segmentationVolumeMm3 } from '../utils/segmentation/physicalMeasurements';
 import { TUMOR_MODEL_MANIFEST_EXAMPLE } from '../utils/segmentation/onnx/modelManifest';
 import { computeRoiCubeBoundsFromSliceDrag } from '../utils/segmentation/roiCube3d';
-import { resample2dAreaAverage } from '../utils/svr/resample2d';
+import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from '../utils/svr/resample2d';
 import { formatMiB } from '../utils/svr/svrUtils';
 import {
   buildRenderVolumeTexData,
@@ -26,6 +26,8 @@ import {
 import {
   RAYMARCH_FRAGMENT_SHADER,
   RAYMARCH_VERTEX_SHADER,
+  SVR3D_CAMERA_Z,
+  SVR3D_FOCAL_Z,
   SVR3D_OCC_BLOCK,
   buildOccupancyMaxGrid,
   buildOccupancyMaxGridAsync,
@@ -53,6 +55,7 @@ const COARSE_POINTER_CONTROL_TARGETS =
 
 const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
 const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
+const INITIAL_VOLUME_VIEWPORT_FILL = 0.9;
 const INSPECTOR_AXES = {
   axial: { slice: 'z', row: 'y', column: 'x' },
   coronal: { slice: 'y', row: 'z', column: 'x' },
@@ -72,6 +75,19 @@ type GlLabelState = {
 type Vec3 = { x: number; y: number; z: number };
 // Quaternion [x, y, z, w]
 type Quat = [number, number, number, number];
+
+/** Fit the nearest physical box face inside the raymarch camera's current viewport. */
+function computeVolumeViewportZoom(
+  boxScale: readonly [number, number, number],
+  viewportWidth: number,
+  viewportHeight: number,
+  relativeZoom = 1,
+): number {
+  const aspect = Math.max(1, viewportWidth) / Math.max(1, viewportHeight);
+  const nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - boxScale[2] * 0.5);
+  const limitingExtent = Math.max(1e-6, boxScale[1], boxScale[0] / aspect);
+  return (2 * nearestDepth * INITIAL_VOLUME_VIEWPORT_FILL * relativeZoom) / (SVR3D_FOCAL_Z * limitingExtent);
+}
 
 function v3ApplyMat3(m: Float32Array, v: Vec3): Vec3 {
   // Column-major 3x3.
@@ -285,6 +301,12 @@ function touchesUnsupportedAnatomy(
   const x = inPlane - y * nx;
 
   return (
+    x === 0 ||
+    x + 1 === nx ||
+    y === 0 ||
+    y + 1 === ny ||
+    z === 0 ||
+    z + 1 === nz ||
     (x > 0 && !observedSupport[index - 1]) ||
     (x + 1 < nx && !observedSupport[index + 1]) ||
     (y > 0 && !observedSupport[index - nx]) ||
@@ -1418,7 +1440,16 @@ export function SvrVolume3DViewer({
     const srcRows = inspectorInfo.srcRows;
     const srcCols = inspectorInfo.srcCols;
 
+    // Downsample for interactive rendering (avoid huge canvases).
+    const MAX_SIZE = 512;
+    const maxDim = Math.max(srcRows, srcCols);
+    const scale = maxDim > MAX_SIZE ? MAX_SIZE / maxDim : 1;
+    const dsRows = Math.max(1, Math.round(srcRows * scale));
+    const dsCols = Math.max(1, Math.round(srcCols * scale));
+
     const src = new Float32Array(srcRows * srcCols);
+    const nativeValidity =
+      observedSupport && (dsRows !== srcRows || dsCols !== srcCols) ? new Uint8Array(src.length) : null;
     // sagittal
     // and the other planes share their precomputed slice, row, and column strides.
     const sliceBase = idx * inspectorInfo.sliceStride;
@@ -1427,20 +1458,19 @@ export function SvrVolume3DViewer({
       const destinationBase = row * srcCols;
       for (let column = 0; column < srcCols; column++) {
         const sourceIndex = sourceBase + column * inspectorInfo.columnStride;
-        src[destinationBase + column] = observedSupport && !observedSupport[sourceIndex] ? 0 : (data[sourceIndex] ?? 0);
+        const destinationIndex = destinationBase + column;
+        const supported = !observedSupport || Boolean(observedSupport[sourceIndex]);
+        src[destinationIndex] = supported ? (data[sourceIndex] ?? 0) : 0;
+        if (nativeValidity) nativeValidity[destinationIndex] = supported ? 1 : 0;
       }
     }
 
-    // Downsample for interactive rendering (avoid huge canvases).
-    const MAX_SIZE = 512;
-    const maxDim = Math.max(srcRows, srcCols);
-    const scale = maxDim > MAX_SIZE ? MAX_SIZE / maxDim : 1;
-    const dsRows = Math.max(1, Math.round(srcRows * scale));
-    const dsCols = Math.max(1, Math.round(srcCols * scale));
+    const supportedResample = nativeValidity
+      ? resample2dAreaAverageWithValidity(src, nativeValidity, srcRows, srcCols, dsRows, dsCols)
+      : null;
+    const down = supportedResample?.pixels ?? resample2dAreaAverage(src, srcRows, srcCols, dsRows, dsCols);
 
-    const down = resample2dAreaAverage(src, srcRows, srcCols, dsRows, dsCols);
-
-    return { down, idx, srcRows, srcCols, dsRows, dsCols };
+    return { down, validity: supportedResample?.validity, idx, srcRows, srcCols, dsRows, dsCols };
   }, [inspectIndex, inspectorInfo, volume]);
 
   // Composite the cached inspector slice with the label overlay and UI decorations
@@ -1453,7 +1483,7 @@ export function SvrVolume3DViewer({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const { down, idx, srcRows, srcCols, dsRows, dsCols } = inspectorSlice;
+    const { down, validity, idx, srcRows, srcCols, dsRows, dsCols } = inspectorSlice;
 
     if (canvas.width !== dsCols) canvas.width = dsCols;
     if (canvas.height !== dsRows) canvas.height = dsRows;
@@ -1483,7 +1513,9 @@ export function SvrVolume3DViewer({
         // and the other planes reuse the indices from their extracted source pixels.
         const sourceIndex =
           idx * inspectorInfo.sliceStride + srcY * inspectorInfo.rowStride + srcX * inspectorInfo.columnStride;
-        if (volume.observedSupport && !volume.observedSupport[sourceIndex]) {
+        const nearestSupported = !volume.observedSupport || Boolean(volume.observedSupport[sourceIndex]);
+        const footprintSupported = validity ? validity[i]! > 1e-6 : nearestSupported;
+        if (!footprintSupported) {
           // Amber cross-hatching is evidence provenance, not invented dark tissue.
           const stripe = ((px + py) & 7) < 2;
           r = stripe ? 108 : 46;
@@ -1492,7 +1524,7 @@ export function SvrVolume3DViewer({
         }
 
         const labelId = labels?.data[sourceIndex] ?? 0;
-        if (labelId !== 0 && palette && !(volume.observedSupport && !volume.observedSupport[sourceIndex])) {
+        if (labelId !== 0 && palette && nearestSupported && footprintSupported) {
           const o = labelId * 4;
           const lr = palette[o] ?? 0;
           const lg = palette[o + 1] ?? 0;
@@ -1984,7 +2016,7 @@ export function SvrVolume3DViewer({
         gl.uniformMatrix3fv(u.invRot, false, invRotMat);
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
-        gl.uniform1f(u.zoom, zoom);
+        gl.uniform1f(u.zoom, computeVolumeViewportZoom(boxScale, canvas.width, canvas.height, zoom));
         gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_MAX));
         // Fewer steps while interacting (banding hidden by the jittered ray start); the
         // settled frame always marches the full configured step count.
@@ -2890,8 +2922,8 @@ export function SvrVolume3DViewer({
                         {labelMetrics.unsupportedBoundaryCount > 0 ? (
                           <div className="border-l-2 border-l-[var(--warning)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
                             Incomplete acquired coverage: {labelMetrics.unsupportedBoundaryCount.toLocaleString()}{' '}
-                            labeled boundary voxels touch unsupported anatomy. Reported volume includes observed voxels
-                            only.
+                            labeled boundary voxels touch unsupported anatomy or the reconstruction boundary. Reported
+                            volume includes observed voxels only and may be truncated.
                           </div>
                         ) : null}
                       </>

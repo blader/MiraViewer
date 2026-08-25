@@ -50,6 +50,7 @@ export function SliceLoopNavigator({
   const loopStepAccumRef = useRef(0);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
+  const draggingPointerIdRef = useRef<number | null>(null);
 
   const playbackHydratedSeqIdRef = useRef<string | null>(null);
 
@@ -188,9 +189,10 @@ export function SliceLoopNavigator({
   useEffect(() => {
     if (!draggingHandle) return;
 
-    const handleMove = (e: MouseEvent) => {
+    const handleMove = (e: PointerEvent) => {
+      if (draggingPointerIdRef.current !== null && e.pointerId !== draggingPointerIdRef.current) return;
       const rect = trackRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      if (!rect || rect.width <= 0) return;
       const pct = clamp01((e.clientX - rect.left) / rect.width);
       if (draggingHandle === 'start') {
         updateLoop(pct, loopEnd);
@@ -199,13 +201,19 @@ export function SliceLoopNavigator({
       }
     };
 
-    const handleUp = () => setDraggingHandle(null);
+    const handleUp = (e: PointerEvent) => {
+      if (draggingPointerIdRef.current !== null && e.pointerId !== draggingPointerIdRef.current) return;
+      draggingPointerIdRef.current = null;
+      setDraggingHandle(null);
+    };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [draggingHandle, loopEnd, loopStart, updateLoop]);
 
@@ -307,10 +315,12 @@ export function SliceLoopNavigator({
                 aria-valuemax={100}
                 aria-valuenow={Math.round(pos * 100)}
                 disabled={interactionBlocked}
-                className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+                className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
                 style={{ left: `${pos * 100}%` }}
-                onMouseDown={(e) => {
+                onPointerDown={(e) => {
+                  if (interactionBlocked || (e.button !== undefined && e.button !== 0)) return;
                   e.preventDefault();
+                  draggingPointerIdRef.current = e.pointerId ?? null;
                   setDraggingHandle(handle);
                 }}
                 onKeyDown={(event) => {

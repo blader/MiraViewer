@@ -13,7 +13,29 @@ import { clearDerivedAlignmentFrames, setDerivedAlignmentFrame } from '../src/ut
 import { useGridLayout } from '../src/hooks/useGridLayout';
 
 vi.mock('../src/components/DicomViewer', () => ({
-  DicomViewer: ({ seriesUid }: { seriesUid: string }) => <div data-testid={`diagnostic-image-${seriesUid}`} />,
+  DicomViewer: ({
+    seriesUid,
+    interactionBlocked,
+    onInstanceChange,
+    onZoomChange,
+  }: {
+    seriesUid: string;
+    interactionBlocked?: boolean;
+    onInstanceChange?: (index: number) => void;
+    onZoomChange?: (zoom: number) => void;
+  }) => (
+    <div
+      data-testid={`diagnostic-image-${seriesUid}`}
+      onWheel={(event) => {
+        if (interactionBlocked) return;
+        if (event.metaKey || event.ctrlKey) {
+          onZoomChange?.(1.5);
+          return;
+        }
+        onInstanceChange?.(1);
+      }}
+    />
+  ),
 }));
 
 vi.mock('../src/components/DragRectActionOverlay', () => ({
@@ -189,6 +211,34 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(screen.getByRole('complementary', { name: 'Examination dates' }).className).toContain('w-48');
   });
 
+  it('prevents unavailable examinations from being selected while allowing previously selected ones to be removed', () => {
+    const onToggleDate = vi.fn();
+    const props = {
+      open: true,
+      onToggleOpen: vi.fn(),
+      sortedDates: [selectedDate, compareDate],
+      enabledDates: new Set([selectedDate]),
+      datesWithDataForSequence: new Set([selectedDate]),
+      onSelectAllDates: vi.fn(),
+      onSelectNoDates: vi.fn(),
+      onToggleDate,
+    };
+
+    const { container, rerender } = render(<ComparisonDatesSidebar {...props} />);
+    const unavailableRow = container.querySelectorAll<HTMLButtonElement>('[data-study-state]')[1]!;
+
+    expect(unavailableRow).toBeDisabled();
+    fireEvent.click(unavailableRow);
+    expect(onToggleDate).not.toHaveBeenCalled();
+
+    rerender(<ComparisonDatesSidebar {...props} enabledDates={new Set([selectedDate, compareDate])} />);
+    const selectedUnavailableRow = container.querySelectorAll<HTMLButtonElement>('[data-study-state]')[1]!;
+
+    expect(selectedUnavailableRow).not.toBeDisabled();
+    fireEvent.click(selectedUnavailableRow);
+    expect(onToggleDate).toHaveBeenCalledWith(compareDate);
+  });
+
   it('retains accessible filters and interpolation disclosure without animated width changes', () => {
     const { container } = render(
       <ComparisonFiltersSidebar
@@ -290,6 +340,13 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toBeInTheDocument();
     expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toBeInTheDocument();
 
+    fireEvent.wheel(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`), {
+      deltaY: -100,
+      metaKey: true,
+    });
+    expect(props.updatePanelSetting).toHaveBeenCalledWith(selectedDate, { zoom: 1.5 });
+    props.updatePanelSetting.mockClear();
+
     rerender(
       <OverlayView
         {...props}
@@ -302,6 +359,15 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toBeInTheDocument();
     expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toBeInTheDocument();
     expect(screen.getByText('Comparing examination')).toBeInTheDocument();
+
+    fireEvent.wheel(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`), {
+      deltaY: -100,
+      metaKey: true,
+    });
+    fireEvent.wheel(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`), { deltaY: 100 });
+
+    expect(props.updatePanelSetting).not.toHaveBeenCalled();
+    expect(props.setProgress).not.toHaveBeenCalled();
     expect(container.innerHTML).not.toContain('backdrop-blur');
   });
 

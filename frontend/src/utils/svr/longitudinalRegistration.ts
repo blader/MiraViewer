@@ -524,11 +524,19 @@ function prepareNativeSliceStack(slices: readonly SvrReconstructionSlice[]): Nat
 function sampleNativeSliceStack(stack: NativeSliceStack, point: Vec3): NativeSliceSample | null {
   const { ordered, expectedSpacing } = stack;
   const depth = dot(point, stack.normal);
-  if (
-    depth < ordered[0]!.depth - COORDINATE_EPSILON_MM ||
-    depth > ordered[ordered.length - 1]!.depth + COORDINATE_EPSILON_MM
-  ) {
-    return null;
+  const first = ordered[0]!;
+  const last = ordered[ordered.length - 1]!;
+  const terminal =
+    depth < first.depth - COORDINATE_EPSILON_MM ? first : depth > last.depth + COORDINATE_EPSILON_MM ? last : undefined;
+  if (terminal) {
+    const halfThickness = Math.max(
+      0,
+      (terminal.slice.sliceThicknessMm ?? terminal.slice.spacingBetweenSlicesMm ?? expectedSpacing) / 2,
+    );
+    if (Math.abs(depth - terminal.depth) > halfThickness + COORDINATE_EPSILON_MM) return null;
+    const value = sampleSliceBilinear(terminal.slice, point);
+    if (value === null) return null;
+    return terminal === first ? { value, lower: terminal.slice } : { value, upper: terminal.slice };
   }
 
   let lo = 0;

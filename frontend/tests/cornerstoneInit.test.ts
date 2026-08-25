@@ -101,10 +101,125 @@ describe('cornerstoneInit', () => {
     expect(derived.rowPixelSpacing).toBeCloseTo(0.4, 10);
     expect(derived.columnPixelSpacing).toBeCloseTo(0.8, 10);
     expect(derived).toMatchObject({
-      minPixelValue: 12,
-      maxPixelValue: 12,
+      minPixelValue: 1,
+      maxPixelValue: 1,
+      slope: 1,
+      intercept: 11,
       imagePositionPatient: [10, 20, 30],
       imageOrientationPatient: [1, 0, 0, 0, 1, 0],
     });
+
+    Object.assign(nativeImage, {
+      cachedLut: { lutArray: new Uint8ClampedArray(2) },
+      modalityLUT: { lut: [100, 200], firstValueMapped: 0 },
+      voiLUT: { lut: [0, 255], firstValueMapped: 0 },
+      invert: true,
+    });
+    const fractionalPixels = Float32Array.from([-100_000, -48.75, -12.125, 3.5, 23.875, 91.625]);
+    const fractionalSupport = Uint8Array.from([0, 1, 1, 1, 1, 1]);
+    sources.derived.mockReturnValue({
+      rows: 2,
+      columns: 3,
+      pixels: fractionalPixels,
+      valid: fractionalSupport,
+      sourceImageId: 'miradb:native-frame',
+    });
+
+    const fractional = await derivedLoader('miraderived:fractional').promise;
+    const presentationPixels = fractional.getPixelData();
+
+    expect(presentationPixels).toBeInstanceOf(Uint16Array);
+    expect(presentationPixels[0]).toBe(0);
+    expect(presentationPixels[1]).toBe(1);
+    expect(presentationPixels[5]).toBe(65_535);
+    expect(fractional).toMatchObject({
+      minPixelValue: 1,
+      maxPixelValue: 65_535,
+      pixelPaddingValue: 0,
+      pixelPaddingRangeLimit: 0,
+      sizeInBytes: presentationPixels.byteLength,
+      invert: true,
+    });
+    expect(fractional.cachedLut).toBeUndefined();
+    expect(fractional.modalityLUT).toBeUndefined();
+    expect(fractional.voiLUT).toBeUndefined();
+    for (let index = 1; index < fractionalPixels.length; index++) {
+      expect(presentationPixels[index] * fractional.slope + fractional.intercept).toBeCloseTo(
+        fractionalPixels[index]!,
+        2,
+      );
+    }
+    expect(fractionalPixels[0]).toBe(-100_000);
+
+    const actualCornerstone = (await vi.importActual<{ default: typeof cornerstone }>('cornerstone-core')).default;
+    const renderImageLuminance = (image: typeof fractional, invert: boolean): number[] => {
+      image.stats = {};
+      const lut = actualCornerstone.generateLut(image, image.windowWidth, image.windowCenter, invert);
+      const rgba = new Uint8ClampedArray(image.getPixelData().length * 4).fill(255);
+      actualCornerstone.storedPixelDataToCanvasImageData(image, lut, rgba);
+      return Array.from(rgba).filter((_value, index) => index % 4 === 3);
+    };
+
+    const normalLuminance = renderImageLuminance(fractional, false);
+    expect(normalLuminance[0]).toBe(0);
+    expect(normalLuminance[2]).toBeGreaterThan(0);
+    expect(normalLuminance[3]).toBeGreaterThan(normalLuminance[2]!);
+    expect(normalLuminance[4]).toBeGreaterThan(normalLuminance[3]!);
+    expect(normalLuminance[5]).toBe(255);
+
+    const invertedLuminance = renderImageLuminance(fractional, true);
+    expect(invertedLuminance[0]).toBe(0);
+    expect(invertedLuminance[1]).toBe(255);
+    expect(invertedLuminance[2]).toBeGreaterThan(invertedLuminance[3]!);
+
+    derived.stats = {};
+    const constantLut = actualCornerstone.generateLut(derived, derived.windowWidth, derived.windowCenter, false);
+    const constantRgba = new Uint8ClampedArray(derived.getPixelData().length * 4).fill(255);
+    actualCornerstone.storedPixelDataToCanvasImageData(derived, constantLut, constantRgba);
+    expect(constantRgba[3]).toBe(0);
+    expect(constantRgba[7]).toBe(128);
+
+    Object.assign(nativeImage, { windowCenter: 50, windowWidth: 100, invert: false });
+    sources.derived.mockReturnValue({
+      rows: 2,
+      columns: 3,
+      pixels: Float32Array.from([0, 25, 50, 75, 100, 10_000]),
+      valid: new Uint8Array(6).fill(1),
+      sourceImageId: 'miradb:native-frame',
+    });
+    const windowed = await derivedLoader('miraderived:native-window').promise;
+    expect(windowed).toMatchObject({ windowCenter: 50, windowWidth: 100 });
+    const windowedLuminance = renderImageLuminance(windowed, false);
+    expect(windowedLuminance[0]).toBe(0);
+    expect(windowedLuminance[1]).toBeGreaterThan(50);
+    expect(windowedLuminance[2]).toBeGreaterThan(110);
+    expect(windowedLuminance[3]).toBeGreaterThan(170);
+    expect(windowedLuminance[4]).toBe(255);
+    expect(windowedLuminance[5]).toBe(255);
+
+    Object.assign(nativeImage, { windowCenter: 0, windowWidth: 1 });
+    sources.derived.mockReturnValue({
+      rows: 2,
+      columns: 3,
+      pixels: Float32Array.from([-1, -0.25, 0, 0.25, 1, 2]),
+      valid: new Uint8Array(6).fill(1),
+      sourceImageId: 'miradb:native-frame',
+    });
+    const zeroCentered = await derivedLoader('miraderived:zero-centered').promise;
+    expect(zeroCentered).toMatchObject({ windowCenter: 0, windowWidth: 1 });
+    const zeroCenteredLuminance = renderImageLuminance(zeroCentered, false);
+    expect(zeroCenteredLuminance[0]).toBe(0);
+    expect(zeroCenteredLuminance[1]).toBeGreaterThan(50);
+    expect(zeroCenteredLuminance[2]).toBeGreaterThan(110);
+    expect(zeroCenteredLuminance[3]).toBeGreaterThan(170);
+    expect(zeroCenteredLuminance[4]).toBe(255);
+
+    Object.assign(nativeImage, { windowCenter: 0, windowWidth: 0 });
+    const invalidWidth = await derivedLoader('miraderived:invalid-window-width').promise;
+    expect(invalidWidth).toMatchObject({ windowCenter: 0.5, windowWidth: 3 });
+
+    Object.assign(nativeImage, { windowCenter: Number.NaN, windowWidth: 1 });
+    const invalidCenter = await derivedLoader('miraderived:invalid-window-center').promise;
+    expect(invalidCenter).toMatchObject({ windowCenter: 0.5, windowWidth: 3 });
   });
 });

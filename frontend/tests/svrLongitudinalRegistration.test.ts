@@ -216,6 +216,37 @@ describe('svr/longitudinalRegistration', () => {
     expect(result.pixels[4 * 9 + 4]).toBeLessThan(0.65);
   });
 
+  it.each([
+    { terminal: 'first', index: 0, direction: -1 },
+    { terminal: 'last', index: 18, direction: 1 },
+  ])('preserves only the physically acquired half-slab beyond the $terminal slice center', ({ index, direction }) => {
+    const stack = makeStack().map((slice, sourceIndex) => ({
+      ...slice,
+      sopInstanceUid: `source-${sourceIndex}`,
+    }));
+    const terminalSlice = stack[index]!;
+    const withinAcquiredSlab = {
+      ...terminalSlice,
+      ippMm: { ...terminalSlice.ippMm, z: terminalSlice.ippMm.z + direction * 0.49 },
+    };
+    const supported = resliceStackToReferencePlane({ targetSlices: stack, referenceSlice: withinAcquiredSlab });
+
+    expect(supported.coverage).toBe(1);
+    expect(supported.valid.every(Boolean)).toBe(true);
+    expect(supported.pixels).toEqual(terminalSlice.pixels);
+    expect(supported.contributingSourceSopInstanceUids).toEqual([`source-${index}`]);
+
+    const beyondAcquiredSlab = {
+      ...terminalSlice,
+      ippMm: { ...terminalSlice.ippMm, z: terminalSlice.ippMm.z + direction * 0.51 },
+    };
+    const unsupported = resliceStackToReferencePlane({ targetSlices: stack, referenceSlice: beyondAcquiredSlab });
+
+    expect(unsupported.coverage).toBe(0);
+    expect(unsupported.valid.every((value) => value === 0)).toBe(true);
+    expect(unsupported.contributingSourceSopInstanceUids).toBeUndefined();
+  });
+
   it('never invents acquired support by interpolating across a physical slice gap', () => {
     const stack = makeStack();
     const target = [0, 1, 2, 25, 26].map((depth, index) => ({
