@@ -104,10 +104,8 @@ function ComparisonStage({
           <Svr3DView
             key={data.selected_patient_key ?? 'selected-patient'}
             data={data}
-            defaultDateIso={navigation.svr3dSeed.defaultDateIso}
+            {...navigation.svr3dSeed}
             defaultSeqId={selectedSeqId}
-            fallbackRoiSeriesUid={navigation.svr3dSeed.fallbackRoiSeriesUid}
-            fallbackRoiSliceIndex={navigation.svr3dSeed.fallbackRoiSliceIndex}
           />
         </Suspense>
       )}
