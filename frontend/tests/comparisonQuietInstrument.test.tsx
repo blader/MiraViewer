@@ -125,6 +125,38 @@ function alignedResult(series: SeriesRef, date: string): AlignmentResult {
   };
 }
 
+function overlayProps(startAlignAll = vi.fn(async () => undefined)) {
+  return {
+    comboId: 'synthetic-sequence',
+    overlayColumns: [
+      { date: selectedDate, ref: selectedSeries },
+      { date: compareDate, ref: compareSeries },
+    ],
+    overlayViewerSize: 420,
+    overlayDisplayedRef: selectedSeries,
+    overlayDisplayedDate: selectedDate,
+    overlayDisplayedSettings: DEFAULT_PANEL_SETTINGS,
+    overlayDisplayedSliceIndex: 0,
+    overlayDisplayedEffectiveSliceIndex: 0,
+    overlaySelectedRef: selectedSeries,
+    overlaySelectedDate: selectedDate,
+    overlaySelectedSettings: DEFAULT_PANEL_SETTINGS,
+    overlaySelectedSliceIndex: 0,
+    overlayCompareRef: compareSeries,
+    overlayCompareDate: compareDate,
+    overlayCompareSettings: DEFAULT_PANEL_SETTINGS,
+    overlayCompareSliceIndex: 0,
+    isOverlayComparing: false,
+    hasOverlayCompareTarget: true,
+    isAligning: false,
+    alignmentProgress: null,
+    abortAlignment: vi.fn(),
+    updatePanelSetting: vi.fn(),
+    startAlignAll,
+    setProgress: vi.fn(),
+  };
+}
+
 afterEach(() => {
   act(() => clearDerivedAlignmentFrames());
 });
@@ -460,35 +492,7 @@ describe('Quiet Instrument comparison surfaces', () => {
   });
 
   it('keeps both overlay image layers mounted while switching the active examination', () => {
-    const props = {
-      comboId: 'synthetic-sequence',
-      overlayColumns: [
-        { date: selectedDate, ref: selectedSeries },
-        { date: compareDate, ref: compareSeries },
-      ],
-      overlayViewerSize: 420,
-      overlayDisplayedRef: selectedSeries,
-      overlayDisplayedDate: selectedDate,
-      overlayDisplayedSettings: DEFAULT_PANEL_SETTINGS,
-      overlayDisplayedSliceIndex: 0,
-      overlayDisplayedEffectiveSliceIndex: 0,
-      overlaySelectedRef: selectedSeries,
-      overlaySelectedDate: selectedDate,
-      overlaySelectedSettings: DEFAULT_PANEL_SETTINGS,
-      overlaySelectedSliceIndex: 0,
-      overlayCompareRef: compareSeries,
-      overlayCompareDate: compareDate,
-      overlayCompareSettings: DEFAULT_PANEL_SETTINGS,
-      overlayCompareSliceIndex: 0,
-      isOverlayComparing: false,
-      hasOverlayCompareTarget: true,
-      isAligning: false,
-      alignmentProgress: null,
-      abortAlignment: vi.fn(),
-      updatePanelSetting: vi.fn(),
-      startAlignAll: vi.fn(async () => undefined),
-      setProgress: vi.fn(),
-    };
+    const props = overlayProps();
 
     const { container, rerender } = render(<OverlayView {...props} />);
     const overlayCell = container.querySelector<HTMLElement>('.study-cell');
@@ -560,37 +564,7 @@ describe('Quiet Instrument comparison surfaces', () => {
       pixels: new Float32Array(96 * 384),
     };
     act(() => setDerivedAlignmentFrame(result));
-    render(
-      <OverlayView
-        comboId="synthetic-sequence"
-        overlayColumns={[
-          { date: selectedDate, ref: selectedSeries },
-          { date: compareDate, ref: compareSeries },
-        ]}
-        overlayViewerSize={420}
-        overlayDisplayedRef={selectedSeries}
-        overlayDisplayedDate={selectedDate}
-        overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
-        overlayDisplayedSliceIndex={0}
-        overlayDisplayedEffectiveSliceIndex={0}
-        overlaySelectedRef={selectedSeries}
-        overlaySelectedDate={selectedDate}
-        overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
-        overlaySelectedSliceIndex={0}
-        overlayCompareRef={compareSeries}
-        overlayCompareDate={compareDate}
-        overlayCompareSettings={DEFAULT_PANEL_SETTINGS}
-        overlayCompareSliceIndex={0}
-        isOverlayComparing={false}
-        hasOverlayCompareTarget
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        startAlignAll={startAlignAll}
-        setProgress={vi.fn()}
-      />,
-    );
+    render(<OverlayView {...overlayProps(startAlignAll)} />);
     const overlay = screen.getByTestId('diagnostic-drag-overlay');
 
     expect(overlay).toHaveAttribute('data-image-width', '384');
@@ -605,37 +579,7 @@ describe('Quiet Instrument comparison surfaces', () => {
 
   it('offers explicitly disclosed opt-in tumor alignment from an acquired overlay reference', () => {
     const startAlignAll = vi.fn(async () => undefined);
-    render(
-      <OverlayView
-        comboId="synthetic-sequence"
-        overlayColumns={[
-          { date: selectedDate, ref: selectedSeries },
-          { date: compareDate, ref: compareSeries },
-        ]}
-        overlayViewerSize={420}
-        overlayDisplayedRef={selectedSeries}
-        overlayDisplayedDate={selectedDate}
-        overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
-        overlayDisplayedSliceIndex={0}
-        overlayDisplayedEffectiveSliceIndex={0}
-        overlaySelectedRef={selectedSeries}
-        overlaySelectedDate={selectedDate}
-        overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
-        overlaySelectedSliceIndex={0}
-        overlayCompareRef={compareSeries}
-        overlayCompareDate={compareDate}
-        overlayCompareSettings={DEFAULT_PANEL_SETTINGS}
-        overlayCompareSliceIndex={0}
-        isOverlayComparing={false}
-        hasOverlayCompareTarget
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        startAlignAll={startAlignAll}
-        setProgress={vi.fn()}
-      />,
-    );
+    render(<OverlayView {...overlayProps(startAlignAll)} />);
     const overlay = screen.getByTestId('diagnostic-drag-overlay');
 
     expect(overlay).toHaveAttribute(
