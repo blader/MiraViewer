@@ -48,6 +48,8 @@ vi.mock('../src/components/DragRectActionOverlay', () => ({
     imageSize?: { width: number; height: number };
     actions?: Array<{
       key: string;
+      title?: string;
+      disabled?: boolean;
       onConfirm: (masks: {
         base: { x: number; y: number; width: number; height: number };
         screen: { x: number; y: number; width: number; height: number };
@@ -58,6 +60,8 @@ vi.mock('../src/components/DragRectActionOverlay', () => ({
       data-testid="diagnostic-drag-overlay"
       data-image-width={imageSize?.width}
       data-image-height={imageSize?.height}
+      data-tumor-alignment-title={actions?.find((action) => action.key === 'align-tumor')?.title}
+      data-tumor-alignment-disabled={String(actions?.find((action) => action.key === 'align-tumor')?.disabled ?? false)}
       onDoubleClick={() =>
         actions
           ?.find((action) => action.key === 'align-all')
@@ -66,6 +70,15 @@ vi.mock('../src/components/DragRectActionOverlay', () => ({
             screen: { x: 0.2, y: 0.3, width: 0.4, height: 0.2 },
           })
       }
+      onContextMenu={(event) => {
+        event.preventDefault();
+        const action = actions?.find((candidate) => candidate.key === 'align-tumor');
+        if (!action || action.disabled) return;
+        action.onConfirm({
+          base: { x: 0.2, y: 0.3, width: 0.4, height: 0.2 },
+          screen: { x: 0.2, y: 0.3, width: 0.4, height: 0.2 },
+        });
+      }}
     >
       {children}
     </div>
@@ -397,9 +410,51 @@ describe('Quiet Instrument comparison surfaces', () => {
 
     expect(overlay).toHaveAttribute('data-image-width', '384');
     expect(overlay).toHaveAttribute('data-image-height', '96');
+    expect(overlay).toHaveAttribute('data-tumor-alignment-disabled', 'true');
     fireEvent.doubleClick(overlay);
     expect(startAlignAll).toHaveBeenCalledWith(
       expect.objectContaining({ imageSize: { width: 384, height: 96 } }),
+      expect.objectContaining({ x: 0.2, y: 0.3 }),
+    );
+  });
+
+  it('offers explicitly disclosed opt-in tumor alignment without changing ordinary grid alignment', () => {
+    const startAlignAll = vi.fn(async () => undefined);
+    render(
+      <GridCell
+        comboId="synthetic-sequence"
+        date={selectedDate}
+        refData={selectedSeries}
+        settings={DEFAULT_PANEL_SETTINGS}
+        progress={0}
+        setProgress={vi.fn()}
+        updatePanelSetting={vi.fn()}
+        isHovered
+        overlayColumns={[
+          { date: selectedDate, ref: selectedSeries },
+          { date: compareDate, ref: compareSeries },
+        ]}
+        isAligning={false}
+        startAlignAll={startAlignAll}
+      />,
+    );
+    const overlay = screen.getByTestId('diagnostic-drag-overlay');
+
+    expect(overlay).toHaveAttribute(
+      'data-tumor-alignment-title',
+      'Match tumor across dates; uses pixels inside the selected region',
+    );
+    expect(overlay).toHaveAttribute('data-tumor-alignment-disabled', 'false');
+    fireEvent.contextMenu(overlay);
+    expect(startAlignAll).toHaveBeenCalledWith(
+      expect.objectContaining({ alignmentFocus: 'tumor', imageSize: { width: 256, height: 128 } }),
+      expect.objectContaining({ x: 0.2, y: 0.3 }),
+    );
+
+    startAlignAll.mockClear();
+    fireEvent.doubleClick(overlay);
+    expect(startAlignAll).toHaveBeenCalledWith(
+      expect.not.objectContaining({ alignmentFocus: 'tumor' }),
       expect.objectContaining({ x: 0.2, y: 0.3 }),
     );
   });
@@ -540,9 +595,56 @@ describe('Quiet Instrument comparison surfaces', () => {
 
     expect(overlay).toHaveAttribute('data-image-width', '384');
     expect(overlay).toHaveAttribute('data-image-height', '96');
+    expect(overlay).toHaveAttribute('data-tumor-alignment-disabled', 'true');
     fireEvent.doubleClick(overlay);
     expect(startAlignAll).toHaveBeenCalledWith(
       expect.objectContaining({ imageSize: { width: 384, height: 96 } }),
+      expect.objectContaining({ x: 0.2, y: 0.3 }),
+    );
+  });
+
+  it('offers explicitly disclosed opt-in tumor alignment from an acquired overlay reference', () => {
+    const startAlignAll = vi.fn(async () => undefined);
+    render(
+      <OverlayView
+        comboId="synthetic-sequence"
+        overlayColumns={[
+          { date: selectedDate, ref: selectedSeries },
+          { date: compareDate, ref: compareSeries },
+        ]}
+        overlayViewerSize={420}
+        overlayDisplayedRef={selectedSeries}
+        overlayDisplayedDate={selectedDate}
+        overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
+        overlayDisplayedSliceIndex={0}
+        overlayDisplayedEffectiveSliceIndex={0}
+        overlaySelectedRef={selectedSeries}
+        overlaySelectedDate={selectedDate}
+        overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
+        overlaySelectedSliceIndex={0}
+        overlayCompareRef={compareSeries}
+        overlayCompareDate={compareDate}
+        overlayCompareSettings={DEFAULT_PANEL_SETTINGS}
+        overlayCompareSliceIndex={0}
+        isOverlayComparing={false}
+        hasOverlayCompareTarget
+        isAligning={false}
+        alignmentProgress={null}
+        abortAlignment={vi.fn()}
+        updatePanelSetting={vi.fn()}
+        startAlignAll={startAlignAll}
+        setProgress={vi.fn()}
+      />,
+    );
+    const overlay = screen.getByTestId('diagnostic-drag-overlay');
+
+    expect(overlay).toHaveAttribute(
+      'data-tumor-alignment-title',
+      'Match tumor across dates; uses pixels inside the selected region',
+    );
+    fireEvent.contextMenu(overlay);
+    expect(startAlignAll).toHaveBeenCalledWith(
+      expect.objectContaining({ alignmentFocus: 'tumor' }),
       expect.objectContaining({ x: 0.2, y: 0.3 }),
     );
   });

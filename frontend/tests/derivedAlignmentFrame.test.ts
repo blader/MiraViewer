@@ -11,7 +11,7 @@ const storage = vi.hoisted(() => ({
 
 vi.mock('../src/utils/localApi', () => ({
   loadDerivedAlignmentFrames: storage.load,
-  MAX_DERIVED_ALIGNMENT_FRAMES: 12,
+  MAX_DERIVED_ALIGNMENT_FRAMES: 32,
   saveDerivedAlignmentFrame: storage.save,
 }));
 
@@ -195,14 +195,14 @@ describe('verified derived alignment frame cache', () => {
     const frame = getDerivedAlignmentFrame('selected-reference', 3)!;
     const release = retainDerivedAlignmentReference(frame);
 
-    for (let index = 0; index < 20; index++) {
+    for (let index = 0; index < 40; index++) {
       const target = result();
       target.seriesUid = `replacement-${index}`;
       setDerivedAlignmentFrame(target);
     }
 
     expect(getDerivedAlignmentFrame('selected-reference', 3)).toBe(frame);
-    expect(getDerivedAlignmentFrame('replacement-19', 12)).not.toBeNull();
+    expect(getDerivedAlignmentFrame('replacement-39', 12)).not.toBeNull();
     expect(getDerivedAlignmentFrame('replacement-0', 12)).toBeNull();
     release();
 

@@ -147,6 +147,9 @@ export interface AlignmentReference {
    * Pixels inside this rect are ignored when computing MI/NMI for slice search and registration.
    */
   exclusionMask?: ExclusionMask;
+
+  /** Explicit opt-in: inspect the marked tissue only when choosing its through-plane location. */
+  alignmentFocus?: 'anatomy' | 'tumor';
 }
 
 // Result of aligning a single date to the reference.

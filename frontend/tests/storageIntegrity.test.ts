@@ -19,6 +19,7 @@ import {
   getTumorSegmentationForInstance,
   getVolumeSegmentation,
   loadDerivedAlignmentFrames,
+  MAX_DERIVED_ALIGNMENT_FRAMES,
   saveDerivedAlignmentFrame,
   saveTumorGroundTruth,
   saveTumorSegmentation,
@@ -526,20 +527,35 @@ describe('durable MRI storage and import contracts', () => {
     expect(localStorage.getItem('miraviewer:overlay-nav:v1')).toContain('synthetic-date');
   });
 
+  it('preserves all seventeen registered examinations across a database connection restart', async () => {
+    await processDicomFile(makeImplicitDicom());
+    await getComparisonData();
+    for (let index = 0; index < 17; index++) {
+      await saveDerivedAlignmentFrame(makeDerivedFrame({ id: `examination-${index}`, createdAt: index }));
+    }
+
+    await resetDbForTests();
+    const restored = await loadDerivedAlignmentFrames('synthetic-patient', 1);
+    expect(restored).toHaveLength(17);
+    expect(restored.map((frame) => frame.id)).toEqual(Array.from({ length: 17 }, (_, index) => `examination-${index}`));
+  });
+
   it('retains bounded registered frames across a database connection restart', async () => {
     await processDicomFile(makeImplicitDicom());
     await getComparisonData();
-    for (let index = 0; index < 15; index++) {
+    for (let index = 0; index < MAX_DERIVED_ALIGNMENT_FRAMES + 3; index++) {
       await saveDerivedAlignmentFrame(makeDerivedFrame({ id: `derived-${index}`, createdAt: index }));
     }
 
     await resetDbForTests();
     const restored = await loadDerivedAlignmentFrames('synthetic-patient', 1);
-    expect(restored).toHaveLength(12);
-    expect(restored.map((frame) => frame.id)).toEqual(Array.from({ length: 12 }, (_, index) => `derived-${index + 3}`));
+    expect(restored).toHaveLength(MAX_DERIVED_ALIGNMENT_FRAMES);
+    expect(restored.map((frame) => frame.id)).toEqual(
+      Array.from({ length: MAX_DERIVED_ALIGNMENT_FRAMES }, (_, index) => `derived-${index + 3}`),
+    );
     expect(Array.from(restored[0]!.pixels)).toEqual([0, 1, 2, 3]);
     await clearPersistedDerivedAlignmentFrames('different-patient');
-    expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toHaveLength(12);
+    expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toHaveLength(MAX_DERIVED_ALIGNMENT_FRAMES);
     await clearPersistedDerivedAlignmentFrames('synthetic-patient');
     expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toEqual([]);
   });

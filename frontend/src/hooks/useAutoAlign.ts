@@ -247,6 +247,14 @@ export function useAutoAlign() {
         };
 
         let verifiedReferenceManifest: SeriesFrameManifest | undefined;
+        let referenceAnatomy:
+          | {
+              manifest: SeriesFrameManifest;
+              sourceIndex: number;
+              rigidTransform: [number, number, number, number, number, number];
+              rotationCenterMm: [number, number, number];
+            }
+          | undefined;
         if (displayedDerivedReference) {
           const originalSeriesUid = displayedDerivedReference.referenceSeriesUid;
           const originalSliceIndex = displayedDerivedReference.referenceFrameIndex;
@@ -283,6 +291,7 @@ export function useAutoAlign() {
             throw new Error('The selected aligned reference belongs to a different patient');
           }
           if (
+            !displayedManifest.geometryReliable ||
             displayedManifest.studyUid !== reference.studyUid ||
             !displayedNativeFrame ||
             displayedNativeFrame.sopInstanceUid !== displayedDerivedReference.targetSopInstanceUid ||
@@ -314,6 +323,24 @@ export function useAutoAlign() {
             throw new Error('The selected aligned reference no longer matches its verified acquired physical anchor');
           }
           validateOutputGridReference(displayedGrid, originalFrame, verifiedReferenceManifest.frameOfReferenceUid);
+          const rigidTransform = displayedDerivedReference.rigidTransform;
+          const rotationCenterMm = displayedDerivedReference.rotationCenterMm;
+          if (
+            !rigidTransform ||
+            rigidTransform.length !== 6 ||
+            rigidTransform.some((value) => !Number.isFinite(value)) ||
+            !rotationCenterMm ||
+            rotationCenterMm.length !== 3 ||
+            rotationCenterMm.some((value) => !Number.isFinite(value))
+          ) {
+            throw new Error('The selected aligned reference lacks a verified rigid transform into its acquired anchor');
+          }
+          referenceAnatomy = {
+            manifest: displayedManifest,
+            sourceIndex: selectedReference.sliceIndex,
+            rigidTransform,
+            rotationCenterMm,
+          };
 
           // The selected examination supplies the visible tissue and panel settings. Its original
           // acquired anchor remains the sole verified authority for the shared physical plane.
@@ -524,6 +551,7 @@ export function useAutoAlign() {
             outputMaxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
             maxSlices: 48,
             outputGrid: operationOutputGrid,
+            ...(referenceAnatomy ? { referenceAnatomy } : {}),
           };
           preparedPhysicalReference ??= prepareLongitudinalReferenceInput(
             referenceManifest,
@@ -541,9 +569,62 @@ export function useAutoAlign() {
               preparedReference,
             },
           );
-          const selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
+          let selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
           if (!selectedReference) {
             return physicalFailure('incompatible-geometry', 'Selected physical reference frame is unavailable');
+          }
+          let referenceSlices = prepared.referenceSlices;
+          let referenceImage:
+            | {
+                pixels: Float32Array;
+                valid: Uint8Array;
+                rows: number;
+                columns: number;
+                outputGrid: OutputPlaneGrid;
+              }
+            | undefined;
+          if (displayedDerivedReference) {
+            const sourceValidity =
+              displayedDerivedReference.valid ?? new Uint8Array(displayedDerivedReference.pixels.length).fill(1);
+            const copyDisplayedReference = (rows: number, columns: number) => {
+              if (rows === displayedDerivedReference.rows && columns === displayedDerivedReference.columns) {
+                const pixels = Float32Array.from(displayedDerivedReference.pixels);
+                const valid = Uint8Array.from(sourceValidity);
+                for (let index = 0; index < valid.length; index++) {
+                  if (!valid[index]) pixels[index] = 0;
+                }
+                return {
+                  pixels,
+                  valid,
+                };
+              }
+              const resampled = resample2dAreaAverageWithValidity(
+                displayedDerivedReference.pixels,
+                sourceValidity,
+                displayedDerivedReference.rows,
+                displayedDerivedReference.columns,
+                rows,
+                columns,
+              );
+              const valid = new Uint8Array(resampled.validity.length);
+              for (let index = 0; index < valid.length; index++) {
+                if (resampled.validity[index]! >= 1 - 1e-6) valid[index] = 1;
+                else resampled.pixels[index] = 0;
+              }
+              return { pixels: resampled.pixels, valid };
+            };
+            selectedReference = {
+              ...selectedReference,
+              ...copyDisplayedReference(selectedReference.dsRows, selectedReference.dsCols),
+            };
+            referenceSlices = [...prepared.referenceSlices];
+            referenceSlices[prepared.referenceSliceIndex] = selectedReference;
+            referenceImage = {
+              ...copyDisplayedReference(operationOutputGrid.rows, operationOutputGrid.columns),
+              rows: operationOutputGrid.rows,
+              columns: operationOutputGrid.columns,
+              outputGrid: operationOutputGrid,
+            };
           }
           const exclusion = rasterizeImageExclusion(
             reference.exclusionMask,
@@ -554,7 +635,7 @@ export function useAutoAlign() {
           const nativeRefinementExclusion = exclusion ? Uint8Array.from(exclusion) : undefined;
           const coarseRegistration = await runLongitudinalRegistration(
             {
-              referenceSlices: prepared.referenceSlices,
+              referenceSlices,
               targetSlices: prepared.targetSlices,
               referenceSliceIndex: prepared.referenceSliceIndex,
               referenceExclusionMask: exclusion,
@@ -600,6 +681,11 @@ export function useAutoAlign() {
               referenceManifest,
               referenceSliceIndex: reference.sliceIndex,
               referenceExclusionMask: nativeRefinementExclusion,
+              ...(reference.alignmentFocus === 'tumor' && !displayedDerivedReference
+                ? { alignmentFocus: 'tumor' as const }
+                : {}),
+              ...(referenceImage ? { referenceImage } : {}),
+              ...(referenceAnatomy ? { referenceAnatomy } : {}),
             },
           );
           ensureNotAborted();

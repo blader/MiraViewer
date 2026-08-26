@@ -1,4 +1,9 @@
 import { outputGridPixelToWorld, validateOutputPlaneGrid, type OutputPlaneGrid } from '../outputPlaneGrid';
+import {
+  minimumBilateralAnatomicalRetention,
+  prepareAnatomicalPlaneLandmarks,
+  scoreAnatomicalPlaneLandmarks,
+} from './anatomicalPlaneLandmarks';
 import { sliceCornersMm } from './dicomGeometry';
 import { resample2dAreaAverageWithValidity } from './resample2d';
 import {
@@ -22,6 +27,15 @@ import {
 } from './reconstructionCore';
 import { boundsCornersMm } from './sliceRoiCrop';
 import { assertNotAborted, yieldToMain } from './svrUtils';
+import {
+  hasPersistentTumorDepthProfile,
+  hasPersistentTumorTarget,
+  prepareTumorFocusedAlignment,
+  prepareTumorFocusedDepthSection,
+  scoreTumorFocusedAlignment,
+  scoreTumorFocusedDepthProfile,
+  type TumorFocusedDepthSection,
+} from './tumorFocusedAlignment';
 import { cross, dot, norm, v3, type Vec3 } from './vec3';
 
 const IDENTITY_RIGID: RigidParams = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
@@ -122,6 +136,8 @@ export type DenseLongitudinalResliceOptions = {
   nativeReferenceSlices?: readonly SvrReconstructionSlice[];
   nativeReferenceSliceIndex?: number;
   referenceExclusionMask?: Uint8Array;
+  /** Explicit lesion correspondence affects native through-plane selection only. */
+  alignmentFocus?: 'anatomy' | 'tumor';
   nativeCandidatePoses?: readonly RigidParams[];
   minCoverage?: number;
   signal?: AbortSignal;
@@ -439,6 +455,35 @@ function pixelToWorld(slice: LongitudinalReferencePlane, row: number, col: numbe
     slice.ippMm.y + slice.colDir.y * row * slice.rowSpacingDsMm + slice.rowDir.y * col * slice.colSpacingDsMm,
     slice.ippMm.z + slice.colDir.z * row * slice.rowSpacingDsMm + slice.rowDir.z * col * slice.colSpacingDsMm,
   );
+}
+
+/** Preserve the presented plane center while distinguishing anatomy from acquisition tilt. */
+export function attenuateLongitudinalPlaneTilt(
+  rigid: RigidParams,
+  centerMm: Vec3,
+  referencePlane: LongitudinalReferencePlane,
+  outputGrid: OutputPlaneGrid | undefined,
+  factor: number,
+): RigidParams {
+  const anchor = outputGrid
+    ? outputGridPixelToWorld(outputGrid, (outputGrid.rows - 1) / 2, (outputGrid.columns - 1) / 2)
+    : pixelToWorld(referencePlane, (referencePlane.dsRows - 1) / 2, (referencePlane.dsCols - 1) / 2);
+  const offset = v3(anchor.x - centerMm.x, anchor.y - centerMm.y, anchor.z - centerMm.z);
+  const original = mat3MulVec3(mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz), offset.x, offset.y, offset.z);
+  const attenuated = mat3MulVec3(
+    mat3FromEulerXYZ(rigid.rx * factor, rigid.ry * factor, rigid.rz),
+    offset.x,
+    offset.y,
+    offset.z,
+  );
+  return {
+    ...rigid,
+    rx: rigid.rx * factor,
+    ry: rigid.ry * factor,
+    tx: rigid.tx + original.x - attenuated.x,
+    ty: rigid.ty + original.y - attenuated.y,
+    tz: rigid.tz + original.z - attenuated.z,
+  };
 }
 
 function sampleSliceBilinear(slice: SvrReconstructionSlice, point: Vec3): number | null {
@@ -1050,6 +1095,265 @@ function refineNativeLongitudinalPose(
   };
 }
 
+function refineAnatomicalPlaneDepth(
+  options: DenseLongitudinalResliceOptions,
+  initial: { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics },
+): { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics } {
+  const referenceIndex = options.nativeReferenceSliceIndex ?? -1;
+  const reference = options.nativeReferenceSlices?.[referenceIndex];
+  const target = options.targetSlices[0];
+  if (!reference || !target) return initial;
+  if (reference.frameOfReferenceUid && reference.frameOfReferenceUid === target.frameOfReferenceUid) return initial;
+  const normal = reference.normalDir;
+  const tumorFocused = options.alignmentFocus === 'tumor';
+  if (!options.referenceExclusionMask || (!tumorFocused && Math.abs(normal.z) < 0.9)) return initial;
+
+  const landmarkPlane = (slice: SvrReconstructionSlice) => ({
+    pixels: slice.pixels,
+    rows: slice.dsRows,
+    cols: slice.dsCols,
+    valid: slice.valid,
+    ippMm: slice.ippMm,
+    rowDir: slice.rowDir,
+    colDir: slice.colDir,
+    rowSpacingDsMm: slice.rowSpacingDsMm,
+    colSpacingDsMm: slice.colSpacingDsMm,
+    frameOfReferenceUid: slice.frameOfReferenceUid,
+  });
+  const previous = options.nativeReferenceSlices?.[referenceIndex - 1];
+  const next = options.nativeReferenceSlices?.[referenceIndex + 1];
+  const landmarks = tumorFocused
+    ? null
+    : prepareAnatomicalPlaneLandmarks(landmarkPlane(reference), options.referenceExclusionMask, {
+        ...(previous ? { previous: landmarkPlane(previous) } : {}),
+        ...(next ? { next: landmarkPlane(next) } : {}),
+      });
+  const tumorLandmarks = tumorFocused
+    ? prepareTumorFocusedAlignment(landmarkPlane(reference), options.referenceExclusionMask)
+    : null;
+  const tumorBilateralLandmarks =
+    tumorLandmarks && Math.abs(normal.z) >= 0.9
+      ? prepareAnatomicalPlaneLandmarks(landmarkPlane(reference), options.referenceExclusionMask)
+      : null;
+  if (!landmarks && !tumorLandmarks) return initial;
+  const referenceTumorProfile =
+    tumorLandmarks?.usesDepthProfile && options.nativeReferenceSlices
+      ? options.nativeReferenceSlices
+          .map((slice) => {
+            const displacement = v3(
+              slice.ippMm.x - reference.ippMm.x,
+              slice.ippMm.y - reference.ippMm.y,
+              slice.ippMm.z - reference.ippMm.z,
+            );
+            const offset = dot(displacement, normal);
+            return Math.abs(offset) <= 6 + COORDINATE_EPSILON_MM
+              ? prepareTumorFocusedDepthSection(tumorLandmarks, landmarkPlane(slice), offset)
+              : null;
+          })
+          .filter((section): section is TumorFocusedDepthSection => Boolean(section))
+          .sort((first, second) => first.offsetMm - second.offsetMm)
+      : [];
+  let trackTumorThroughDepth = Boolean(
+    tumorLandmarks && hasPersistentTumorDepthProfile(tumorLandmarks, referenceTumorProfile),
+  );
+  const scoringSize = tumorLandmarks?.size ?? landmarks!.size;
+  const previewReference = prepareScoringSlices([reference], scoringSize)[0]!;
+  const previewTargets = prepareScoringSlices(options.targetSlices, scoringSize);
+  const spacing = Math.max(0.5, Math.min(2, target.spacingBetweenSlicesMm ?? target.sliceThicknessMm ?? 1));
+  const minimumCoverage = Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55));
+  const targetBounds = stackBounds(options.targetSlices);
+  const families = [initial.rigid];
+  if (
+    !tumorFocused &&
+    maximumPoseDisplacementMm(options.targetToReference, initial.rigid, targetBounds, options.centerMm) >
+      COORDINATE_EPSILON_MM
+  ) {
+    families.push(options.targetToReference);
+  }
+  if (!tumorFocused) {
+    for (const family of [...families]) {
+      for (const factor of [0.5, 0.75]) {
+        const candidate = attenuateLongitudinalPlaneTilt(
+          family,
+          options.centerMm,
+          options.referencePlane,
+          options.outputGrid,
+          factor,
+        );
+        if (
+          families.every(
+            (existing) =>
+              maximumPoseDisplacementMm(existing, candidate, targetBounds, options.centerMm) > COORDINATE_EPSILON_MM,
+          )
+        ) {
+          families.push(candidate);
+        }
+      }
+    }
+  }
+  let best = initial.rigid;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  const shortlist: Array<{ rigid: RigidParams; score: number; distance: number }> = [];
+  const maximumSteps = Math.floor(12 / spacing);
+  for (const family of families) {
+    const leaders: Array<{ offset: number; score: number }> = [];
+    const previewCache = new Map<
+      string,
+      { rigid: RigidParams; preview: LongitudinalReslicedPlane; section?: TumorFocusedDepthSection | null }
+    >();
+    const previewAt = (offset: number) => {
+      const key = offset.toFixed(6);
+      const cached = previewCache.get(key);
+      if (cached) return cached;
+      const rigid = {
+        ...family,
+        tx: family.tx + normal.x * offset,
+        ty: family.ty + normal.y * offset,
+        tz: family.tz + normal.z * offset,
+      };
+      const preview = resliceStackToReferencePlane({
+        targetSlices: previewTargets,
+        referenceSlice: previewReference,
+        targetToReference: rigid,
+        centerMm: options.centerMm,
+        signal: options.signal,
+      });
+      const entry: {
+        rigid: RigidParams;
+        preview: LongitudinalReslicedPlane;
+        section?: TumorFocusedDepthSection | null;
+      } = { rigid, preview };
+      previewCache.set(key, entry);
+      return entry;
+    };
+    const targetDirection = mat3MulVec3(
+      mat3FromEulerXYZ(family.rx, family.ry, family.rz),
+      target.normalDir.x,
+      target.normalDir.y,
+      target.normalDir.z,
+    );
+    const projectedSpacing = Math.max(COORDINATE_EPSILON_MM, Math.abs(spacing * dot(targetDirection, normal)));
+    const profileRadius = referenceTumorProfile.reduce(
+      (maximum, section) => Math.max(maximum, Math.abs(section.offsetMm)),
+      0,
+    );
+    const profileSteps = Math.ceil(profileRadius / projectedSpacing);
+    if (trackTumorThroughDepth && tumorLandmarks) {
+      const acquiredSections: TumorFocusedDepthSection[] = [];
+      for (let step = -maximumSteps; step <= maximumSteps; step++) {
+        assertNotAborted(options.signal);
+        const offset = step * spacing;
+        const entry = previewAt(offset);
+        if (entry.preview.coverage < minimumCoverage) continue;
+        if (!('section' in entry)) {
+          entry.section = prepareTumorFocusedDepthSection(tumorLandmarks, entry.preview, offset);
+        }
+        if (entry.section) acquiredSections.push(entry.section);
+      }
+      trackTumorThroughDepth = hasPersistentTumorTarget(tumorLandmarks, acquiredSections);
+    }
+    const evaluate = (offset: number, phase: 'coarse' | 'fine') => {
+      assertNotAborted(options.signal);
+      const center = previewAt(offset);
+      const { rigid: candidate, preview } = center;
+      if (preview.coverage < minimumCoverage) return;
+      let score = tumorLandmarks
+        ? scoreTumorFocusedAlignment(tumorLandmarks, preview)
+        : scoreAnatomicalPlaneLandmarks(landmarks!, preview);
+      if (trackTumorThroughDepth && tumorLandmarks && Number.isFinite(score)) {
+        if (!('section' in center)) {
+          center.section = prepareTumorFocusedDepthSection(tumorLandmarks, center.preview, offset);
+        }
+        if (!center.section || !hasPersistentTumorTarget(tumorLandmarks, [center.section])) return;
+        const targetProfile: TumorFocusedDepthSection[] = [];
+        for (let step = -profileSteps; step <= profileSteps; step++) {
+          assertNotAborted(options.signal);
+          const relative = step * projectedSpacing;
+          const sectionOffset = offset - step * spacing;
+          const entry = previewAt(sectionOffset);
+          if (entry.preview.coverage < minimumCoverage) continue;
+          if (!('section' in entry)) {
+            entry.section = prepareTumorFocusedDepthSection(tumorLandmarks, entry.preview, 0);
+          }
+          if (entry.section) targetProfile.push({ ...entry.section, offsetMm: relative });
+        }
+        targetProfile.sort((first, second) => first.offsetMm - second.offsetMm);
+        score = scoreTumorFocusedDepthProfile(tumorLandmarks, referenceTumorProfile, targetProfile);
+      }
+      if (score > bestScore + 1e-7 || (Math.abs(score - bestScore) <= 1e-7 && Math.abs(offset) < bestDistance)) {
+        best = candidate;
+        bestScore = score;
+        bestDistance = Math.abs(offset);
+      }
+      if (Number.isFinite(score)) {
+        const duplicate = shortlist.findIndex(
+          (entry) => maximumPoseDisplacementMm(entry.rigid, candidate, targetBounds, options.centerMm) < spacing * 0.45,
+        );
+        if (duplicate < 0 || score > shortlist[duplicate]!.score) {
+          if (duplicate >= 0) shortlist.splice(duplicate, 1);
+          shortlist.push({ rigid: candidate, score, distance: Math.abs(offset) });
+          shortlist.sort((first, second) => second.score - first.score);
+          if (shortlist.length > 5) shortlist.pop();
+        }
+      }
+      if (phase === 'coarse' && Number.isFinite(score)) {
+        leaders.push({ offset, score });
+        leaders.sort((first, second) => second.score - first.score);
+        if (leaders.length > 3) leaders.pop();
+      }
+    };
+    for (let step = -maximumSteps; step <= maximumSteps; step++) evaluate(step * spacing, 'coarse');
+    for (const leader of leaders) {
+      for (const direction of [-1, 1]) {
+        const offset = leader.offset + (direction * spacing) / 2;
+        if (Math.abs(offset) <= 12 + COORDINATE_EPSILON_MM) evaluate(offset, 'fine');
+      }
+    }
+  }
+  let nativeBestScore = Number.NEGATIVE_INFINITY;
+  for (const entry of shortlist) {
+    assertNotAborted(options.signal);
+    const native = resliceStackToReferencePlane({
+      targetSlices: options.targetSlices,
+      referenceSlice: reference,
+      targetToReference: entry.rigid,
+      centerMm: options.centerMm,
+      signal: options.signal,
+    });
+    if (native.coverage < minimumCoverage) continue;
+    if (
+      tumorBilateralLandmarks?.bilateral &&
+      minimumBilateralAnatomicalRetention(tumorBilateralLandmarks, native) < 0.35
+    ) {
+      continue;
+    }
+    const score = tumorLandmarks
+      ? trackTumorThroughDepth
+        ? Number.isFinite(scoreTumorFocusedAlignment(tumorLandmarks, native))
+          ? entry.score
+          : Number.NEGATIVE_INFINITY
+        : scoreTumorFocusedAlignment(tumorLandmarks, native)
+      : scoreAnatomicalPlaneLandmarks(landmarks!, native);
+    if (
+      score > nativeBestScore + 1e-7 ||
+      (Math.abs(score - nativeBestScore) <= 1e-7 && entry.distance < bestDistance)
+    ) {
+      best = entry.rigid;
+      bestScore = score;
+      nativeBestScore = score;
+      bestDistance = entry.distance;
+    }
+  }
+  if (
+    !Number.isFinite(nativeBestScore) ||
+    maximumPoseDisplacementMm(best, initial.rigid, targetBounds, options.centerMm) <= COORDINATE_EPSILON_MM
+  ) {
+    return initial;
+  }
+  return { rigid: best, diagnostics: initial.diagnostics };
+}
+
 export function resliceDenseLongitudinalPlane(
   options: DenseLongitudinalResliceOptions,
 ): DenseLongitudinalResliceResult | LongitudinalRegistrationFailure {
@@ -1094,7 +1398,52 @@ export function resliceDenseLongitudinalPlane(
         return firstFailure ?? failure('insufficient-evidence', 'No native rigid hypothesis retains stable anatomy');
       }
       refinements.sort((first, second) => second.diagnostics.heldOutScore - first.diagnostics.heldOutScore);
-      const winner = refinements[0]!;
+      const anatomicalWinner = refineAnatomicalPlaneDepth(
+        options.alignmentFocus === 'tumor' ? { ...options, alignmentFocus: 'anatomy' } : options,
+        refinements[0]!,
+      );
+      let winner =
+        options.alignmentFocus === 'tumor' ? refineAnatomicalPlaneDepth(options, anatomicalWinner) : anatomicalWinner;
+      const selectedReference = options.nativeReferenceSlices[options.nativeReferenceSliceIndex ?? -1];
+      if (
+        options.alignmentFocus === 'tumor' &&
+        winner !== anatomicalWinner &&
+        selectedReference &&
+        Math.abs(selectedReference.normalDir.z) >= 0.9
+      ) {
+        const bilateral = prepareAnatomicalPlaneLandmarks(
+          {
+            pixels: selectedReference.pixels,
+            rows: selectedReference.dsRows,
+            cols: selectedReference.dsCols,
+            valid: selectedReference.valid,
+            ippMm: selectedReference.ippMm,
+            rowDir: selectedReference.rowDir,
+            colDir: selectedReference.colDir,
+            rowSpacingDsMm: selectedReference.rowSpacingDsMm,
+            colSpacingDsMm: selectedReference.colSpacingDsMm,
+            frameOfReferenceUid: selectedReference.frameOfReferenceUid,
+          },
+          options.referenceExclusionMask,
+        );
+        if (bilateral?.bilateral) {
+          const presentation = (rigid: RigidParams) =>
+            resliceStackToReferencePlane({
+              targetSlices: options.targetSlices,
+              referenceSlice: selectedReference,
+              targetToReference: rigid,
+              centerMm: options.centerMm,
+              signal: options.signal,
+            });
+          if (
+            !Number.isFinite(scoreAnatomicalPlaneLandmarks(bilateral, presentation(winner.rigid))) &&
+            Number.isFinite(scoreAnatomicalPlaneLandmarks(bilateral, presentation(anatomicalWinner.rigid)))
+          ) {
+            winner = anatomicalWinner;
+          }
+        }
+      }
+      refinements[0] = winner;
       const nativeSpacing = Math.min(
         options.referencePlane.rowSpacingDsMm,
         options.referencePlane.colSpacingDsMm,
@@ -1279,17 +1628,27 @@ export async function registerAndResliceLongitudinal(
       Math.PI;
 
     const candidates: RigidParams[] = [];
-    if (options.initialTargetToReference) candidates.push({ ...options.initialTargetToReference });
-    candidates.push({ ...IDENTITY_RIGID });
+    const addCandidate = (candidate: RigidParams) => {
+      if (
+        candidates.some(
+          (existing) => maximumPoseDisplacementMm(existing, candidate, targetBounds, centerMm) <= COORDINATE_EPSILON_MM,
+        )
+      ) {
+        return;
+      }
+      candidates.push(candidate);
+    };
+    if (options.initialTargetToReference) addCandidate({ ...options.initialTargetToReference });
+    addCandidate({ ...IDENTITY_RIGID });
     if (frameRelationship !== 'same') {
       const centered = alignCenters(targetCenter, centerMm, mat3FromEulerXYZ(0, 0, 0));
-      candidates.push({ ...IDENTITY_RIGID, tx: centered.x, ty: centered.y, tz: centered.z });
+      addCandidate({ ...IDENTITY_RIGID, tx: centered.x, ty: centered.y, tz: centered.z });
       const rotation = axesRotation(targetFirst, referenceSlice);
       const angles = eulerFromRotation(rotation);
       const rotatedCenter = alignCenters(targetCenter, centerMm, rotation);
-      candidates.push({ ...angles, tx: rotatedCenter.x, ty: rotatedCenter.y, tz: rotatedCenter.z });
+      addCandidate({ ...angles, tx: rotatedCenter.x, ty: rotatedCenter.y, tz: rotatedCenter.z });
     } else {
-      candidates.push({ ...IDENTITY_RIGID, tx: referenceDomain.voxelSizeMm });
+      addCandidate({ ...IDENTITY_RIGID, tx: referenceDomain.voxelSizeMm });
     }
 
     const common = {

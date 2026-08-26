@@ -690,7 +690,8 @@ export async function deleteVolumeSegmentation(volumeKey: string): Promise<void>
   await db.delete('volume_segmentations', volumeKey);
 }
 
-export const MAX_DERIVED_ALIGNMENT_FRAMES = 12;
+/** At most 160 MiB: 32 maximum-size 1024² float-and-support registered planes. */
+export const MAX_DERIVED_ALIGNMENT_FRAMES = 32;
 
 export function matchesReferenceGeometry(frame: Partial<DerivedAlignmentFrameRow>, reference?: DicomInstance): boolean {
   return !(

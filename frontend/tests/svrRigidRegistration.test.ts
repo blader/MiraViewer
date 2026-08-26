@@ -383,6 +383,114 @@ describe('svr/rigidRegistration', () => {
       expect(result.ncc).toBe(Number.NEGATIVE_INFINITY);
     });
 
+    it('preserves fractional acquired weights and the exact half-support boundary', () => {
+      const dims = { nx: 4, ny: 4, nz: 2 };
+      const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+      const occupancy = new Uint8Array(volume.length);
+      for (let z = 0; z < dims.nz; z++) {
+        for (let y = 0; y < dims.ny; y++) {
+          for (let x = 0; x < dims.nx; x++) {
+            const index = x + y * dims.nx + z * dims.nx * dims.ny;
+            occupancy[index] = x > 0 ? 1 : 0;
+            volume[index] = occupancy[index] ? x + 10 * y + 100 * z : 0;
+          }
+        }
+      }
+
+      const pos = new Float32Array([
+        0.49, 1.2, 0.4, 0.5, 1.2, 0.4, 0.51, 2, 0.6, 1.75, 0.2, 0.1, 3, 3, 1, 3.01, 2, 0.5,
+      ]);
+      const weights = new Float32Array([0.25, 0.5, 0.75, 1, 0.2, 0.4]);
+      const obs = new Float32Array([7, 10, 24, 38, 51, 90]);
+      const retained = [1, 2, 3, 4];
+      let sumA = 0;
+      let sumB = 0;
+      let sumAA = 0;
+      let sumBB = 0;
+      let sumAB = 0;
+      let retainedWeight = 0;
+      for (const index of retained) {
+        const weight = weights[index]!;
+        const observed = obs[index]!;
+        const x = pos[index * 3]!;
+        const y = pos[index * 3 + 1]!;
+        const z = pos[index * 3 + 2]!;
+        const sampled = sampleTrilinear(volume, dims, x, y, z) / sampleTrilinear(occupancy, dims, x, y, z);
+        sumA += weight * observed;
+        sumB += weight * sampled;
+        sumAA += weight * observed * observed;
+        sumBB += weight * sampled * sampled;
+        sumAB += weight * observed * sampled;
+        retainedWeight += weight;
+      }
+      const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+      const expectedCoverage = retainedWeight / totalWeight;
+      const inverseRetainedWeight = 1 / retainedWeight;
+      const expectedRawNcc =
+        (sumAB - sumA * sumB * inverseRetainedWeight) /
+        Math.sqrt((sumAA - sumA * sumA * inverseRetainedWeight) * (sumBB - sumB * sumB * inverseRetainedWeight));
+
+      const result = scoreNcc({
+        samples: { obs, pos, count: obs.length, weights },
+        refVolume: volume,
+        occupancy,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        minimumSamples: 1,
+        minimumCoverage: 0,
+      });
+
+      expect(result.used).toBe(retained.length);
+      expect(result.coverage).toBe(expectedCoverage);
+      expect(result.rawNcc).toBe(expectedRawNcc);
+      expect(result.ncc).toBe(expectedRawNcc * expectedCoverage);
+    });
+
+    it('does not dilute supported registration intensity with unacquired zero-filled corners', () => {
+      const dims = { nx: 3, ny: 3, nz: 2 };
+      const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+      const occupancy = new Uint8Array(volume.length);
+      for (let z = 0; z < dims.nz; z++) {
+        for (let y = 0; y < dims.ny; y++) {
+          for (let x = 1; x < dims.nx; x++) {
+            const index = x + y * dims.nx + z * dims.nx * dims.ny;
+            volume[index] = 10 + 4 * y + 7 * z;
+            occupancy[index] = 1;
+          }
+        }
+      }
+
+      const pos = new Float32Array([0.5, 0.2, 0.2, 0.6, 1.2, 0.4, 0.75, 0.4, 0.8, 0.9, 1.7, 0.1, 1.2, 0.5, 0.6]);
+      const count = pos.length / 3;
+      const obs = new Float32Array(count);
+      for (let index = 0; index < count; index++) {
+        const x = pos[index * 3]!;
+        const y = pos[index * 3 + 1]!;
+        const z = pos[index * 3 + 2]!;
+        obs[index] = sampleTrilinear(volume, dims, x, y, z) / sampleTrilinear(occupancy, dims, x, y, z);
+      }
+
+      const result = scoreNcc({
+        samples: { obs, pos, count },
+        refVolume: volume,
+        occupancy,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        minimumSamples: 1,
+        minimumCoverage: 0,
+      });
+
+      expect(result.coverage).toBe(1);
+      expect(result.rawNcc).toBeCloseTo(1, 12);
+      expect(result.ncc).toBeCloseTo(1, 12);
+    });
+
     it('rejects otherwise convincing forward evidence when reverse anatomy is unsupported', () => {
       const dims = { nx: 10, ny: 10, nz: 10 };
       const count = 600;

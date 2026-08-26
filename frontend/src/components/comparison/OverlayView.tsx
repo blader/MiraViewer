@@ -1,11 +1,11 @@
 import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link2, Loader2, ScanLine } from 'lucide-react';
+import { Crosshair, Link2, Loader2, ScanLine } from 'lucide-react';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StepControl } from '../StepControl';
-import { DragRectActionOverlay } from '../DragRectActionOverlay';
+import { DragRectActionOverlay, type DragRectAction } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
 import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
 import { GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
@@ -327,6 +327,164 @@ function OverlayStudyFooter({
   );
 }
 
+function OverlayStudyHeader({
+  date,
+  settings,
+  instanceIndex,
+  instanceCount,
+  presentation,
+  annotation,
+  onUpdate,
+}: {
+  date: string;
+  settings: PanelSettings;
+  instanceIndex: number;
+  instanceCount: number;
+  presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean; nativeAnnotationsAvailable: boolean };
+  annotation: {
+    showSavedTumor: boolean;
+    tumorToolOpen: boolean;
+    gtPolygonToolOpen: boolean;
+    setShowSavedTumor: React.Dispatch<React.SetStateAction<boolean>>;
+    setTumorToolOpen: React.Dispatch<React.SetStateAction<boolean>>;
+    setGtPolygonToolOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  };
+  onUpdate: (update: Partial<PanelSettings>) => void;
+}) {
+  return (
+    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+      <div className="flex shrink-0 items-center gap-2">
+        <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
+          {formatDate(date)}
+        </span>
+        {presentation.isAligned ? <VerifiedAlignmentBadge /> : null}
+      </div>
+
+      <div
+        inert={presentation.isComparing || presentation.isAligning}
+        className={`ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100 ${
+          presentation.isComparing ? 'pointer-events-none opacity-40' : 'study-controls'
+        }`}
+      >
+        <StudyAnnotationControls {...annotation} nativeAnnotationsAvailable={presentation.nativeAnnotationsAvailable} />
+
+        <ImageControls
+          settings={settings}
+          instanceIndex={instanceIndex}
+          instanceCount={instanceCount}
+          onUpdate={onUpdate}
+          showSliceControl={false}
+        />
+      </div>
+    </div>
+  );
+}
+
+function overlaySelectionActions({
+  date,
+  columnCount,
+  isAligning,
+  isComparing,
+  nativeAnnotationsAvailable,
+  onAlign,
+  onSegment,
+}: {
+  date: string;
+  columnCount: number;
+  isAligning: boolean;
+  isComparing: boolean;
+  nativeAnnotationsAvailable: boolean;
+  onAlign: (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => void;
+  onSegment: (selection: ExclusionMask) => void;
+}): DragRectAction[] {
+  return [
+    {
+      key: 'align-all',
+      label: 'Align All',
+      title: `Align all other dates to ${formatDate(date)}`,
+      icon: <Link2 className="w-4 h-4" />,
+      variant: 'primary',
+      minSizeSpace: 'base',
+      disabled: columnCount < 2 || isAligning,
+      onConfirm: (masks) => onAlign(masks.base),
+    },
+    {
+      key: 'align-tumor',
+      label: 'Align Tumor',
+      title: 'Match tumor across dates; uses pixels inside the selected region',
+      icon: <Crosshair className="w-4 h-4" />,
+      variant: 'secondary',
+      minSizeSpace: 'base',
+      disabled: columnCount < 2 || isAligning || isComparing || !nativeAnnotationsAvailable,
+      onConfirm: (masks) => onAlign(masks.base, 'tumor'),
+    },
+    {
+      key: 'segment-tumor',
+      label: 'Segment',
+      title: 'Segment tumor from this rectangle',
+      icon: <ScanLine className="w-4 h-4" />,
+      variant: 'secondary',
+      minSizeSpace: 'screen',
+      disabled: isAligning || isComparing || !nativeAnnotationsAvailable,
+      onConfirm: (masks) => onSegment(masks.screen),
+    },
+  ];
+}
+
+function OverlaySelectionSurface({
+  date,
+  settings,
+  imageSize,
+  columnCount,
+  presentation,
+  onAlign,
+  onSegment,
+  children,
+}: {
+  date: string;
+  settings: PanelSettings;
+  imageSize: { width: number; height: number };
+  columnCount: number;
+  presentation: {
+    isAligning: boolean;
+    isComparing: boolean;
+    groundTruthOpen: boolean;
+    nativeAnnotationsAvailable: boolean;
+  };
+  onAlign: (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => void;
+  onSegment: (selection: ExclusionMask) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <DragRectActionOverlay
+      className="absolute inset-0 cursor-crosshair"
+      imageSize={imageSize}
+      geometry={{
+        panX: settings.panX,
+        panY: settings.panY,
+        zoom: settings.zoom,
+        rotation: settings.rotation,
+        affine00: settings.affine00,
+        affine01: settings.affine01,
+        affine10: settings.affine10,
+        affine11: settings.affine11,
+      }}
+      disabled={presentation.isAligning || presentation.isComparing || presentation.groundTruthOpen}
+      actions={overlaySelectionActions({
+        date,
+        columnCount,
+        isAligning: presentation.isAligning,
+        isComparing: presentation.isComparing,
+        nativeAnnotationsAvailable: presentation.nativeAnnotationsAvailable,
+        onAlign,
+        onSegment,
+      })}
+    >
+      {children}
+    </DragRectActionOverlay>
+  );
+}
+
 export function OverlayView({
   comboId,
   overlayColumns,
@@ -414,6 +572,28 @@ export function OverlayView({
   };
   const nativeAnnotationsAvailable = displayedDerivedFrame === null;
 
+  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
+    if (!overlayDisplayedRef || !overlayDisplayedDate) return;
+    const bounds = overlayCellRef.current?.getBoundingClientRect();
+    void startAlignAll(
+      {
+        date: overlayDisplayedDate,
+        seriesUid: overlayDisplayedRef.series_uid,
+        sliceIndex: overlayDisplayedEffectiveSliceIndex,
+        sliceCount: overlayDisplayedRef.instance_count,
+        patientKey: overlayDisplayedRef.patient_key,
+        studyUid: overlayDisplayedRef.study_uid ?? overlayDisplayedRef.study_id,
+        frameOfReferenceUid: overlayDisplayedRef.frame_of_reference_uid,
+        imageSize: displayedImageSize,
+        viewportSize:
+          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
+        settings: overlayDisplayedSettings,
+        ...(alignmentFocus ? { alignmentFocus } : {}),
+      },
+      exclusion,
+    );
+  };
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden p-3">
       {overlayColumns.length === 0 ? (
@@ -427,110 +607,55 @@ export function OverlayView({
           onMouseEnter={() => setIsOverlayViewerHovered(true)}
           onMouseLeave={() => setIsOverlayViewerHovered(false)}
         >
-          <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-            <div className="flex shrink-0 items-center gap-2">
-              <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
-                {formatDate(overlayDisplayedDate)}
-              </span>
-              {displayedDerivedFrame ? <VerifiedAlignmentBadge /> : null}
-            </div>
-
-            <div
-              inert={isOverlayComparing || isAligning}
-              className={`ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100 ${
-                isOverlayComparing ? 'pointer-events-none opacity-40' : 'study-controls'
-              }`}
-            >
-              <StudyAnnotationControls
-                showSavedTumor={showSavedTumor}
-                tumorToolOpen={tumorToolOpen}
-                gtPolygonToolOpen={gtPolygonToolOpen}
-                nativeAnnotationsAvailable={nativeAnnotationsAvailable}
-                setShowSavedTumor={setShowSavedTumor}
-                setTumorToolOpen={setTumorToolOpen}
-                setGtPolygonToolOpen={setGtPolygonToolOpen}
-              />
-
-              <ImageControls
-                settings={overlayDisplayedSettings}
-                instanceIndex={overlayDisplayedSliceIndex}
-                instanceCount={overlayDisplayedRef.instance_count}
-                onUpdate={(update) => updatePanelSetting(overlayDisplayedDate, update)}
-                showSliceControl={false}
-              />
-            </div>
-          </div>
+          <OverlayStudyHeader
+            date={overlayDisplayedDate}
+            settings={overlayDisplayedSettings}
+            instanceIndex={overlayDisplayedSliceIndex}
+            instanceCount={overlayDisplayedRef.instance_count}
+            presentation={{
+              isComparing: isOverlayComparing,
+              isAligning,
+              isAligned: Boolean(displayedDerivedFrame),
+              nativeAnnotationsAvailable,
+            }}
+            annotation={{
+              showSavedTumor,
+              tumorToolOpen,
+              gtPolygonToolOpen,
+              setShowSavedTumor,
+              setTumorToolOpen,
+              setGtPolygonToolOpen,
+            }}
+            onUpdate={(update) => updatePanelSetting(overlayDisplayedDate, update)}
+          />
 
           <div
             ref={overlayCellRef}
             data-diagnostic-surface="true"
             className="relative min-h-0 flex-1 bg-[var(--bg-primary)]"
           >
-            <DragRectActionOverlay
-              className="absolute inset-0 cursor-crosshair"
+            <OverlaySelectionSurface
+              date={overlayDisplayedDate}
+              settings={overlayDisplayedSettings}
               imageSize={displayedImageSize}
-              geometry={{
-                panX: overlayDisplayedSettings.panX,
-                panY: overlayDisplayedSettings.panY,
-                zoom: overlayDisplayedSettings.zoom,
-                rotation: overlayDisplayedSettings.rotation,
-                affine00: overlayDisplayedSettings.affine00,
-                affine01: overlayDisplayedSettings.affine01,
-                affine10: overlayDisplayedSettings.affine10,
-                affine11: overlayDisplayedSettings.affine11,
+              columnCount={overlayColumns.length}
+              presentation={{
+                isAligning,
+                isComparing: isOverlayComparing,
+                groundTruthOpen: gtPolygonToolOpen,
+                nativeAnnotationsAvailable,
               }}
-              disabled={isAligning || isOverlayComparing || gtPolygonToolOpen}
-              actions={[
-                {
-                  key: 'align-all',
-                  label: 'Align All',
-                  title: `Align all other dates to ${formatDate(overlayDisplayedDate)}`,
-                  icon: <Link2 className="w-4 h-4" />,
-                  variant: 'primary',
-                  minSizeSpace: 'base',
-                  disabled: overlayColumns.length < 2 || isAligning,
-                  onConfirm: (masks) => {
-                    const bounds = overlayCellRef.current?.getBoundingClientRect();
-                    void startAlignAll(
-                      {
-                        date: overlayDisplayedDate,
-                        seriesUid: overlayDisplayedRef.series_uid,
-                        sliceIndex: overlayDisplayedEffectiveSliceIndex,
-                        sliceCount: overlayDisplayedRef.instance_count,
-                        patientKey: overlayDisplayedRef.patient_key,
-                        studyUid: overlayDisplayedRef.study_uid ?? overlayDisplayedRef.study_id,
-                        frameOfReferenceUid: overlayDisplayedRef.frame_of_reference_uid,
-                        imageSize: displayedImageSize,
-                        viewportSize:
-                          bounds && bounds.width > 0 && bounds.height > 0
-                            ? { width: bounds.width, height: bounds.height }
-                            : undefined,
-                        settings: overlayDisplayedSettings,
-                      },
-                      masks.base,
-                    );
-                  },
-                },
-                {
-                  key: 'segment-tumor',
-                  label: 'Segment',
-                  title: 'Segment tumor from this rectangle',
-                  icon: <ScanLine className="w-4 h-4" />,
-                  variant: 'secondary',
-                  minSizeSpace: 'screen',
-                  disabled: isAligning || isOverlayComparing || !nativeAnnotationsAvailable,
-                  onConfirm: (masks) => {
-                    setTumorToolOpen(true);
-                    setTumorSeedBoxToStart({
-                      x0: masks.screen.x,
-                      y0: masks.screen.y,
-                      x1: masks.screen.x + masks.screen.width,
-                      y1: masks.screen.y + masks.screen.height,
-                    });
-                    setGtPolygonToolOpen(false);
-                  },
-                },
-              ]}
+              onAlign={startAlignment}
+              onSegment={(selection) => {
+                setTumorToolOpen(true);
+                setTumorSeedBoxToStart({
+                  x0: selection.x,
+                  y0: selection.y,
+                  x1: selection.x + selection.width,
+                  y1: selection.y + selection.height,
+                });
+                setGtPolygonToolOpen(false);
+              }}
             >
               {/*
             Space compare should feel instant.
@@ -600,7 +725,7 @@ export function OverlayView({
               {isAligning && alignmentProgress ? (
                 <OverlayAlignmentProgress progress={alignmentProgress} onAbort={abortAlignment} />
               ) : null}
-            </DragRectActionOverlay>
+            </OverlaySelectionSurface>
           </div>
 
           <OverlayStudyFooter

@@ -6,6 +6,11 @@ import {
   resliceDenseLongitudinalPlane,
   resliceStackToReferencePlane,
 } from '../src/utils/svr/longitudinalRegistration';
+import {
+  minimumBilateralAnatomicalRetention,
+  prepareAnatomicalPlaneLandmarks,
+  scoreAnatomicalPlaneLandmarks,
+} from '../src/utils/svr/anatomicalPlaneLandmarks';
 
 function signalAt(x: number, y: number, z: number): number {
   const central = Math.exp(-(x * x + y * y + z * z) / 80);
@@ -124,6 +129,24 @@ describe('svr/longitudinalRegistration', () => {
     expect(result.provenance.frameRelationship).toBe('different');
     expect(Math.abs(result.targetToReference.tx + 50)).toBeLessThan(1);
     expect(result.coverage).toBeGreaterThan(0.75);
+  });
+
+  it('optimizes physically indistinguishable cross-frame seed poses only once', async () => {
+    const result = await registerAndResliceLongitudinal({
+      referenceSlices: makeStack({ frameUid: 'reference-frame' }),
+      targetSlices: makeStack({ frameUid: 'target-frame' }),
+      referenceSliceIndex: 9,
+      maxDimension: 32,
+      maxSamples: 4000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.provenance.frameRelationship).toBe('different');
+    expect(result.diagnostics.optimizedHypothesisCount).toBe(1);
+    expect(result.diagnostics.optimizedAlternativeCount).toBe(0);
+    expect(result.score).toBeCloseTo(1, 12);
+    expect(result.targetToReference).toEqual({ tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 });
   });
 
   it('preserves anisotropic row and column spacing while sampling an exact reference plane', () => {
@@ -327,6 +350,139 @@ describe('svr/longitudinalRegistration', () => {
     expect(result.targetToReference).toEqual({ tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 });
     expect(result.nativeRefinement?.forwardCoverage).toBeCloseTo(result.nativeRefinement?.reverseCoverage ?? 0, 2);
     expect(result.pixels[9 * 19 + 9]).toBeGreaterThan(5);
+  });
+
+  it.each(['AX', 'COR', 'SAG'] as const)(
+    'uses lesion correspondence only for explicitly requested native %s through-plane localization',
+    (plane) => {
+      const rotate = (point: { x: number; y: number; z: number }) =>
+        plane === 'COR'
+          ? { x: point.x, y: point.z, z: -point.y }
+          : plane === 'SAG'
+            ? { x: point.z, y: point.y, z: -point.x }
+            : point;
+      const orient = (stack: SvrReconstructionSlice[]) =>
+        stack.map((slice) => ({
+          ...slice,
+          ippMm: rotate(slice.ippMm),
+          rowDir: rotate(slice.rowDir),
+          colDir: rotate(slice.colDir),
+          normalDir: rotate(slice.normalDir),
+        }));
+      const reference = orient(makeStack({ frameUid: 'reference-frame' }));
+      const target = orient(makeStack({ frameUid: 'target-frame' }));
+      const mask = new Uint8Array(19 * 19);
+      for (let row = 5; row <= 13; row++) mask.fill(1, row * 19 + 5, row * 19 + 14);
+      const addLesion = (slice: SvrReconstructionSlice, contrast: number) => {
+        slice.pixels[9 * 19 + 9]! += contrast;
+      };
+      addLesion(reference[9]!, 3);
+      for (const index of [11, 12, 13]) addLesion(target[index]!, index === 12 ? 3 : 2);
+
+      const options = {
+        targetSlices: target,
+        referencePlane: reference[9]!,
+        nativeReferenceSlices: reference.slice(7, 12),
+        nativeReferenceSliceIndex: 2,
+        referenceExclusionMask: mask,
+        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        centerMm: { x: 0, y: 0, z: 0 },
+      };
+      const anatomy = resliceDenseLongitudinalPlane(options);
+      const focused = resliceDenseLongitudinalPlane({ ...options, alignmentFocus: 'tumor' });
+
+      expect(anatomy.ok).toBe(true);
+      expect(focused.ok).toBe(true);
+      if (!anatomy.ok || !focused.ok) return;
+      const normal = reference[9]!.normalDir;
+      const throughPlaneOffset = (rigid: NonNullable<typeof anatomy.targetToReference>) =>
+        rigid.tx * normal.x + rigid.ty * normal.y + rigid.tz * normal.z;
+
+      expect(Math.abs(throughPlaneOffset(anatomy.targetToReference!))).toBeLessThan(0.5);
+      expect(throughPlaneOffset(focused.targetToReference!)).toBeLessThan(-1.5);
+      expect(focused.pixels[9 * 19 + 9]).toBeGreaterThan(anatomy.pixels[9 * 19 + 9]! + 0.5);
+    },
+  );
+
+  it('keeps already verified bilateral anatomy when an opted-in tumor match would erase both orbital cavities', () => {
+    const size = 64;
+    const makeOrbitalStack = (frameUid: string) =>
+      makeStack({ frameUid }).map((slice) => {
+        const pixels = new Float32Array(size * size);
+        for (let row = 0; row < size; row++) {
+          for (let column = 0; column < size; column++) {
+            const x = (column - size / 2) / (size * 0.42);
+            const y = (row - size / 2) / (size * 0.44);
+            if (x * x + y * y >= 1) continue;
+            pixels[row * size + column] = 0.38 + 0.2 * Math.cos(x * 2) * Math.cos(y * 2);
+            for (const center of [size * 0.35, size * 0.65]) {
+              if (((column - center) / (size * 0.075)) ** 2 + ((row - size * 0.23) / (size * 0.055)) ** 2 < 1) {
+                pixels[row * size + column] = 0;
+              }
+            }
+          }
+        }
+        return {
+          ...slice,
+          pixels,
+          dsRows: size,
+          dsCols: size,
+          ippMm: { ...slice.ippMm, x: -(size - 1) / 2, y: -(size - 1) / 2 },
+        };
+      });
+    const reference = makeOrbitalStack('reference-frame');
+    const target = makeOrbitalStack('target-frame');
+    const mask = new Uint8Array(size * size);
+    for (let row = 24; row <= 40; row++) mask.fill(1, row * size + 24, row * size + 41);
+    const addTumor = (slice: SvrReconstructionSlice, contrast: number) => {
+      for (let row = 30; row <= 33; row++) {
+        for (let column = 30; column <= 33; column++) slice.pixels[row * size + column]! += contrast;
+      }
+    };
+    addTumor(reference[9]!, 1);
+    addTumor(target[9]!, 0.4);
+    addTumor(target[12]!, 3);
+    for (let row = 10; row <= 21; row++) {
+      for (let column = 12; column <= 51; column++) {
+        if (target[12]!.pixels[row * size + column] === 0) {
+          target[12]!.pixels[row * size + column] = 0.5;
+        }
+      }
+    }
+    const prepared = prepareAnatomicalPlaneLandmarks(
+      {
+        pixels: reference[9]!.pixels,
+        rows: size,
+        cols: size,
+        ippMm: reference[9]!.ippMm,
+        rowDir: reference[9]!.rowDir,
+        colDir: reference[9]!.colDir,
+        rowSpacingDsMm: reference[9]!.rowSpacingDsMm,
+        colSpacingDsMm: reference[9]!.colSpacingDsMm,
+      },
+      mask,
+    );
+    expect(prepared?.bilateral).toBeDefined();
+    if (!prepared) return;
+
+    const options = {
+      targetSlices: target,
+      referencePlane: reference[9]!,
+      nativeReferenceSlices: reference.slice(7, 12),
+      nativeReferenceSliceIndex: 2,
+      referenceExclusionMask: mask,
+      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      centerMm: { x: 0, y: 0, z: 0 },
+    };
+    const anatomy = resliceDenseLongitudinalPlane(options);
+    const result = resliceDenseLongitudinalPlane({ ...options, alignmentFocus: 'tumor' });
+
+    expect(anatomy.ok).toBe(true);
+    expect(result.ok).toBe(true);
+    if (!anatomy.ok || !result.ok) return;
+    expect(scoreAnatomicalPlaneLandmarks(prepared, result)).toBeGreaterThan(0);
+    expect(minimumBilateralAnatomicalRetention(prepared, result)).toBeGreaterThanOrEqual(0.35);
+    expect(result.pixels[32 * size + 32]).toBeGreaterThan(anatomy.pixels[32 * size + 32]! + 0.5);
   });
 
   it('never reports more independent anatomical blocks than actually supported full or held-out samples', () => {

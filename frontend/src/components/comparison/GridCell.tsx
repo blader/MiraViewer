@@ -1,5 +1,5 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Link2, ScanLine } from 'lucide-react';
+import { Crosshair, Link2, ScanLine } from 'lucide-react';
 import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
@@ -78,6 +78,27 @@ export function GridCell({
     );
   }
 
+  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
+    const bounds = studyCellRef.current?.getBoundingClientRect();
+    void startAlignAll(
+      {
+        date,
+        seriesUid: refData.series_uid,
+        sliceIndex: effectiveIdx,
+        sliceCount: refData.instance_count,
+        patientKey: refData.patient_key,
+        studyUid: refData.study_uid ?? refData.study_id,
+        frameOfReferenceUid: refData.frame_of_reference_uid,
+        imageSize: displayedImageSize,
+        viewportSize:
+          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
+        settings,
+        ...(alignmentFocus ? { alignmentFocus } : {}),
+      },
+      exclusion,
+    );
+  };
+
   return (
     <div
       data-grid-cell-date={date}
@@ -141,27 +162,17 @@ export function GridCell({
               variant: 'primary',
               minSizeSpace: 'base',
               disabled: overlayColumns.length < 2 || isAligning,
-              onConfirm: (masks) => {
-                const bounds = studyCellRef.current?.getBoundingClientRect();
-                void startAlignAll(
-                  {
-                    date,
-                    seriesUid: refData.series_uid,
-                    sliceIndex: effectiveIdx,
-                    sliceCount: refData.instance_count,
-                    patientKey: refData.patient_key,
-                    studyUid: refData.study_uid ?? refData.study_id,
-                    frameOfReferenceUid: refData.frame_of_reference_uid,
-                    imageSize: displayedImageSize,
-                    viewportSize:
-                      bounds && bounds.width > 0 && bounds.height > 0
-                        ? { width: bounds.width, height: bounds.height }
-                        : undefined,
-                    settings,
-                  },
-                  masks.base,
-                );
-              },
+              onConfirm: (masks) => startAlignment(masks.base),
+            },
+            {
+              key: 'align-tumor',
+              label: 'Align Tumor',
+              title: 'Match tumor across dates; uses pixels inside the selected region',
+              icon: <Crosshair className="w-4 h-4" />,
+              variant: 'secondary',
+              minSizeSpace: 'base',
+              disabled: overlayColumns.length < 2 || isAligning || !nativeAnnotationsAvailable,
+              onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
             },
             {
               key: 'segment-tumor',

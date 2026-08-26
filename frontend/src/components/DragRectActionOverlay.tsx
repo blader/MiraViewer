@@ -202,6 +202,115 @@ export interface DragRectActionOverlayProps {
   children: React.ReactNode;
 }
 
+type DragRectSelection = {
+  rect: RectPx;
+  masks: DragRectActionMasks;
+  viewportSize: { width: number; height: number };
+};
+
+type DragRectActionToolbar = { actionWidth: number; left: number; top: number; closeLeft: number };
+
+function positionSelectionActions(selection: DragRectSelection, actions: DragRectAction[]): DragRectActionToolbar {
+  const { width, height } = selection.viewportSize;
+  const horizontalPadding = 6;
+  const closeButtonWidth = 44;
+  const closeButtonGap = 6;
+  const preferredActionWidth = Math.max(
+    96,
+    ...actions.map((action) => action.label.length * 8 + (action.icon ? 24 : 0) + 28),
+  );
+  const actionWidth = Math.max(
+    0,
+    Math.min(preferredActionWidth, width - horizontalPadding * 2 - closeButtonWidth - closeButtonGap),
+  );
+  const groupWidth = closeButtonWidth + closeButtonGap + actionWidth;
+  const minimumGroupLeft = horizontalPadding;
+  const maximumGroupLeft = Math.max(minimumGroupLeft, width - horizontalPadding - groupWidth);
+  const rightGroupLeft = selection.rect.x + selection.rect.width + horizontalPadding;
+  const leftGroupLeft = selection.rect.x - horizontalPadding - groupWidth;
+  const groupLeft =
+    rightGroupLeft <= maximumGroupLeft
+      ? rightGroupLeft
+      : leftGroupLeft >= minimumGroupLeft
+        ? leftGroupLeft
+        : clamp(selection.rect.x + horizontalPadding, minimumGroupLeft, maximumGroupLeft);
+  const left = groupLeft + closeButtonWidth + closeButtonGap;
+  const stackHeight = Math.max(closeButtonWidth, (actions.length - 1) * 48 + closeButtonWidth);
+  const top = clamp(selection.rect.y + horizontalPadding, 2, Math.max(2, height - stackHeight - 2));
+  return { actionWidth, left, top, closeLeft: groupLeft };
+}
+
+function SelectionActionButtons({
+  selection,
+  actions,
+  toolbar,
+  disabled,
+  minMaskSize,
+  onClear,
+}: {
+  selection: DragRectSelection;
+  actions: DragRectAction[];
+  toolbar: DragRectActionToolbar;
+  disabled: boolean;
+  minMaskSize: number;
+  onClear: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        data-drag-rect-action-button="true"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onClear();
+        }}
+        aria-label="Clear selection"
+        className="absolute pointer-events-auto flex min-h-11 min-w-11 items-center justify-center rounded-[3px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+        style={{ left: toolbar.closeLeft, top: toolbar.top }}
+        title="Clear selection"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </button>
+
+      {actions.map((action, actionIndex) => {
+        const mask = action.minSizeSpace === 'screen' ? selection.masks.screen : selection.masks.base;
+        const enabled = !disabled && mask.width >= minMaskSize && mask.height >= minMaskSize && !action.disabled;
+        const variant = action.variant ?? 'primary';
+        const colors = enabled
+          ? variant === 'primary'
+            ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
+            : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] border-[var(--border-color)]'
+          : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
+
+        return (
+          <button
+            key={action.key}
+            type="button"
+            data-drag-rect-action-button="true"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!enabled) return;
+              action.onConfirm(selection.masks);
+              onClear();
+            }}
+            disabled={!enabled}
+            className={`absolute pointer-events-auto flex min-h-11 min-w-0 items-center gap-2 rounded-[3px] border px-3 py-2 text-sm font-medium transition-colors ${colors}`}
+            style={{ left: toolbar.left, top: toolbar.top + actionIndex * 48, maxWidth: toolbar.actionWidth }}
+            title={action.title}
+          >
+            {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
+            <span className="truncate">{action.label}</span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 export function DragRectActionOverlay({
   geometry,
   imageSize,
@@ -222,7 +331,7 @@ export function DragRectActionOverlay({
     didExceedThreshold: boolean;
   } | null>(null);
 
-  const [selection, setSelection] = useState<{ rect: RectPx; masks: DragRectActionMasks } | null>(null);
+  const [selection, setSelection] = useState<DragRectSelection | null>(null);
 
   const didDragRef = useRef(false);
 
@@ -324,7 +433,7 @@ export function DragRectActionOverlay({
 
         const maskBase = computeBaseMaskFromScreenRect(rect, size, geometry, imageSize ?? size);
         const maskScreen = computeScreenMaskFromScreenRect(rect, size);
-        setSelection({ rect, masks: { base: maskBase, screen: maskScreen } });
+        setSelection({ rect, masks: { base: maskBase, screen: maskScreen }, viewportSize: size });
       }
 
       setDrag(null);
@@ -374,20 +483,7 @@ export function DragRectActionOverlay({
   }, [clearSelection, selection]);
 
   const effectiveRect = selection?.rect ?? currentRect;
-
-  const baseOk = (() => {
-    const m = selection?.masks.base;
-    if (!m) return false;
-    return m.width >= minMaskSize && m.height >= minMaskSize;
-  })();
-
-  const screenOk = (() => {
-    const m = selection?.masks.screen;
-    if (!m) return false;
-    return m.width >= minMaskSize && m.height >= minMaskSize;
-  })();
-
-  const canRunAnyAction = !!selection && !disabled;
+  const toolbar = selection ? positionSelectionActions(selection, actions) : null;
 
   return (
     <div
@@ -417,65 +513,16 @@ export function DragRectActionOverlay({
             }}
           />
 
-          {selection && (
-            <>
-              {/* Close button */}
-              <button
-                type="button"
-                data-drag-rect-action-button="true"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  clearSelection();
-                }}
-                aria-label="Clear selection"
-                className="absolute pointer-events-auto flex min-h-11 min-w-11 items-center justify-center rounded-[3px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
-                style={{ left: effectiveRect.x + 6, top: effectiveRect.y + 6 }}
-                title="Clear selection"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </button>
-
-              {/* Action buttons */}
-              {actions.map((action, actionIdx) => {
-                const space = action.minSizeSpace ?? 'base';
-                const sizeOk = space === 'screen' ? screenOk : baseOk;
-                const enabled = canRunAnyAction && sizeOk && !action.disabled;
-                const variant = action.variant ?? 'primary';
-
-                const cls = enabled
-                  ? variant === 'primary'
-                    ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
-                    : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] border-[var(--border-color)]'
-                  : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
-
-                return (
-                  <button
-                    key={action.key}
-                    type="button"
-                    data-drag-rect-action-button="true"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!selection) return;
-                      if (!enabled) return;
-                      action.onConfirm(selection.masks);
-                      clearSelection();
-                    }}
-                    disabled={!enabled}
-                    className={`absolute pointer-events-auto flex min-h-11 items-center gap-2 rounded-[3px] border px-3 py-2 text-sm font-medium transition-colors ${cls}`}
-                    style={{ left: effectiveRect.x + 56, top: effectiveRect.y + 6 + actionIdx * 48 }}
-                    title={action.title}
-                  >
-                    {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
-                    {action.label}
-                  </button>
-                );
-              })}
-            </>
-          )}
+          {selection && toolbar ? (
+            <SelectionActionButtons
+              selection={selection}
+              actions={actions}
+              toolbar={toolbar}
+              disabled={disabled}
+              minMaskSize={minMaskSize}
+              onClear={clearSelection}
+            />
+          ) : null}
         </div>
       )}
     </div>

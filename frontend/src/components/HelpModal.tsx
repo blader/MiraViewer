@@ -70,12 +70,15 @@ export function HelpModal({ onClose }: HelpModalProps) {
           <ul className="space-y-2">
             <li>
               <Label>Drag a rectangle</Label> on any image (Grid or Overlay), then choose an action:
-              <Label>Align All</Label> (use the rectangle as an exclusion region) or <Label>Segment</Label> (start a
-              tumor segmentation from that rectangle).
+              <Label>Align All</Label> (exclude the selected region), <Label>Align Tumor</Label> (match its tumor
+              slice), or <Label>Segment</Label> (start a tumor segmentation).
             </li>
             <li>
-              For alignment, the exclusion region tells the algorithm to ignore that area (e.g. a tumor) when matching
-              slices.
+              <Label>Align All</Label> ignores pixels inside the selected region when matching scans.
+            </li>
+            <li>
+              <Label>Align Tumor</Label> still aligns pose using surrounding healthy anatomy, then uses pixels inside
+              the selected region only to match the tumor slice.
             </li>
             <li>
               Press <Kbd>Esc</Kbd> or the <Label>X</Label> button to clear the selection.

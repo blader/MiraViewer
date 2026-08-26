@@ -13,7 +13,7 @@
  */
 
 import type { VolumeDims } from './trilinear';
-import { sampleTrilinear } from './trilinear';
+import { sampleTrilinear, sampleTrilinearWithSupport } from './trilinear';
 import type { Vec3 } from './vec3';
 import { cross, normalize, v3 } from './vec3';
 import { assertNotAborted, clampAbs, withinTrilinearSupport, yieldToMain } from './svrUtils';
@@ -387,6 +387,7 @@ export function scoreNcc(params: {
 
   const obs = samples.obs;
   const pos = samples.pos;
+  const interpolatedObservation = occupancy ? new Float64Array(2) : undefined;
 
   for (let i = 0; i < samples.count; i++) {
     const acquiredWeight = samples.weights?.[i] ?? 1;
@@ -408,9 +409,14 @@ export function scoreNcc(params: {
     const vz = (centerZ + rot[6] * dx + rot[7] * dy + rot[8] * dz + rigid.tz - originZ) * invVox;
 
     if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
-    if (occupancy && sampleTrilinear(occupancy, dims, vx, vy, vz) < 0.5) continue;
-
-    const b = sampleTrilinear(refVolume, dims, vx, vy, vz);
+    let b: number;
+    if (occupancy && interpolatedObservation) {
+      sampleTrilinearWithSupport(refVolume, occupancy, dims, vx, vy, vz, interpolatedObservation);
+      if (interpolatedObservation[1]! < 0.5) continue;
+      b = interpolatedObservation[0]! / interpolatedObservation[1]!;
+    } else {
+      b = sampleTrilinear(refVolume, dims, vx, vy, vz);
+    }
 
     sumA += acquiredWeight * a;
     sumB += acquiredWeight * b;

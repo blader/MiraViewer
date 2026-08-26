@@ -9,6 +9,7 @@ import {
 } from '../outputPlaneGrid';
 import { downsampledSliceOriginMm, getSliceGeometryFromInstance, sliceCornersMm } from './dicomGeometry';
 import {
+  attenuateLongitudinalPlaneTilt,
   longitudinalRegistrationFailure,
   type DenseLongitudinalResliceOptions,
   type LongitudinalReferencePlane,
@@ -16,12 +17,26 @@ import {
   type LongitudinalRegistrationResult,
 } from './longitudinalRegistration';
 import type { SvrReconstructionSlice } from './reconstructionCore';
-import { applyRigidToPoint, invertRigidParams, mat3FromEulerXYZ, type RigidParams } from './rigidRegistration';
+import { resample2dAreaAverageWithValidity } from './resample2d';
+import {
+  applyRigidToPoint,
+  invertRigidParams,
+  mat3FromEulerXYZ,
+  mat3MulVec3,
+  type RigidParams,
+} from './rigidRegistration';
 import { runLongitudinalDenseReslice } from './runLongitudinalRegistration';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { dot, v3, type Vec3 } from './vec3';
 
 type SeriesFrameManifest = Awaited<ReturnType<typeof getSeriesFrameManifest>>;
+
+export type LongitudinalReferenceAnatomy = {
+  manifest: SeriesFrameManifest;
+  sourceIndex: number;
+  rigidTransform: [number, number, number, number, number, number];
+  rotationCenterMm: [number, number, number];
+};
 
 export type PreparedLongitudinalRegistrationInput = {
   referenceSlices: SvrReconstructionSlice[];
@@ -42,6 +57,7 @@ export type PreparedLongitudinalReferenceInput = {
   readonly maxSlices: number;
   readonly outputMaxDimension: number;
   readonly outputGrid?: OutputPlaneGrid;
+  readonly referenceAnatomy?: LongitudinalReferenceAnatomy;
 };
 
 export type PrepareLongitudinalOptions = {
@@ -52,6 +68,7 @@ export type PrepareLongitudinalOptions = {
   outputMaxDimension?: number;
   outputGrid?: OutputPlaneGrid;
   preparedReference?: PreparedLongitudinalReferenceInput;
+  referenceAnatomy?: LongitudinalReferenceAnatomy;
 };
 
 export type PreparedDenseLongitudinalResliceInput = Omit<DenseLongitudinalResliceOptions, 'signal'> & {
@@ -68,7 +85,16 @@ type DenseLongitudinalOptions = {
   outputGrid?: OutputPlaneGrid;
   referenceManifest?: SeriesFrameManifest;
   referenceSliceIndex?: number;
+  referenceAnatomy?: LongitudinalReferenceAnatomy;
   referenceExclusionMask?: Uint8Array;
+  alignmentFocus?: 'anatomy' | 'tumor';
+  referenceImage?: {
+    pixels: Float32Array;
+    valid: Uint8Array;
+    rows: number;
+    columns: number;
+    outputGrid: OutputPlaneGrid;
+  };
   nativeCandidatePoses?: readonly RigidParams[];
 };
 
@@ -80,14 +106,74 @@ function outputPlaneCorners(grid: OutputPlaneGrid): Vec3[] {
   );
 }
 
+function verifyReferenceAnatomy(
+  anchorManifest: SeriesFrameManifest | undefined,
+  anchorSourceIndex: number | undefined,
+  anatomy: LongitudinalReferenceAnatomy | undefined,
+): void {
+  if (!anatomy) return;
+  if (!anchorManifest || anchorSourceIndex === undefined || !anchorManifest.frames[anchorSourceIndex]) {
+    throw new Error('Selected reference anatomy requires its verified acquired physical anchor');
+  }
+  if (anatomy.manifest.patientKey !== anchorManifest.patientKey) {
+    throw new Error('Selected reference anatomy and its acquired anchor must belong to the same patient');
+  }
+  if (!Number.isSafeInteger(anatomy.sourceIndex) || !anatomy.manifest.frames[anatomy.sourceIndex]) {
+    throw new Error('Selected reference anatomy requires a verified acquired source frame');
+  }
+  if (
+    anatomy.rigidTransform.length !== 6 ||
+    anatomy.rotationCenterMm.length !== 3 ||
+    [...anatomy.rigidTransform, ...anatomy.rotationCenterMm].some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error('Selected reference anatomy requires a finite verified rigid transform');
+  }
+}
+
+function transformReferenceAnatomySlices(
+  slices: readonly SvrReconstructionSlice[],
+  sourceIndices: readonly number[],
+  anatomy: LongitudinalReferenceAnatomy,
+  anchorManifest: SeriesFrameManifest,
+  anchorSourceIndex: number,
+): SvrReconstructionSlice[] {
+  const [tx, ty, tz, rx, ry, rz] = anatomy.rigidTransform;
+  const rotation = mat3FromEulerXYZ(rx, ry, rz);
+  const center = v3(...anatomy.rotationCenterMm);
+  const translation = v3(tx, ty, tz);
+  const anchor = getSliceGeometryFromInstance(anchorManifest.frames[anchorSourceIndex]!);
+
+  return slices.map((slice, index) => {
+    const transformed = {
+      ...slice,
+      ippMm: applyRigidToPoint(slice.ippMm, center, rotation, translation),
+      rowDir: mat3MulVec3(rotation, slice.rowDir.x, slice.rowDir.y, slice.rowDir.z),
+      colDir: mat3MulVec3(rotation, slice.colDir.x, slice.colDir.y, slice.colDir.z),
+      normalDir: mat3MulVec3(rotation, slice.normalDir.x, slice.normalDir.y, slice.normalDir.z),
+      frameOfReferenceUid: anchorManifest.frameOfReferenceUid,
+    };
+    if (sourceIndices[index] !== anatomy.sourceIndex) return transformed;
+    return {
+      ...transformed,
+      ippMm: downsampledSliceOriginMm(anchor, slice.dsRows, slice.dsCols),
+      rowDir: anchor.rowDir,
+      colDir: anchor.colDir,
+      normalDir: anchor.normalDir,
+      rowSpacingDsMm: (anchor.rowSpacingMm * anchor.rows) / slice.dsRows,
+      colSpacingDsMm: (anchor.colSpacingMm * anchor.cols) / slice.dsCols,
+    };
+  });
+}
+
 function selectNativeReferenceContext(options: DenseLongitudinalOptions): {
   manifest: SeriesFrameManifest;
   sourceIndices: number[];
   selectedIndex: number;
   maxDimension: number;
 } {
-  const manifest = options.referenceManifest;
-  const selectedIndex = options.referenceSliceIndex;
+  verifyReferenceAnatomy(options.referenceManifest, options.referenceSliceIndex, options.referenceAnatomy);
+  const manifest = options.referenceAnatomy?.manifest ?? options.referenceManifest;
+  const selectedIndex = options.referenceAnatomy?.sourceIndex ?? options.referenceSliceIndex;
   const selected = selectedIndex === undefined ? undefined : manifest?.frames[selectedIndex];
   if (!manifest || !selected || selectedIndex === undefined) {
     throw new Error('Native refinement requires the selected physical reference frame');
@@ -242,10 +328,16 @@ async function decodeManifestSlices(
       rows,
       cols,
     );
+    const valid = new Uint8Array(validity.length);
+    for (let index = 0; index < validity.length; index++) {
+      const support = validity[index]!;
+      if (Number.isFinite(support) && support >= 1 - 1e-6) valid[index] = 1;
+      else pixels[index] = 0;
+    }
 
     output.push({
       pixels,
-      valid: Uint8Array.from(validity, (support) => (support > 0 ? 1 : 0)),
+      valid,
       sopInstanceUid: frame.sopInstanceUid,
       dsRows: rows,
       dsCols: cols,
@@ -289,6 +381,10 @@ function normalizeLongitudinalPreparation(
   if (referenceManifest.frames.length < 2 || targetManifest.frames.length < 2) {
     throw new Error('Longitudinal registration requires at least two frames in each physical stack');
   }
+  verifyReferenceAnatomy(referenceManifest, referenceSliceIndex, options.referenceAnatomy);
+  if (options.referenceAnatomy && options.referenceAnatomy.manifest.frames.length < 2) {
+    throw new Error('Selected reference anatomy requires at least two acquired physical slices');
+  }
   if (options.outputGrid) {
     validateOutputGridReference(
       options.outputGrid,
@@ -322,19 +418,27 @@ export async function prepareLongitudinalReferenceInput(
 ): Promise<PreparedLongitudinalReferenceInput> {
   assertNotAborted(options.signal);
   const bounds = normalizeLongitudinalPreparation(referenceManifest, referenceSliceIndex, options);
-  const referenceSourceIndices = selectPhysicallySpacedIndices(
-    referenceManifest,
-    bounds.maxSlices,
-    referenceSliceIndex,
-  );
-  const referenceSlices = await decodeManifestSlices(
-    referenceManifest,
+  const anatomy = options.referenceAnatomy;
+  const sourceManifest = anatomy?.manifest ?? referenceManifest;
+  const sourceIndex = anatomy?.sourceIndex ?? referenceSliceIndex;
+  const referenceSourceIndices = selectPhysicallySpacedIndices(sourceManifest, bounds.maxSlices, sourceIndex);
+  let referenceSlices = await decodeManifestSlices(
+    sourceManifest,
     referenceSourceIndices,
     bounds.maxDimension,
     options.signal,
-    referenceSliceIndex,
+    sourceIndex,
     bounds.outputMaxDimension,
   );
+  if (anatomy) {
+    referenceSlices = transformReferenceAnatomySlices(
+      referenceSlices,
+      referenceSourceIndices,
+      anatomy,
+      referenceManifest,
+      referenceSliceIndex,
+    );
+  }
   assertNotAborted(options.signal);
   const retainedBytes = referenceSlices.reduce(
     (total, slice) => total + slice.pixels.byteLength + (slice.valid?.byteLength ?? 0),
@@ -346,11 +450,12 @@ export async function prepareLongitudinalReferenceInput(
   return {
     referenceManifest,
     referenceSlices,
-    referenceSliceIndex: referenceSourceIndices.indexOf(referenceSliceIndex),
+    referenceSliceIndex: referenceSourceIndices.indexOf(sourceIndex),
     referenceSourceIndex: referenceSliceIndex,
     referenceSourceIndices,
     ...bounds,
     ...(options.outputGrid ? { outputGrid: options.outputGrid } : {}),
+    ...(anatomy ? { referenceAnatomy: anatomy } : {}),
   };
 }
 
@@ -372,6 +477,7 @@ export async function prepareLongitudinalRegistrationInput(
   if (
     preparedReference.referenceManifest !== referenceManifest ||
     preparedReference.referenceSourceIndex !== referenceSliceIndex ||
+    preparedReference.referenceAnatomy !== options.referenceAnatomy ||
     preparedReference.maxDimension !== bounds.maxDimension ||
     preparedReference.maxSlices !== bounds.maxSlices ||
     preparedReference.outputMaxDimension !== bounds.outputMaxDimension ||
@@ -380,7 +486,9 @@ export async function prepareLongitudinalRegistrationInput(
       options.outputGrid &&
       outputGridFingerprint(preparedReference.outputGrid) !== outputGridFingerprint(options.outputGrid)) ||
     preparedReference.referenceSlices[preparedReference.referenceSliceIndex]?.sopInstanceUid !==
-      referenceManifest.frames[referenceSliceIndex]!.sopInstanceUid
+      (options.referenceAnatomy
+        ? options.referenceAnatomy.manifest.frames[options.referenceAnatomy.sourceIndex]!.sopInstanceUid
+        : referenceManifest.frames[referenceSliceIndex]!.sopInstanceUid)
   ) {
     throw new Error('The prepared reference does not match this alignment run, source frame, or output grid');
   }
@@ -413,14 +521,14 @@ export async function prepareLongitudinalRegistrationInput(
   };
 }
 
-/** Load every native slice physically intersecting the already-registered reference plane. */
-export async function prepareDenseLongitudinalResliceInput(
+/** Select the complete bounded acquired envelope without decoding or inventing support. */
+export function selectDenseLongitudinalSourceEnvelope(
   targetManifest: SeriesFrameManifest,
-  selectedReference: SvrReconstructionSlice,
+  referencePlane: LongitudinalReferencePlane,
   targetToReference: RigidParams,
   centerMm: Vec3,
   options: DenseLongitudinalOptions = {},
-): Promise<PreparedDenseLongitudinalResliceInput> {
+): { sourceIndices: number[]; sliceSpacingMm: number; sourceDepthSpanMm: number; maxDimension: number } {
   assertNotAborted(options.signal);
   const firstFrame = targetManifest.frames[0];
   if (!firstFrame) throw new Error('A native-fidelity reference plane requires a target frame manifest');
@@ -434,11 +542,6 @@ export async function prepareDenseLongitudinalResliceInput(
     throw new Error('Native-fidelity reference reslicing requires positive target slice spacing');
   }
 
-  // The coarse worker owns and detaches selectedReference pixels/support. Final
-  // resampling needs only the immutable geometry of its native reference plane.
-  const { pixels: _detachedPixels, valid: _detachedValidity, ...referencePlane } = selectedReference;
-  void _detachedPixels;
-  void _detachedValidity;
   if (options.outputGrid) validateOutputPlaneGrid(options.outputGrid);
   const corners = options.outputGrid
     ? outputPlaneCorners(options.outputGrid)
@@ -468,22 +571,73 @@ export async function prepareDenseLongitudinalResliceInput(
   const sourceCorners = [...corners];
   if (nativeCandidatePoses.length > 1 && options.referenceManifest) {
     const context = selectNativeReferenceContext(options);
+    const anatomy = options.referenceAnatomy;
+    const rotation = anatomy
+      ? mat3FromEulerXYZ(anatomy.rigidTransform[3], anatomy.rigidTransform[4], anatomy.rigidTransform[5])
+      : null;
+    const center = anatomy ? v3(...anatomy.rotationCenterMm) : null;
+    const translation = anatomy
+      ? v3(anatomy.rigidTransform[0], anatomy.rigidTransform[1], anatomy.rigidTransform[2])
+      : null;
     for (const index of context.sourceIndices) {
       const geometry = getSliceGeometryFromInstance(context.manifest.frames[index]!);
-      sourceCorners.push(...sliceCornersMm(geometry));
+      const contextCorners = sliceCornersMm(geometry);
+      sourceCorners.push(
+        ...(rotation && center && translation
+          ? contextCorners.map((corner) => applyRigidToPoint(corner, center, rotation, translation))
+          : contextCorners),
+      );
     }
   }
-  const depths = nativeCandidatePoses.flatMap((candidate) => {
+  const candidateDepths = (candidate: RigidParams, candidateCorners: readonly Vec3[] = sourceCorners): number[] => {
     const inverse = invertRigidParams(candidate);
     const rotation = mat3FromEulerXYZ(inverse.rx, inverse.ry, inverse.rz);
     const translation = v3(inverse.tx, inverse.ty, inverse.tz);
-    return sourceCorners.map((corner) =>
+    return candidateCorners.map((corner) =>
       dot(applyRigidToPoint(corner, centerMm, rotation, translation), firstGeometry.normalDir),
     );
-  });
-  const minimumDepth = Math.min(...depths) - spacing;
-  const maximumDepth = Math.max(...depths) + spacing;
+  };
+  const depths = nativeCandidatePoses.flatMap((candidate) => candidateDepths(candidate));
+  let minimumDepth = Math.min(...depths) - spacing;
+  let maximumDepth = Math.max(...depths) + spacing;
+  const maximumSlices = Math.max(2, Math.min(96, Math.round(options.maxSlices ?? 96)));
+  const maxDimension = Math.max(
+    8,
+    Math.min(
+      1024,
+      Math.max(
+        Math.round(options.maxDimension ?? 512),
+        options.outputGrid ? Math.max(options.outputGrid.rows, options.outputGrid.columns) : 0,
+      ),
+    ),
+  );
+  const frameBytes = (index: number): number => {
+    const frame = targetManifest.frames[index]!;
+    const scale = Math.min(1, maxDimension / Math.max(frame.rows, frame.columns));
+    return (
+      Math.max(2, Math.round(frame.rows * scale)) *
+      Math.max(2, Math.round(frame.columns * scale)) *
+      (Float32Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
+    );
+  };
+  const referenceFrame = options.referenceManifest?.frameOfReferenceUid;
+  const distinctFrame =
+    !referenceFrame || !targetManifest.frameOfReferenceUid || referenceFrame !== targetManifest.frameOfReferenceUid;
+  const normal = referencePlane.normalDir;
+  const axialPlane = Math.abs(normal.z) >= 0.9;
+  const correctAxialAnatomy = Boolean(
+    options.referenceExclusionMask && options.referenceManifest && distinctFrame && axialPlane,
+  );
+  const obliqueDepths = correctAxialAnatomy
+    ? candidateDepths(
+        attenuateLongitudinalPlaneTilt(targetToReference, centerMm, referencePlane, options.outputGrid, 0.5),
+        corners,
+      )
+    : [];
+  const obliqueMinimumDepth = Math.min(minimumDepth, ...obliqueDepths.map((depth) => depth - spacing));
+  const obliqueMaximumDepth = Math.max(maximumDepth, ...obliqueDepths.map((depth) => depth + spacing));
   const sourceIndices: number[] = [];
+  const obliqueSourceIndices: number[] = [];
   for (let index = 0; index < targetManifest.frames.length; index++) {
     const frame = targetManifest.frames[index]!;
     const geometry = getSliceGeometryFromInstance(frame);
@@ -503,40 +657,100 @@ export async function prepareDenseLongitudinalResliceInput(
     }
     const depth = dot(geometry.ippMm, firstGeometry.normalDir);
     if (depth >= minimumDepth - 1e-5 && depth <= maximumDepth + 1e-5) sourceIndices.push(index);
+    if (correctAxialAnatomy && depth >= obliqueMinimumDepth - 1e-5 && depth <= obliqueMaximumDepth + 1e-5) {
+      obliqueSourceIndices.push(index);
+    }
   }
   if (sourceIndices.length < 2) {
     throw new Error('The registered reference plane does not intersect adjacent native target slices');
   }
-  const maximumSlices = Math.max(2, Math.min(96, Math.round(options.maxSlices ?? 96)));
   if (sourceIndices.length > maximumSlices) {
     throw new Error(
       `The registered reference plane requires ${sourceIndices.length} native frames, exceeding its ${maximumSlices}-frame native-slice safety budget`,
     );
   }
-  const maxDimension = Math.max(
-    8,
-    Math.min(
-      1024,
-      Math.max(
-        Math.round(options.maxDimension ?? 512),
-        options.outputGrid ? Math.max(options.outputGrid.rows, options.outputGrid.columns) : 0,
-      ),
-    ),
-  );
-  const expectedBytes = sourceIndices.reduce((bytes, index) => {
-    const frame = targetManifest.frames[index]!;
-    const scale = Math.min(1, maxDimension / Math.max(frame.rows, frame.columns));
-    return (
-      bytes +
-      Math.max(2, Math.round(frame.rows * scale)) *
-        Math.max(2, Math.round(frame.columns * scale)) *
-        (Float32Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
-    );
-  }, 0);
+  let expectedBytes = sourceIndices.reduce((bytes, index) => bytes + frameBytes(index), 0);
   if (expectedBytes > 128 * 1024 * 1024) {
     throw new Error('The registered reference plane exceeds its native-frame memory safety budget');
   }
-  const targetSlices = await decodeManifestSlices(targetManifest, sourceIndices, maxDimension, options.signal);
+  const obliqueBytes = obliqueSourceIndices.reduce((bytes, index) => bytes + frameBytes(index), 0);
+  if (
+    obliqueSourceIndices.length > sourceIndices.length &&
+    obliqueSourceIndices.length <= maximumSlices &&
+    obliqueBytes <= 128 * 1024 * 1024
+  ) {
+    sourceIndices.splice(0, sourceIndices.length, ...obliqueSourceIndices);
+    minimumDepth = obliqueMinimumDepth;
+    maximumDepth = obliqueMaximumDepth;
+    expectedBytes = obliqueBytes;
+  }
+  const localizeTumor = options.alignmentFocus === 'tumor' && Boolean(options.referenceExclusionMask);
+  if (correctAxialAnatomy || localizeTumor) {
+    const localizationSliceLimit = localizeTumor && !axialPlane ? Math.min(maximumSlices, 32) : maximumSlices;
+    let lower = sourceIndices[0]! - 1;
+    let upper = sourceIndices[sourceIndices.length - 1]! + 1;
+    while (sourceIndices.length < localizationSliceLimit && (lower >= 0 || upper < targetManifest.frames.length)) {
+      assertNotAborted(options.signal);
+      const leftDepth =
+        lower >= 0
+          ? dot(getSliceGeometryFromInstance(targetManifest.frames[lower]!).ippMm, firstGeometry.normalDir)
+          : Number.NEGATIVE_INFINITY;
+      const rightDepth =
+        upper < targetManifest.frames.length
+          ? dot(getSliceGeometryFromInstance(targetManifest.frames[upper]!).ippMm, firstGeometry.normalDir)
+          : Number.POSITIVE_INFINITY;
+      const leftDistance = minimumDepth - leftDepth;
+      const rightDistance = rightDepth - maximumDepth;
+      const useLeft = leftDistance <= rightDistance;
+      const index = useLeft ? lower : upper;
+      const distance = useLeft ? leftDistance : rightDistance;
+      if (!Number.isFinite(distance) || distance > 12 + 1e-5) break;
+      const additionalBytes = frameBytes(index);
+      if (expectedBytes + additionalBytes > 128 * 1024 * 1024) break;
+      if (useLeft) {
+        sourceIndices.unshift(index);
+        lower--;
+      } else {
+        sourceIndices.push(index);
+        upper++;
+      }
+      expectedBytes += additionalBytes;
+    }
+  }
+  return {
+    sourceIndices,
+    sliceSpacingMm: spacing,
+    sourceDepthSpanMm: Math.max(...depths) - Math.min(...depths),
+    maxDimension,
+  };
+}
+
+/** Load every native slice physically intersecting the already-registered reference plane. */
+export async function prepareDenseLongitudinalResliceInput(
+  targetManifest: SeriesFrameManifest,
+  selectedReference: SvrReconstructionSlice,
+  targetToReference: RigidParams,
+  centerMm: Vec3,
+  options: DenseLongitudinalOptions = {},
+): Promise<PreparedDenseLongitudinalResliceInput> {
+  // The coarse worker owns and detaches selectedReference pixels/support. Final
+  // resampling needs only the immutable geometry of its native reference plane.
+  const { pixels: _detachedPixels, valid: _detachedValidity, ...referencePlane } = selectedReference;
+  void _detachedPixels;
+  void _detachedValidity;
+  const envelope = selectDenseLongitudinalSourceEnvelope(
+    targetManifest,
+    referencePlane,
+    targetToReference,
+    centerMm,
+    options,
+  );
+  const targetSlices = await decodeManifestSlices(
+    targetManifest,
+    envelope.sourceIndices,
+    envelope.maxDimension,
+    options.signal,
+  );
   assertNotAborted(options.signal);
 
   return {
@@ -545,11 +759,11 @@ export async function prepareDenseLongitudinalResliceInput(
     targetToReference,
     centerMm,
     outputGrid: options.outputGrid,
-    ...(options.nativeCandidatePoses?.length ? { nativeCandidatePoses } : {}),
+    ...(options.nativeCandidatePoses?.length ? { nativeCandidatePoses: options.nativeCandidatePoses } : {}),
     minCoverage: options.minCoverage,
-    sourceIndices,
-    sliceSpacingMm: spacing,
-    sourceDepthSpanMm: Math.max(...depths) - Math.min(...depths),
+    sourceIndices: envelope.sourceIndices,
+    sliceSpacingMm: envelope.sliceSpacingMm,
+    sourceDepthSpanMm: envelope.sourceDepthSpanMm,
   };
 }
 
@@ -561,6 +775,19 @@ export async function densifyLongitudinalRegistration(
   options: DenseLongitudinalOptions = {},
 ): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure> {
   try {
+    const referenceImage = options.referenceImage;
+    if (
+      referenceImage &&
+      (!options.referenceManifest ||
+        !options.outputGrid ||
+        outputGridFingerprint(referenceImage.outputGrid) !== outputGridFingerprint(options.outputGrid) ||
+        referenceImage.rows !== referenceImage.outputGrid.rows ||
+        referenceImage.columns !== referenceImage.outputGrid.columns ||
+        referenceImage.pixels.length !== referenceImage.rows * referenceImage.columns ||
+        referenceImage.valid.length !== referenceImage.pixels.length)
+    ) {
+      throw new Error('The displayed reference image does not match its verified physical output grid');
+    }
     const nativeCandidatePoses = registration.nativeCandidatePoses ?? options.nativeCandidatePoses;
     if ((nativeCandidatePoses?.length ?? 0) > 1 && !options.referenceManifest) {
       return longitudinalRegistrationFailure(
@@ -586,9 +813,9 @@ export async function densifyLongitudinalRegistration(
         ...options,
         ...(nativeCandidatePoses ? { nativeCandidatePoses } : {}),
       });
-      const nativeReference = context.manifest.frames[context.selectedIndex]!;
+      const anchorReference = options.referenceManifest.frames[options.referenceSliceIndex!]!;
       if (options.outputGrid) {
-        validateOutputGridReference(options.outputGrid, nativeReference, options.referenceManifest.frameOfReferenceUid);
+        validateOutputGridReference(options.outputGrid, anchorReference, options.referenceManifest.frameOfReferenceUid);
       }
       nativeReferenceSlices = await decodeManifestSlices(
         context.manifest,
@@ -596,7 +823,33 @@ export async function densifyLongitudinalRegistration(
         context.maxDimension,
         options.signal,
       );
+      if (options.referenceAnatomy) {
+        nativeReferenceSlices = transformReferenceAnatomySlices(
+          nativeReferenceSlices,
+          context.sourceIndices,
+          options.referenceAnatomy,
+          options.referenceManifest,
+          options.referenceSliceIndex!,
+        );
+      }
       nativeReferenceSliceIndex = context.sourceIndices.indexOf(context.selectedIndex);
+      if (referenceImage) {
+        const selectedNative = nativeReferenceSlices[nativeReferenceSliceIndex]!;
+        const { pixels, validity } = resample2dAreaAverageWithValidity(
+          referenceImage.pixels,
+          referenceImage.valid,
+          referenceImage.rows,
+          referenceImage.columns,
+          selectedNative.dsRows,
+          selectedNative.dsCols,
+        );
+        const valid = new Uint8Array(pixels.length);
+        for (let index = 0; index < pixels.length; index++) {
+          if (validity[index]! >= 1 - 1e-6) valid[index] = 1;
+          else pixels[index] = 0;
+        }
+        nativeReferenceSlices[nativeReferenceSliceIndex] = { ...selectedNative, pixels, valid };
+      }
       if (options.referenceExclusionMask) {
         const selectedNative = nativeReferenceSlices[nativeReferenceSliceIndex]!;
         referenceExclusionMask = resizeExcludedSupport(
@@ -619,6 +872,7 @@ export async function densifyLongitudinalRegistration(
         nativeReferenceSlices,
         nativeReferenceSliceIndex,
         referenceExclusionMask,
+        ...(options.alignmentFocus ? { alignmentFocus: options.alignmentFocus } : {}),
         minCoverage: options.minCoverage,
         signal: options.signal,
       },

@@ -7,6 +7,7 @@ import * as localApi from '../src/utils/localApi';
 import {
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
+  retainDerivedAlignmentReference,
   setDerivedAlignmentFrame,
   subscribeToDerivedAlignmentFrames,
 } from '../src/utils/derivedAlignmentFrame';
@@ -101,6 +102,79 @@ function alignmentFixture({
 }
 
 describe('useApplyAlignmentResults', () => {
+  it('keeps all sixteen aligned examinations and their selected derived reference visible', async () => {
+    const { sequenceId, data, frame, result, applyResults } = alignmentFixture();
+    const examinations = Array.from({ length: 16 }, (_, index) => ({
+      date: `2026-01-${String(index + 1).padStart(2, '0')}`,
+      seriesUid: `aligned-series-${index}`,
+      studyUid: `aligned-study-${index}`,
+      sopInstanceUid: `aligned-sop-${index}`,
+    }));
+    const comparisonData: ComparisonData = {
+      ...data,
+      dates: examinations.map(({ date }) => date),
+      series_map: {
+        [sequenceId]: Object.fromEntries(
+          examinations.map(({ date, seriesUid, studyUid }) => [
+            date,
+            {
+              study_id: studyUid,
+              study_uid: studyUid,
+              series_uid: seriesUid,
+              instance_count: 10,
+              patient_key: 'patient-a',
+            },
+          ]),
+        ),
+      },
+    };
+    const selectedReference = result({
+      date: 'selected-reference-date',
+      seriesUid: 'selected-reference-series',
+      referenceSeriesUid: 'original-acquired-reference',
+      derivedFrame: frame({
+        targetStudyUid: 'selected-reference-study',
+        targetSopInstanceUid: 'selected-reference-sop',
+        sourceImageId: 'miradb:selected-reference-sop',
+      }),
+    });
+    setDerivedAlignmentFrame(selectedReference);
+    const retainedReference = getDerivedAlignmentFrame('selected-reference-series', 1)!;
+    const releaseReference = retainDerivedAlignmentReference(retainedReference);
+    const clearPersisted = vi.spyOn(localApi, 'clearPersistedDerivedAlignmentFrames').mockResolvedValue();
+    const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockResolvedValue();
+    const batchUpdateSettings = vi.fn();
+
+    try {
+      applyResults(
+        examinations.map(({ date, seriesUid, studyUid, sopInstanceUid }) =>
+          result({
+            date,
+            seriesUid,
+            derivedFrame: frame({
+              targetStudyUid: studyUid,
+              targetSopInstanceUid: sopInstanceUid,
+              sourceImageId: `miradb:${sopInstanceUid}`,
+            }),
+          }),
+        ),
+        { data: comparisonData, batchUpdateSettings },
+      );
+
+      await waitFor(() => expect(save).toHaveBeenCalledTimes(examinations.length));
+      expect(batchUpdateSettings.mock.calls[0]?.[0]).toHaveProperty('size', examinations.length);
+      expect(getDerivedAlignmentFrame('selected-reference-series', 1)).toBe(retainedReference);
+      for (const { seriesUid } of examinations) {
+        expect(getDerivedAlignmentFrame(seriesUid, 1)).not.toBeNull();
+      }
+    } finally {
+      releaseReference();
+      clearPersisted.mockRestore();
+      save.mockRestore();
+      clearDerivedAlignmentFrames();
+    }
+  });
+
   it('applies alignment results and preserves reverseSliceOrder (adjusting offset)', async () => {
     const date = '2024-01-01T00:00:00';
     const seqId = 'seq-1';

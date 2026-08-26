@@ -50,6 +50,96 @@ describe('DragRectActionOverlay', () => {
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { side: 'right', start: 180, end: 300 },
+    { side: 'left', start: 335, end: 465 },
+  ])('keeps all controls outside the selected anatomy on its $side side', ({ side, start, end }) => {
+    const { container } = render(
+      <DragRectActionOverlay
+        className="relative"
+        geometry={DEFAULT_PANEL_SETTINGS}
+        actions={[
+          { key: 'align-all', label: 'Align All', onConfirm: vi.fn() },
+          { key: 'align-tumor', label: 'Align Tumor', onConfirm: vi.fn() },
+          { key: 'segment', label: 'Segment', onConfirm: vi.fn() },
+        ]}
+      >
+        <div>Viewer</div>
+      </DragRectActionOverlay>,
+    );
+
+    const overlay = container.firstElementChild as HTMLElement;
+    fireEvent.pointerDown(overlay, { pointerId: 7, button: 0, isPrimary: true, clientX: start, clientY: 160 });
+    fireEvent.pointerMove(overlay, { pointerId: 7, isPrimary: true, clientX: end, clientY: 290 });
+    fireEvent.pointerUp(overlay, { pointerId: 7, button: 0, isPrimary: true, clientX: end, clientY: 290 });
+
+    for (const label of ['Clear selection', 'Align All', 'Align Tumor', 'Segment']) {
+      const button = screen.getByRole('button', { name: label });
+      const left = Number.parseFloat(button.style.left);
+      const right = left + (label === 'Clear selection' ? 44 : Number.parseFloat(button.style.maxWidth));
+
+      expect(side === 'right' ? left >= end : right <= start).toBe(true);
+      expect(left).toBeGreaterThanOrEqual(0);
+      expect(right).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it('keeps every compact action reachable when a selection ends near the lower-right viewport edge', () => {
+    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
+      width: 180,
+      height: 150,
+      top: 0,
+      left: 0,
+      right: 180,
+      bottom: 150,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    const onTumorAlignment = vi.fn();
+    const { container } = render(
+      <DragRectActionOverlay
+        className="relative"
+        geometry={DEFAULT_PANEL_SETTINGS}
+        actions={[
+          { key: 'align-all', label: 'Align All', onConfirm: vi.fn() },
+          {
+            key: 'align-tumor',
+            label: 'Align Tumor',
+            title: 'Match tumor across dates; uses pixels inside the selected region',
+            onConfirm: onTumorAlignment,
+          },
+          { key: 'segment', label: 'Segment', onConfirm: vi.fn() },
+        ]}
+      >
+        <div>Viewer</div>
+      </DragRectActionOverlay>,
+    );
+
+    const overlay = container.firstElementChild as HTMLElement;
+    fireEvent.pointerDown(overlay, { pointerId: 8, button: 0, isPrimary: true, clientX: 151, clientY: 117 });
+    fireEvent.pointerMove(overlay, { pointerId: 8, isPrimary: true, clientX: 176, clientY: 144 });
+    fireEvent.pointerUp(overlay, { pointerId: 8, button: 0, isPrimary: true, clientX: 176, clientY: 144 });
+
+    const actionButtons = ['Align All', 'Align Tumor', 'Segment'].map((label) =>
+      screen.getByRole('button', { name: label }),
+    );
+    for (const button of actionButtons) {
+      expect(button).toBeEnabled();
+      expect(Number.parseFloat(button.style.left) + Number.parseFloat(button.style.maxWidth)).toBeLessThanOrEqual(180);
+      expect(Number.parseFloat(button.style.top) + 44).toBeLessThanOrEqual(150);
+    }
+    const close = screen.getByRole('button', { name: 'Clear selection' });
+    expect(Number.parseFloat(close.style.left) + 44).toBeLessThanOrEqual(180);
+    expect(Number.parseFloat(close.style.top) + 44).toBeLessThanOrEqual(150);
+    expect(actionButtons[1]).toHaveAttribute(
+      'title',
+      'Match tumor across dates; uses pixels inside the selected region',
+    );
+    fireEvent.click(actionButtons[1]!);
+    expect(onTumorAlignment).toHaveBeenCalledOnce();
+  });
+
   it('stores exclusion masks in image coordinates when the viewport contains horizontal letterboxing', () => {
     Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
       width: 1000,

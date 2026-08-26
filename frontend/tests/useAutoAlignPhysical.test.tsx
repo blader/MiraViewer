@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.getSeriesFrameManifest,
-  MAX_DERIVED_ALIGNMENT_FRAMES: 12,
+  MAX_DERIVED_ALIGNMENT_FRAMES: 32,
 }));
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
@@ -229,6 +229,23 @@ describe('physically registered longitudinal auto-alignment', () => {
         ? originalManifest
         : manifest(seriesUid, 'patient-a', seriesUid === reference.seriesUid ? 'selected-frame' : 'target-frame'),
     );
+    mocks.prepare.mockImplementation(async (anchorManifest, _targetManifest, anchorIndex, options) => {
+      const anatomy = options.referenceAnatomy;
+      const source = anatomy?.manifest ?? anchorManifest;
+      const sourceIndex = anatomy?.sourceIndex ?? anchorIndex;
+      return {
+        referenceSlices: source.frames.map((frame: { sopInstanceUid: string }) => ({
+          sopInstanceUid: frame.sopInstanceUid,
+          dsRows: 4,
+          dsCols: 4,
+          pixels: new Float32Array(16),
+        })),
+        targetSlices: [{ dsRows: 4, dsCols: 4, pixels: new Float32Array(16) }],
+        referenceSliceIndex: sourceIndex,
+        referenceSourceIndices: [0, 1, 2],
+        targetSourceIndices: [0, 1, 2],
+      };
+    });
 
     const originalAnchor: SeriesRef = {
       study_id: originalManifest.studyUid,
@@ -243,7 +260,7 @@ describe('physically registered longitudinal auto-alignment', () => {
 
     await act(async () => {
       const pending = result.current.alignAllDates(
-        reference,
+        { ...reference, alignmentFocus: 'tumor' },
         ['original-examination', 'target-examination'],
         { 'original-examination': originalAnchor, 'target-examination': target },
         0.5,
@@ -264,6 +281,35 @@ describe('physically registered longitudinal auto-alignment', () => {
       expect.objectContaining({ outputGrid }),
     );
     expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    const coarseInput = mocks.register3d.mock.calls[0]![0];
+    expect(coarseInput.referenceSlices.map((slice: { sopInstanceUid: string }) => slice.sopInstanceUid)).toEqual([
+      'reference-series-0',
+      'reference-series-1',
+      'reference-series-2',
+    ]);
+    const selectedCoarseReference = coarseInput.referenceSlices[coarseInput.referenceSliceIndex];
+    expect(selectedCoarseReference.pixels).toEqual(displayedReference.pixels);
+    expect(selectedCoarseReference.valid).toEqual(displayedReference.valid);
+    expect(selectedCoarseReference.pixels).not.toBe(displayedReference.pixels);
+    const denseReference = mocks.densify.mock.calls[0]![3].referenceImage;
+    expect(denseReference).toMatchObject({
+      rows: displayedReference.rows,
+      columns: displayedReference.columns,
+      outputGrid,
+    });
+    expect(denseReference.pixels).toEqual(displayedReference.pixels);
+    expect(denseReference.valid).toEqual(displayedReference.valid);
+    expect(denseReference.pixels).not.toBe(selectedCoarseReference.pixels);
+    expect(mocks.prepareReference.mock.calls[0]![2].referenceAnatomy).toMatchObject({
+      manifest: expect.objectContaining({ seriesUid: reference.seriesUid, patientKey: 'patient-a' }),
+      sourceIndex: reference.sliceIndex,
+      rigidTransform: [0, 0, 0, 0, 0, 0],
+      rotationCenterMm: [0, 0, 2],
+    });
+    expect(mocks.densify.mock.calls[0]![3].referenceAnatomy).toEqual(
+      mocks.prepareReference.mock.calls[0]![2].referenceAnatomy,
+    );
+    expect(mocks.densify.mock.calls[0]![3]).not.toHaveProperty('alignmentFocus');
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({
       date: 'target-examination',
@@ -356,6 +402,34 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(mocks.captureSlice.mock.calls[0]?.slice(0, 3)).toEqual(['reference-series', 1, 256]);
     expect(mocks.createScorer).not.toHaveBeenCalled();
     expect(mocks.closeScorer).not.toHaveBeenCalled();
+  });
+
+  it('enables explicit tumor-focused slice selection only after exclusion-safe coarse pose registration', async () => {
+    const { result } = renderHook(() => useAutoAlign());
+    await act(async () => {
+      await result.current.alignAllDates(
+        { ...reference, alignmentFocus: 'tumor' },
+        ['target-examination'],
+        { 'target-examination': target },
+        0.5,
+      );
+    });
+
+    const coarse = mocks.register3d.mock.calls[0]?.[0];
+    expect(coarse.referenceExclusionMask).toBeInstanceOf(Uint8Array);
+    expect(coarse.referenceExclusionMask[0]).toBe(1);
+    expect(coarse).not.toHaveProperty('alignmentFocus');
+    expect(mocks.densify.mock.calls[0]?.[3]).toMatchObject({
+      alignmentFocus: 'tumor',
+      referenceExclusionMask: expect.any(Uint8Array),
+    });
+  });
+
+  it('keeps ordinary alignment fully exclusion-only unless tumor matching is explicitly requested', async () => {
+    await runPhysicalAlignment();
+
+    expect(mocks.register3d.mock.calls[0]?.[0]).not.toHaveProperty('alignmentFocus');
+    expect(mocks.densify.mock.calls[0]?.[3]).not.toHaveProperty('alignmentFocus');
   });
 
   it('aligns a verified physical volume without depending on an unavailable 2D scoring worker', async () => {

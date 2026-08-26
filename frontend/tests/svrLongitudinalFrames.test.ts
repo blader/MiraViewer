@@ -25,8 +25,12 @@ import {
   prepareLongitudinalReferenceInput,
   prepareLongitudinalRegistrationInput,
 } from '../src/utils/svr/longitudinalFrames';
-import type { LongitudinalRegistrationResult } from '../src/utils/svr/longitudinalRegistration';
-import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
+import {
+  attenuateLongitudinalPlaneTilt,
+  resliceStackToReferencePlane,
+  type LongitudinalRegistrationResult,
+} from '../src/utils/svr/longitudinalRegistration';
+import { buildOutputPlaneGrid, outputGridPixelToWorld } from '../src/utils/outputPlaneGrid';
 
 function makeManifest(
   seriesUid: string,
@@ -215,11 +219,41 @@ describe('svr/longitudinalFrames', () => {
     });
 
     expect(prepared.outputGrid).toEqual(outputGrid);
-    expect(Array.from(prepared.referenceSlices[0]!.valid!.subarray(0, 2))).toEqual([0, 1]);
+    expect(Array.from(prepared.referenceSlices[0]!.valid!.subarray(0, 2))).toEqual([0, 0]);
+    expect(Array.from(prepared.referenceSlices[0]!.pixels.subarray(0, 2))).toEqual([0, 0]);
     expect(decode.resample.mock.calls[0]![0]).toMatchObject({
       pixelPaddingValue: -2048,
       pixelPaddingRangeLimit: -2000,
     });
+  });
+
+  it('categorizes every decoded support value without inventing acquired anatomy', async () => {
+    decode.resample.mockImplementationOnce((_image, rows, cols) => {
+      const validity = new Float32Array(rows * cols).fill(1);
+      validity.set([
+        0,
+        -0,
+        -0.25,
+        Number.NaN,
+        Number.NEGATIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+        1e-38,
+        0.25,
+        0.999,
+        0.9999995,
+        1,
+      ]);
+      return { pixels: new Float32Array(rows * cols).fill(1), validity };
+    });
+
+    const prepared = await prepareLongitudinalRegistrationInput(
+      makeManifest('reference', 4),
+      makeManifest('target', 4),
+      1,
+    );
+
+    expect(Array.from(prepared.referenceSlices[0]!.valid!.subarray(0, 11))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
+    expect(Array.from(prepared.referenceSlices[0]!.pixels.subarray(0, 11))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
   });
 
   it('rejects cross-patient manifests and aborted requests before decoding', async () => {
@@ -339,6 +373,54 @@ describe('svr/longitudinalFrames', () => {
     expect(decode.load).toHaveBeenCalledTimes(dense.sourceIndices.length);
   });
 
+  it('admits acquired support for anchor-preserving oblique anatomy without adding unverified native hypotheses', async () => {
+    const reference = makeManifest('reference', 121);
+    const target = makeManifest('target', 121, { angleDeg: 18 });
+    for (const manifest of [reference, target]) {
+      manifest.frames = manifest.frames.map((frame) => ({ ...frame, pixelSpacing: '8\\\\8' }));
+    }
+    const outputGrid = buildOutputPlaneGrid(reference.frames[60]!, {
+      frameOfReferenceUid: reference.frameOfReferenceUid,
+    });
+    const prepared = await prepareLongitudinalRegistrationInput(reference, target, 60, {
+      maxSlices: 5,
+      outputGrid,
+    });
+    const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+    const centerMm = outputGridPixelToWorld(outputGrid, (outputGrid.rows - 1) / 2, (outputGrid.columns - 1) / 2);
+    const aligned = { tx: 0, ty: 0, tz: 0, rx: 0, ry: (18 * Math.PI) / 180, rz: 0 };
+    const referenceExclusionMask = new Uint8Array(selected.dsRows * selected.dsCols);
+    referenceExclusionMask[Math.floor(referenceExclusionMask.length / 2)] = 1;
+    const options = {
+      maxSlices: 96,
+      outputGrid,
+      referenceManifest: reference,
+      referenceSliceIndex: 60,
+      referenceExclusionMask,
+    };
+
+    const dense = await prepareDenseLongitudinalResliceInput(target, selected, aligned, centerMm, options);
+    const oblique = attenuateLongitudinalPlaneTilt(aligned, centerMm, selected, outputGrid, 0.5);
+    const presentation = resliceStackToReferencePlane({
+      targetSlices: dense.targetSlices,
+      referenceSlice: selected,
+      targetToReference: oblique,
+      centerMm,
+      outputGrid,
+    });
+
+    expect(dense.sourceIndices.length).toBeGreaterThan(30);
+    expect(presentation.coverage).toBeGreaterThan(0.9);
+    expect(dense.nativeCandidatePoses).toBeUndefined();
+
+    const bounded = await prepareDenseLongitudinalResliceInput(target, selected, aligned, centerMm, {
+      ...options,
+      maxSlices: 5,
+    });
+    expect(bounded.sourceIndices.length).toBeLessThanOrEqual(5);
+    expect(bounded.nativeCandidatePoses).toBeUndefined();
+  });
+
   it('unions native target coverage across bounded physically distinct winner and rival poses', async () => {
     const reference = makeManifest('reference', 101);
     const target = makeManifest('target', 101);
@@ -393,6 +475,89 @@ describe('svr/longitudinalFrames', () => {
         },
       ),
     ).rejects.toThrow('winner-first');
+  });
+
+  it('retains bounded acquired neighboring anatomy for axial landmark depth correction', async () => {
+    const reference = makeManifest('reference', 101);
+    const target = makeManifest('target', 101);
+    const prepared = await prepareLongitudinalRegistrationInput(reference, target, 50, { maxSlices: 5 });
+    const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+    const exclusion = new Uint8Array(selected.dsRows * selected.dsCols);
+    exclusion[Math.floor(exclusion.length / 2)] = 1;
+    const rigid = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+
+    const expanded = await prepareDenseLongitudinalResliceInput(
+      target,
+      selected,
+      rigid,
+      { x: 0, y: 0, z: 0 },
+      {
+        referenceManifest: reference,
+        referenceSliceIndex: 50,
+        referenceExclusionMask: exclusion,
+      },
+    );
+
+    expect(expanded.sourceIndices).toEqual(Array.from({ length: 27 }, (_, index) => index + 37));
+
+    const bounded = await prepareDenseLongitudinalResliceInput(
+      target,
+      selected,
+      rigid,
+      { x: 0, y: 0, z: 0 },
+      {
+        maxSlices: 5,
+        referenceManifest: reference,
+        referenceSliceIndex: 50,
+        referenceExclusionMask: exclusion,
+      },
+    );
+
+    expect(bounded.sourceIndices).toEqual([48, 49, 50, 51, 52]);
+
+    const sameFrame = await prepareDenseLongitudinalResliceInput(
+      { ...target, frameOfReferenceUid: reference.frameOfReferenceUid },
+      selected,
+      rigid,
+      { x: 0, y: 0, z: 0 },
+      { referenceManifest: reference, referenceSliceIndex: 50, referenceExclusionMask: exclusion },
+    );
+
+    expect(sameFrame.sourceIndices).toEqual([49, 50, 51]);
+  });
+
+  it('preserves minimal sagittal and coronal envelopes without applying axial-only depth correction', async () => {
+    const orient = (manifest: SeriesFrameManifest, plane: 'sagittal' | 'coronal'): SeriesFrameManifest => ({
+      ...manifest,
+      frames: manifest.frames.map((frame, index) => ({
+        ...frame,
+        imageOrientationPatient: plane === 'sagittal' ? '0\\1\\0\\0\\0\\1' : '1\\0\\0\\0\\0\\-1',
+        imagePositionPatient: plane === 'sagittal' ? `${index}\\0\\0` : `0\\${index}\\0`,
+      })),
+    });
+    const rigid = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+    for (const plane of ['sagittal', 'coronal'] as const) {
+      const reference = orient(makeManifest(`${plane}-reference`, 101), plane);
+      const target = orient(makeManifest(`${plane}-target`, 101), plane);
+      const prepared = await prepareLongitudinalRegistrationInput(reference, target, 50, { maxSlices: 5 });
+      const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+      const result = await prepareDenseLongitudinalResliceInput(
+        target,
+        selected,
+        rigid,
+        { x: 0, y: 0, z: 0 },
+        {
+          referenceManifest: reference,
+          referenceSliceIndex: 50,
+          ...(plane === 'coronal'
+            ? { referenceExclusionMask: new Uint8Array(selected.dsRows * selected.dsCols).fill(1) }
+            : {}),
+        },
+      );
+
+      expect(result.sourceIndices).toEqual([49, 50, 51]);
+      expect(result.nativeCandidatePoses).toBeUndefined();
+    }
   });
 
   it('refuses to silently sparsify a reference plane exceeding its native-slice safety budget', async () => {
@@ -500,6 +665,175 @@ describe('svr/longitudinalFrames', () => {
     expect(options.nativeReferenceSlices[2]).toMatchObject({ dsRows: 12, dsCols: 16 });
     expect(options.referenceExclusionMask).toHaveLength(12 * 16);
     expect(options.referenceExclusionMask[2 * 16 + 4]).toBe(1);
+  });
+
+  it('scores visible aligned reference tissue without changing its verified acquired plane or source identity', async () => {
+    const reference = makeManifest('reference', 11);
+    const target = makeManifest('target', 11);
+    const outputGrid = buildOutputPlaneGrid(reference.frames[5]!, {
+      mode: 'fixed-256',
+      frameOfReferenceUid: reference.frameOfReferenceUid,
+    });
+    const prepared = await prepareLongitudinalRegistrationInput(reference, target, 5, { outputGrid, maxSlices: 5 });
+    const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+    const pixels = new Float32Array(outputGrid.rows * outputGrid.columns).fill(17);
+    const valid = new Uint8Array(pixels.length).fill(1);
+    for (let row = 0; row < 22; row++) valid.fill(0, row * outputGrid.columns, row * outputGrid.columns + 16);
+    denseWorker.run.mockResolvedValueOnce({
+      ok: true,
+      pixels: new Float32Array(pixels.length),
+      valid: new Uint8Array(pixels.length).fill(1),
+      rows: outputGrid.rows,
+      cols: outputGrid.columns,
+      coverage: 1,
+      outputGrid,
+      contributingSourceSopInstanceUids: ['target-5'],
+      nativeRefinement: { score: 0.9, sampleCount: 100 },
+    });
+
+    const result = await densifyLongitudinalRegistration(
+      target,
+      selected,
+      {
+        ok: true,
+        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        centerMm: { x: 0, y: 0, z: 0 },
+        diagnostics: {},
+      } as LongitudinalRegistrationResult,
+      {
+        outputGrid,
+        referenceManifest: reference,
+        referenceSliceIndex: 5,
+        referenceImage: { pixels, valid, rows: outputGrid.rows, columns: outputGrid.columns, outputGrid },
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const context = denseWorker.run.mock.calls[0]![0];
+    const visibleReference = context.nativeReferenceSlices[context.nativeReferenceSliceIndex];
+    expect(visibleReference.sopInstanceUid).toBe('reference-5');
+    expect(visibleReference.ippMm).toEqual(selected.ippMm);
+    expect(visibleReference.valid[0]).toBe(0);
+    expect(visibleReference.pixels[0]).toBe(0);
+    expect(visibleReference.valid[1]).toBe(1);
+    expect(visibleReference.pixels[1]).toBe(17);
+    expect(context.nativeReferenceSlices[0].pixels[1]).toBe(1);
+    expect(visibleReference.pixels.buffer).not.toBe(pixels.buffer);
+    expect(visibleReference.valid.buffer).not.toBe(valid.buffer);
+
+    denseWorker.run.mockClear();
+    const differentGrid = buildOutputPlaneGrid(reference.frames[5]!, {
+      frameOfReferenceUid: reference.frameOfReferenceUid,
+    });
+    await expect(
+      densifyLongitudinalRegistration(
+        target,
+        selected,
+        {
+          ok: true,
+          targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+          centerMm: { x: 0, y: 0, z: 0 },
+          diagnostics: {},
+        } as LongitudinalRegistrationResult,
+        {
+          outputGrid,
+          referenceManifest: reference,
+          referenceSliceIndex: 5,
+          referenceImage: {
+            pixels,
+            valid,
+            rows: outputGrid.rows,
+            columns: outputGrid.columns,
+            outputGrid: differentGrid,
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('verified physical output grid') });
+    expect(denseWorker.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps the entire selected-examination reference volume coherent in its immutable acquired anchor frame', async () => {
+    const anchor = makeManifest('anchor', 11);
+    const anatomy = makeManifest('selected', 11);
+    anatomy.frames = anatomy.frames.map((frame, index) => ({
+      ...frame,
+      imagePositionPatient: `10\\\\20\\\\${index}`,
+    }));
+    const target = makeManifest('target', 11);
+    const outputGrid = buildOutputPlaneGrid(anchor.frames[5]!, {
+      frameOfReferenceUid: anchor.frameOfReferenceUid,
+    });
+    const referenceAnatomy = {
+      manifest: anatomy,
+      sourceIndex: 5,
+      rigidTransform: [-10, -20, 0, 0, 0, 0] as [number, number, number, number, number, number],
+      rotationCenterMm: [0, 0, 0] as [number, number, number],
+    };
+    const options = { outputGrid, maxSlices: 5, referenceAnatomy };
+
+    const retained = await prepareLongitudinalReferenceInput(anchor, 5, options);
+    const prepared = await prepareLongitudinalRegistrationInput(anchor, target, 5, {
+      ...options,
+      preparedReference: retained,
+    });
+
+    expect(retained.referenceManifest).toBe(anchor);
+    expect(prepared.referenceSlices.every((slice) => slice.sopInstanceUid?.startsWith('selected-'))).toBe(true);
+    expect(prepared.referenceSlices.every((slice) => slice.frameOfReferenceUid === anchor.frameOfReferenceUid)).toBe(
+      true,
+    );
+    const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+    expect(selected.sopInstanceUid).toBe('selected-5');
+    expect(selected.ippMm).toEqual({ x: outputGrid.originMm[0], y: outputGrid.originMm[1], z: outputGrid.originMm[2] });
+    expect(prepared.referenceSlices[0]!.ippMm.x).toBeCloseTo(0, 6);
+    expect(prepared.referenceSlices[0]!.ippMm.y).toBeCloseTo(0, 6);
+
+    denseWorker.run.mockResolvedValueOnce({
+      ok: true,
+      pixels: new Float32Array(outputGrid.rows * outputGrid.columns),
+      valid: new Uint8Array(outputGrid.rows * outputGrid.columns).fill(1),
+      rows: outputGrid.rows,
+      cols: outputGrid.columns,
+      coverage: 1,
+      outputGrid,
+      contributingSourceSopInstanceUids: ['target-5'],
+      nativeRefinement: { score: 0.9, sampleCount: 100 },
+    });
+    const result = await densifyLongitudinalRegistration(
+      target,
+      selected,
+      {
+        ok: true,
+        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        centerMm: { x: 0, y: 0, z: 0 },
+        diagnostics: {},
+      } as LongitudinalRegistrationResult,
+      {
+        outputGrid,
+        referenceManifest: anchor,
+        referenceSliceIndex: 5,
+        referenceAnatomy,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const native = denseWorker.run.mock.calls[0]![0];
+    expect(native.nativeReferenceSlices.map((slice: { sopInstanceUid: string }) => slice.sopInstanceUid)).toEqual([
+      'selected-3',
+      'selected-4',
+      'selected-5',
+      'selected-6',
+      'selected-7',
+    ]);
+    expect(native.nativeReferenceSlices[2]!.ippMm).toEqual(selected.ippMm);
+    expect(native.nativeReferenceSlices[1]!.ippMm).toEqual({ x: 0, y: 0, z: 4 });
+
+    await expect(
+      prepareLongitudinalReferenceInput(anchor, 5, {
+        ...options,
+        referenceAnatomy: { ...referenceAnatomy, manifest: makeManifest('other', 11, { patientKey: 'different' }) },
+      }),
+    ).rejects.toThrow('same patient');
   });
 
   it('rejects worker pixels bound to a different output lattice or unknown source examination', async () => {
