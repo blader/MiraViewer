@@ -1,6 +1,6 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Crosshair, Link2, ScanLine } from 'lucide-react';
-import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { Crosshair, Link2, Loader2, ScanLine } from 'lucide-react';
+import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
@@ -32,6 +32,40 @@ export type GridCellProps = {
 };
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
+
+export function AlignmentProgressCard({ progress, onAbort }: { progress: AlignmentProgress; onAbort: () => void }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
+    >
+      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-[var(--text-primary)]">
+          {progress.phase === 'capturing'
+            ? 'Preparing reference…'
+            : progress.currentDate
+              ? `Aligning ${formatDate(progress.currentDate)} (${progress.dateIndex + 1}/${progress.totalDates})`
+              : 'Aligning…'}
+        </div>
+        {progress.phase !== 'capturing' && progress.slicesChecked ? (
+          <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
+            {progress.slicesChecked} slices · Score {progress.bestMiSoFar.toFixed(3)}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={onAbort}
+        className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        title="Cancel alignment"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
 
 export function StudySelectionSurface({
   reference,

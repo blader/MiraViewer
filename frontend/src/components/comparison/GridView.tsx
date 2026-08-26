@@ -1,9 +1,7 @@
 import { useCallback, useState } from 'react';
 import type { FocusEvent, MouseEvent } from 'react';
-import { Loader2 } from 'lucide-react';
-import { GridCell } from './GridCell';
+import { AlignmentProgressCard, GridCell } from './GridCell';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
-import { formatDate } from '../../utils/format';
 import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
 
 export type GridViewProps = {
@@ -66,35 +64,7 @@ export function GridView({
     >
       {isAligning && alignmentProgress && (
         <div className="absolute left-1/2 top-3 z-20 max-w-[calc(100%-2rem)] -translate-x-1/2">
-          <div
-            role="status"
-            aria-live="polite"
-            className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
-          >
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-[var(--text-primary)]">
-                {alignmentProgress.phase === 'capturing'
-                  ? 'Preparing reference…'
-                  : alignmentProgress.currentDate
-                    ? `Aligning ${formatDate(alignmentProgress.currentDate)} (${alignmentProgress.dateIndex + 1}/${alignmentProgress.totalDates})`
-                    : 'Aligning…'}
-              </div>
-              {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
-                <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
-                  {alignmentProgress.slicesChecked} slices · Score {alignmentProgress.bestMiSoFar.toFixed(3)}
-                </div>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              onClick={abortAlignment}
-              className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-              title="Cancel alignment"
-            >
-              Cancel
-            </button>
-          </div>
+          <AlignmentProgressCard progress={alignmentProgress} onAbort={abortAlignment} />
         </div>
       )}
 

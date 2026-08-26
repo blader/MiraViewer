@@ -170,6 +170,27 @@ function heterogeneousAnatomicalTumorPhantom() {
   return { ...phantom, lesionSeed };
 }
 
+function measureTumorQuality(
+  phantom: Pick<TumorPhantom, 'truth' | 'observedSupport'>,
+  result: Awaited<ReturnType<typeof regionGrow3D_v2>>,
+) {
+  let truePositive = 0;
+  let unsupported = 0;
+  for (const index of result.indices) {
+    truePositive += phantom.truth[index]!;
+    unsupported += phantom.observedSupport[index] === 0 ? 1 : 0;
+  }
+  const expected = phantom.truth.reduce((total, value) => total + value, 0);
+  return {
+    truePositive,
+    unsupported,
+    expected,
+    precision: truePositive / Math.max(1, result.count),
+    recall: truePositive / Math.max(1, expected),
+    dice: (2 * truePositive) / Math.max(1, result.count + expected),
+  };
+}
+
 async function evaluateTumorPhantom(contrast: TumorContrast) {
   const phantom = contrastingTumorPhantom(contrast);
   const band =
@@ -191,17 +212,7 @@ async function evaluateTumorPhantom(contrast: TumorContrast) {
     opts: { connectivity: 6, maxVoxels: 20_000, yieldEvery: 0 },
   });
 
-  let truePositive = 0;
-  let unsupported = 0;
-  for (let position = 0; position < result.count; position++) {
-    const index = result.indices[position]!;
-    truePositive += phantom.truth[index]!;
-    unsupported += phantom.observedSupport[index] === 0 ? 1 : 0;
-  }
-  const expected = phantom.truth.reduce((total, entry) => total + entry, 0);
-  const precision = truePositive / Math.max(1, result.count);
-  const recall = truePositive / Math.max(1, expected);
-  const dice = (2 * truePositive) / Math.max(1, result.count + expected);
+  const { truePositive, unsupported, expected, precision, recall, dice } = measureTumorQuality(phantom, result);
   const metrics = {
     stage: 'tumor-segmentation-phantom',
     contrast,
@@ -269,16 +280,7 @@ describe('tumor-only SVR segmentation fidelity', () => {
         max: lesionIntensity + 0.12,
       });
 
-      let truePositive = 0;
-      let unsupported = 0;
-      for (const index of localized.indices) {
-        truePositive += phantom.truth[index]!;
-        unsupported += phantom.observedSupport[index] === 0 ? 1 : 0;
-      }
-      const lesionVoxels = phantom.truth.reduce((total, value) => total + value, 0);
-      const precision = truePositive / Math.max(1, localized.count);
-      const recall = truePositive / Math.max(1, lesionVoxels);
-      const dice = (2 * truePositive) / Math.max(1, localized.count + lesionVoxels);
+      const { unsupported, expected: lesionVoxels, precision, recall, dice } = measureTumorQuality(phantom, localized);
       console.log(
         JSON.stringify({
           stage: 'automatic-center-seed-tumor-segmentation',
@@ -328,12 +330,7 @@ describe('tumor-only SVR segmentation fidelity', () => {
       max: 0.508,
     });
 
-    const expected = phantom.truth.reduce((total, value) => total + value, 0);
-    let truePositive = 0;
-    for (const index of result.indices) truePositive += phantom.truth[index]!;
-    const precision = truePositive / Math.max(1, result.count);
-    const recall = truePositive / Math.max(1, expected);
-    const dice = (2 * truePositive) / Math.max(1, result.count + expected);
+    const { truePositive, expected, precision, recall, dice } = measureTumorQuality(phantom, result);
     console.log(
       JSON.stringify({
         stage: 'anatomical-bilateral-cavity-tumor-segmentation',
@@ -487,7 +484,7 @@ describe('optional private real-MRI tumor segmentation', () => {
         [1, { AX: 100, COR: 110, SAG: 150 }],
         [9, { AX: 97, COR: 109, SAG: 136 }],
         [15, { AX: 91, COR: 103, SAG: 134 }],
-        // Visually reviewed August source-only context: displayed AX 95/221,
+        // Visually reviewed latest source-only context: displayed AX 95/221,
         // COR 111/221, and SAG 138/274. These are not clinical tumor labels.
         [18, { AX: 94, COR: 110, SAG: 137 }],
       ]).get(reviewedExamination);

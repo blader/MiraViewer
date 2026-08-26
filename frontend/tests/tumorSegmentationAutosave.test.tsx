@@ -111,6 +111,15 @@ async function waitForPendingDraft() {
   expect(mocks.save).not.toHaveBeenCalled();
 }
 
+async function expectSavedOriginalDraft() {
+  await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
+  expect(mocks.save.mock.calls[0]?.[0]).toMatchObject({
+    studyId: 'synthetic-study-a',
+    seriesUid: 'synthetic-series-a',
+    sopInstanceUid: 'synthetic-series-a-instance-0',
+  });
+}
+
 describe('tumor segmentation autosave durability', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -184,12 +193,7 @@ describe('tumor segmentation autosave durability', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close tumor segmentation tool' }));
 
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
-    expect(mocks.save.mock.calls[0]?.[0]).toMatchObject({
-      studyId: 'synthetic-study-a',
-      seriesUid: 'synthetic-series-a',
-      sopInstanceUid: 'synthetic-series-a-instance-0',
-    });
+    await expectSavedOriginalDraft();
   });
 
   it('flushes the last acquired draft when the existing overlay is disabled', async () => {
@@ -199,12 +203,7 @@ describe('tumor segmentation autosave durability', () => {
 
     mounted.rerender(<SegmentationHarness viewerRef={viewerRef} enabled={false} />);
 
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
-    expect(mocks.save.mock.calls[0]?.[0]).toMatchObject({
-      studyId: 'synthetic-study-a',
-      seriesUid: 'synthetic-series-a',
-      sopInstanceUid: 'synthetic-series-a-instance-0',
-    });
+    await expectSavedOriginalDraft();
   });
 
   it('continues to debounce ordinary same-slice draft edits and saves only the newest polygon', async () => {
@@ -232,12 +231,7 @@ describe('tumor segmentation autosave durability', () => {
       mounted.rerender(<SegmentationHarness viewerRef={viewerRef} effectiveInstanceIndex={1} />);
     });
 
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
-    expect(mocks.save.mock.calls[0]?.[0]).toMatchObject({
-      studyId: 'synthetic-study-a',
-      seriesUid: 'synthetic-series-a',
-      sopInstanceUid: 'synthetic-series-a-instance-0',
-    });
+    await expectSavedOriginalDraft();
   });
 
   it('never reassigns an unfinished annotation to the next patient examination or series', async () => {
@@ -290,12 +284,7 @@ describe('tumor segmentation autosave durability', () => {
       );
     });
 
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
-    expect(mocks.save.mock.calls[0]?.[0]).toMatchObject({
-      studyId: 'synthetic-study-a',
-      seriesUid: 'synthetic-series-a',
-      sopInstanceUid: 'synthetic-series-a-instance-0',
-    });
+    await expectSavedOriginalDraft();
     expect(mocks.lookup).toHaveBeenCalledWith('synthetic-series-a', 0);
   });
 

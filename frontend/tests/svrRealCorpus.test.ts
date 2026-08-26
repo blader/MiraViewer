@@ -1,7 +1,5 @@
 import { closeSync, openSync, readdirSync, readFileSync, readSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import dicomParser from 'dicom-parser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deleteAllStoredMriData } from '../src/db/db';
@@ -10,6 +8,7 @@ import { DEFAULT_SVR_PARAMS, type SvrResult, type SvrRoi, type SvrSelectedSeries
 import { parseSeriesDescription } from '../src/utils/dicomSeriesParsing';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
 import { dot, type Vec3 } from '../src/utils/svr/vec3';
+import { loadAlignmentLosslessCodec } from './helpers/alignmentRealCorpus';
 
 const corpusMocks = vi.hoisted(() => ({ loadAndCacheImage: vi.fn() }));
 
@@ -34,27 +33,6 @@ const LITTLE_ENDIAN_TRANSFER_SYNTAXES = new Set(['1.2.840.10008.1.2', '1.2.840.1
 const JPEG_LOSSLESS_TRANSFER_SYNTAXES = new Set(['1.2.840.10008.1.2.4.57', '1.2.840.10008.1.2.4.70']);
 
 type CorpusPixelData = Int16Array | Uint16Array | Int8Array | Uint8Array;
-
-type CorpusCodec = {
-  external: { dicomParser: typeof dicomParser };
-  wadouri: { getEncapsulatedImageFrame: (dataset: dicomParser.DataSet, frame: number) => Uint8Array };
-  decodeImageFrame: (
-    frame: {
-      rows: number;
-      columns: number;
-      bitsAllocated: number;
-      bitsStored: number;
-      highBit: number;
-      pixelRepresentation: number;
-      samplesPerPixel: number;
-      photometricInterpretation?: string;
-    },
-    transferSyntax: string,
-    encoded: Uint8Array,
-    decoderConfig: object,
-    options: { preScale: { enabled: boolean } },
-  ) => Promise<{ pixelData: CorpusPixelData }>;
-};
 
 type CorpusFrame = {
   path: string;
@@ -160,26 +138,6 @@ function readDicomHeader(path: string): dicomParser.DataSet {
 function positiveUint16(dataset: dicomParser.DataSet, tag: string): number {
   const value = dataset.uint16(tag);
   return typeof value === 'number' && value > 0 ? value : 0;
-}
-
-function loadExistingLosslessDicomCodec(): CorpusCodec {
-  const require = createRequire(import.meta.url);
-  const modulePath =
-    require.resolve('cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoaderNoWebWorkers.bundle.min.js');
-  const previousScript = Object.getOwnPropertyDescriptor(document, 'currentScript');
-  Object.defineProperty(document, 'currentScript', {
-    configurable: true,
-    value: { src: pathToFileURL(modulePath).href },
-  });
-  try {
-    const imported = require(modulePath) as CorpusCodec | { default: CorpusCodec };
-    const codec = 'default' in imported ? imported.default : imported;
-    codec.external.dicomParser = dicomParser;
-    return codec;
-  } finally {
-    if (previousScript) Object.defineProperty(document, 'currentScript', previousScript);
-    else Reflect.deleteProperty(document, 'currentScript');
-  }
 }
 
 function contrastFamily(dataset: dicomParser.DataSet): string {
@@ -394,7 +352,7 @@ function sampleFrames(frames: CorpusFrame[]): CorpusFrame[] {
 async function readStoredPixels(
   bytes: Uint8Array,
   dataset: dicomParser.DataSet,
-  codec: CorpusCodec,
+  codec: ReturnType<typeof loadAlignmentLosslessCodec>,
 ): Promise<DecodedCorpusImage> {
   const rows = positiveUint16(dataset, 'x00280010');
   const columns = positiveUint16(dataset, 'x00280011');
@@ -554,7 +512,7 @@ function centeredAnatomicalRoi(group: CorpusGroup, reconstructed: SvrResult): Sv
 async function evaluateGroup(
   group: CorpusGroup,
   summary: CorpusSummary,
-  codec: CorpusCodec,
+  codec: ReturnType<typeof loadAlignmentLosslessCodec>,
   validateRegistration: boolean,
 ): Promise<void> {
   await deleteAllStoredMriData();
@@ -692,7 +650,7 @@ describe('optional private real-MRI SVR corpus validation', () => {
         totalElapsedMilliseconds: 0,
       };
 
-      const codec = loadExistingLosslessDicomCodec();
+      const codec = loadAlignmentLosslessCodec();
       const groups = inspectCorpus(corpusDirectory!, summary);
       const requestedGroups = Number(process.env.MIRAVIEWER_SVR_CORPUS_GROUPS ?? DEFAULT_MAX_GROUPS);
       const maxGroups =

@@ -103,6 +103,15 @@ function syntheticVolume(boxScale: readonly [number, number, number]): SvrVolume
   };
 }
 
+function mockSingleSeedGrowth(volume: SvrVolume) {
+  return vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
+    indices: new Uint32Array([seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x]),
+    count: 1,
+    seedValue: 0.5,
+    hitMaxVoxels: false,
+  }));
+}
+
 function drawInspectorTumorRegion(start = 20, end = 80): void {
   const canvas = screen.getByRole('img', { name: /axial reconstructed slice/i }) as HTMLCanvasElement;
   vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
@@ -292,12 +301,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
 
   it('automatically isolates newly segmented acquired tumor and exposes a truthful sensitivity control', async () => {
     const volume = syntheticVolume([1, 1, 1]);
-    const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-      indices: new Uint32Array([seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x]),
-      count: 1,
-      seedValue: 0.5,
-      hitMaxVoxels: false,
-    }));
+    const run = mockSingleSeedGrowth(volume);
     render(<SvrVolume3DViewer volume={volume} />);
 
     drawInspectorTumorRegion();
@@ -424,12 +428,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it('frames the physical tumor center within its entire supported grow domain and restores the prior anatomy zoom', async () => {
     const volume = syntheticVolume([1, 1, 1]);
     const recorder = createViewportRecorder({ width: 1440, height: 900 });
-    const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-      indices: new Uint32Array([seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x]),
-      count: 1,
-      seedValue: 0.5,
-      hitMaxVoxels: false,
-    }));
+    const run = mockSingleSeedGrowth(volume);
     render(<SvrVolume3DViewer volume={volume} />);
     await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
 
@@ -471,12 +470,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it('recovers the nearest physically supported seed when the drawn tumor center is unsupported', async () => {
     const volume = syntheticVolume([1, 1, 1]);
     volume.observedSupport![21] = 0;
-    const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-      indices: new Uint32Array([seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x]),
-      count: 1,
-      seedValue: 0.5,
-      hitMaxVoxels: false,
-    }));
+    const run = mockSingleSeedGrowth(volume);
     render(<SvrVolume3DViewer volume={volume} />);
 
     drawInspectorTumorRegion();
