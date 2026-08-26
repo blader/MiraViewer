@@ -203,20 +203,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
   });
 
   it('exposes matched bilateral acquired-component retention even when a collapsed cavity still has finite overlap', () => {
-    const size = 128;
-    const pixels = anatomicalPhantom(size, 0.23);
-    const valid = new Uint8Array(pixels.length).fill(1);
-    const prepared = prepareAnatomicalPlaneLandmarks({
-      pixels,
-      valid,
-      rows: size,
-      cols: size,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    });
+    const { rows: size, pixels, valid, prepared } = physicalBilateralAnatomy();
     if (!prepared?.bilateral) throw new Error('Expected independently acquired bilateral reference cavities');
     const collapsed = anatomicalPhantom(size, 0.23, 0.52);
 
