@@ -64,6 +64,183 @@ const INSPECTOR_AXES = {
   sagittal: { slice: 'x', row: 'z', column: 'y' },
 } as const satisfies Record<SvrRoiPlane, Record<'slice' | 'row' | 'column', keyof Vec3i>>;
 
+/** A drawn box guides the search; its geometric center need not be tumor tissue. */
+function selectAutomaticRoiSeed(
+  volume: SvrVolume,
+  bounds: { min: Vec3i; max: Vec3i },
+  plane: SvrRoiPlane,
+  slice: number,
+  center: Vec3i,
+): Vec3i {
+  const axes = INSPECTOR_AXES[plane];
+  const columns = bounds.max[axes.column] - bounds.min[axes.column] + 1;
+  const rows = bounds.max[axes.row] - bounds.min[axes.row] + 1;
+  const values = new Float32Array(columns * rows).fill(Number.NaN);
+  const residuals = new Float32Array(values.length).fill(Number.NaN);
+  const baselines = new Float32Array(values.length);
+  const deviations = new Float32Array(values.length);
+  const [nx, ny] = volume.dims;
+  const spacingIndex = { x: 0, y: 1, z: 2 } as const;
+  const columnSpacing = volume.voxelSizeMm[spacingIndex[axes.column]];
+  const rowSpacing = volume.voxelSizeMm[spacingIndex[axes.row]];
+  const minimumSpacing = Math.min(columnSpacing, rowSpacing);
+  const innerRadius = minimumSpacing * 3;
+  const outerRadius = minimumSpacing * 8;
+  const rowRadius = Math.ceil(outerRadius / rowSpacing);
+  const columnRadius = Math.ceil(outerRadius / columnSpacing);
+
+  for (let row = 0; row < rows; row++) {
+    for (let column = 0; column < columns; column++) {
+      const voxel = { ...center };
+      voxel[axes.column] = bounds.min[axes.column] + column;
+      voxel[axes.row] = bounds.min[axes.row] + row;
+      voxel[axes.slice] = slice;
+      const index = voxel.z * nx * ny + voxel.y * nx + voxel.x;
+      if (volume.observedSupport && !volume.observedSupport[index]) continue;
+      const value = volume.data[index];
+      if (!Number.isFinite(value)) continue;
+      const cell = row * columns + column;
+      values[cell] = value!;
+
+      const surrounding: number[] = [];
+      for (let rowOffset = -rowRadius; rowOffset <= rowRadius; rowOffset++) {
+        for (let columnOffset = -columnRadius; columnOffset <= columnRadius; columnOffset++) {
+          const distance = Math.hypot(columnOffset * columnSpacing, rowOffset * rowSpacing);
+          if (distance < innerRadius || distance > outerRadius) continue;
+          const surroundingVoxel = { ...voxel };
+          surroundingVoxel[axes.column] += columnOffset;
+          surroundingVoxel[axes.row] += rowOffset;
+          if (
+            surroundingVoxel[axes.column] < 0 ||
+            surroundingVoxel[axes.column] >= volume.dims[spacingIndex[axes.column]] ||
+            surroundingVoxel[axes.row] < 0 ||
+            surroundingVoxel[axes.row] >= volume.dims[spacingIndex[axes.row]]
+          ) {
+            continue;
+          }
+          const surroundingIndex = surroundingVoxel.z * nx * ny + surroundingVoxel.y * nx + surroundingVoxel.x;
+          if (volume.observedSupport && !volume.observedSupport[surroundingIndex]) continue;
+          const surroundingValue = volume.data[surroundingIndex];
+          if (Number.isFinite(surroundingValue)) surrounding.push(surroundingValue!);
+        }
+      }
+
+      if (surrounding.length < 8) continue;
+      surrounding.sort((a, b) => a - b);
+      const baseline = surrounding[Math.floor(surrounding.length / 2)]!;
+      const localDeviations = surrounding.map((sample) => Math.abs(sample - baseline)).sort((a, b) => a - b);
+      const deviation = Math.max(localDeviations[Math.floor(localDeviations.length / 2)]! * 1.4826, 0.025);
+      baselines[cell] = baseline;
+      deviations[cell] = deviation;
+      residuals[cell] = (value! - baseline) / deviation;
+    }
+  }
+
+  const visited = new Uint8Array(values.length);
+  const queue = new Int32Array(values.length);
+  let best = center;
+  let bestScore = -Infinity;
+
+  for (let first = 0; first < values.length; first++) {
+    if (visited[first] || !Number.isFinite(residuals[first])) continue;
+    if (Math.abs(residuals[first]!) < 2) continue;
+    const polarity = Math.sign(residuals[first]!);
+    let count = 1;
+    let cursor = 0;
+    let evidence = 0;
+    let weightedColumn = 0;
+    let weightedRow = 0;
+    let containsCenter = false;
+    let touchesBoundary = false;
+    queue[0] = first;
+    visited[first] = 1;
+
+    while (cursor < count) {
+      const current = queue[cursor++]!;
+      const column = current % columns;
+      const row = Math.floor(current / columns);
+      const weight = Math.abs(residuals[current]!);
+      evidence += weight;
+      weightedColumn += column * weight;
+      weightedRow += row * weight;
+      touchesBoundary ||= column === 0 || row === 0 || column === columns - 1 || row === rows - 1;
+      containsCenter ||=
+        center[axes.slice] === slice &&
+        center[axes.column] === bounds.min[axes.column] + column &&
+        center[axes.row] === bounds.min[axes.row] + row;
+
+      for (const adjacent of [current - 1, current + 1, current - columns, current + columns]) {
+        if (adjacent < 0 || adjacent >= values.length || visited[adjacent]) continue;
+        if (Math.abs((adjacent % columns) - column) + Math.abs(Math.floor(adjacent / columns) - row) !== 1) continue;
+        if (!Number.isFinite(residuals[adjacent])) continue;
+        if (residuals[adjacent]! * polarity < 2) continue;
+        visited[adjacent] = 1;
+        queue[count++] = adjacent;
+      }
+    }
+
+    if (count < 3 || evidence <= 0) continue;
+    if (containsCenter) return center;
+    if (touchesBoundary) continue;
+
+    let availableSlices = 0;
+    let persistentSlices = 0;
+    for (const sliceOffset of [-2, -1, 1, 2]) {
+      const neighboringSlice = slice + sliceOffset;
+      if (neighboringSlice < 0 || neighboringSlice >= volume.dims[spacingIndex[axes.slice]]) continue;
+      let observed = 0;
+      let matching = 0;
+      for (let index = 0; index < count; index++) {
+        const cell = queue[index]!;
+        const neighboringVoxel = { ...center };
+        neighboringVoxel[axes.column] = bounds.min[axes.column] + (cell % columns);
+        neighboringVoxel[axes.row] = bounds.min[axes.row] + Math.floor(cell / columns);
+        neighboringVoxel[axes.slice] = neighboringSlice;
+        const neighboringIndex = neighboringVoxel.z * nx * ny + neighboringVoxel.y * nx + neighboringVoxel.x;
+        if (volume.observedSupport && !volume.observedSupport[neighboringIndex]) continue;
+        observed++;
+        if ((volume.data[neighboringIndex]! - baselines[cell]!) * polarity >= deviations[cell]! * 1.5) matching++;
+      }
+      if (observed === 0) continue;
+      availableSlices++;
+      if (matching * 2 >= observed) persistentSlices++;
+    }
+    if (availableSlices > 0 && persistentSlices * 2 < availableSlices) continue;
+
+    const centroidColumn = weightedColumn / evidence;
+    const centroidRow = weightedRow / evidence;
+    const distance = Math.hypot(
+      (bounds.min[axes.column] + centroidColumn - center[axes.column]) * columnSpacing,
+      (bounds.min[axes.row] + centroidRow - center[axes.row]) * rowSpacing,
+    );
+    const radius = Math.sqrt((count * columnSpacing * rowSpacing) / Math.PI);
+    const score = evidence / (1 + (distance / Math.max(radius, Math.min(columnSpacing, rowSpacing))) ** 4);
+    if (score <= bestScore) continue;
+
+    let closest = queue[0]!;
+    let closestDistance = Infinity;
+    for (let index = 0; index < count; index++) {
+      const candidate = queue[index]!;
+      const candidateDistance = Math.hypot(
+        ((candidate % columns) - centroidColumn) * columnSpacing,
+        (Math.floor(candidate / columns) - centroidRow) * rowSpacing,
+      );
+      if (candidateDistance < closestDistance) {
+        closest = candidate;
+        closestDistance = candidateDistance;
+      }
+    }
+
+    best = { ...center };
+    best[axes.column] = bounds.min[axes.column] + (closest % columns);
+    best[axes.row] = bounds.min[axes.row] + Math.floor(closest / columns);
+    best[axes.slice] = slice;
+    bestScore = score;
+  }
+
+  return best;
+}
+
 type GlLabelState = {
   gl: WebGL2RenderingContext;
   texLabels: WebGLTexture;
@@ -293,6 +470,7 @@ type RenderBuildState = {
 };
 
 type GrowStatus = { running: boolean; message?: string; error?: string };
+type VolumeVisualizationMode = 'anatomy' | 'overlay' | 'tumor';
 
 type VolumeSegmentationState = {
   volume: SvrVolume | null;
@@ -632,12 +810,18 @@ function useSvrVolumeViewerModel({
   const steps = 256;
   const [gamma, setGamma] = useState(1.0);
   const [opacity, setOpacity] = useState(4.0);
-  const [zoom, setZoom] = useState(1.0);
+  const [cameraZoom, setCameraZoom] = useState<{
+    anatomy: number;
+    focused: { bounds: { min: Vec3i; max: Vec3i }; factor: number } | null;
+  }>({ anatomy: 1, focused: null });
 
-  // Optional segmentation overlay (label volume).
-  // No UI controls: labels are always shown when available.
-  const labelsEnabled = true;
-  const labelMix = 0.65;
+  // Keep the accepted label texture resident across display-mode changes.
+  const [visualizationMode, setVisualizationModeValue] = useState<VolumeVisualizationMode>('overlay');
+  const setVisualizationMode = useCallback((next: VolumeVisualizationMode) => {
+    setCameraZoom((current) => (current.focused ? { ...current, focused: null } : current));
+    setVisualizationModeValue(next);
+  }, []);
+  const labelMix = 0.82;
 
   const [segmentationCollapsed, setSegmentationCollapsed] = useState(true);
 
@@ -748,6 +932,11 @@ function useSvrVolumeViewerModel({
     labelCountsRef.current = labelMetrics?.cache ?? null;
   }, [labelMetrics]);
 
+  const hasTumorLabels = (labelMetrics?.totalCount ?? 0) > 0;
+  const activeVisualizationMode = hasTumorLabels ? visualizationMode : 'anatomy';
+  const labelsEnabled = activeVisualizationMode !== 'anatomy';
+  const tumorOnly = activeVisualizationMode === 'tumor';
+
   // Slice inspector (orthogonal slices).
   const sliceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [inspectPlane, setInspectPlane] = useState<SvrRoiPlane>('axial');
@@ -787,14 +976,6 @@ function useSvrVolumeViewerModel({
     };
   }, []);
 
-  const paramsRef = useRef({ threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels });
-  useEffect(() => {
-    paramsRef.current = { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels };
-    // Render-on-demand: any control change must explicitly schedule a frame, since the GL
-    // loop no longer free-runs (idle viewer = zero GPU work).
-    requestRenderRef.current?.();
-  }, [gamma, hasLabels, labelMix, labelsEnabled, opacity, steps, threshold, zoom]);
-
   const rotationRef = useRef<Quat>([0, 0, 0, 1]);
 
   const { boxScale, volDims } = useMemo(() => {
@@ -813,12 +994,91 @@ function useSvrVolumeViewerModel({
     };
   }, [volume]);
 
+  const tumorFocus = useMemo(() => {
+    if (!tumorOnly || !volume || !growRoiBounds) return null;
+
+    const axes = ['x', 'y', 'z'] as const;
+    const spans = axes.map((axis) => growRoiBounds.max[axis] - growRoiBounds.min[axis] + 1);
+    const margin = clamp(Math.round(Math.max(...spans) * 0.1), 2, 12);
+    const center = axes.map(
+      (axis, index) =>
+        ((growRoiBounds.min[axis] + growRoiBounds.max[axis] + 1) / (2 * volume.dims[index]!) - 0.5) * boxScale[index]!,
+    ) as [number, number, number];
+    const min = axes.map(
+      (axis, index) => (Math.max(0, growRoiBounds.min[axis] - margin) / volume.dims[index]! - 0.5) * boxScale[index]!,
+    ) as [number, number, number];
+    const max = axes.map(
+      (axis, index) =>
+        ((Math.min(volume.dims[index]! - 1, growRoiBounds.max[axis] + margin) + 1) / volume.dims[index]! - 0.5) *
+        boxScale[index]!,
+    ) as [number, number, number];
+    const roiExtent = Math.max(...spans.map((span, index) => span * Math.abs(volume.voxelSizeMm[index]!)));
+    const volumeExtent = Math.max(...volume.dims.map((count, index) => count * Math.abs(volume.voxelSizeMm[index]!)));
+
+    return { center, min, max, magnification: clamp((0.56 * volumeExtent) / Math.max(roiExtent, 1e-6), 2, 4) };
+  }, [boxScale, growRoiBounds, tumorOnly, volume]);
+
+  const focusAdjustment = cameraZoom.focused?.bounds === growRoiBounds ? cameraZoom.focused.factor : 1;
+  const zoom = tumorFocus
+    ? clamp(cameraZoom.anatomy * tumorFocus.magnification * focusAdjustment, 0.6, 10)
+    : cameraZoom.anatomy;
+  const setZoom = useCallback(
+    (next: number | ((current: number) => number)) => {
+      setCameraZoom((current) => {
+        if (!tumorFocus || !growRoiBounds) {
+          const anatomy = typeof next === 'function' ? next(current.anatomy) : next;
+          return { anatomy, focused: null };
+        }
+
+        const base = clamp(current.anatomy * tumorFocus.magnification, 0.6, 10);
+        const adjustment = current.focused?.bounds === growRoiBounds ? current.focused.factor : 1;
+        const previous = clamp(base * adjustment, 0.6, 10);
+        const focused = typeof next === 'function' ? next(previous) : next;
+        return {
+          anatomy: current.anatomy,
+          focused: { bounds: growRoiBounds, factor: clamp(focused, 0.6, 10) / base },
+        };
+      });
+    },
+    [growRoiBounds, tumorFocus],
+  );
+
+  const paramsRef = useRef({
+    threshold,
+    steps,
+    gamma,
+    opacity,
+    zoom,
+    labelsEnabled,
+    labelMix,
+    hasLabels,
+    tumorOnly,
+    tumorFocus,
+  });
+  useEffect(() => {
+    paramsRef.current = {
+      threshold,
+      steps,
+      gamma,
+      opacity,
+      zoom,
+      labelsEnabled,
+      labelMix,
+      hasLabels,
+      tumorOnly,
+      tumorFocus,
+    };
+    // Render-on-demand: any control change must explicitly schedule a frame, since the GL
+    // loop no longer free-runs (idle viewer = zero GPU work).
+    requestRenderRef.current?.();
+  }, [gamma, hasLabels, labelMix, labelsEnabled, opacity, steps, threshold, tumorFocus, tumorOnly, zoom]);
+
   const renderPlan = useMemo(() => {
     if (!volume) return null;
 
     return computeRenderPlan({
       srcDims: volDims,
-      labelsEnabled,
+      labelsEnabled: true,
       hasLabels: false,
       budgetMiB: DEFAULT_RENDER_GPU_BUDGET_MIB,
       quality: DEFAULT_RENDER_QUALITY,
@@ -826,7 +1086,7 @@ function useSvrVolumeViewerModel({
       reserveLabelTexture: true,
       hasObservedSupport: Boolean(volume.observedSupport),
     });
-  }, [labelsEnabled, volume, volDims]);
+  }, [volume, volDims]);
 
   const renderBuildKey = useMemo(() => {
     if (!renderPlan) return null;
@@ -915,7 +1175,7 @@ function useSvrVolumeViewerModel({
     // If zoom was already 1.0 the params effect won't fire, so the rotation reset needs its
     // own explicit frame request.
     requestRenderRef.current?.();
-  }, []);
+  }, [setZoom]);
 
   // Pointer drag rotation (viewport-relative yaw/pitch).
   //
@@ -1029,7 +1289,7 @@ function useSvrVolumeViewerModel({
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
     };
-  }, [markInteraction]);
+  }, [markInteraction, setZoom]);
 
   const inspectorInfo = useMemo(() => {
     if (!volume) {
@@ -1176,21 +1436,78 @@ function useSvrVolumeViewerModel({
         return;
       }
 
-      // Use a single seed at the ROI center.
-      const seed: Vec3i = {
-        x: Math.floor((roiBounds.min.x + roiBounds.max.x) * 0.5),
-        y: Math.floor((roiBounds.min.y + roiBounds.max.y) * 0.5),
-        z: Math.floor((roiBounds.min.z + roiBounds.max.z) * 0.5),
+      // Preserve the explicit drawn seed, falling back to the nearest acquired voxel
+      // only when its exact location has no physical source support.
+      const requestedSeed = params?.seed ??
+        seedVoxel ?? {
+          x: Math.floor((roiBounds.min.x + roiBounds.max.x) * 0.5),
+          y: Math.floor((roiBounds.min.y + roiBounds.max.y) * 0.5),
+          z: Math.floor((roiBounds.min.z + roiBounds.max.z) * 0.5),
+        };
+      let seed: Vec3i = {
+        x: clamp(Math.round(requestedSeed.x), roiBounds.min.x, roiBounds.max.x),
+        y: clamp(Math.round(requestedSeed.y), roiBounds.min.y, roiBounds.max.y),
+        z: clamp(Math.round(requestedSeed.z), roiBounds.min.z, roiBounds.max.z),
       };
       const [nx, ny, nz] = volume.dims;
-      const seedIdx = seed.z * nx * ny + seed.y * nx + seed.x;
+      let seedIdx = seed.z * nx * ny + seed.y * nx + seed.x;
       if (volume.observedSupport && !volume.observedSupport[seedIdx]) {
-        setGrowStatus({
-          running: false,
-          error: 'The ROI center has no acquired MRI support. Draw the box around observed anatomy.',
-        });
-        return;
+        const support = volume.observedSupport;
+        const spacing = volume.voxelSizeMm;
+        const minimumSpacing = Math.min(...spacing);
+        const maximumRadius = Math.max(
+          seed.x - roiBounds.min.x,
+          roiBounds.max.x - seed.x,
+          seed.y - roiBounds.min.y,
+          roiBounds.max.y - seed.y,
+          seed.z - roiBounds.min.z,
+          roiBounds.max.z - seed.z,
+        );
+        let nearest: Vec3i | null = null;
+        let nearestDistance = Infinity;
+
+        for (let radius = 1; radius <= maximumRadius; radius++) {
+          const minimumX = Math.max(roiBounds.min.x, seed.x - radius);
+          const maximumX = Math.min(roiBounds.max.x, seed.x + radius);
+          for (
+            let z = Math.max(roiBounds.min.z, seed.z - radius);
+            z <= Math.min(roiBounds.max.z, seed.z + radius);
+            z++
+          ) {
+            for (
+              let y = Math.max(roiBounds.min.y, seed.y - radius);
+              y <= Math.min(roiBounds.max.y, seed.y + radius);
+              y++
+            ) {
+              const completeRow = Math.abs(z - seed.z) === radius || Math.abs(y - seed.y) === radius;
+              for (let x = minimumX; x <= maximumX; x += completeRow ? 1 : Math.max(1, maximumX - minimumX)) {
+                if (!completeRow && Math.abs(x - seed.x) !== radius) continue;
+                if (!support[z * nx * ny + y * nx + x]) continue;
+                const distance =
+                  ((x - seed.x) * spacing[0]) ** 2 +
+                  ((y - seed.y) * spacing[1]) ** 2 +
+                  ((z - seed.z) * spacing[2]) ** 2;
+                if (distance < nearestDistance) {
+                  nearest = { x, y, z };
+                  nearestDistance = distance;
+                }
+              }
+            }
+          }
+          if (nearest && nearestDistance <= ((radius + 1) * minimumSpacing) ** 2) break;
+        }
+
+        if (!nearest) {
+          setGrowStatus({
+            running: false,
+            error: 'The selected region contains no acquired MRI support. Draw the box around observed anatomy.',
+          });
+          return;
+        }
+        seed = nearest;
+        seedIdx = seed.z * nx * ny + seed.y * nx + seed.x;
       }
+      setSeedVoxel(seed);
 
       const tolerance = params?.tolerance ?? growTolerance;
       const targetLabel = params?.targetLabel ?? growTargetLabel;
@@ -1283,6 +1600,14 @@ function useSvrVolumeViewerModel({
           if (controller.signal.aborted) return;
           if (growRunIdRef.current !== runId) return;
 
+          if (res.count === 0 || res.indices.length === 0) {
+            setGrowStatus({
+              running: false,
+              error: 'No distinct tumor-like tissue was found. Draw a tighter box around the lesion.',
+            });
+            return;
+          }
+
           const o = growOverlayRef.current;
           if (!o || o.key !== volumeKey || o.seedKey !== seedKey) return;
 
@@ -1343,12 +1668,14 @@ function useSvrVolumeViewerModel({
           // Apply the new preview, capturing previous values so we can restore on the next update.
           const idx = res.indices;
           const nextPrevValues = new Uint8Array(idx.length);
+          let supportedVoxelCount = 0;
           for (let i = 0; i < idx.length; i++) {
             const vi = idx[i]!;
             if (volume.observedSupport && !volume.observedSupport[vi]) continue;
             nextPrevValues[i] = o.workLabels[vi] ?? 0;
             replaceLabel(vi, targetLabel);
             trackIndex(vi);
+            supportedVoxelCount++;
           }
           o.prevIndices = idx;
           o.prevValues = nextPrevValues;
@@ -1359,6 +1686,7 @@ function useSvrVolumeViewerModel({
 
           labelSourceRef.current = undefined;
           setGeneratedLabels({ data: o.workLabels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
+          if (!hasTumorLabels && supportedVoxelCount > 0) setVisualizationMode('tumor');
 
           setGrowStatus({
             running: false,
@@ -1385,11 +1713,15 @@ function useSvrVolumeViewerModel({
       growTargetLabel,
       growTolerance,
       hasLabels,
+      hasTumorLabels,
       labels,
       markLabelsDirty,
       onnxSegRunning,
+      seedVoxel,
       setGeneratedLabels,
       setGrowStatus,
+      setSeedVoxel,
+      setVisualizationMode,
       volume,
     ],
   );
@@ -1488,11 +1820,18 @@ function useSvrVolumeViewerModel({
         if (bounds) {
           setGrowRoiBounds(bounds);
 
-          const seed: Vec3i = {
+          const center: Vec3i = {
             x: Math.floor((bounds.min.x + bounds.max.x) * 0.5),
             y: Math.floor((bounds.min.y + bounds.max.y) * 0.5),
             z: Math.floor((bounds.min.z + bounds.max.z) * 0.5),
           };
+          const seed = selectAutomaticRoiSeed(
+            volume!,
+            bounds,
+            inspectPlane,
+            drag.startVoxel[INSPECTOR_AXES[inspectPlane].slice],
+            center,
+          );
           setSeedVoxel(seed);
 
           startSeedGrow({ auto: true, roiBounds: bounds, seed });
@@ -1507,11 +1846,13 @@ function useSvrVolumeViewerModel({
     },
     [
       computeRoiBoundsFromSliceVoxels,
+      inspectPlane,
       inspectorPointerToVoxel,
       setGrowRoiBounds,
       setGrowRoiDraftBounds,
       setSeedVoxel,
       startSeedGrow,
+      volume,
     ],
   );
 
@@ -2020,6 +2361,11 @@ function useSvrVolumeViewerModel({
         palette: gl.getUniformLocation(program, 'u_palette'),
         labelsEnabled: gl.getUniformLocation(program, 'u_labelsEnabled'),
         labelMix: gl.getUniformLocation(program, 'u_labelMix'),
+        tumorOnly: gl.getUniformLocation(program, 'u_tumorOnly'),
+        focusCenter: gl.getUniformLocation(program, 'u_focusCenter'),
+        focusEnabled: gl.getUniformLocation(program, 'u_focusEnabled'),
+        focusMin: gl.getUniformLocation(program, 'u_focusMin'),
+        focusMax: gl.getUniformLocation(program, 'u_focusMax'),
 
         occ: gl.getUniformLocation(program, 'u_occ'),
         occEnabled: gl.getUniformLocation(program, 'u_occEnabled'),
@@ -2079,7 +2425,8 @@ function useSvrVolumeViewerModel({
 
         resizeAndViewport(interacting ? INTERACTION_SCALE : 1);
 
-        const { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels } = paramsRef.current;
+        const { threshold, steps, gamma, opacity, zoom, labelsEnabled, labelMix, hasLabels, tumorOnly, tumorFocus } =
+          paramsRef.current;
 
         gl.disable(gl.DEPTH_TEST);
         gl.disable(gl.CULL_FACE);
@@ -2114,6 +2461,11 @@ function useSvrVolumeViewerModel({
 
         const labelsOn = labelsEnabled && hasLabels ? 1 : 0;
         gl.uniform1i(u.labelsEnabled, labelsOn);
+        gl.uniform1i(u.tumorOnly, labelsOn && tumorOnly ? 1 : 0);
+        gl.uniform1i(u.focusEnabled, labelsOn && tumorFocus ? 1 : 0);
+        gl.uniform3f(u.focusCenter, ...(tumorFocus?.center ?? [0, 0, 0]));
+        gl.uniform3f(u.focusMin, ...(tumorFocus?.min ?? [0, 0, 0]));
+        gl.uniform3f(u.focusMax, ...(tumorFocus?.max ?? [0, 0, 0]));
         gl.uniform1f(u.labelMix, clamp(labelMix, 0, 1));
 
         // Uniforms
@@ -2220,14 +2572,14 @@ function useSvrVolumeViewerModel({
   }, [boxScale, contextEpoch, renderBuild.key, renderBuild.status, renderBuild.data, volume]);
 
   // Incrementally upload label data + palette without re-initializing the whole GL program.
-  // IMPORTANT: allocate the full 3D label texture only when labels are enabled + present.
+  // Keep the accepted label texture resident when the user temporarily views anatomy alone.
   useEffect(() => {
     const st = glLabelStateRef.current;
     if (!st) return;
 
     const { gl, texLabels, texPalette, texDims } = st;
 
-    if (!labelsEnabled || !volume || !labels || !hasLabels) {
+    if (!volume || !labels || !hasLabels) {
       if (volume && labels && !hasLabels) {
         console.warn('[svr3d] Ignoring label volume (dims mismatch)', {
           volumeDims: volume.dims,
@@ -2414,7 +2766,7 @@ function useSvrVolumeViewerModel({
       // were just disabled/removed, and that state change repaints via the params effect.)
       requestRenderRef.current?.();
     }
-  }, [glEpoch, hasLabels, labelPalette, labels, labelsEnabled, volume]);
+  }, [glEpoch, hasLabels, labelPalette, labels, volume]);
 
   const onViewerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLCanvasElement>) => {
@@ -2446,7 +2798,7 @@ function useSvrVolumeViewerModel({
       event.preventDefault();
       event.stopPropagation();
     },
-    [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView],
+    [cancelSeedGrow, growStatus.running, inspectorInfo.maxIndex, markInteraction, resetView, setZoom],
   );
 
   return {
@@ -2463,6 +2815,7 @@ function useSvrVolumeViewerModel({
     growTargetLabel,
     growTolerance,
     hasLabels,
+    hasTumorLabels,
     initError,
     initOnnxSession,
     inspectIndex,
@@ -2503,36 +2856,113 @@ function useSvrVolumeViewerModel({
     setOpacity,
     setSegmentationCollapsed,
     setThreshold,
+    setVisualizationMode,
     sliceCanvasRef,
     sliceInspectorPortalTarget,
     threshold,
+    visualizationMode: activeVisualizationMode,
     volDims,
   };
 }
 
 type SvrVolumeViewerModel = ReturnType<typeof useSvrVolumeViewerModel>;
 
-function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
-  const {
-    inspectIndex,
-    inspectPlane,
-    inspectedCoordinate,
-    inspectorInfo,
-    onSliceInspectorPointerCancel,
-    onSliceInspectorPointerDown,
-    onSliceInspectorPointerMove,
-    onSliceInspectorPointerUp,
-    setInspectIndex,
-    setInspectPlane,
-    sliceCanvasRef,
-    volDims,
-    volume,
-  } = model;
+type SvrSliceInspectorProps = Pick<
+  SvrVolumeViewerModel,
+  | 'inspectIndex'
+  | 'inspectPlane'
+  | 'inspectedCoordinate'
+  | 'inspectorInfo'
+  | 'growRoiBounds'
+  | 'growStatus'
+  | 'growTolerance'
+  | 'hasTumorLabels'
+  | 'onSliceInspectorPointerCancel'
+  | 'onSliceInspectorPointerDown'
+  | 'onSliceInspectorPointerMove'
+  | 'onSliceInspectorPointerUp'
+  | 'onnxSegRunning'
+  | 'scheduleSeedGrow'
+  | 'setGrowTolerance'
+  | 'setInspectIndex'
+  | 'setInspectPlane'
+  | 'setVisualizationMode'
+  | 'sliceCanvasRef'
+  | 'visualizationMode'
+  | 'volDims'
+> & {
+  hasVolume: boolean;
+  tumorVolumeMl: number | null;
+};
 
+function SvrSliceInspector({
+  inspectIndex,
+  inspectPlane,
+  inspectedCoordinate,
+  inspectorInfo,
+  growRoiBounds,
+  growStatus,
+  growTolerance,
+  hasTumorLabels,
+  hasVolume,
+  onSliceInspectorPointerCancel,
+  onSliceInspectorPointerDown,
+  onSliceInspectorPointerMove,
+  onSliceInspectorPointerUp,
+  onnxSegRunning,
+  scheduleSeedGrow,
+  setGrowTolerance,
+  setInspectIndex,
+  setInspectPlane,
+  setVisualizationMode,
+  sliceCanvasRef,
+  tumorVolumeMl,
+  visualizationMode,
+  volDims,
+}: SvrSliceInspectorProps) {
   return (
     <div className={`space-y-3 bg-[var(--bg-secondary)] ${COARSE_POINTER_CONTROL_TARGETS}`}>
       <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">Slice Inspector</div>
       <div className="space-y-3">
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+            <span className="font-medium text-[var(--text-secondary)]">Tumor visualization</span>
+            {hasTumorLabels && tumorVolumeMl !== null ? (
+              <span className="tabular-nums text-[var(--signal-metal)] [font-family:var(--font-mono)]">
+                {tumorVolumeMl.toFixed(2)} mL
+              </span>
+            ) : null}
+          </div>
+          <div
+            role="group"
+            aria-label="Tumor visualization"
+            className="grid grid-cols-3 gap-px overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--border-color)]"
+          >
+            {(
+              [
+                ['anatomy', 'Anatomy'],
+                ['overlay', 'Overlay'],
+                ['tumor', 'Tumor only'],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={visualizationMode === mode}
+                disabled={mode !== 'anatomy' && !hasTumorLabels}
+                onClick={() => setVisualizationMode(mode)}
+                className={`relative min-h-9 bg-[var(--bg-secondary)] px-1 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  visualizationMode === mode
+                    ? 'bg-[var(--bg-tertiary)] font-medium text-[var(--signal-metal)] after:absolute after:inset-x-2 after:bottom-0 after:h-px after:bg-[var(--signal-metal)]'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <label className="block text-xs text-[var(--text-secondary)]">
             Plane
@@ -2540,7 +2970,7 @@ function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
               value={inspectPlane}
               onChange={(e) => setInspectPlane(e.target.value as SvrRoiPlane)}
               className="mt-1 min-h-9 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-tertiary)] px-2 py-1 text-[var(--text-primary)]"
-              disabled={!volume}
+              disabled={!hasVolume}
             >
               <option value="axial">Axial (z)</option>
               <option value="coronal">Coronal (y)</option>
@@ -2558,7 +2988,7 @@ function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
               value={Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}
               onChange={(e) => setInspectIndex(Number(e.target.value))}
               className="mt-1 w-full"
-              disabled={!volume}
+              disabled={!hasVolume}
             />
             <div className="mt-1 text-xs tabular-nums text-[var(--text-tertiary)] [font-family:var(--font-mono)]">
               {Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}/{inspectorInfo.maxIndex}
@@ -2567,8 +2997,18 @@ function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
         </div>
 
         <div className="text-xs text-[var(--text-tertiary)]">
-          Drag to draw an inspection region. Amber indicates anatomy without acquired-pixel support.
+          Drag a box around the tumor to segment it in 3D. Amber marks areas without acquired MRI support.
         </div>
+
+        {growStatus.error ? (
+          <div role="alert" className="border-l-2 border-[var(--danger)] pl-2 text-xs text-[var(--danger)]">
+            {growStatus.error}
+          </div>
+        ) : growStatus.running || growStatus.message ? (
+          <div role="status" aria-live="polite" className="text-xs text-[var(--text-secondary)]">
+            {growStatus.message ?? 'Segmenting supported tumor tissue…'}
+          </div>
+        ) : null}
 
         {inspectedCoordinate ? (
           <div
@@ -2599,10 +3039,10 @@ function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
             className="w-full h-auto"
             role="img"
             aria-label={`${inspectPlane} reconstructed slice ${Math.round(clamp(inspectIndex, 0, inspectorInfo.maxIndex))}`}
-            tabIndex={volume ? 0 : -1}
+            tabIndex={hasVolume ? 0 : -1}
             style={{
               aspectRatio: inspectorInfo.aspectRatio,
-              cursor: volume ? 'crosshair' : 'default',
+              cursor: hasVolume ? 'crosshair' : 'default',
             }}
             onPointerDown={onSliceInspectorPointerDown}
             onPointerMove={onSliceInspectorPointerMove}
@@ -2612,7 +3052,32 @@ function SvrSliceInspector({ model }: { model: SvrVolumeViewerModel }) {
           />
         </div>
 
-        {volume ? (
+        {growRoiBounds ? (
+          <label className="block text-xs text-[var(--text-secondary)]">
+            <span className="flex items-center justify-between gap-2">
+              <span>Tumor sensitivity</span>
+              <span className="tabular-nums text-[var(--text-tertiary)] [font-family:var(--font-mono)]">
+                ±{growTolerance.toFixed(3)}
+              </span>
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={0.5}
+              step={0.005}
+              value={growTolerance}
+              disabled={onnxSegRunning}
+              onChange={(event) => {
+                const tolerance = Number(event.target.value);
+                setGrowTolerance(tolerance);
+                scheduleSeedGrow({ tolerance });
+              }}
+              className="mt-2 w-full"
+            />
+          </label>
+        ) : null}
+
+        {hasVolume ? (
           <div className="text-xs tabular-nums text-[var(--text-tertiary)] [font-family:var(--font-mono)]">
             Volume dims: {volDims.nx}×{volDims.ny}×{volDims.nz}
           </div>
@@ -3064,7 +3529,33 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
     sliceInspectorPortalTarget,
     volume,
   } = model;
-  const sliceInspectorCard = <SvrSliceInspector model={model} />;
+  const sliceInspectorCard = (
+    <SvrSliceInspector
+      inspectIndex={model.inspectIndex}
+      inspectPlane={model.inspectPlane}
+      inspectedCoordinate={model.inspectedCoordinate}
+      inspectorInfo={model.inspectorInfo}
+      growRoiBounds={model.growRoiBounds}
+      growStatus={model.growStatus}
+      growTolerance={model.growTolerance}
+      hasTumorLabels={model.hasTumorLabels}
+      hasVolume={Boolean(volume)}
+      onSliceInspectorPointerCancel={model.onSliceInspectorPointerCancel}
+      onSliceInspectorPointerDown={model.onSliceInspectorPointerDown}
+      onSliceInspectorPointerMove={model.onSliceInspectorPointerMove}
+      onSliceInspectorPointerUp={model.onSliceInspectorPointerUp}
+      onnxSegRunning={model.onnxSegRunning}
+      scheduleSeedGrow={model.scheduleSeedGrow}
+      setGrowTolerance={model.setGrowTolerance}
+      setInspectIndex={model.setInspectIndex}
+      setInspectPlane={model.setInspectPlane}
+      setVisualizationMode={model.setVisualizationMode}
+      sliceCanvasRef={model.sliceCanvasRef}
+      tumorVolumeMl={model.labelMetrics?.totalMl ?? null}
+      visualizationMode={model.visualizationMode}
+      volDims={model.volDims}
+    />
+  );
   const wantsSliceInspectorPortal = Boolean(sliceInspectorPortalTarget);
   const sliceInspectorPortal =
     volume && sliceInspectorPortalTarget ? createPortal(sliceInspectorCard, sliceInspectorPortalTarget) : null;

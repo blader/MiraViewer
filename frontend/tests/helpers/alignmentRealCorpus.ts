@@ -88,7 +88,23 @@ export type DecodedAlignmentFrame = {
   windowWidth?: number;
 };
 
-function* walkCorpus(root: string): Generator<string> {
+function hasDicomPreamble(path: string): boolean {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, 'r');
+    const preamble = Buffer.allocUnsafe(132);
+    return (
+      readSync(descriptor, preamble, 0, preamble.length, 0) === preamble.length &&
+      preamble.toString('ascii', 128) === 'DICM'
+    );
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function* walkCorpus(root: string, includeExtensionlessDicom = false): Generator<string> {
   const pending = [root];
   while (pending.length > 0) {
     const directory = pending.pop()!;
@@ -96,7 +112,13 @@ function* walkCorpus(root: string): Generator<string> {
       if (entry.name.startsWith('.')) continue;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) pending.push(path);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.dcm')) yield path;
+      else if (
+        entry.isFile() &&
+        (entry.name.toLowerCase().endsWith('.dcm') ||
+          (includeExtensionlessDicom && !entry.name.includes('.') && hasDicomPreamble(path)))
+      ) {
+        yield path;
+      }
     }
   }
 }
@@ -137,18 +159,19 @@ function readHeader(path: string): dicomParser.DataSet {
 
 export function inspectAlignmentCorpus(
   root: string,
-  options: { studyOrdinals?: Iterable<number> } = {},
+  options: { studyOrdinals?: Iterable<number>; includeExtensionlessDicom?: boolean } = {},
 ): AlignmentCorpusSeries[] {
   const series = new Map<string, AlignmentCorpusSeries>();
   const examinationDates = new Map<string, string>();
   const requestedOrdinals = new Set(options.studyOrdinals ?? []);
+  const includeExtensionlessDicom = options.includeExtensionlessDicom === true;
   let globalOrdinals: Map<string, number> | undefined;
-  let files: Iterable<string> = walkCorpus(root);
+  let files: Iterable<string> = walkCorpus(root, includeExtensionlessDicom);
 
   if (requestedOrdinals.size > 0) {
     const directories = new Map<string, string>();
     const studyDates = new Map<string, string>();
-    for (const path of walkCorpus(root)) {
+    for (const path of walkCorpus(root, includeExtensionlessDicom)) {
       const directory = dirname(path);
       if (directories.has(directory)) continue;
       let dataset: dicomParser.DataSet;
@@ -171,7 +194,7 @@ export function inspectAlignmentCorpus(
       requestedOrdinals.has(globalOrdinals!.get(studyUid)!),
     );
     files = (function* () {
-      for (const [directory] of selectedDirectories) yield* walkCorpus(directory);
+      for (const [directory] of selectedDirectories) yield* walkCorpus(directory, includeExtensionlessDicom);
     })();
   }
 

@@ -267,6 +267,48 @@ describe('svr/acquired-support texture', () => {
     expect(RAYMARCH_FRAGMENT_SHADER.slice(supportGate, supportGate + 90)).toContain('continue;');
   });
 
+  it('isolates acquired lesion labels before paying for anatomy and gradient sampling', () => {
+    const supportGate = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_support, tc).r <= 0.0');
+    const lesionLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('labelCoverage = lesionCoverage(tc, lid)');
+    const lesionGate = RAYMARCH_FRAGMENT_SHADER.indexOf('labelCoverage <= 0.08');
+    const intensityLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_vol, tc).r');
+
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_tumorOnly;');
+    expect(supportGate).toBeGreaterThan(0);
+    expect(lesionLookup).toBeGreaterThan(supportGate);
+    expect(lesionGate).toBeGreaterThan(lesionLookup);
+    expect(lesionGate).toBeLessThan(intensityLookup);
+    expect(RAYMARCH_FRAGMENT_SHADER.slice(lesionGate, lesionGate + 90)).toContain('continue;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('u_tumorOnly != 0 ? 0.0 : saturate(u_thr)');
+  });
+
+  it('renders acquired categorical labels below the anatomical intensity threshold', () => {
+    const supportGate = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_support, tc).r <= 0.0');
+    const lesionLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('lid = texture(u_labels, tc).r');
+    const visibilityGate = RAYMARCH_FRAGMENT_SHADER.indexOf('if (v >= thr || (u_labelsEnabled != 0 && lid != 0u))');
+
+    expect(supportGate).toBeGreaterThan(0);
+    expect(lesionLookup).toBeGreaterThan(supportGate);
+    expect(visibilityGate).toBeGreaterThan(lesionLookup);
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('? max(v, 0.48)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('max(0.48, val) * dt * 12.0 * boundary');
+  });
+
+  it('clips focused rays to the complete lesion domain and smoothly samples categorical boundaries', () => {
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_focusEnabled;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMin;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMax;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('ro += u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmin = max(bmin, u_focusMin);');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmax = min(bmax, u_focusMax);');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('smoothstep(0.12, 0.78, labelCoverage)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('pos - u_focusCenter');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('normalize(mix(radial, nrm, 0.16))');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('lesionAccum += (1.0 - lesionAlpha)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('accum = mix(accum, visibleLesion');
+  });
+
   it('restores conservative cell skipping through sparse acquired MRI support without changing visible anatomy', () => {
     const size = 96;
     const dims = { nx: size, ny: size, nz: size };

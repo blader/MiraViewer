@@ -304,7 +304,7 @@ describe('Quiet Instrument visual system', () => {
     expect(within(chronology).getAllByRole('button')[0]).toBeEnabled();
   });
 
-  it('preserves actual reconstruction examination selection without occupying a global date sidebar', async () => {
+  it('opens the newest enabled grid examination for reconstruction and preserves later study selection', async () => {
     render(<ComparisonMatrix />);
 
     expect(screen.getByLabelText('Selected patient')).toHaveTextContent('Synthetic Patient');
@@ -313,15 +313,48 @@ describe('Quiet Instrument visual system', () => {
     fireEvent.click(screen.getByRole('button', { name: '3D' }));
 
     expect(screen.queryByRole('complementary', { name: 'Examination dates' })).not.toBeInTheDocument();
-    expect(await screen.findByTestId('reconstruction-examination')).toHaveTextContent(examinations[0]!);
+    expect(await screen.findByTestId('reconstruction-examination')).toHaveTextContent(examinations[1]!);
 
     const chronology = screen.getByRole('navigation', { name: 'Available examinations' });
-    const secondStudy = within(chronology).getByRole('button', { name: /Feb 1, 2025/i });
-    fireEvent.click(secondStudy);
+    const firstStudy = within(chronology).getByRole('button', { name: /Jan 1, 2025/i });
+    fireEvent.click(firstStudy);
 
-    expect(secondStudy).toHaveAttribute('aria-current', 'true');
-    expect(screen.getByTestId('reconstruction-examination')).toHaveTextContent(examinations[1]!);
+    expect(firstStudy).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByTestId('reconstruction-examination')).toHaveTextContent(examinations[0]!);
     expect(screen.getByLabelText('Selected patient')).toHaveTextContent('Synthetic Patient');
+  });
+
+  it('preserves an explicitly selected older overlay examination when opening reconstruction', async () => {
+    render(<ComparisonMatrix />);
+    fireEvent.click(screen.getByRole('button', { name: 'Overlay' }));
+
+    const chronology = screen.getByRole('navigation', { name: 'Available examinations' });
+    fireEvent.click(within(chronology).getByRole('button', { name: /Feb 1, 2025/i }));
+    const selectedStudy = within(chronology).getByRole('button', { name: /Jan 1, 2025/i });
+    fireEvent.click(selectedStudy);
+    expect(selectedStudy).toHaveAttribute('aria-current', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: '3D' }));
+
+    expect(await screen.findByTestId('reconstruction-examination')).toHaveTextContent(examinations[0]!);
+  });
+
+  it('preserves the selected examination across workspace refresh and restores the newest after returning to the grid', async () => {
+    const { rerender } = render(<ComparisonMatrix />);
+    fireEvent.click(screen.getByRole('button', { name: '3D' }));
+    expect(await screen.findByTestId('reconstruction-examination')).toHaveTextContent(examinations[1]!);
+
+    rerender(<ComparisonMatrix />);
+    expect(screen.getByTestId('reconstruction-examination')).toHaveTextContent(examinations[1]!);
+
+    const chronology = screen.getByRole('navigation', { name: 'Available examinations' });
+    fireEvent.click(within(chronology).getByRole('button', { name: /Jan 1, 2025/i }));
+    rerender(<ComparisonMatrix />);
+    expect(screen.getByTestId('reconstruction-examination')).toHaveTextContent(examinations[0]!);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Compare' }));
+    fireEvent.click(screen.getByRole('button', { name: '3D' }));
+    expect(await screen.findByTestId('reconstruction-examination')).toHaveTextContent(examinations[1]!);
   });
 
   it('keeps only one substantial navigation surface open and closes a contextual drawer with Escape', () => {

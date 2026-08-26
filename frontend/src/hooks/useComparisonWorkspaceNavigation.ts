@@ -66,13 +66,23 @@ export function useComparisonWorkspaceNavigation({
     overlayDateIndex,
     compareTargetIndex,
     displayedOverlayIndex,
-    setViewMode,
+    setViewMode: setNavigationViewMode,
     setOverlayDateIndex,
     isPlaying,
     setIsPlaying,
     playSpeed,
     setPlaySpeed,
   } = navigation;
+
+  const setViewMode = useCallback(
+    (next: 'grid' | 'overlay' | 'svr3d') => {
+      if (viewMode === 'grid' && next === 'svr3d' && overlayColumns.length > 0) {
+        setOverlayDateIndex(overlayColumns.length - 1);
+      }
+      setNavigationViewMode(next);
+    },
+    [overlayColumns.length, setNavigationViewMode, setOverlayDateIndex, viewMode],
+  );
 
   const positionAt = (index: number) => {
     const column = overlayColumns[index];

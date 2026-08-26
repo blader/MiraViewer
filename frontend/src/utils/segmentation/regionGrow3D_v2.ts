@@ -39,57 +39,69 @@ export type RegionGrow3DOptions = {
   debug?: boolean;
 };
 
-type HeapItem = { i: number; d: number };
-
 class MinHeap {
-  private items: HeapItem[] = [];
+  private indices = new Uint32Array(64);
+  private distances = new Float32Array(64);
+  private length = 0;
+  distance = 0;
 
-  push(item: HeapItem) {
-    const a = this.items;
-    a.push(item);
-    let i = a.length - 1;
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (a[p]!.d <= a[i]!.d) break;
-      const tmp = a[p]!;
-      a[p] = a[i]!;
-      a[i] = tmp;
-      i = p;
+  push(index: number, distance: number): void {
+    if (this.length === this.indices.length) {
+      const indices = new Uint32Array(this.indices.length * 2);
+      indices.set(this.indices);
+      this.indices = indices;
+      const distances = new Float32Array(this.distances.length * 2);
+      distances.set(this.distances);
+      this.distances = distances;
     }
+
+    let current = this.length++;
+    while (current > 0) {
+      const parent = (current - 1) >> 1;
+      if (this.distances[parent]! <= distance) break;
+      this.indices[current] = this.indices[parent]!;
+      this.distances[current] = this.distances[parent]!;
+      current = parent;
+    }
+    this.indices[current] = index;
+    this.distances[current] = distance;
   }
 
-  pop(): HeapItem | null {
-    const a = this.items;
-    const n = a.length;
-    if (n === 0) return null;
+  pop(): number {
+    if (this.length === 0) return -1;
 
-    const out = a[0]!;
-    const last = a.pop()!;
-    if (n > 1) {
-      a[0] = last;
-
-      let i = 0;
+    const index = this.indices[0]!;
+    this.distance = this.distances[0]!;
+    const lastIndex = this.indices[--this.length]!;
+    const lastDistance = this.distances[this.length]!;
+    if (this.length > 0) {
+      let current = 0;
       for (;;) {
-        const l = i * 2 + 1;
-        const r = l + 1;
-        let smallest = i;
+        const left = current * 2 + 1;
+        const right = left + 1;
+        let smallest = current;
+        let smallestDistance = lastDistance;
 
-        if (l < a.length && a[l]!.d < a[smallest]!.d) smallest = l;
-        if (r < a.length && a[r]!.d < a[smallest]!.d) smallest = r;
+        if (left < this.length && this.distances[left]! < smallestDistance) {
+          smallest = left;
+          smallestDistance = this.distances[left]!;
+        }
+        if (right < this.length && this.distances[right]! < smallestDistance) smallest = right;
 
-        if (smallest === i) break;
-        const tmp = a[i]!;
-        a[i] = a[smallest]!;
-        a[smallest] = tmp;
-        i = smallest;
+        if (smallest === current) break;
+        this.indices[current] = this.indices[smallest]!;
+        this.distances[current] = this.distances[smallest]!;
+        current = smallest;
       }
+      this.indices[current] = lastIndex;
+      this.distances[current] = lastDistance;
     }
 
-    return out;
+    return index;
   }
 
-  get size() {
-    return this.items.length;
+  get size(): number {
+    return this.length;
   }
 }
 
@@ -176,14 +188,15 @@ export async function regionGrow3D_v2(params: {
     throw new Error(`regionGrow3D_v2: seed out of bounds: (${seed.x}, ${seed.y}, ${seed.z})`);
   }
 
-  const minV = Math.min(params.min, params.max);
+  let minV = Math.min(params.min, params.max);
   let maxV = Math.max(params.min, params.max);
 
   const seedIdx = idx3(seed.x, seed.y, seed.z, nx, ny);
   if (observedSupport && !observedSupport[seedIdx]) {
     throw new Error('regionGrow3D_v2: segmentation seed is not supported by observed MRI data');
   }
-  const seedValue = volume[seedIdx] ?? 0;
+  const acquiredSeedValue = volume[seedIdx] ?? 0;
+  let seedValue = acquiredSeedValue;
 
   const opts = params.opts;
   const tuning = opts?.tuning;
@@ -226,6 +239,9 @@ export async function regionGrow3D_v2(params: {
   if (!roiParsed && n > 5_000_000) {
     throw new Error('regionGrow3D_v2 requires an ROI for large volumes');
   }
+  if (opts?.signal?.aborted) {
+    return { indices: new Uint32Array(0), count: 0, seedValue: acquiredSeedValue, hitMaxVoxels: false };
+  }
 
   const roiSamplesForTumorStats = (() => {
     const r = roiParsed;
@@ -238,7 +254,7 @@ export async function regionGrow3D_v2(params: {
 
     // Keep sampling bounded for performance.
     const maxSamples = 8192;
-    const stride = clampInt(Math.floor(Math.cbrt(roiN / maxSamples)), 1, 8);
+    const stride = clampInt(Math.ceil(Math.cbrt(roiN / maxSamples)), 1, 8);
 
     const samples: number[] = [];
 
@@ -255,6 +271,80 @@ export async function regionGrow3D_v2(params: {
 
     return samples;
   })();
+
+  const roiBackground = roiSamplesForTumorStats ? robustStats(roiSamplesForTumorStats, 0.02) : null;
+  const localSeedBackground = (() => {
+    if (
+      !observedSupport ||
+      roiParsed?.mode !== 'guide' ||
+      tuning ||
+      params.seedIndices?.length ||
+      opts?.maxCost !== undefined
+    ) {
+      return null;
+    }
+
+    const samples: number[] = [];
+    for (let dz = -8; dz <= 8; dz++) {
+      const z = seed.z + dz;
+      if (z < 0 || z >= nz) continue;
+      for (let dy = -8; dy <= 8; dy++) {
+        const y = seed.y + dy;
+        if (y < 0 || y >= ny) continue;
+        for (let dx = -8; dx <= 8; dx++) {
+          const squaredDistance = dx * dx + dy * dy + dz * dz;
+          if (squaredDistance < 9 || squaredDistance > 64) continue;
+          if (dz < 0 || (dz === 0 && (dy < 0 || (dy === 0 && dx <= 0)))) continue;
+          const x = seed.x + dx;
+          const oppositeX = seed.x - dx;
+          const oppositeY = seed.y - dy;
+          const oppositeZ = seed.z - dz;
+          if (
+            x < 0 ||
+            x >= nx ||
+            oppositeX < 0 ||
+            oppositeX >= nx ||
+            oppositeY < 0 ||
+            oppositeY >= ny ||
+            oppositeZ < 0 ||
+            oppositeZ >= nz
+          ) {
+            continue;
+          }
+          const index = idx3(x, y, z, nx, ny);
+          const opposite = idx3(oppositeX, oppositeY, oppositeZ, nx, ny);
+          if (observedSupport[index] && observedSupport[opposite]) {
+            samples.push(((volume[index] ?? 0) + (volume[opposite] ?? 0)) * 0.5);
+          }
+        }
+      }
+    }
+
+    return robustStats(samples, 0.025);
+  })();
+  const locallyDistinctSeed = Boolean(
+    localSeedBackground && Math.abs(seedValue - localSeedBackground.mu) >= 2 * localSeedBackground.sigma,
+  );
+  const invertAcquiredContrast = Boolean(
+    observedSupport &&
+    roiParsed &&
+    !tuning &&
+    ((roiBackground && seedValue < roiBackground.mu - 3 * roiBackground.sigma) ||
+      (localSeedBackground && seedValue < localSeedBackground.mu - 2 * localSeedBackground.sigma)),
+  );
+  if (invertAcquiredContrast) {
+    const originalMinimum = minV;
+    minV = 1 - maxV;
+    maxV = 1 - originalMinimum;
+    seedValue = 1 - seedValue;
+    for (let index = 0; index < roiSamplesForTumorStats!.length; index++) {
+      roiSamplesForTumorStats![index] = 1 - roiSamplesForTumorStats![index]!;
+    }
+  }
+  const acquiredIntensity = (index: number): number => {
+    const value = volume[index] ?? 0;
+    return invertAcquiredContrast ? 1 - value : value;
+  };
 
   const roiQuantiles = (() => {
     const s = roiSamplesForTumorStats;
@@ -350,7 +440,7 @@ export async function regionGrow3D_v2(params: {
       seed.z <= roiParsed.maxZ;
 
     if (!inside) {
-      return { indices: new Uint32Array(0), count: 0, seedValue, hitMaxVoxels: false };
+      return { indices: new Uint32Array(0), count: 0, seedValue: acquiredSeedValue, hitMaxVoxels: false };
     }
   }
 
@@ -421,17 +511,12 @@ export async function regionGrow3D_v2(params: {
       ? clampInt(tuning.bgShellThicknessVox, 1, 6)
       : 2;
 
-  // Compute tumor stats:
-  // - If an ROI is present, sample inside the ROI so the stats reflect the whole user-selected region
-  //   (helps include very bright/cystic portions).
-  // - Otherwise, use a small neighborhood around the seed (clamped to the current domain).
+  // Estimate the lesion from acquired anatomy connected to its user-selected seed.
+  // A guide ROI deliberately includes surrounding healthy tissue, so its median is
+  // usually a background statistic rather than a representative tumor intensity.
   const tumorStats = (() => {
-    const roiSamples = roiSamplesForTumorStats;
-    if (roiSamples && roiSamples.length >= 64) {
-      return robustStats(roiSamples, 0.02) ?? { mu: seedValue, sigma: 0.05 };
-    }
-
     const samples: number[] = [];
+    const seedSamples: number[] = [];
 
     for (let dz = -seedStatsRadiusVox; dz <= seedStatsRadiusVox; dz++) {
       const z = seed.z + dz;
@@ -447,8 +532,29 @@ export async function regionGrow3D_v2(params: {
 
           const i = idx3(x, y, z, nx, ny);
           if (observedSupport && !observedSupport[i]) continue;
-          samples.push(volume[i] ?? 0);
+          const value = acquiredIntensity(i);
+          samples.push(value);
+          if (value >= minV && value <= maxV) seedSamples.push(value);
         }
+      }
+    }
+
+    if (roiParsed) {
+      const seedLocal = robustStats(seedSamples, 0.02);
+      const roiSamples = roiSamplesForTumorStats;
+      if (seedLocal && roiSamples && roiSamples.length >= 64) {
+        const surrounding = robustStats(roiSamples, 0.02);
+        if (surrounding && Math.abs(seedLocal.mu - surrounding.mu) >= 3 * surrounding.sigma) {
+          const midpoint = (seedLocal.mu + surrounding.mu) * 0.5;
+          const foreground = roiSamples.filter((value) =>
+            seedLocal.mu > surrounding.mu ? value >= midpoint : value <= midpoint,
+          );
+          return robustStats(foreground, 0.02) ?? seedLocal;
+        }
+      }
+      if (seedLocal) return seedLocal;
+      if (roiSamples && roiSamples.length >= 64) {
+        return robustStats(roiSamples, 0.02) ?? { mu: seedValue, sigma: 0.05 };
       }
     }
 
@@ -489,7 +595,7 @@ export async function regionGrow3D_v2(params: {
           if (seen % stride === 0) {
             const i = idx3(x, y, z, nx, ny);
             if (observedSupport && !observedSupport[i]) continue;
-            samples.push(volume[i] ?? 0);
+            samples.push(acquiredIntensity(i));
             if (samples.length >= bgMaxSamples) break;
           }
           seen++;
@@ -502,15 +608,49 @@ export async function regionGrow3D_v2(params: {
     return robustStats(samples, 0.02);
   })();
 
+  if (
+    observedSupport &&
+    roiParsed?.mode === 'guide' &&
+    !tuning &&
+    !params.seedIndices?.length &&
+    opts?.maxCost === undefined &&
+    !locallyDistinctSeed &&
+    roiSamplesForTumorStats &&
+    roiSamplesForTumorStats.length >= 64 &&
+    roiBackground &&
+    bgStats &&
+    Math.abs(tumorStats.mu - (invertAcquiredContrast ? 1 - roiBackground.mu : roiBackground.mu)) <=
+      3 * Math.max(tumorStats.sigma, roiBackground.sigma) &&
+    Math.abs(tumorStats.mu - bgStats.mu) <= 3 * Math.max(tumorStats.sigma, bgStats.sigma)
+  ) {
+    return { indices: new Uint32Array(0), count: 0, seedValue: acquiredSeedValue, hitMaxVoxels: false };
+  }
+
   const roiLoGate = clamp(roiQuantiles?.qLo ?? tumorStats.mu - 2.0 * tumorStats.sigma, 0, 1);
   const roiHiGate = clamp(roiQuantiles?.qHi ?? tumorStats.mu + 2.0 * tumorStats.sigma, 0, 1);
+  const acquiredForegroundContrast =
+    observedSupport &&
+    roiParsed &&
+    !tuning &&
+    bgStats &&
+    tumorStats.mu > bgStats.mu + 3 * Math.max(tumorStats.sigma, bgStats.sigma);
+  const foregroundMaxCost =
+    acquiredForegroundContrast && opts?.maxCost === undefined
+      ? Math.max(maxCost, 18 + (Math.abs(seedValue - tumorStats.mu) + 2 * tumorStats.sigma) * 220)
+      : maxCost;
 
   // Directionality gates.
   // The extreme quantiles (especially qLo) can be too permissive if the ROI contains some background.
   //
   // We keep a *looser* high gate to disable bg-likeness for bright regions, and a *stricter* high gate
   // for the strongest leniency branch (to avoid being too permissive in mid intensities).
-  const roiLoCore = clamp(Math.max(roiLoGate, tumorStats.mu - 0.75 * tumorStats.sigma), 0, 1);
+  const roiLoCore = clamp(
+    Math.max(roiLoGate, tumorStats.mu - (acquiredForegroundContrast ? 2 : 0.75) * tumorStats.sigma),
+    0,
+    1,
+  );
+  const foregroundMinimum = acquiredForegroundContrast ? Math.min(minV, roiLoCore) : minV;
+  const foregroundTolerance = seedValue - foregroundMinimum;
   const roiHiLoose = clamp(Math.min(roiHiGate, tumorStats.mu + 0.75 * tumorStats.sigma), 0, 1);
   const roiHiCore = clamp(Math.min(roiHiGate, tumorStats.mu + 1.25 * tumorStats.sigma), 0, 1);
 
@@ -562,12 +702,12 @@ export async function regionGrow3D_v2(params: {
     // - bandScale = 1 => base tolerance band
     // - bandScale < 1 => stricter (near ROI edges / outside)
     // - bandScale > 1 => slightly looser (near ROI center, to reduce central holes)
-    let minR = minV;
+    let minR = foregroundMinimum;
     let maxR = maxV;
 
     if (roiParsed) {
       const s = clamp(bandScale, 0, BAND_SCALE_MAX);
-      const minOutRaw = seedValue - tolLo * s;
+      const minOutRaw = seedValue - foregroundTolerance * s;
       const maxOutRaw = seedValue + tolHi * s;
       minR = Math.min(minOutRaw, maxOutRaw);
       maxR = Math.max(minOutRaw, maxOutRaw);
@@ -617,8 +757,8 @@ export async function regionGrow3D_v2(params: {
     const i0 = idx3(x0, y0, z0, nx, ny);
     const i1 = idx3(x1, y1, z1, nx, ny);
 
-    const v0 = volume[i0] ?? 0;
-    const v1 = volume[i1] ?? 0;
+    const v0 = acquiredIntensity(i0);
+    const v1 = acquiredIntensity(i1);
 
     // Compute a smooth ROI guidance weight based on how far (in a box-normalized sense) the voxel is
     // from the ROI centroid.
@@ -774,7 +914,7 @@ export async function regionGrow3D_v2(params: {
     if (dist[li] === 0) return;
 
     dist[li] = 0;
-    heap.push({ i: li, d: 0 });
+    heap.push(li, 0);
   };
 
   pushSeed(seed.x, seed.y, seed.z);
@@ -797,7 +937,7 @@ export async function regionGrow3D_v2(params: {
   }
 
   if (heap.size === 0) {
-    return { indices: new Uint32Array(0), count: 0, seedValue, hitMaxVoxels: false };
+    return { indices: new Uint32Array(0), count: 0, seedValue: acquiredSeedValue, hitMaxVoxels: false };
   }
 
   const out = new Uint32Array(Math.min(maxVoxels, domN));
@@ -813,16 +953,14 @@ export async function regionGrow3D_v2(params: {
   while (heap.size > 0) {
     if (opts?.signal?.aborted) break;
 
-    const item = heap.pop();
-    if (!item) break;
-
-    const li = item.i;
-    const d = item.d;
+    const li = heap.pop();
+    if (li < 0) break;
+    const d = heap.distance;
 
     if (d !== dist[li]) continue;
     if (finalized[li]) continue;
 
-    if (d > maxCost) {
+    if (d > foregroundMaxCost) {
       // Costs are non-negative, so all remaining candidates will be >= d.
       break;
     }
@@ -865,7 +1003,7 @@ export async function regionGrow3D_v2(params: {
         dist[li2] = nd;
         // IMPORTANT: dist is stored in a Float32Array; push the stored (float32-rounded) value
         // so the stale-entry check `item.d !== dist[item.i]` is stable.
-        heap.push({ i: li2, d: dist[li2]! });
+        heap.push(li2, dist[li2]!);
       }
     };
 
@@ -892,10 +1030,10 @@ export async function regionGrow3D_v2(params: {
     console.log('[regionGrow3D_v2] done', {
       dims,
       seed,
-      seedValue,
+      seedValue: acquiredSeedValue,
       minV,
       maxV,
-      maxCost,
+      maxCost: foregroundMaxCost,
       roi: roiParsed,
       dom: { minX: dom.minX, maxX: dom.maxX, minY: dom.minY, maxY: dom.maxY, minZ: dom.minZ, maxZ: dom.maxZ },
       tumorStats,
@@ -908,7 +1046,7 @@ export async function regionGrow3D_v2(params: {
   return {
     indices: out.subarray(0, outCount),
     count: outCount,
-    seedValue,
+    seedValue: acquiredSeedValue,
     hitMaxVoxels,
   };
 }

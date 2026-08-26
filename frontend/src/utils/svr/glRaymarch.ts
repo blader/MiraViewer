@@ -397,6 +397,11 @@ uniform int u_supportEnabled;
 uniform usampler3D u_labels;
 uniform sampler2D u_palette;
 uniform int u_labelsEnabled;
+uniform int u_tumorOnly;
+uniform int u_focusEnabled;
+uniform vec3 u_focusCenter;
+uniform vec3 u_focusMin;
+uniform vec3 u_focusMax;
 uniform float u_labelMix;
 
 // Empty-space skipping: a coarse per-block conservative max of the volume (see
@@ -429,6 +434,48 @@ float saturate(float x) {
   return clamp(x, 0.0, 1.0);
 }
 
+void addLesionSample(
+  ivec3 coordinates,
+  ivec3 maxCoordinates,
+  float weight,
+  inout float coverage,
+  inout float strongest,
+  inout uint label
+) {
+  uint sampleLabel = texelFetch(u_labels, clamp(coordinates, ivec3(0), maxCoordinates), 0).r;
+  if (sampleLabel == 0u) return;
+  coverage += weight;
+  if (weight > strongest) {
+    strongest = weight;
+    label = sampleLabel;
+  }
+}
+
+// Integer label textures cannot use linear filtering. Interpolate categorical
+// occupancy before choosing a label so boundaries soften without another texture.
+float lesionCoverage(vec3 tc, out uint label) {
+  ivec3 size = textureSize(u_labels, 0);
+  vec3 coordinates = tc * vec3(size) - 0.5;
+  ivec3 lower = ivec3(floor(coordinates));
+  ivec3 upper = size - ivec3(1);
+  vec3 fraction = fract(coordinates);
+  vec3 inverse = 1.0 - fraction;
+  float coverage = 0.0;
+  float strongest = -1.0;
+  label = 0u;
+
+  addLesionSample(lower, upper, inverse.x * inverse.y * inverse.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(1, 0, 0), upper, fraction.x * inverse.y * inverse.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(0, 1, 0), upper, inverse.x * fraction.y * inverse.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(1, 1, 0), upper, fraction.x * fraction.y * inverse.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(0, 0, 1), upper, inverse.x * inverse.y * fraction.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(1, 0, 1), upper, fraction.x * inverse.y * fraction.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(0, 1, 1), upper, inverse.x * fraction.y * fraction.z, coverage, strongest, label);
+  addLesionSample(lower + ivec3(1, 1, 1), upper, fraction.x * fraction.y * fraction.z, coverage, strongest, label);
+
+  return coverage;
+}
+
 bool intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1) {
   vec3 invD = 1.0 / rd;
   vec3 tbot = (bmin - ro) * invD;
@@ -452,10 +499,19 @@ void main() {
 
   // Rotate ray into volume/object space (the volume is rotated; rays go the other way).
   vec3 ro = u_invRot * roW;
+  if (u_focusEnabled != 0) {
+    ro += u_focusCenter;
+  }
   vec3 rd = u_invRot * rdW;
 
   vec3 bmin = -0.5 * u_box;
   vec3 bmax =  0.5 * u_box;
+  if (u_focusEnabled != 0) {
+    // The bounds include the complete seed-grow search domain. Rejecting rays
+    // outside that acquired region reduces work without clipping lesion labels.
+    bmin = max(bmin, u_focusMin);
+    bmax = min(bmax, u_focusMax);
+  }
 
   float t0;
   float t1;
@@ -472,10 +528,14 @@ void main() {
   // The transfer function is spatially neutral: equal acquired intensities and
   // gradients must remain equally visible at the center and at the periphery.
   const float EDGE_K = 14.0;
-  float thr = saturate(u_thr);
+  // A categorical lesion remains visible even when its acquired intensity is
+  // below the anatomy threshold; the acquired-support gate still applies.
+  float thr = u_tumorOnly != 0 ? 0.0 : saturate(u_thr);
 
   vec3 accum = vec3(0.0);
   float aAccum = 0.0;
+  vec3 lesionAccum = vec3(0.0);
+  float lesionAlpha = 0.0;
 
   // Interleaved gradient noise (Jimenez 2014): a stable per-pixel value in [0,1) used to
   // offset each ray's start by up to one step. During interaction we march fewer steps
@@ -530,10 +590,30 @@ void main() {
       continue;
     }
 
+    // Reject non-lesion anatomy before its intensity and six gradient fetches.
+    // Labels are categorical annotations, never evidence of acquired support.
+    uint lid = 0u;
+    float labelCoverage = 0.0;
+    if (u_labelsEnabled != 0 || u_tumorOnly != 0) {
+      if (u_tumorOnly != 0) {
+        labelCoverage = lesionCoverage(tc, lid);
+        if (labelCoverage <= 0.08) {
+          continue;
+        }
+      } else {
+        lid = texture(u_labels, tc).r;
+        if (lid != 0u) {
+          labelCoverage = lesionCoverage(tc, lid);
+        }
+      }
+    }
+
     float v = saturate(texture(u_vol, tc).r);
 
-    if (v >= thr) {
-      float val = saturate((v - thr) / max(1e-6, 1.0 - thr));
+    if (v >= thr || (u_labelsEnabled != 0 && lid != 0u)) {
+      float val = u_tumorOnly != 0
+        ? max(v, 0.48)
+        : saturate((v - thr) / max(1e-6, 1.0 - thr));
 
       // Gradient in object/texture space (central differences).
       vec3 d = u_texel;
@@ -561,32 +641,59 @@ void main() {
       float shade = 0.25 + 0.75 * diff;
 
       // Make edges matter for visibility (opacity) and for perceived contrast (brightness).
-      float a = saturate(val * (0.15 + 0.85 * edge));
+      float a = saturate(val * (u_tumorOnly != 0
+        ? 0.55 + 0.45 * edge
+        : 0.15 + 0.85 * edge));
+      if (u_tumorOnly != 0) {
+        a *= smoothstep(0.12, 0.78, labelCoverage);
+      }
 
       // Convert to per-step opacity; dt keeps opacity roughly stable as step count changes.
-      float aStep = 1.0 - exp(-u_opacity * a * dt * 4.0);
+      float emphasis = u_tumorOnly != 0 ? 14.0 : 4.0;
+      float aStep = 1.0 - exp(-u_opacity * a * dt * emphasis);
       aStep = saturate(aStep);
 
       float sampleV = v * shade * (0.6 + 0.4 * edge);
 
       vec3 sampleColor = vec3(sampleV);
 
-      if (u_labelsEnabled != 0) {
-        uint lid = texture(u_labels, tc).r;
-        if (lid != 0u) {
-          vec3 labelRgb = texelFetch(u_palette, ivec2(int(lid), 0), 0).rgb;
-          float mixK = clamp(u_labelMix, 0.0, 1.0);
+      if (u_labelsEnabled != 0 && lid != 0u) {
+        vec3 labelRgb = texelFetch(u_palette, ivec2(int(lid), 0), 0).rgb;
+        if (u_tumorOnly != 0) {
+          // Categorical gradients jump at every voxel boundary. Blend the
+          // continuous acquired-intensity normal with the lesion-centered
+          // physical position instead, preserving depth without tiled facets.
+          vec3 radial = normalize(pos - u_focusCenter + vec3(0.0, 0.0, 0.08));
+          vec3 surfaceNormal = normalize(mix(radial, nrm, 0.16));
+          vec3 keyLight = normalize(vDir + vec3(0.38, 0.52, 0.22));
+          float diffuse = 0.50 + 0.50 * abs(dot(surfaceNormal, keyLight));
+          float rim = 0.08 * pow(1.0 - abs(dot(surfaceNormal, vDir)), 2.0);
+          sampleColor = labelRgb * (diffuse * (0.90 + 0.10 * v) + rim);
+        } else {
+          float mixK = clamp(u_labelMix * smoothstep(0.35, 0.9, labelCoverage), 0.0, 0.62);
           sampleColor = mix(sampleColor, labelRgb, mixK);
+          // A separate categorical channel survives foreground tissue. Its
+          // final composition shows the selected lesion in anatomical context
+          // without making normal MRI opacity authoritative for annotations.
+          float boundary = smoothstep(0.35, 0.9, labelCoverage);
+          float lesionStep = 1.0 - exp(-u_opacity * max(0.48, val) * dt * 12.0 * boundary);
+          lesionAccum += (1.0 - lesionAlpha) * labelRgb * lesionStep;
+          lesionAlpha += (1.0 - lesionAlpha) * lesionStep;
         }
       }
 
       accum += (1.0 - aAccum) * sampleColor * aStep;
       aAccum += (1.0 - aAccum) * aStep;
 
-      if (aAccum > 0.98) {
+      if (aAccum > 0.98 && (u_labelsEnabled == 0 || u_tumorOnly != 0)) {
         break;
       }
     }
+  }
+
+  if (u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
+    vec3 visibleLesion = lesionAccum / max(lesionAlpha, 1e-6);
+    accum = mix(accum, visibleLesion, clamp(lesionAlpha * 1.15, 0.0, 0.58));
   }
 
   outColor = vec4(clamp(accum, 0.0, 1.0), 1.0);
