@@ -1,13 +1,23 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { AlignmentReference, AlignmentResult, AlignmentProgress, SeriesRef } from '../types/api';
 import { collectBoundedSliceCandidates, computeAlignedSettings, selectFineSliceShortlist } from '../utils/alignment';
-import { ALIGNMENT_IMAGE_SIZE, computeHistogramStats } from '../utils/imageCapture';
+import {
+  ALIGNMENT_IMAGE_SIZE,
+  computeCorrespondingDisplayStats,
+  computeHistogramStats,
+  windowDisplayPixels,
+} from '../utils/imageCapture';
 import { computeMutualInformation } from '../utils/mutualInformation';
 import { renderSliceToPixels, type RenderedSlice } from '../utils/cornerstoneSliceCapture';
 import { clamp, nowMs } from '../utils/math';
 import { fillInvalidWarpWithValidMean } from '../utils/warpAffine';
 import { buildStructuralPhaseImageSquare, inpaintExclusionRectSquare } from '../utils/imageFeatures';
-import { affineAboutOriginToStandard, composeStandardAffine2D, standardToAffineAboutOrigin } from '../utils/affine2d';
+import {
+  affineAboutOriginToStandard,
+  composeStandardAffine2D,
+  standardToAffineAboutOrigin,
+  type StandardAffine2D,
+} from '../utils/affine2d';
 import { affineAboutCenterToPanelGeometry, panelGeometryToAffineAboutCenter } from '../utils/panelTransform';
 import { isDebugAlignmentEnabled, debugAlignmentLog } from '../utils/debugAlignment';
 import {
@@ -31,7 +41,11 @@ import {
   mapFixedExclusionToMovingBounds,
   type GridSeedTransform,
 } from '../utils/alignmentTransform';
-import { type FinalAffineProposalKind, type OptimizerFinalAffineProposal } from '../utils/structuralAffineSelection';
+import {
+  selectFinalAffineProposal,
+  type FinalAffineProposalKind,
+  type OptimizerFinalAffineProposal,
+} from '../utils/structuralAffineSelection';
 import { createAlignmentScoringRunner, type AlignmentScoringRunner } from '../utils/alignmentScoringRunner';
 import { assessSliceAlignmentEvidence } from '../utils/alignmentConfidence';
 import { rasterizeImageExclusion, selectPhysicalTargetSlice } from '../utils/alignmentGeometry';
@@ -143,6 +157,36 @@ function supportedRegistrationPixels(pixels: Float32Array, validity?: Float32Arr
 function supportedHistogramStats(pixels: Float32Array, validity?: Float32Array) {
   if (!validity) return computeHistogramStats(pixels);
   return computeHistogramStats(pixels.filter((_value, index) => (validity[index] ?? 0) > 1e-6));
+}
+
+function composeReferencePanelGeometry(
+  reference: Pick<AlignmentReference, 'settings' | 'viewportSize' | 'imageSize'>,
+  movingImageSize: { width: number; height: number },
+  movingToReference: StandardAffine2D,
+) {
+  const referenceMapping =
+    reference.viewportSize && reference.imageSize
+      ? { viewportSize: reference.viewportSize, imageSize: reference.imageSize }
+      : undefined;
+  const movingMapping = referenceMapping
+    ? { viewportSize: referenceMapping.viewportSize, imageSize: movingImageSize }
+    : undefined;
+  const referenceToDisplayed = affineAboutOriginToStandard(
+    panelGeometryToAffineAboutCenter(reference.settings, ALIGNMENT_IMAGE_SIZE, referenceMapping),
+  );
+  const movingToDisplayed = composeStandardAffine2D(referenceToDisplayed, movingToReference);
+  const origin = { x: (ALIGNMENT_IMAGE_SIZE - 1) / 2, y: (ALIGNMENT_IMAGE_SIZE - 1) / 2 };
+  const centered = standardToAffineAboutOrigin(movingToDisplayed.A, movingToDisplayed.b, origin);
+
+  return {
+    geometry: affineAboutCenterToPanelGeometry(
+      { A: centered.A, translatePx: centered.t },
+      ALIGNMENT_IMAGE_SIZE,
+      movingMapping,
+    ),
+    referenceToDisplayed,
+    movingToDisplayed,
+  };
 }
 
 export interface AutoAlignState {
@@ -439,15 +483,21 @@ export function useAutoAlign() {
           });
         }
 
+        const referenceManifest: SeriesFrameManifest | null =
+          verifiedReferenceManifest ??
+          (reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null);
+        const referenceDisplayFrame =
+          referenceAnatomy?.manifest.frames[referenceAnatomy.sourceIndex] ??
+          referenceManifest?.frames[reference.sliceIndex];
+        const referenceWindowedPixels =
+          windowDisplayPixels(referencePixels, referenceDisplayFrame) ??
+          (referencePixels.some((value) => value < 0 || value > 1) ? normalizedReferenceFine : referencePixels);
         const referenceDisplayedPixels = applyBrightnessContrastToPixels(
-          referencePixels.some((value) => value < 0 || value > 1) ? normalizedReferenceFine : referencePixels,
+          referenceWindowedPixels,
           reference.settings.brightness,
           reference.settings.contrast,
         );
         const referenceDisplayedStats = supportedHistogramStats(referenceDisplayedPixels, referenceRender.validity);
-        const referenceManifest: SeriesFrameManifest | null =
-          verifiedReferenceManifest ??
-          (reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null);
         const targetManifests = new Map<string, SeriesFrameManifest>();
         let preparedPhysicalReference: Promise<PreparedLongitudinalReferenceInput> | undefined;
         const selectedReferenceFrame = referenceManifest?.frames[reference.sliceIndex];
@@ -762,13 +812,98 @@ export function useAutoAlign() {
             imageWidth: ALIGNMENT_IMAGE_SIZE,
             imageHeight: ALIGNMENT_IMAGE_SIZE,
           });
+          let displayGeometry: Parameters<typeof computeAlignedSettings>[5] = reference.settings;
+          if (reference.exclusionMask && Math.min(nativeFrame.rows, nativeFrame.columns, rows, cols) >= 64) {
+            try {
+              const { registerAffine2DWithElastix } = await import('../utils/elastixRegistration');
+              ensureNotAborted();
+              const fixedStructure = buildStructuralPhaseImageSquare(
+                inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
+                  .pixels,
+                ALIGNMENT_IMAGE_SIZE,
+              );
+              const movingStructure = buildStructuralPhaseImageSquare(
+                inpaintExclusionRectSquare(normalized, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6).pixels,
+                ALIGNMENT_IMAGE_SIZE,
+              );
+              const residual = await registerAffine2DWithElastix(
+                fixedStructure,
+                movingStructure,
+                ALIGNMENT_IMAGE_SIZE,
+                {
+                  numberOfResolutions: REFINEMENT_REGISTRATION_RESOLUTIONS,
+                  webWorker: sharedWebWorker,
+                  exclusionRect: reference.exclusionMask,
+                  signal: alignmentAbortController.signal,
+                  ...(referenceAnalysisPixelSpacing
+                    ? {
+                        fixedPixelSpacing: referenceAnalysisPixelSpacing,
+                        movingPixelSpacing: referenceAnalysisPixelSpacing,
+                      }
+                    : {}),
+                },
+              );
+              ensureNotAborted();
+              sharedWebWorker = residual.webWorker;
+              const selection = selectFinalAffineProposal({
+                normalizedReference: normalizedReferenceFine,
+                referenceValidity: referenceRender.validity,
+                movingPixels: resampled.pixels,
+                movingValidity: resampled.validity,
+                size: ALIGNMENT_IMAGE_SIZE,
+                scales: FINE_PERCEPTUAL_SCALES,
+                winningWarp: {
+                  A: { m00: 1, m01: 0, m10: 0, m11: 1 },
+                  translateX: 0,
+                  translateY: 0,
+                },
+                fixedExclusionRect: reference.exclusionMask,
+                optimizerProposals: [{ kind: 'structure-elastix', residualMovingToFixed: residual.movingToFixed }],
+              });
+              if (selection.selected.kind !== 'seed-only') {
+                displayGeometry = composeReferencePanelGeometry(
+                  reference,
+                  { width: cols, height: rows },
+                  selection.selected.totalMovingToFixed,
+                ).geometry;
+              }
+              debugAlignmentLog(
+                'physical.final-affine',
+                {
+                  date,
+                  selected: selection.selected.kind,
+                  structuralScore: selection.selected.structuralScore,
+                  baselineStructuralScore: selection.proposals[0]?.structuralScore,
+                  computedGeometry: displayGeometry,
+                },
+                debugAlignment,
+              );
+            } catch (error) {
+              ensureNotAborted();
+              sharedWebWorker = undefined;
+              debugAlignmentLog(
+                'physical.final-affine-unavailable',
+                { date, message: error instanceof Error ? error.message : String(error) },
+                debugAlignment,
+              );
+            }
+          }
+          const movingDisplayPixels = windowDisplayPixels(resampled.pixels, nativeFrame);
+          const displayStats = movingDisplayPixels
+            ? computeCorrespondingDisplayStats(referenceDisplayedPixels, movingDisplayPixels, {
+                referenceValidity: referenceRender.validity,
+                movingValidity: resampled.validity,
+                exclusionRect: reference.exclusionMask,
+                columns: ALIGNMENT_IMAGE_SIZE,
+              })
+            : null;
           const computedSettings = computeAlignedSettings(
-            referenceDisplayedStats,
-            supportedHistogramStats(normalized, resampled.validity),
+            displayStats?.reference ?? referenceDisplayedStats,
+            displayStats?.moving ?? supportedHistogramStats(movingDisplayPixels ?? normalized, resampled.validity),
             bestSliceIndex,
             seriesRef.instance_count,
             currentProgress,
-            reference.settings,
+            displayGeometry,
           );
           const nativeRivalEvidence = nativeRefinement?.optimizedAlternativeCount ? nativeRefinement : undefined;
 
@@ -1742,49 +1877,44 @@ export function useAutoAlign() {
                   validity: selectedWarpedPresentation.validity,
                 })
               : selectedRawResample;
-            const targetStats = supportedHistogramStats(
-              targetDisplayPixels,
-              bestRender.validity ? selectedWarpedPresentation.validity : undefined,
+            const nativeDisplayPixels = windowDisplayPixels(
+              selectedRawResample,
+              targetManifest?.frames[winningCandidate.index],
             );
+            const displayStats = nativeDisplayPixels
+              ? computeCorrespondingDisplayStats(referenceDisplayedPixels, nativeDisplayPixels, {
+                  referenceValidity: referenceRender.validity,
+                  movingValidity: selectedWarpedPresentation.validity,
+                  exclusionRect: reference.exclusionMask,
+                  columns: ALIGNMENT_IMAGE_SIZE,
+                })
+              : null;
+            const targetStats =
+              displayStats?.moving ??
+              supportedHistogramStats(
+                nativeDisplayPixels ?? targetDisplayPixels,
+                bestRender.validity ? selectedWarpedPresentation.validity : undefined,
+              );
 
             // Compose recovered delta onto the reference geometry so the displayed target matches the
             // displayed reference (including reference zoom/rotation/pan and any stored shear).
-            const referenceMapping =
-              reference.viewportSize && reference.imageSize
-                ? { viewportSize: reference.viewportSize, imageSize: reference.imageSize }
-                : undefined;
-            const targetMapping = referenceMapping
-              ? {
-                  viewportSize: referenceMapping.viewportSize,
-                  imageSize: {
-                    width: seriesRef.columns ?? referenceMapping.imageSize.width,
-                    height: seriesRef.rows ?? referenceMapping.imageSize.height,
-                  },
-                }
-              : undefined;
-            const refAffine = panelGeometryToAffineAboutCenter(
-              reference.settings,
-              ALIGNMENT_IMAGE_SIZE,
-              referenceMapping,
-            );
-            const refStd = affineAboutOriginToStandard(refAffine);
-
             // Composition order matters:
             // - `deltaStd` maps target -> reference (in the downsampled alignment pixel space)
             // - `refStd` maps reference -> displayed reference
             // To display the *target* in the same view as the reference we want:
             //   displayed = refStd(deltaStd(x_target))
-            const composedStd = composeStandardAffine2D(refStd, deltaStd);
-
-            const composedAboutOrigin = standardToAffineAboutOrigin(composedStd.A, composedStd.b, origin);
-            const composedGeometry = affineAboutCenterToPanelGeometry(
-              { A: composedAboutOrigin.A, translatePx: composedAboutOrigin.t },
-              ALIGNMENT_IMAGE_SIZE,
-              targetMapping,
+            const composed = composeReferencePanelGeometry(
+              reference,
+              {
+                width: seriesRef.columns ?? reference.imageSize?.width ?? ALIGNMENT_IMAGE_SIZE,
+                height: seriesRef.rows ?? reference.imageSize?.height ?? ALIGNMENT_IMAGE_SIZE,
+              },
+              deltaStd,
             );
+            const composedGeometry = composed.geometry;
 
             const computedSettings = computeAlignedSettings(
-              referenceDisplayedStats,
+              displayStats?.reference ?? referenceDisplayedStats,
               targetStats,
               winningCandidate.index,
               seriesRef.instance_count,
@@ -1801,8 +1931,8 @@ export function useAutoAlign() {
                 selectedProposal: selectedProposal.kind,
                 residualMovingToFixed: selectedProposal.residualMovingToFixed,
                 totalTargetToReference: deltaStd,
-                referenceToDisplayed: refStd,
-                totalTargetToDisplayed: composedStd,
+                referenceToDisplayed: composed.referenceToDisplayed,
+                totalTargetToDisplayed: composed.movingToDisplayed,
                 computedGeometry: composedGeometry,
                 computedSettings,
               },

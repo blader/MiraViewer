@@ -248,9 +248,13 @@ export function selectFinalAffineProposal(options: {
         MAX_RESIDUAL_DISPLACEMENT_FRACTION * size + maximumMindFootprintAtFullResolution,
       )
     : undefined;
+  const sourceFocusRect = fixedExclusionRect
+    ? mapFixedExclusionToMovingBounds(fixedExclusionRect, winningWarp, size, maximumMindFootprintAtFullResolution)
+    : undefined;
   const preparedFixedReference = preparePerceptualReference(normalizedReference, size, {
     scales: scaleSizes,
     exclusionRect: fixedScoringExclusionRect,
+    focusRect: fixedExclusionRect,
     validity: referenceValidity,
   });
   const normalizedMoving = normalizePerceptualSource(movingPixels, size, {
@@ -260,6 +264,7 @@ export function selectFinalAffineProposal(options: {
   const preparedMovingSource = preparePerceptualReference(normalizedMoving, size, {
     scales: scaleSizes,
     exclusionRect: sourceExclusionRect,
+    focusRect: sourceFocusRect,
     validity: movingValidity,
   });
   const scoringScratch = createPerceptualScoringScratch();

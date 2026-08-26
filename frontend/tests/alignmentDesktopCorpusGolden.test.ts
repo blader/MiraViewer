@@ -1,5 +1,7 @@
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { computeIntensityMatch } from '../src/utils/alignment';
+import { computeCorrespondingDisplayStats, windowDisplayPixels } from '../src/utils/imageCapture';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { normalizePerceptualSource } from '../src/utils/perceptualSliceSimilarity';
 import {
@@ -451,6 +453,61 @@ describe('deidentified longitudinal MRI desktop gold', () => {
             );
           }
           const anatomy = sourceLandmark.plane === 'AX' ? finalDerivedAnatomy(result) : undefined;
+          if (sourceLandmark.examination === REVIEWED_EXTENSIONLESS_AXIAL.reference.examination) {
+            const nativeReference = result.nativeReferences[result.nativeReferenceSliceIndex]!;
+            const sourcePixels = resample2dAreaAverageWithValidity(
+              nativeReference.pixels,
+              nativeReference.valid ?? new Uint8Array(nativeReference.pixels.length).fill(1),
+              nativeReference.dsRows,
+              nativeReference.dsCols,
+              256,
+              256,
+            );
+            const targetPixels = resample2dAreaAverageWithValidity(
+              result.dense.pixels,
+              result.dense.valid,
+              result.dense.rows,
+              result.dense.cols,
+              256,
+              256,
+            );
+            const fixedDisplay = windowDisplayPixels(
+              sourcePixels.pixels,
+              reference.series.frames[reference.frameIndex],
+            );
+            const targetDisplay = windowDisplayPixels(targetPixels.pixels, target.frames[result.selectedIndex]);
+            const displayStats =
+              fixedDisplay && targetDisplay
+                ? computeCorrespondingDisplayStats(fixedDisplay, targetDisplay, {
+                    referenceValidity: sourcePixels.validity,
+                    movingValidity: targetPixels.validity,
+                    exclusionRect: REVIEWED_EXTENSIONLESS_AXIAL.exclusion,
+                    columns: 256,
+                  })
+                : null;
+            if (!displayStats) {
+              failures.push(`${caseLabel}: the corresponding native display windows lack supported healthy anatomy`);
+            } else {
+              const match = computeIntensityMatch(displayStats.reference, displayStats.moving);
+              const brightness = match.brightness / 100;
+              const contrast = match.contrast / 100;
+              const matchedMean = displayStats.moving.mean * brightness * contrast + 0.5 * (1 - contrast);
+              const matchedDeviation = displayStats.moving.stddev * brightness * contrast;
+              if (Math.abs(matchedMean - displayStats.reference.mean) > 0.015) {
+                failures.push(`${caseLabel}: focused displayed tissue brightness no longer matches its reference`);
+              }
+              if (Math.abs(matchedDeviation - displayStats.reference.stddev) > 0.015) {
+                failures.push(`${caseLabel}: focused displayed tissue contrast no longer matches its reference`);
+              }
+            }
+            if (targetLandmark.examination === 17 && anatomy) {
+              const referenceArea = anatomy.sides.reduce((sum, side) => sum + side.referenceArea, 0);
+              const candidateArea = anatomy.sides.reduce((sum, side) => sum + side.candidateArea, 0);
+              if (anatomy.score < 0.68 || candidateArea > referenceArea * 1.5) {
+                failures.push(`${caseLabel}: anchor-preserving tilt no longer matches the reviewed local anatomy`);
+              }
+            }
+          }
           if (sourceLandmark.examination === 14) {
             if (result.dense.coverage < 0.95) {
               failures.push(

@@ -427,6 +427,29 @@ describe('perceptual slice scoring', () => {
     }
   });
 
+  test('retains lesion-focused anatomical weighting after expanding its safety exclusion margin', () => {
+    const size = 96;
+    const reference = tissueReference(size);
+    const focusRect = { x: 42 / size, y: 42 / size, width: 12 / size, height: 12 / size };
+    const exclusionRect = { x: 0.32, y: 0.32, width: 0.36, height: 0.36 };
+    const unfocused = preparePerceptualReference(reference, size, { scales: [size], exclusionRect }).scales[0]!;
+    const focused = preparePerceptualReference(reference, size, {
+      scales: [size],
+      exclusionRect,
+      focusRect,
+    }).scales[0]!;
+    const near = 48 * size + 71;
+    const distant = 48 * size + 17;
+
+    expect(unfocused.weights[near]).toBeGreaterThan(0);
+    expect(unfocused.weights[distant]).toBeGreaterThan(0);
+    expect(focused.weights[near]! / unfocused.weights[near]!).toBeGreaterThan(
+      (focused.weights[distant]! / unfocused.weights[distant]!) * 1.25,
+    );
+    expect(focused.weights[distant]).toBeGreaterThan(0);
+    expect(focused.weights[48 * size + 62]).toBe(0);
+  });
+
   test('prefers matching healthy anatomy near the lesion when more distant structures disagree', () => {
     const size = 96;
     const reference = tissueReference(size);

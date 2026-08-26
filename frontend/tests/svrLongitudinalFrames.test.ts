@@ -30,7 +30,9 @@ import {
   resliceStackToReferencePlane,
   type LongitudinalRegistrationResult,
 } from '../src/utils/svr/longitudinalRegistration';
+import { selectPhysicalTargetSlice } from '../src/utils/alignmentGeometry';
 import { buildOutputPlaneGrid, outputGridPixelToWorld } from '../src/utils/outputPlaneGrid';
+import { applyRigidToPoint, invertRigidParams, mat3FromEulerXYZ } from '../src/utils/svr/rigidRegistration';
 
 function makeManifest(
   seriesUid: string,
@@ -421,6 +423,16 @@ describe('svr/longitudinalFrames', () => {
 
     expect(dense.sourceIndices.length).toBeGreaterThan(30);
     expect(presentation.coverage).toBeGreaterThan(0.9);
+    const amplified = attenuateLongitudinalPlaneTilt(aligned, centerMm, selected, outputGrid, 1.75);
+    expect(
+      resliceStackToReferencePlane({
+        targetSlices: dense.targetSlices,
+        referenceSlice: selected,
+        targetToReference: amplified,
+        centerMm,
+        outputGrid,
+      }).coverage,
+    ).toBeGreaterThan(0.9);
     expect(dense.nativeCandidatePoses).toBeUndefined();
 
     const bounded = await prepareDenseLongitudinalResliceInput(target, selected, aligned, centerMm, {
@@ -429,6 +441,56 @@ describe('svr/longitudinalFrames', () => {
     });
     expect(bounded.sourceIndices.length).toBeLessThanOrEqual(5);
     expect(bounded.nativeCandidatePoses).toBeUndefined();
+  });
+
+  it('keeps the acquired plane anchor and source slice fixed while changing through-plane tilt', async () => {
+    const reference = makeManifest('reference', 121);
+    const target = makeManifest('target', 121, { angleDeg: 18 });
+    const outputGrid = buildOutputPlaneGrid(reference.frames[60]!, {
+      frameOfReferenceUid: reference.frameOfReferenceUid,
+    });
+    const prepared = await prepareLongitudinalRegistrationInput(reference, target, 60, { outputGrid });
+    const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
+    const anchor = outputGridPixelToWorld(outputGrid, (outputGrid.rows - 1) / 2, (outputGrid.columns - 1) / 2);
+    const centerMm = { x: anchor.x + 43, y: anchor.y - 31, z: anchor.z + 12 };
+    const original = { tx: 4.2, ty: -2.1, tz: 3.6, rx: 0.18, ry: 0.09, rz: 0.04 };
+    const sourceAnchor = (rigid: typeof original) => {
+      const inverse = invertRigidParams(rigid);
+      return applyRigidToPoint(anchor, centerMm, mat3FromEulerXYZ(inverse.rx, inverse.ry, inverse.rz), {
+        x: inverse.tx,
+        y: inverse.ty,
+        z: inverse.tz,
+      });
+    };
+    const referenceAnchor = (rigid: typeof original) =>
+      applyRigidToPoint(anchor, centerMm, mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz), {
+        x: rigid.tx,
+        y: rigid.ty,
+        z: rigid.tz,
+      });
+    const expectedAnchor = sourceAnchor(original);
+    const expectedReferenceAnchor = referenceAnchor(original);
+    const expectedSlice = selectPhysicalTargetSlice(reference, target, 60, {
+      rigid: original,
+      centerMm,
+      outputGrid,
+    });
+
+    for (const factor of [0.5, 0.75, 1.25, 1.5]) {
+      const broadAnatomy = attenuateLongitudinalPlaneTilt(original, centerMm, selected, outputGrid, factor);
+      const broadAnchor = referenceAnchor(broadAnatomy);
+      expect(broadAnchor.x).toBeCloseTo(expectedReferenceAnchor.x, 8);
+      expect(broadAnchor.y).toBeCloseTo(expectedReferenceAnchor.y, 8);
+      expect(broadAnchor.z).toBeCloseTo(expectedReferenceAnchor.z, 8);
+      const adjusted = attenuateLongitudinalPlaneTilt(original, centerMm, selected, outputGrid, factor, 'acquired');
+      const actualAnchor = sourceAnchor(adjusted);
+      expect(actualAnchor.x).toBeCloseTo(expectedAnchor.x, 8);
+      expect(actualAnchor.y).toBeCloseTo(expectedAnchor.y, 8);
+      expect(actualAnchor.z).toBeCloseTo(expectedAnchor.z, 8);
+      expect(selectPhysicalTargetSlice(reference, target, 60, { rigid: adjusted, centerMm, outputGrid })).toBe(
+        expectedSlice,
+      );
+    }
   });
 
   it('unions native target coverage across bounded physically distinct winner and rival poses', async () => {

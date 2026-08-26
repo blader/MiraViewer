@@ -8,6 +8,12 @@ import {
   setDerivedAlignmentFrame,
 } from '../src/utils/derivedAlignmentFrame';
 import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
+import {
+  makeTissueLabelPhantom,
+  REFERENCE_CONTRAST,
+  renderMovingFromFixed,
+  renderTissueContrast,
+} from './helpers/alignmentSynthetic';
 
 const mocks = vi.hoisted(() => ({
   getSeriesFrameManifest: vi.fn(),
@@ -17,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   register3d: vi.fn(),
   densify: vi.fn(),
   register2d: vi.fn(),
+  registerAffine: vi.fn(),
   captureSlice: vi.fn(),
   createScorer: vi.fn(),
   closeScorer: vi.fn(),
@@ -37,7 +44,7 @@ vi.mock('../src/utils/alignmentScoringRunner', () => ({
 
 vi.mock('../src/utils/elastixRegistration', () => ({
   registerRigid2DWithElastix: mocks.register2d,
-  registerAffine2DWithElastix: vi.fn(),
+  registerAffine2DWithElastix: mocks.registerAffine,
 }));
 
 vi.mock('../src/utils/svr/longitudinalFrames', () => ({
@@ -441,6 +448,73 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(mocks.register3d).toHaveBeenCalledTimes(1);
     expect(mocks.createScorer).not.toHaveBeenCalled();
     expect(mocks.closeScorer).not.toHaveBeenCalled();
+  });
+
+  it('refines a native physical presentation with a structurally verified affine while preserving its acquired grid', async () => {
+    const size = 256;
+    const fixed = renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST);
+    const residual = {
+      A: { m00: 1.025, m01: 0.018, m10: -0.012, m11: 0.985 },
+      b: { x: 3.5, y: -2.25 },
+    };
+    const moving = renderMovingFromFixed(fixed, size, residual);
+    mocks.captureSlice.mockResolvedValue({
+      pixels: fixed,
+      validity: new Float32Array(fixed.length).fill(1),
+      imageId: 'miradb:reference-series-1',
+      timingMs: { getImageId: 0, loadImage: 0, capture: 0, total: 0 },
+    });
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => ({
+      ...manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b'),
+      frames: manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b').frames.map(
+        (frame) => ({ ...frame, rows: size, columns: size }),
+      ),
+    }));
+    const initial = await mocks.register3d();
+    mocks.register3d.mockResolvedValue({
+      ...initial,
+      pixels: moving,
+      valid: new Uint8Array(moving.length).fill(1),
+      rows: size,
+      cols: size,
+    });
+    mocks.registerAffine.mockResolvedValue({ movingToFixed: residual, webWorker: undefined });
+
+    const [aligned] = await runPhysicalAlignment();
+
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+    expect(mocks.createScorer).not.toHaveBeenCalled();
+    expect(aligned).toMatchObject({ outcome: 'aligned', evidence: { geometryMode: 'registered-3d' } });
+    expect(aligned?.computedSettings.affine01).not.toBe(0);
+    expect(aligned?.computedSettings.rotation).not.toBe(0);
+    expect(aligned?.derivedFrame?.pixels).toBe(moving);
+    expect(aligned?.derivedFrame?.outputGrid).toMatchObject({ rows: size, columns: size });
+  });
+
+  it('retains a verified physical presentation when optional final affine refinement fails', async () => {
+    const size = 64;
+    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => ({
+      ...manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b'),
+      frames: manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b').frames.map(
+        (frame) => ({ ...frame, rows: size, columns: size }),
+      ),
+    }));
+    const initial = await mocks.register3d();
+    mocks.register3d.mockResolvedValue({
+      ...initial,
+      pixels: Float32Array.from({ length: size * size }, (_, index) => index + 1),
+      rows: size,
+      cols: size,
+    });
+    mocks.registerAffine.mockRejectedValue(new Error('optional affine worker unavailable'));
+
+    const [aligned] = await runPhysicalAlignment();
+
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+    expect(aligned).toMatchObject({
+      outcome: 'aligned',
+      computedSettings: { affine00: 1, affine01: 0, affine10: 0, affine11: 1, rotation: 0 },
+    });
   });
 
   it('keeps an earlier physical result when a later fallback cannot start its independent 2D worker', async () => {

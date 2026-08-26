@@ -457,32 +457,40 @@ function pixelToWorld(slice: LongitudinalReferencePlane, row: number, col: numbe
   );
 }
 
-/** Preserve the presented plane center while distinguishing anatomy from acquisition tilt. */
+/** Preserve the established reference pivot, or the acquired source beneath a focused output anchor. */
 export function attenuateLongitudinalPlaneTilt(
   rigid: RigidParams,
   centerMm: Vec3,
   referencePlane: LongitudinalReferencePlane,
   outputGrid: OutputPlaneGrid | undefined,
   factor: number,
+  anchorSpace: 'reference' | 'acquired' = 'reference',
 ): RigidParams {
   const anchor = outputGrid
     ? outputGridPixelToWorld(outputGrid, (outputGrid.rows - 1) / 2, (outputGrid.columns - 1) / 2)
     : pixelToWorld(referencePlane, (referencePlane.dsRows - 1) / 2, (referencePlane.dsCols - 1) / 2);
-  const offset = v3(anchor.x - centerMm.x, anchor.y - centerMm.y, anchor.z - centerMm.z);
-  const original = mat3MulVec3(mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz), offset.x, offset.y, offset.z);
+  const originalRotation = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
+  const sourceAnchor =
+    anchorSpace === 'acquired' ? inverseRigidPoint(anchor, rigid, centerMm, originalRotation) : anchor;
+  const sourceOffset = v3(sourceAnchor.x - centerMm.x, sourceAnchor.y - centerMm.y, sourceAnchor.z - centerMm.z);
   const attenuated = mat3MulVec3(
     mat3FromEulerXYZ(rigid.rx * factor, rigid.ry * factor, rigid.rz),
-    offset.x,
-    offset.y,
-    offset.z,
+    sourceOffset.x,
+    sourceOffset.y,
+    sourceOffset.z,
   );
+  const original = mat3MulVec3(originalRotation, sourceOffset.x, sourceOffset.y, sourceOffset.z);
+  const preserved =
+    anchorSpace === 'acquired'
+      ? v3(anchor.x - centerMm.x, anchor.y - centerMm.y, anchor.z - centerMm.z)
+      : v3(rigid.tx + original.x, rigid.ty + original.y, rigid.tz + original.z);
   return {
     ...rigid,
     rx: rigid.rx * factor,
     ry: rigid.ry * factor,
-    tx: rigid.tx + original.x - attenuated.x,
-    ty: rigid.ty + original.y - attenuated.y,
-    tz: rigid.tz + original.z - attenuated.z,
+    tx: preserved.x - attenuated.x,
+    ty: preserved.y - attenuated.y,
+    tz: preserved.z - attenuated.z,
   };
 }
 
@@ -1214,15 +1222,18 @@ function refineAnatomicalPlaneDepth(
   ) {
     families.push(options.targetToReference);
   }
-  if (!tumorFocused && trustAlternativePose) {
+  if (!tumorFocused && (trustAlternativePose || landmarks?.localizedAnatomy)) {
+    const tiltFactors =
+      landmarks?.localizedAnatomy && !landmarks.bilateral?.reliable ? [0.5, 0.75, 1.25, 1.5] : [0.5, 0.75];
     for (const family of [...families]) {
-      for (const factor of [0.5, 0.75]) {
+      for (const factor of tiltFactors) {
         const candidate = attenuateLongitudinalPlaneTilt(
           family,
           options.centerMm,
           options.referencePlane,
           options.outputGrid,
           factor,
+          landmarks?.localizedAnatomy ? 'acquired' : 'reference',
         );
         if (
           families.every(
@@ -1387,6 +1398,33 @@ function refineAnatomicalPlaneDepth(
       bestScore = score;
       nativeBestScore = score;
       bestDistance = entry.distance;
+    }
+  }
+  if (!tumorFocused && landmarks?.localizedAnatomy && !landmarks.bilateral?.reliable) {
+    for (const factor of [0.9, 1.1]) {
+      assertNotAborted(options.signal);
+      const candidate = attenuateLongitudinalPlaneTilt(
+        best,
+        options.centerMm,
+        options.referencePlane,
+        options.outputGrid,
+        factor,
+        'acquired',
+      );
+      const presentation = resliceStackToReferencePlane({
+        targetSlices: options.targetSlices,
+        referenceSlice: reference,
+        targetToReference: candidate,
+        centerMm: options.centerMm,
+        signal: options.signal,
+      });
+      if (presentation.coverage < minimumCoverage) continue;
+      const score = scoreAnatomicalPlaneLandmarks(landmarks, presentation);
+      if (score > nativeBestScore + 1e-7) {
+        best = candidate;
+        bestScore = score;
+        nativeBestScore = score;
+      }
     }
   }
   if (

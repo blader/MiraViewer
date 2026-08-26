@@ -71,6 +71,8 @@ export function createPerceptualScoringScratch(): PerceptualScoringScratch {
 export type PreparePerceptualReferenceOptions = {
   scales?: number[];
   exclusionRect?: ExclusionMask;
+  /** Original user-selected anatomy, independent of any expanded exclusion-safety margin. */
+  focusRect?: ExclusionMask;
   validity?: Float32Array | Uint8Array;
 };
 
@@ -355,6 +357,7 @@ function buildReferenceWeights(
   exclusionRect: ExclusionMask | undefined,
   safeBorder: number,
   validity?: Float32Array,
+  focusRect: ExclusionMask | undefined = exclusionRect,
 ): Float32Array {
   const support = buildSoftForegroundSupportSquare(reference, size);
   const gradients = computeGradientMagnitudeL1Square(reference, size);
@@ -366,14 +369,24 @@ function buildReferenceWeights(
   let exclusionY0 = 0;
   let exclusionX1 = 0;
   let exclusionY1 = 0;
+  let focusX0 = 0;
+  let focusY0 = 0;
+  let focusX1 = 0;
+  let focusY1 = 0;
   let proximityRadiusSquared = 1;
-  const localizeAnatomy = Boolean(exclusionRect && exclusionRect.width * exclusionRect.height <= 0.04);
+  const localizeAnatomy = Boolean(focusRect && focusRect.width * focusRect.height <= 0.04);
   if (exclusionRect) {
     exclusionX0 = Math.floor(exclusionRect.x * size) - safeBorder;
     exclusionY0 = Math.floor(exclusionRect.y * size) - safeBorder;
     exclusionX1 = Math.ceil((exclusionRect.x + exclusionRect.width) * size) + safeBorder;
     exclusionY1 = Math.ceil((exclusionRect.y + exclusionRect.height) * size) + safeBorder;
-    proximityRadiusSquared = Math.max(safeBorder, exclusionRect.width * size, exclusionRect.height * size) ** 2;
+  }
+  if (focusRect) {
+    focusX0 = Math.floor(focusRect.x * size) - safeBorder;
+    focusY0 = Math.floor(focusRect.y * size) - safeBorder;
+    focusX1 = Math.ceil((focusRect.x + focusRect.width) * size) + safeBorder;
+    focusY1 = Math.ceil((focusRect.y + focusRect.height) * size) + safeBorder;
+    proximityRadiusSquared = Math.max(safeBorder, focusRect.width * size, focusRect.height * size) ** 2;
   }
 
   for (let y = safeBorder; y < size - safeBorder; y++) {
@@ -385,8 +398,8 @@ function buildReferenceWeights(
         1,
         3 * (gradients[index] ?? 0) + 5 * Math.sqrt(Math.max(0, variance[index] ?? 0)),
       );
-      const distanceX = localizeAnatomy ? Math.max(exclusionX0 - x, 0, x - exclusionX1 + 1) : 0;
-      const distanceY = localizeAnatomy ? Math.max(exclusionY0 - y, 0, y - exclusionY1 + 1) : 0;
+      const distanceX = localizeAnatomy ? Math.max(focusX0 - x, 0, x - focusX1 + 1) : 0;
+      const distanceY = localizeAnatomy ? Math.max(focusY0 - y, 0, y - focusY1 + 1) : 0;
       const anatomicalProximity = localizeAnatomy
         ? 0.2 + 0.8 / (1 + (distanceX * distanceX + distanceY * distanceY) / proximityRadiusSquared)
         : 1;
@@ -436,7 +449,14 @@ export function preparePerceptualReference(
     const descriptorValidity = scaled.validity
       ? erodeFractionalSupportSquare(scaled.validity, scaleSize, safeBorder)
       : undefined;
-    const weights = buildReferenceWeights(reference, scaleSize, options.exclusionRect, safeBorder, descriptorValidity);
+    const weights = buildReferenceWeights(
+      reference,
+      scaleSize,
+      options.exclusionRect,
+      safeBorder,
+      descriptorValidity,
+      options.focusRect ?? options.exclusionRect,
+    );
     const gradients = computeCentralGradients(reference, scaleSize);
     let totalWeight = 0;
     for (let i = 0; i < weights.length; i++) totalWeight += weights[i] ?? 0;
