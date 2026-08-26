@@ -10,8 +10,6 @@ export type Mat2 = {
 
 export type Vec2 = { x: number; y: number };
 
-export const IDENTITY_MAT2: Mat2 = { m00: 1, m01: 0, m10: 0, m11: 1 };
-
 export function det2(m: Mat2): number {
   return m.m00 * m.m11 - m.m01 * m.m10;
 }
@@ -29,15 +27,6 @@ export function mul2Vec(m: Mat2, v: Vec2): Vec2 {
   return {
     x: m.m00 * v.x + m.m01 * v.y,
     y: m.m10 * v.x + m.m11 * v.y,
-  };
-}
-
-export function transpose2(m: Mat2): Mat2 {
-  return {
-    m00: m.m00,
-    m01: m.m10,
-    m10: m.m01,
-    m11: m.m11,
   };
 }
 
@@ -179,15 +168,4 @@ export function decomposeAffineToSimilarityAndResidual(A: Mat2): SimilarityAndRe
 export function composeSimilarityAndResidual(rotationDeg: number, zoom: number, residual: Mat2): Mat2 {
   const S = rotationScaleToMat2(rotationDeg, zoom);
   return mul2(S, residual);
-}
-
-/**
- * CSS matrix() uses column-major for the 2x2 part: matrix(a, b, c, d, e, f)
- * corresponds to:
- *   [ a c e ]
- *   [ b d f ]
- *   [ 0 0 1 ]
- */
-export function toCssMatrixArgs(m: Mat2): { a: number; b: number; c: number; d: number } {
-  return { a: m.m00, b: m.m10, c: m.m01, d: m.m11 };
 }

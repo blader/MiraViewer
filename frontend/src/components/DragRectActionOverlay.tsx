@@ -2,12 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { ExclusionMask, PanelSettings } from '../types/api';
 import { clamp } from '../utils/math';
+import { viewerNormToImageNorm } from '../utils/viewportMapping';
 
 type Point = { x: number; y: number };
 
 type RectPx = { x: number; y: number; width: number; height: number };
 
-function invert2x2(a00: number, a01: number, a10: number, a11: number): { i00: number; i01: number; i10: number; i11: number } | null {
+function invert2x2(
+  a00: number,
+  a01: number,
+  a10: number,
+  a11: number,
+): { i00: number; i01: number; i10: number; i11: number } | null {
   const det = a00 * a11 - a01 * a10;
   if (!Number.isFinite(det) || Math.abs(det) < 1e-10) return null;
   const invDet = 1 / det;
@@ -22,7 +28,10 @@ function invert2x2(a00: number, a01: number, a10: number, a11: number): { i00: n
 function screenToBasePoint(
   p: Point,
   size: { width: number; height: number },
-  geometry: Pick<PanelSettings, 'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'>
+  geometry: Pick<
+    PanelSettings,
+    'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'
+  >,
 ): Point {
   const w = size.width;
   const h = size.height;
@@ -82,7 +91,11 @@ function rectFromPoints(a: Point, b: Point): RectPx {
 function computeBaseMaskFromScreenRect(
   rect: RectPx,
   size: { width: number; height: number },
-  geometry: Pick<PanelSettings, 'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'>
+  geometry: Pick<
+    PanelSettings,
+    'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'
+  >,
+  imageSize: { width: number; height: number },
 ): ExclusionMask {
   const w = size.width;
   const h = size.height;
@@ -95,7 +108,14 @@ function computeBaseMaskFromScreenRect(
     { x: rect.x + rect.width, y: rect.y + rect.height },
   ];
 
-  const baseCorners = corners.map((p) => screenToBasePoint(p, size, geometry));
+  const baseCorners = corners.map((point) => {
+    const viewportPoint = screenToBasePoint(point, size, geometry);
+    return viewerNormToImageNorm(
+      { x: viewportPoint.x / Math.max(1, w), y: viewportPoint.y / Math.max(1, h) },
+      { w, h },
+      { w: imageSize.width, h: imageSize.height },
+    );
+  });
 
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -109,15 +129,10 @@ function computeBaseMaskFromScreenRect(
     if (p.y > maxY) maxY = p.y;
   }
 
-  minX = clamp(minX, 0, w);
-  minY = clamp(minY, 0, h);
-  maxX = clamp(maxX, 0, w);
-  maxY = clamp(maxY, 0, h);
-
-  const x = w > 0 ? clamp(minX / w, 0, 1) : 0;
-  const y = h > 0 ? clamp(minY / h, 0, 1) : 0;
-  const width = w > 0 ? clamp((maxX - minX) / w, 0, 1) : 0;
-  const height = h > 0 ? clamp((maxY - minY) / h, 0, 1) : 0;
+  const x = clamp(minX, 0, 1);
+  const y = clamp(minY, 0, 1);
+  const width = clamp(maxX - minX, 0, 1);
+  const height = clamp(maxY - minY, 0, 1);
 
   return { x, y, width, height };
 }
@@ -154,7 +169,13 @@ export interface DragRectActionOverlayProps {
    *
    * This should match the *displayed* geometry (pan/zoom/rotation/affine) for the viewer.
    */
-  geometry: Pick<PanelSettings, 'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'>;
+  geometry: Pick<
+    PanelSettings,
+    'panX' | 'panY' | 'zoom' | 'rotation' | 'affine00' | 'affine01' | 'affine10' | 'affine11'
+  >;
+
+  /** Native decoded image dimensions; masks always use normalized image coordinates. */
+  imageSize?: { width: number; height: number };
 
   /** Actions shown when a rectangle selection is finalized. */
   actions: DragRectAction[];
@@ -181,8 +202,118 @@ export interface DragRectActionOverlayProps {
   children: React.ReactNode;
 }
 
+type DragRectSelection = {
+  rect: RectPx;
+  masks: DragRectActionMasks;
+  viewportSize: { width: number; height: number };
+};
+
+type DragRectActionToolbar = { actionWidth: number; left: number; top: number; closeLeft: number };
+
+function positionSelectionActions(selection: DragRectSelection, actions: DragRectAction[]): DragRectActionToolbar {
+  const { width, height } = selection.viewportSize;
+  const horizontalPadding = 6;
+  const closeButtonWidth = 44;
+  const closeButtonGap = 6;
+  const preferredActionWidth = Math.max(
+    96,
+    ...actions.map((action) => action.label.length * 8 + (action.icon ? 24 : 0) + 28),
+  );
+  const actionWidth = Math.max(
+    0,
+    Math.min(preferredActionWidth, width - horizontalPadding * 2 - closeButtonWidth - closeButtonGap),
+  );
+  const groupWidth = closeButtonWidth + closeButtonGap + actionWidth;
+  const minimumGroupLeft = horizontalPadding;
+  const maximumGroupLeft = Math.max(minimumGroupLeft, width - horizontalPadding - groupWidth);
+  const rightGroupLeft = selection.rect.x + selection.rect.width + horizontalPadding;
+  const leftGroupLeft = selection.rect.x - horizontalPadding - groupWidth;
+  const groupLeft =
+    rightGroupLeft <= maximumGroupLeft
+      ? rightGroupLeft
+      : leftGroupLeft >= minimumGroupLeft
+        ? leftGroupLeft
+        : clamp(selection.rect.x + horizontalPadding, minimumGroupLeft, maximumGroupLeft);
+  const left = groupLeft + closeButtonWidth + closeButtonGap;
+  const stackHeight = Math.max(closeButtonWidth, (actions.length - 1) * 48 + closeButtonWidth);
+  const top = clamp(selection.rect.y + horizontalPadding, 2, Math.max(2, height - stackHeight - 2));
+  return { actionWidth, left, top, closeLeft: groupLeft };
+}
+
+function SelectionActionButtons({
+  selection,
+  actions,
+  toolbar,
+  disabled,
+  minMaskSize,
+  onClear,
+}: {
+  selection: DragRectSelection;
+  actions: DragRectAction[];
+  toolbar: DragRectActionToolbar;
+  disabled: boolean;
+  minMaskSize: number;
+  onClear: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        data-drag-rect-action-button="true"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onClear();
+        }}
+        aria-label="Clear selection"
+        className="absolute pointer-events-auto flex min-h-11 min-w-11 items-center justify-center rounded-[3px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+        style={{ left: toolbar.closeLeft, top: toolbar.top }}
+        title="Clear selection"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </button>
+
+      {actions.map((action, actionIndex) => {
+        const mask = action.minSizeSpace === 'screen' ? selection.masks.screen : selection.masks.base;
+        const enabled = !disabled && mask.width >= minMaskSize && mask.height >= minMaskSize && !action.disabled;
+        const variant = action.variant ?? 'primary';
+        const colors = enabled
+          ? variant === 'primary'
+            ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
+            : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] border-[var(--border-color)]'
+          : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
+
+        return (
+          <button
+            key={action.key}
+            type="button"
+            data-drag-rect-action-button="true"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!enabled) return;
+              action.onConfirm(selection.masks);
+              onClear();
+            }}
+            disabled={!enabled}
+            className={`absolute pointer-events-auto flex min-h-11 min-w-0 items-center gap-2 rounded-[3px] border px-3 py-2 text-sm font-medium transition-colors ${colors}`}
+            style={{ left: toolbar.left, top: toolbar.top + actionIndex * 48, maxWidth: toolbar.actionWidth }}
+            title={action.title}
+          >
+            {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
+            <span className="truncate">{action.label}</span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 export function DragRectActionOverlay({
   geometry,
+  imageSize,
   actions,
   onDragBegin,
   disabled = false,
@@ -200,7 +331,7 @@ export function DragRectActionOverlay({
     didExceedThreshold: boolean;
   } | null>(null);
 
-  const [selection, setSelection] = useState<{ rect: RectPx; masks: DragRectActionMasks } | null>(null);
+  const [selection, setSelection] = useState<DragRectSelection | null>(null);
 
   const didDragRef = useRef(false);
 
@@ -242,7 +373,7 @@ export function DragRectActionOverlay({
         didExceedThreshold: false,
       });
     },
-    [disabled, getLocalPoint]
+    [disabled, getLocalPoint],
   );
 
   const onPointerMoveCapture = useCallback(
@@ -276,7 +407,7 @@ export function DragRectActionOverlay({
 
       setDrag((prev) => (prev ? { ...prev, current: p } : prev));
     },
-    [drag, dragThresholdPx, getLocalPoint, onDragBegin]
+    [drag, dragThresholdPx, getLocalPoint, onDragBegin],
   );
 
   const onPointerUpCapture = useCallback(
@@ -300,14 +431,14 @@ export function DragRectActionOverlay({
         const r = el?.getBoundingClientRect();
         const size = { width: r?.width ?? 0, height: r?.height ?? 0 };
 
-        const maskBase = computeBaseMaskFromScreenRect(rect, size, geometry);
+        const maskBase = computeBaseMaskFromScreenRect(rect, size, geometry, imageSize ?? size);
         const maskScreen = computeScreenMaskFromScreenRect(rect, size);
-        setSelection({ rect, masks: { base: maskBase, screen: maskScreen } });
+        setSelection({ rect, masks: { base: maskBase, screen: maskScreen }, viewportSize: size });
       }
 
       setDrag(null);
     },
-    [drag, geometry, getLocalPoint]
+    [drag, geometry, getLocalPoint, imageSize],
   );
 
   const onPointerCancelCapture = useCallback(
@@ -316,7 +447,7 @@ export function DragRectActionOverlay({
       if (e.pointerId !== drag.pointerId) return;
       setDrag(null);
     },
-    [drag]
+    [drag],
   );
 
   // Suppress viewer clicks when the user just drew a rectangle.
@@ -339,6 +470,20 @@ export function DragRectActionOverlay({
   }, []);
 
   useEffect(() => {
+    if (!selection && !drag?.didExceedThreshold) return;
+    const element = containerRef.current;
+    if (!element) return;
+
+    const preventSliceNavigation = (event: WheelEvent) => {
+      if (event.metaKey || event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    element.addEventListener('wheel', preventSliceNavigation, { capture: true, passive: false });
+    return () => element.removeEventListener('wheel', preventSliceNavigation, { capture: true });
+  }, [drag?.didExceedThreshold, selection]);
+
+  useEffect(() => {
     if (!selection) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -352,20 +497,7 @@ export function DragRectActionOverlay({
   }, [clearSelection, selection]);
 
   const effectiveRect = selection?.rect ?? currentRect;
-
-  const baseOk = (() => {
-    const m = selection?.masks.base;
-    if (!m) return false;
-    return m.width >= minMaskSize && m.height >= minMaskSize;
-  })();
-
-  const screenOk = (() => {
-    const m = selection?.masks.screen;
-    if (!m) return false;
-    return m.width >= minMaskSize && m.height >= minMaskSize;
-  })();
-
-  const canRunAnyAction = !!selection && !disabled;
+  const toolbar = selection ? positionSelectionActions(selection, actions) : null;
 
   return (
     <div
@@ -376,13 +508,17 @@ export function DragRectActionOverlay({
       onPointerUpCapture={onPointerUpCapture}
       onPointerCancelCapture={onPointerCancelCapture}
       onClickCapture={onClickCapture}
+      onKeyDownCapture={(event) => {
+        if (event.key === 'Escape' && selection) clearSelection();
+      }}
     >
       {children}
 
       {effectiveRect && effectiveRect.width > 0 && effectiveRect.height > 0 && (
         <div className="absolute inset-0 pointer-events-none">
           <div
-            className="absolute border-2 border-[var(--accent)] bg-[var(--accent)]/15 rounded-sm"
+            data-selection-outline="true"
+            className="absolute rounded-[2px] border border-[var(--signal-metal)] bg-transparent"
             style={{
               left: effectiveRect.x,
               top: effectiveRect.y,
@@ -391,64 +527,16 @@ export function DragRectActionOverlay({
             }}
           />
 
-          {selection && (
-            <>
-              {/* Close button */}
-              <button
-                type="button"
-                data-drag-rect-action-button="true"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  clearSelection();
-                }}
-                className="absolute pointer-events-auto p-1 rounded bg-black/70 text-white/90 hover:bg-black/80"
-                style={{ left: effectiveRect.x + 6, top: effectiveRect.y + 6 }}
-                title="Clear selection"
-              >
-                <X className="w-4 h-4" />
-              </button>
-
-              {/* Action buttons */}
-              {actions.map((action, actionIdx) => {
-                const space = action.minSizeSpace ?? 'base';
-                const sizeOk = space === 'screen' ? screenOk : baseOk;
-                const enabled = canRunAnyAction && sizeOk && !action.disabled;
-                const variant = action.variant ?? 'primary';
-
-                const cls = enabled
-                  ? variant === 'primary'
-                    ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border-[var(--accent)]'
-                    : 'bg-black/70 text-white/90 hover:bg-black/80 border-white/10'
-                  : 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]';
-
-                return (
-                  <button
-                    key={action.key}
-                    type="button"
-                    data-drag-rect-action-button="true"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!selection) return;
-                      if (!enabled) return;
-                      action.onConfirm(selection.masks);
-                      clearSelection();
-                    }}
-                    disabled={!enabled}
-                    className={`absolute pointer-events-auto px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-xl transition-colors border ${cls}`}
-                    style={{ left: effectiveRect.x + 40, top: effectiveRect.y + 6 + actionIdx * 44 }}
-                    title={action.title}
-                  >
-                    {action.icon ? <span className="shrink-0">{action.icon}</span> : null}
-                    {action.label}
-                  </button>
-                );
-              })}
-            </>
-          )}
+          {selection && toolbar ? (
+            <SelectionActionButtons
+              selection={selection}
+              actions={actions}
+              toolbar={toolbar}
+              disabled={disabled}
+              minMaskSize={minMaskSize}
+              onClear={clearSelection}
+            />
+          ) : null}
         </div>
       )}
     </div>

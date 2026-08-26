@@ -25,6 +25,9 @@ export const CONTROL_LIMITS = {
   SLICE_NAV: { MAX_RANGE: 1000 }, // For the bottom slider
 } as const;
 
+/** Two fixed 48 px metadata rails preserve 44 px coarse-pointer interaction targets. */
+export const GRID_CELL_METADATA_HEIGHT = 96;
+
 export const OVERLAY = {
   PLAY_SPEEDS: [
     { label: '0.5x', value: 2000 },

@@ -111,6 +111,18 @@ export const DEFAULT_SVR_PARAMS: SvrParams = {
 
 export type SvrVolume = {
   data: Float32Array;
+  /** Acquired-observation support in the same voxel order as `data`; zero means no physical evidence. */
+  observedSupport?: Uint8Array;
+  /** Number of acquired-supported voxels, counted when `observedSupport` is produced. */
+  supportedVoxelCount?: number;
+  /** Number of physically independent source-slice orientation families. */
+  acquiredOrientationCount?: number;
+  /** Conservative source-derived patient-axis resolution estimate; absent when an axis cannot be verified. */
+  effectiveResolutionMm?: [number, number, number];
+  /** Whether contributing frames explicitly declared their slice-excitation thickness. */
+  sliceProfileSource?: 'declared' | 'mixed' | 'unknown';
+  /** Metadata-only fingerprint binding accepted source identity, geometry, settings, and output evidence. */
+  reconstructionFingerprint?: string;
   dims: [number, number, number];
   voxelSizeMm: [number, number, number];
   originMm: [number, number, number];

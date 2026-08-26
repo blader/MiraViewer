@@ -13,11 +13,11 @@
  */
 
 import type { VolumeDims } from './trilinear';
-import { sampleTrilinear } from './trilinear';
+import { sampleTrilinear, sampleTrilinearWithSupport } from './trilinear';
 import type { Vec3 } from './vec3';
 import { cross, normalize, v3 } from './vec3';
 import { assertNotAborted, clampAbs, withinTrilinearSupport, yieldToMain } from './svrUtils';
-import type { SvrReconstructionSlice } from './reconstructionCore';
+import { acquiredObservationWeight, type SvrReconstructionSlice } from './reconstructionCore';
 
 // ============================================================================
 // Types
@@ -56,6 +56,8 @@ export type SeriesSamples = {
   pos: Float32Array;
   /** Number of samples */
   count: number;
+  /** Fractional acquired-footprint evidence for each observation, when available. */
+  weights?: Float32Array;
 };
 
 /** Axis-aligned bounding box in world/patient mm coordinates */
@@ -188,13 +190,6 @@ export function boundsCenterMm(b: BoundsMm): Vec3 {
   return v3((b.min.x + b.max.x) * 0.5, (b.min.y + b.max.y) * 0.5, (b.min.z + b.max.z) * 0.5);
 }
 
-/**
- * Checks if a point is within a bounding box (inclusive).
- */
-function isWithinBoundsMm(p: Vec3, b: BoundsMm): boolean {
-  return p.x >= b.min.x && p.x <= b.max.x && p.y >= b.min.y && p.y <= b.max.y && p.z >= b.min.z && p.z <= b.max.z;
-}
-
 // ============================================================================
 // Slice transform application
 // ============================================================================
@@ -243,7 +238,7 @@ export function applyRigidToSeriesSlices(params: {
  * @returns Extracted samples with positions
  */
 export function buildSeriesSamples(params: {
-  slices: LoadedSlice[];
+  slices: readonly SvrReconstructionSlice[];
   roiBounds: BoundsMm;
   maxSamples: number;
   signal?: AbortSignal;
@@ -264,6 +259,9 @@ export function buildSeriesSamples(params: {
   // for buffers whose maximum size (maxN) is known up front.
   const obs = new Float32Array(maxN);
   const pos = new Float32Array(maxN * 3);
+  const weights = slices.some((slice) => slice.valid && typeof slice.validScale === 'number' && slice.validScale !== 1)
+    ? new Float32Array(maxN)
+    : undefined;
   let count = 0;
 
   for (let sIdx = 0; sIdx < slices.length; sIdx++) {
@@ -272,29 +270,43 @@ export function buildSeriesSamples(params: {
     if (!s) continue;
 
     let usedThisSlice = 0;
+    // Stopping a row-major scan after its quota samples only the top of every
+    // slice. Choose a per-slice lattice that spans the complete field instead.
+    const sliceStride = Math.max(stride, Math.ceil(Math.sqrt((s.dsRows * s.dsCols) / perSliceTarget)));
 
-    for (let r = 0; r < s.dsRows; r += stride) {
+    for (let r = 0; r < s.dsRows; r += sliceStride) {
       const baseX = s.ippMm.x + s.colDir.x * (r * s.rowSpacingDsMm);
       const baseY = s.ippMm.y + s.colDir.y * (r * s.rowSpacingDsMm);
       const baseZ = s.ippMm.z + s.colDir.z * (r * s.rowSpacingDsMm);
 
       const rowBase = r * s.dsCols;
 
-      for (let c = 0; c < s.dsCols; c += stride) {
-        const v = s.pixels[rowBase + c] ?? 0;
-        if (v <= 0) continue;
+      for (let c = 0; c < s.dsCols; c += sliceStride) {
+        const index = rowBase + c;
+        const v = s.pixels[index];
+        const acquiredWeight = acquiredObservationWeight(s, index);
+        if (!(acquiredWeight > 0) || v === undefined || !Number.isFinite(v)) continue;
 
         const wx = baseX + s.rowDir.x * (c * s.colSpacingDsMm);
         const wy = baseY + s.rowDir.y * (c * s.colSpacingDsMm);
         const wz = baseZ + s.rowDir.z * (c * s.colSpacingDsMm);
 
-        const p = v3(wx, wy, wz);
-        if (!isWithinBoundsMm(p, roiBounds)) continue;
+        if (
+          wx < roiBounds.min.x ||
+          wx > roiBounds.max.x ||
+          wy < roiBounds.min.y ||
+          wy > roiBounds.max.y ||
+          wz < roiBounds.min.z ||
+          wz > roiBounds.max.z
+        ) {
+          continue;
+        }
 
         obs[count] = v;
         pos[count * 3] = wx;
         pos[count * 3 + 1] = wy;
         pos[count * 3 + 2] = wz;
+        if (weights) weights[count] = acquiredWeight;
         count++;
         usedThisSlice++;
 
@@ -314,6 +326,7 @@ export function buildSeriesSamples(params: {
     obs: obs.subarray(0, count),
     pos: pos.subarray(0, count * 3),
     count,
+    ...(weights ? { weights: weights.subarray(0, count) } : {}),
   };
 }
 
@@ -338,15 +351,30 @@ export function scoreNcc(params: {
   voxelSizeMm: number;
   centerMm: Vec3;
   rigid: RigidParams;
-}): { ncc: number; used: number } {
-  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid } = params;
+  /** Reconstructed voxel occupancy; unsupported zero-filled voxels are never anatomy. */
+  occupancy?: Uint8Array;
+  /** Minimum fraction of the fixed moving-sample domain retained by this transform. */
+  minimumCoverage?: number;
+  minimumSamples?: number;
+}): { ncc: number; rawNcc: number; used: number; coverage: number } {
+  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid, occupancy } = params;
 
-  if (samples.count <= 0) return { ncc: Number.NEGATIVE_INFINITY, used: 0 };
+  if (samples.count <= 0)
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used: 0, coverage: 0 };
+  if (occupancy && occupancy.length !== refVolume.length)
+    throw new Error('Registration occupancy does not match reference volume');
+  if (samples.weights && samples.weights.length < samples.count) {
+    throw new Error('Registration acquired weights do not match its sample domain');
+  }
 
   const rot = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
-  const tMm = v3(rigid.tx, rigid.ty, rigid.tz);
-
   const invVox = 1 / voxelSizeMm;
+  const originX = originMm.x;
+  const originY = originMm.y;
+  const originZ = originMm.z;
+  const centerX = centerMm.x;
+  const centerY = centerMm.y;
+  const centerZ = centerMm.z;
 
   let sumA = 0;
   let sumB = 0;
@@ -354,50 +382,135 @@ export function scoreNcc(params: {
   let sumBB = 0;
   let sumAB = 0;
   let used = 0;
+  let usedWeight = 0;
+  let totalWeight = 0;
 
   const obs = samples.obs;
   const pos = samples.pos;
+  const interpolatedObservation = occupancy ? new Float64Array(2) : undefined;
 
   for (let i = 0; i < samples.count; i++) {
+    const acquiredWeight = samples.weights?.[i] ?? 1;
+    if (!(acquiredWeight > 0) || !Number.isFinite(acquiredWeight)) continue;
+    totalWeight += acquiredWeight;
     const a = obs[i] ?? 0;
     const x = pos[i * 3] ?? 0;
     const y = pos[i * 3 + 1] ?? 0;
     const z = pos[i * 3 + 2] ?? 0;
 
-    // Apply candidate rigid transform about ROI center.
-    const p = applyRigidToPoint(v3(x, y, z), centerMm, rot, tMm);
-
-    const vx = (p.x - originMm.x) * invVox;
-    const vy = (p.y - originMm.y) * invVox;
-    const vz = (p.z - originMm.z) * invVox;
+    // Keep the candidate transform scalar: a representative optimizer scores
+    // millions of points, and allocating three Vec3 objects per point creates
+    // garbage-collection stalls without changing the physical transform.
+    const dx = x - centerX;
+    const dy = y - centerY;
+    const dz = z - centerZ;
+    const vx = (centerX + rot[0] * dx + rot[1] * dy + rot[2] * dz + rigid.tx - originX) * invVox;
+    const vy = (centerY + rot[3] * dx + rot[4] * dy + rot[5] * dz + rigid.ty - originY) * invVox;
+    const vz = (centerZ + rot[6] * dx + rot[7] * dy + rot[8] * dz + rigid.tz - originZ) * invVox;
 
     if (!withinTrilinearSupport(dims, vx, vy, vz)) continue;
+    let b: number;
+    if (occupancy && interpolatedObservation) {
+      sampleTrilinearWithSupport(refVolume, occupancy, dims, vx, vy, vz, interpolatedObservation);
+      if (interpolatedObservation[1]! < 0.5) continue;
+      b = interpolatedObservation[0]! / interpolatedObservation[1]!;
+    } else {
+      b = sampleTrilinear(refVolume, dims, vx, vy, vz);
+    }
 
-    const b = sampleTrilinear(refVolume, dims, vx, vy, vz);
-
-    sumA += a;
-    sumB += b;
-    sumAA += a * a;
-    sumBB += b * b;
-    sumAB += a * b;
+    sumA += acquiredWeight * a;
+    sumB += acquiredWeight * b;
+    sumAA += acquiredWeight * a * a;
+    sumBB += acquiredWeight * b * b;
+    sumAB += acquiredWeight * a * b;
+    usedWeight += acquiredWeight;
     used++;
   }
 
   // Require minimum samples for reliable optimization
-  const MIN_SAMPLES_FOR_OPTIMIZATION = 512;
-  if (used < MIN_SAMPLES_FOR_OPTIMIZATION) {
-    return { ncc: Number.NEGATIVE_INFINITY, used };
+  const coverage = totalWeight > 0 ? usedWeight / totalWeight : 0;
+  const minimumSamples = Math.max(1, Math.round(params.minimumSamples ?? 512));
+  const minimumCoverage = Math.max(0, Math.min(1, params.minimumCoverage ?? 0.6));
+  if (used < minimumSamples || coverage < minimumCoverage) {
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used, coverage };
   }
 
-  const invN = 1 / used;
+  const invN = 1 / usedWeight;
   const cov = sumAB - sumA * sumB * invN;
   const varA = sumAA - sumA * sumA * invN;
   const varB = sumBB - sumB * sumB * invN;
 
-  const denom = Math.sqrt(Math.max(1e-12, varA * varB));
-  const ncc = denom > 0 ? cov / denom : Number.NEGATIVE_INFINITY;
+  // Pearson correlation is undefined when either supported signal is constant.
+  // Flooring its denominator manufactures a finite zero score, which allows a
+  // completely flat MRI volume to masquerade as a valid registration candidate.
+  if (varA <= Number.EPSILON * Math.max(1, sumAA) || varB <= Number.EPSILON * Math.max(1, sumBB)) {
+    return { ncc: Number.NEGATIVE_INFINITY, rawNcc: Number.NEGATIVE_INFINITY, used, coverage };
+  }
 
-  return { ncc, used };
+  const rawNcc = cov / Math.sqrt(varA * varB);
+  // Compare every proposal against the same complete moving-sample domain.
+  // Missing anatomy contributes zero evidence instead of disappearing from the denominator.
+  const ncc = rawNcc * coverage;
+
+  return { ncc, rawNcc, used, coverage };
+}
+
+export type ReverseRegistrationDomain = {
+  samples: SeriesSamples;
+  refVolume: Float32Array;
+  dims: VolumeDims;
+  originMm: Vec3;
+  voxelSizeMm: number;
+  occupancy?: Uint8Array;
+};
+
+/** Invert a center-relative rigid transform without treating Euler angles as commutative. */
+export function invertRigidParams(rigid: RigidParams): RigidParams {
+  const rotation = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
+  const inverse: Mat3 = [
+    rotation[0],
+    rotation[3],
+    rotation[6],
+    rotation[1],
+    rotation[4],
+    rotation[7],
+    rotation[2],
+    rotation[5],
+    rotation[8],
+  ];
+  const ry = Math.asin(Math.max(-1, Math.min(1, -inverse[6])));
+  const singular = Math.abs(Math.cos(ry)) < 1e-8;
+  const rx = singular ? 0 : Math.atan2(inverse[7], inverse[8]);
+  const rz = singular ? Math.atan2(-inverse[1], inverse[4]) : Math.atan2(inverse[3], inverse[0]);
+  const translation = mat3MulVec3(inverse, -rigid.tx, -rigid.ty, -rigid.tz);
+  return { tx: translation.x, ty: translation.y, tz: translation.z, rx, ry, rz };
+}
+
+export function scoreBidirectionalNcc(
+  params: Parameters<typeof scoreNcc>[0] & { reverse: ReverseRegistrationDomain },
+): {
+  ncc: number;
+  used: number;
+  coverage: number;
+  forward: ReturnType<typeof scoreNcc>;
+  reverse: ReturnType<typeof scoreNcc>;
+} {
+  const { reverse, ...forwardParams } = params;
+  const forward = scoreNcc(forwardParams);
+  const backward = scoreNcc({
+    ...reverse,
+    centerMm: params.centerMm,
+    rigid: invertRigidParams(params.rigid),
+    minimumCoverage: params.minimumCoverage,
+    minimumSamples: params.minimumSamples,
+  });
+  return {
+    ncc: Math.min(forward.ncc, backward.ncc),
+    used: Math.min(forward.used, backward.used),
+    coverage: Math.min(forward.coverage, backward.coverage),
+    forward,
+    reverse: backward,
+  };
 }
 
 // ============================================================================
@@ -426,22 +539,83 @@ export async function optimizeRigidNcc(params: {
   voxelSizeMm: number;
   centerMm: Vec3;
   signal?: AbortSignal;
+  occupancy?: Uint8Array;
+  minimumCoverage?: number;
+  minimumSamples?: number;
+  initial?: RigidParams;
+  maxTranslationMm?: number;
+  maxRotationRad?: number;
+  /** Smallest physically justified translation probe; defaults to one tenth of a voxel. */
+  finestTranslationStepMm?: number;
+  /** Smallest physically justified rotation probe; defaults to the translation step at the sample radius. */
+  finestRotationStepRad?: number;
+  reverse?: ReverseRegistrationDomain;
 }): Promise<{ best: RigidParams; bestScore: number; used: number; evals: number }> {
-  const { samples, refVolume, dims, originMm, voxelSizeMm, centerMm, signal } = params;
+  const {
+    samples,
+    refVolume,
+    dims,
+    originMm,
+    voxelSizeMm,
+    centerMm,
+    signal,
+    occupancy,
+    minimumCoverage,
+    minimumSamples,
+    reverse,
+  } = params;
 
   // Search bounds - assumes coarse alignment got us "close"
-  const MAX_TRANS_MM = 20;
-  const MAX_ROT_RAD = (10 * Math.PI) / 180;
+  const MAX_TRANS_MM = params.maxTranslationMm ?? 20;
+  const MAX_ROT_RAD = params.maxRotationRad ?? (10 * Math.PI) / 180;
 
-  // Multi-scale optimization stages (coarse to fine)
+  let sampleRadiusMm = voxelSizeMm;
+  for (let index = 0; index < samples.count; index++) {
+    sampleRadiusMm = Math.max(
+      sampleRadiusMm,
+      Math.hypot(
+        samples.pos[index * 3]! - centerMm.x,
+        samples.pos[index * 3 + 1]! - centerMm.y,
+        samples.pos[index * 3 + 2]! - centerMm.z,
+      ),
+    );
+  }
+  const finestTranslationStepMm = Math.max(0.025, Math.min(0.5, params.finestTranslationStepMm ?? voxelSizeMm / 10));
+  const finestRotationStepRad = Math.max(
+    (0.025 * Math.PI) / 180,
+    Math.min((0.5 * Math.PI) / 180, params.finestRotationStepRad ?? finestTranslationStepMm / sampleRadiusMm),
+  );
   const stages = [
     { transStepMm: 2.0, rotStepRad: (2 * Math.PI) / 180 },
     { transStepMm: 1.0, rotStepRad: (1 * Math.PI) / 180 },
     { transStepMm: 0.5, rotStepRad: (0.5 * Math.PI) / 180 },
   ];
+  let translationStepMm = 0.5;
+  let rotationStepRad = (0.5 * Math.PI) / 180;
+  while (translationStepMm > finestTranslationStepMm || rotationStepRad > finestRotationStepRad) {
+    translationStepMm = Math.max(finestTranslationStepMm, translationStepMm / 2);
+    rotationStepRad = Math.max(finestRotationStepRad, rotationStepRad / 2);
+    stages.push({ transStepMm: translationStepMm, rotStepRad: rotationStepRad });
+  }
 
-  const cur: RigidParams = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
-  const bestEval = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: cur });
+  const evaluate = (rigid: RigidParams) => {
+    const forward = {
+      samples,
+      refVolume,
+      dims,
+      originMm,
+      voxelSizeMm,
+      centerMm,
+      rigid,
+      occupancy,
+      minimumCoverage,
+      minimumSamples,
+    };
+    return reverse ? scoreBidirectionalNcc({ ...forward, reverse }) : scoreNcc(forward);
+  };
+
+  const cur: RigidParams = params.initial ? { ...params.initial } : { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+  const bestEval = evaluate(cur);
   let bestScore = bestEval.ncc;
   let bestUsed = bestEval.used;
   let evals = 1;
@@ -462,9 +636,9 @@ export async function optimizeRigidNcc(params: {
     probe.rz = cur.rz;
     probe[key] = value;
 
-    const e = scoreNcc({ samples, refVolume, dims, originMm, voxelSizeMm, centerMm, rigid: probe });
+    const e = evaluate(probe);
     evals++;
-    if (e.ncc > bestScore + 1e-4) {
+    if (e.ncc > bestScore + 1e-7) {
       cur[key] = value;
       bestScore = e.ncc;
       bestUsed = e.used;

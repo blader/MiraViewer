@@ -11,6 +11,20 @@ function makeGridPixels(rows: number, cols: number): Float32Array {
   return out;
 }
 
+function makeAxialSlice(size: number, z = 0, pixels = makeGridPixels(size, size)) {
+  return {
+    pixels,
+    dsRows: size,
+    dsCols: size,
+    ippMm: { x: 0, y: 0, z },
+    rowDir: { x: 1, y: 0, z: 0 },
+    colDir: { x: 0, y: 1, z: 0 },
+    normalDir: { x: 0, y: 0, z: 1 },
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+  };
+}
+
 describe('svr/sliceRoiCrop', () => {
   it('crops an axial slice and shifts IPP so (r0,c0) becomes the new origin', () => {
     const slice = {
@@ -82,5 +96,47 @@ describe('svr/sliceRoiCrop', () => {
     expect(slice.dsRows).toBe(before.dsRows);
     expect(slice.dsCols).toBe(before.dsCols);
     expect(slice.ippMm).toEqual(before.ipp);
+  });
+
+  it('keeps a thick slice when its physical slab overlaps the ROI despite its center being outside', () => {
+    const slice = { ...makeAxialSlice(3, -0.4), sliceThicknessMm: 1.2 };
+
+    expect(
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 2, z: 1 } })),
+    ).toBe(true);
+  });
+
+  it('crops acquired-pixel support in lockstep with pixels and physical origin', () => {
+    const valid = new Uint8Array(8 * 8);
+    valid[3 * 8 + 4] = 1;
+    valid[5 * 8 + 6] = 1;
+
+    const slice = { ...makeAxialSlice(8), valid };
+
+    expect(
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 4, y: 3, z: -1 }, max: { x: 5, y: 4, z: 1 } })),
+    ).toBe(true);
+
+    expect(slice.dsRows).toBe(4);
+    expect(slice.dsCols).toBe(4);
+    expect(slice.valid).toHaveLength(slice.pixels.length);
+    expect(slice.ippMm).toEqual({ x: 3, y: 2, z: 0 });
+    expect(slice.pixels[1 * slice.dsCols + 1]).toBe(304);
+    expect(slice.valid[1 * slice.dsCols + 1]).toBe(1);
+    expect(slice.pixels[3 * slice.dsCols + 3]).toBe(506);
+    expect(slice.valid[3 * slice.dsCols + 3]).toBe(1);
+    expect(Array.from(slice.valid).reduce((sum, value) => sum + value, 0)).toBe(2);
+  });
+
+  it('rejects malformed acquired support before mutating a source slice', () => {
+    const pixels = makeGridPixels(4, 4);
+    const slice = { ...makeAxialSlice(4, 0, pixels), valid: new Uint8Array(3) };
+
+    expect(() =>
+      cropSliceToRoiInPlace(slice, boundsCornersMm({ min: { x: 1, y: 1, z: -1 }, max: { x: 2, y: 2, z: 1 } })),
+    ).toThrow(/support.*dimensions/i);
+    expect(slice.pixels).toBe(pixels);
+    expect(slice.dsRows).toBe(4);
+    expect(slice.dsCols).toBe(4);
   });
 });

@@ -5,11 +5,19 @@ export interface RepeatButtonProps {
   onAction: () => void;
   className?: string;
   title?: string;
+  'aria-label'?: string;
   children: React.ReactNode;
   onClick?: (e: React.MouseEvent) => void;
 }
 
-export function RepeatButton({ onAction, className, title, children, onClick }: RepeatButtonProps) {
+export function RepeatButton({
+  onAction,
+  className,
+  title,
+  children,
+  onClick,
+  'aria-label': ariaLabel,
+}: RepeatButtonProps) {
   const repeatTimeoutRef = useRef<number | null>(null);
   const initialDelayTimeoutRef = useRef<number | null>(null);
   const countRef = useRef(0);
@@ -54,22 +62,33 @@ export function RepeatButton({ onAction, className, title, children, onClick }: 
       tick();
     }, 300); // Initial delay before repeat starts
   }, []);
-  
+
   useEffect(() => {
     return stop;
   }, [stop]);
-  
+
   return (
     <button
+      type="button"
       className={className}
       title={title}
+      aria-label={ariaLabel ?? title}
       onMouseDown={(e) => {
         e.preventDefault();
         start();
       }}
       onMouseUp={stop}
       onMouseLeave={stop}
-      onClick={onClick}
+      onTouchStart={(event) => {
+        event.preventDefault();
+        start();
+      }}
+      onTouchEnd={stop}
+      onTouchCancel={stop}
+      onClick={(event) => {
+        if (event.detail === 0) onActionRef.current();
+        onClick?.(event);
+      }}
     >
       {children}
     </button>

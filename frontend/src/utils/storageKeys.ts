@@ -22,6 +22,9 @@ export const OVERLAY_NAV_STORAGE_KEY = 'miraviewer:overlay-nav:v1';
 /** Per-sequence slice loop playback settings (prefix + seqId). */
 export const PLAYBACK_STORAGE_KEY_PREFIX = 'miraviewer:slice-loop-playback:v2:';
 
+/** Every current MiraViewer-specific localStorage key uses this owned namespace. */
+export const OWNED_STORAGE_KEY_PREFIX = 'miraviewer:';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cookie names
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,13 +37,13 @@ export const PLAYBACK_COOKIE_NAME_V2 = 'miraviewer_slice_loop_playback_v2';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Legacy v1 playback storage key.
- * @deprecated Users may still have this data - kept so ClearDataModal can remove it.
- */
-export const LEGACY_PLAYBACK_STORAGE_KEY = 'miraviewer:slice-loop-playback:v1';
-
-/**
  * Legacy v1 playback cookie name.
  * @deprecated Users may still have this cookie - kept so ClearDataModal can remove it.
  */
 export const LEGACY_PLAYBACK_COOKIE_NAME = 'miraviewer_slice_loop_playback_v1';
+
+export const OWNED_COOKIE_NAMES = [PLAYBACK_COOKIE_NAME_V2, LEGACY_PLAYBACK_COOKIE_NAME] as const;
+
+export function isOwnedStorageKey(key: string): boolean {
+  return key.startsWith(OWNED_STORAGE_KEY_PREFIX) || key === FILTERS_STORAGE_KEY;
+}

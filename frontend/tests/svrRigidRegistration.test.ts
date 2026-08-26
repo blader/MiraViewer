@@ -15,8 +15,13 @@ import {
   applyRigidToPoint,
   boundsCenterMm,
   scoreNcc,
+  scoreBidirectionalNcc,
+  invertRigidParams,
+  buildSeriesSamples,
+  optimizeRigidNcc,
 } from '../src/utils/svr/rigidRegistration';
 import type { SeriesSamples, BoundsMm } from '../src/utils/svr/rigidRegistration';
+import { sampleTrilinear } from '../src/utils/svr/trilinear';
 import { v3 } from '../src/utils/svr/vec3';
 
 describe('svr/rigidRegistration', () => {
@@ -289,5 +294,369 @@ describe('svr/rigidRegistration', () => {
       expect(result.ncc).toBeGreaterThan(0.99);
       expect(result.used).toBeGreaterThan(100);
     });
+
+    it('rejects fully supported but anatomically flat signals instead of inventing zero-confidence NCC', () => {
+      const dims = { nx: 10, ny: 10, nz: 10 };
+      const count = 600;
+      const positions = new Float32Array(count * 3);
+      for (let index = 0; index < count; index++) {
+        positions.set([1 + (index % 8), 1 + (Math.floor(index / 8) % 8), 1], index * 3);
+      }
+
+      const result = scoreNcc({
+        samples: { obs: new Float32Array(count).fill(0.5), pos: positions, count },
+        refVolume: new Float32Array(1000).fill(0.5),
+        occupancy: new Uint8Array(1000).fill(1),
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(5, 5, 5),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      });
+
+      expect(result.coverage).toBe(1);
+      expect(result.used).toBe(count);
+      expect(result.ncc).toBe(Number.NEGATIVE_INFINITY);
+      expect(result.rawNcc).toBe(Number.NEGATIVE_INFINITY);
+    });
+
+    it('rejects a deceptively perfect registration that discards most anatomical support', () => {
+      const dims = { nx: 22, ny: 100, nz: 3 };
+      const field = (x: number, y: number) => Math.sin(x * 0.31) + Math.cos(y * 0.13);
+      const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+      for (let z = 0; z < dims.nz; z++) {
+        for (let y = 0; y < dims.ny; y++) {
+          for (let x = 0; x < dims.nx; x++) volume[x + y * dims.nx + z * dims.nx * dims.ny] = field(x, y);
+        }
+      }
+
+      const count = 21 * 99 * 6;
+      const obs = new Float32Array(count);
+      const pos = new Float32Array(count * 3);
+      let cursor = 0;
+      for (let repetition = 0; repetition < 6; repetition++) {
+        for (let y = 0; y < 99; y++) {
+          for (let x = 0; x < 21; x++) {
+            obs[cursor] = x === 0 ? field(20, y) : -field(x, y);
+            pos.set([x, y, 0.5], cursor * 3);
+            cursor++;
+          }
+        }
+      }
+
+      const result = scoreNcc({
+        samples: { obs, pos, count },
+        refVolume: volume,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 20, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      });
+
+      expect(result.used).toBeGreaterThanOrEqual(512);
+      expect(result.ncc).toBe(Number.NEGATIVE_INFINITY);
+    });
+
+    it('never treats zero-filled unsupported reference voxels as observed anatomy', () => {
+      const dims = { nx: 10, ny: 10, nz: 10 };
+      const count = 600;
+      const samples: SeriesSamples = {
+        obs: new Float32Array(count).fill(1),
+        pos: new Float32Array(count * 3),
+        count,
+      };
+      for (let index = 0; index < count; index++) samples.pos.set([1 + (index % 8), 1, 1], index * 3);
+
+      const result = scoreNcc({
+        samples,
+        refVolume: new Float32Array(1000),
+        occupancy: new Uint8Array(1000),
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      });
+
+      expect(result.used).toBe(0);
+      expect(result.ncc).toBe(Number.NEGATIVE_INFINITY);
+    });
+
+    it('preserves fractional acquired weights and the exact half-support boundary', () => {
+      const dims = { nx: 4, ny: 4, nz: 2 };
+      const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+      const occupancy = new Uint8Array(volume.length);
+      for (let z = 0; z < dims.nz; z++) {
+        for (let y = 0; y < dims.ny; y++) {
+          for (let x = 0; x < dims.nx; x++) {
+            const index = x + y * dims.nx + z * dims.nx * dims.ny;
+            occupancy[index] = x > 0 ? 1 : 0;
+            volume[index] = occupancy[index] ? x + 10 * y + 100 * z : 0;
+          }
+        }
+      }
+
+      const pos = new Float32Array([
+        0.49, 1.2, 0.4, 0.5, 1.2, 0.4, 0.51, 2, 0.6, 1.75, 0.2, 0.1, 3, 3, 1, 3.01, 2, 0.5,
+      ]);
+      const weights = new Float32Array([0.25, 0.5, 0.75, 1, 0.2, 0.4]);
+      const obs = new Float32Array([7, 10, 24, 38, 51, 90]);
+      const retained = [1, 2, 3, 4];
+      let sumA = 0;
+      let sumB = 0;
+      let sumAA = 0;
+      let sumBB = 0;
+      let sumAB = 0;
+      let retainedWeight = 0;
+      for (const index of retained) {
+        const weight = weights[index]!;
+        const observed = obs[index]!;
+        const x = pos[index * 3]!;
+        const y = pos[index * 3 + 1]!;
+        const z = pos[index * 3 + 2]!;
+        const sampled = sampleTrilinear(volume, dims, x, y, z) / sampleTrilinear(occupancy, dims, x, y, z);
+        sumA += weight * observed;
+        sumB += weight * sampled;
+        sumAA += weight * observed * observed;
+        sumBB += weight * sampled * sampled;
+        sumAB += weight * observed * sampled;
+        retainedWeight += weight;
+      }
+      const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+      const expectedCoverage = retainedWeight / totalWeight;
+      const inverseRetainedWeight = 1 / retainedWeight;
+      const expectedRawNcc =
+        (sumAB - sumA * sumB * inverseRetainedWeight) /
+        Math.sqrt((sumAA - sumA * sumA * inverseRetainedWeight) * (sumBB - sumB * sumB * inverseRetainedWeight));
+
+      const result = scoreNcc({
+        samples: { obs, pos, count: obs.length, weights },
+        refVolume: volume,
+        occupancy,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        minimumSamples: 1,
+        minimumCoverage: 0,
+      });
+
+      expect(result.used).toBe(retained.length);
+      expect(result.coverage).toBe(expectedCoverage);
+      expect(result.rawNcc).toBe(expectedRawNcc);
+      expect(result.ncc).toBe(expectedRawNcc * expectedCoverage);
+    });
+
+    it('does not dilute supported registration intensity with unacquired zero-filled corners', () => {
+      const dims = { nx: 3, ny: 3, nz: 2 };
+      const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+      const occupancy = new Uint8Array(volume.length);
+      for (let z = 0; z < dims.nz; z++) {
+        for (let y = 0; y < dims.ny; y++) {
+          for (let x = 1; x < dims.nx; x++) {
+            const index = x + y * dims.nx + z * dims.nx * dims.ny;
+            volume[index] = 10 + 4 * y + 7 * z;
+            occupancy[index] = 1;
+          }
+        }
+      }
+
+      const pos = new Float32Array([0.5, 0.2, 0.2, 0.6, 1.2, 0.4, 0.75, 0.4, 0.8, 0.9, 1.7, 0.1, 1.2, 0.5, 0.6]);
+      const count = pos.length / 3;
+      const obs = new Float32Array(count);
+      for (let index = 0; index < count; index++) {
+        const x = pos[index * 3]!;
+        const y = pos[index * 3 + 1]!;
+        const z = pos[index * 3 + 2]!;
+        obs[index] = sampleTrilinear(volume, dims, x, y, z) / sampleTrilinear(occupancy, dims, x, y, z);
+      }
+
+      const result = scoreNcc({
+        samples: { obs, pos, count },
+        refVolume: volume,
+        occupancy,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        minimumSamples: 1,
+        minimumCoverage: 0,
+      });
+
+      expect(result.coverage).toBe(1);
+      expect(result.rawNcc).toBeCloseTo(1, 12);
+      expect(result.ncc).toBeCloseTo(1, 12);
+    });
+
+    it('rejects otherwise convincing forward evidence when reverse anatomy is unsupported', () => {
+      const dims = { nx: 10, ny: 10, nz: 10 };
+      const count = 600;
+      const positions = new Float32Array(count * 3);
+      const values = new Float32Array(count);
+      const volume = new Float32Array(1000);
+      for (let index = 0; index < count; index++) {
+        const x = 1 + (index % 8);
+        positions.set([x, 1, 1], index * 3);
+        values[index] = x;
+        volume[x + 10 + 100] = x;
+      }
+      const common = {
+        samples: { obs: values, pos: positions, count },
+        refVolume: volume,
+        dims,
+        originMm: v3(0, 0, 0),
+        voxelSizeMm: 1,
+      };
+
+      const result = scoreBidirectionalNcc({
+        ...common,
+        centerMm: v3(0, 0, 0),
+        rigid: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        reverse: { ...common, occupancy: new Uint8Array(volume.length) },
+      });
+
+      expect(result.forward.ncc).toBeGreaterThan(0.99);
+      expect(result.reverse.used).toBe(0);
+      expect(result.ncc).toBe(Number.NEGATIVE_INFINITY);
+    });
+  });
+
+  const syntheticSliceGeometry = () => ({
+    ippMm: v3(0, 0, 0),
+    rowDir: v3(1, 0, 0),
+    colDir: v3(0, 1, 0),
+    normalDir: v3(0, 0, 1),
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+    sliceThicknessMm: 1,
+    spacingBetweenSlicesMm: 1,
+  });
+
+  it('samples across the complete slice field instead of exhausting its quota in the first rows', () => {
+    const samples = buildSeriesSamples({
+      slices: [
+        {
+          pixels: new Float32Array(20 * 20).fill(1),
+          dsRows: 20,
+          dsCols: 20,
+          ...syntheticSliceGeometry(),
+        },
+      ],
+      roiBounds: { min: v3(0, 0, 0), max: v3(20, 20, 1) },
+      maxSamples: 80,
+    });
+
+    let highestRow = 0;
+    for (let index = 0; index < samples.count; index++) highestRow = Math.max(highestRow, samples.pos[index * 3 + 1]!);
+    expect(highestRow).toBeGreaterThanOrEqual(18);
+  });
+
+  it('uses acquired validity rather than intensity to include zero and negative registration samples', () => {
+    const samples = buildSeriesSamples({
+      slices: [
+        {
+          pixels: new Float32Array([-2, 0, 5, 999]),
+          valid: new Uint8Array([1, 1, 1, 0]),
+          dsRows: 2,
+          dsCols: 2,
+          ...syntheticSliceGeometry(),
+        },
+      ],
+      roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
+      maxSamples: 10,
+    });
+
+    expect(samples.count).toBe(3);
+    expect(Array.from(samples.obs)).toEqual([-2, 0, 5]);
+  });
+
+  it('retains quantized acquired-footprint weights in supported registration samples', () => {
+    const samples = buildSeriesSamples({
+      slices: [
+        {
+          pixels: new Float32Array([10, 20, 30, 40]),
+          valid: new Uint8Array([255, 64, 0, 128]),
+          validScale: 255,
+          dsRows: 2,
+          dsCols: 2,
+          ...syntheticSliceGeometry(),
+        },
+      ],
+      roiBounds: { min: v3(0, 0, 0), max: v3(2, 2, 1) },
+      maxSamples: 10,
+    });
+
+    expect(samples.count).toBe(3);
+    expect(Array.from(samples.obs)).toEqual([10, 20, 40]);
+    expect(samples.weights).toBeDefined();
+    expect(samples.weights![0]).toBeCloseTo(1, 6);
+    expect(samples.weights![1]).toBeCloseTo(64 / 255, 6);
+    expect(samples.weights![2]).toBeCloseTo(128 / 255, 6);
+  });
+
+  it('refines physically supported rigid translations below the former half-millimeter floor', async () => {
+    const dims = { nx: 24, ny: 24, nz: 24 };
+    const volume = new Float32Array(dims.nx * dims.ny * dims.nz);
+    for (let z = 0; z < dims.nz; z++) {
+      for (let y = 0; y < dims.ny; y++) {
+        for (let x = 0; x < dims.nx; x++) {
+          volume[x + y * dims.nx + z * dims.nx * dims.ny] =
+            Math.sin(x * 0.63 + z * 0.11) + Math.cos(y * 0.51 - x * 0.09) + Math.sin(z * 0.43);
+        }
+      }
+    }
+
+    const observed: number[] = [];
+    const positions: number[] = [];
+    for (let z = 4; z <= 19; z++) {
+      for (let y = 4; y <= 19; y++) {
+        for (let x = 4; x <= 19; x++) {
+          observed.push(sampleTrilinear(volume, dims, x + 0.2, y - 0.15, z + 0.1));
+          positions.push(x, y, z);
+        }
+      }
+    }
+
+    const result = await optimizeRigidNcc({
+      samples: { obs: Float32Array.from(observed), pos: Float32Array.from(positions), count: observed.length },
+      refVolume: volume,
+      dims,
+      originMm: v3(0, 0, 0),
+      voxelSizeMm: 1,
+      centerMm: v3(12, 12, 12),
+      maxTranslationMm: 2,
+      maxRotationRad: 0,
+      finestTranslationStepMm: 0.05,
+    });
+
+    expect(result.best.tx).toBeCloseTo(0.2, 1);
+    expect(result.best.ty).toBeCloseTo(-0.15, 1);
+    expect(result.best.tz).toBeCloseTo(0.1, 1);
+  });
+
+  it('inverts center-relative 3D rigid transforms without assuming commuting rotations', () => {
+    const rigid = { tx: 2, ty: -3, tz: 4, rx: 0.2, ry: -0.15, rz: 0.1 };
+    const inverse = invertRigidParams(rigid);
+    const center = v3(10, 20, -5);
+    const source = v3(4, -2, 8);
+    const transformed = applyRigidToPoint(
+      source,
+      center,
+      mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz),
+      v3(rigid.tx, rigid.ty, rigid.tz),
+    );
+    const restored = applyRigidToPoint(
+      transformed,
+      center,
+      mat3FromEulerXYZ(inverse.rx, inverse.ry, inverse.rz),
+      v3(inverse.tx, inverse.ty, inverse.tz),
+    );
+
+    expect(restored.x).toBeCloseTo(source.x, 8);
+    expect(restored.y).toBeCloseTo(source.y, 8);
+    expect(restored.z).toBeCloseTo(source.z, 8);
   });
 });

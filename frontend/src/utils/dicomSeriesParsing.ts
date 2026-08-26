@@ -76,6 +76,7 @@ export function parseWeightFromSeriesDescription(desc: string): string | undefin
 export function parseSequenceTypeFromSeriesDescription(desc: string): string | undefined {
   const d = desc.toUpperCase();
   const tokens = tokenizeSeriesDescription(desc);
+  const tokenSet = new Set(tokens);
 
   // Compact form allows matching sequences written with separators, e.g. "SS-FSE" -> "SSFSE".
   // Keep digits so patterns like "3D" aren't accidentally collapsed away (if we ever add them).
@@ -108,14 +109,14 @@ export function parseSequenceTypeFromSeriesDescription(desc: string): string | u
   for (const s of seqs) {
     // Avoid very broad substring matches for short tokens (e.g. "SE" matching "SERIES").
     if (s.length <= 3) {
-      if (tokens.includes(s) || hasTokenOrTokenWithNumericSuffix(tokens, s)) {
+      if (tokenSet.has(s) || hasTokenOrTokenWithNumericSuffix(tokens, s)) {
         return s === 'LOCALIZER' ? 'Localizer' : s;
       }
       continue;
     }
 
     // Prefer token/compact matching for longer patterns.
-    if (tokens.includes(s) || hasTokenOrTokenWithNumericSuffix(tokens, s)) {
+    if (tokenSet.has(s) || hasTokenOrTokenWithNumericSuffix(tokens, s)) {
       return s === 'LOCALIZER' ? 'Localizer' : s;
     }
 

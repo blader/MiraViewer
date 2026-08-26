@@ -51,17 +51,10 @@ async function run(payload: Extract<SvrComputeWorkerRequest, { type: 'run' }>['p
     // Transfer (not copy) the volume back: for large grids this is a
     // multi-hundred-MiB Float32Array, and the worker is about to be
     // terminated anyway, so handing over ownership is free.
-    workerScope.postMessage(
-      {
-        type: 'done',
-        volume: result.volume,
-        dims: result.dims,
-        originMm: result.originMm,
-        voxelSizeMm: result.voxelSizeMm,
-        bounds: result.bounds,
-      },
-      [result.volume.buffer as ArrayBuffer],
-    );
+    workerScope.postMessage({ type: 'done', ...result }, [
+      result.volume.buffer as ArrayBuffer,
+      result.observedSupport.buffer as ArrayBuffer,
+    ]);
   } catch (err) {
     // Errors don't propagate across the worker boundary on their own; report
     // the message so the main thread can reject with the same semantics as the

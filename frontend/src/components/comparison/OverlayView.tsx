@@ -1,21 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
-import { Link2, Loader2, Pencil, Sparkles } from 'lucide-react';
-import type {
-  AlignmentProgress,
-  AlignmentReference,
-  ExclusionMask,
-  PanelSettings,
-  SeriesRef,
-} from '../../types/api';
+import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls } from '../ImageControls';
+import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StepControl } from '../StepControl';
-import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
-import { GroundTruthPolygonOverlay } from '../GroundTruthPolygonOverlay';
-import { TumorSavedSegmentationOverlay } from '../TumorSavedSegmentationOverlay';
-import { TumorSegmentationOverlay } from '../TumorSegmentationOverlaySeedGrow';
+import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
+import { GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
+import {
+  GroundTruthPolygonOverlay,
+  TumorSavedSegmentationOverlay,
+  TumorSegmentationOverlay,
+} from './LazyStudyOverlays';
+import { AlignmentProgressCard, StudySelectionSurface } from './GridCell';
 
 export type OverlayViewProps = {
   comboId: string;
@@ -53,6 +50,299 @@ export type OverlayViewProps = {
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
 
+type OverlayAnnotationState = {
+  showSavedTumor: boolean;
+  tumorToolOpen: boolean;
+  gtPolygonToolOpen: boolean;
+  tumorSeedBoxToStart: NormalizedRoi | null;
+  closeTumor: () => void;
+  consumeTumorSeed: () => void;
+  closeGroundTruth: () => void;
+};
+
+type OverlayAnnotationLayersProps = {
+  comboId: string;
+  date: string;
+  series: SeriesRef;
+  settings: PanelSettings;
+  effectiveSliceIndex: number;
+  imageSize: { w: number; h: number };
+  viewerRef: React.RefObject<DicomViewerHandle | null>;
+  annotation: OverlayAnnotationState;
+  nativeAnnotationsAvailable: boolean;
+  isComparing: boolean;
+};
+
+function OverlayAnnotationLayers({
+  comboId,
+  date,
+  series,
+  settings,
+  effectiveSliceIndex,
+  imageSize,
+  viewerRef,
+  annotation,
+  nativeAnnotationsAvailable,
+  isComparing,
+}: OverlayAnnotationLayersProps) {
+  if (!nativeAnnotationsAvailable || isComparing) return null;
+
+  return (
+    <Suspense fallback={null}>
+      {annotation.showSavedTumor && !annotation.tumorToolOpen ? (
+        <TumorSavedSegmentationOverlay
+          enabled
+          seriesUid={series.series_uid}
+          effectiveInstanceIndex={effectiveSliceIndex}
+          viewerTransform={settings}
+          imageSize={imageSize}
+        />
+      ) : null}
+
+      {annotation.tumorToolOpen ? (
+        <TumorSegmentationOverlay
+          enabled
+          onRequestClose={annotation.closeTumor}
+          seedBoxToStart={annotation.tumorSeedBoxToStart}
+          onSeedBoxToStartConsumed={annotation.consumeTumorSeed}
+          viewerRef={viewerRef}
+          comboId={comboId}
+          dateIso={date}
+          studyId={series.study_id}
+          seriesUid={series.series_uid}
+          effectiveInstanceIndex={effectiveSliceIndex}
+          viewerTransform={settings}
+        />
+      ) : null}
+
+      {annotation.gtPolygonToolOpen ? (
+        <GroundTruthPolygonOverlay
+          enabled
+          onRequestClose={annotation.closeGroundTruth}
+          comboId={comboId}
+          dateIso={date}
+          studyId={series.study_id}
+          seriesUid={series.series_uid}
+          effectiveInstanceIndex={effectiveSliceIndex}
+          viewerTransform={settings}
+          imageSize={imageSize}
+        />
+      ) : null}
+    </Suspense>
+  );
+}
+
+type OverlayCompareStudy = {
+  series: SeriesRef;
+  settings: PanelSettings;
+  sliceIndex: number;
+  effectiveSliceIndex: number;
+  imageSize: { w: number; h: number };
+  nativeAnnotationsAvailable: boolean;
+};
+
+type OverlaySelectedStudy = OverlayCompareStudy & { date: string };
+
+function OverlaySelectedLayer({
+  comboId,
+  study,
+  annotation,
+  viewerRef,
+  presentation,
+  setProgress,
+  updatePanelSetting,
+}: {
+  comboId: string;
+  study: OverlaySelectedStudy;
+  annotation: OverlayAnnotationState;
+  viewerRef: React.RefObject<DicomViewerHandle | null>;
+  presentation: Pick<OverlayComparePresentation, 'isComparing' | 'isAligning'>;
+  setProgress: (progress: number) => void;
+  updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
+}) {
+  const { date, series, settings, sliceIndex, effectiveSliceIndex, imageSize, nativeAnnotationsAvailable } = study;
+  const { isComparing, isAligning } = presentation;
+
+  return (
+    <>
+      <DicomViewer
+        ref={viewerRef}
+        studyId={series.study_id}
+        seriesUid={series.series_uid}
+        interactionBlocked={isAligning}
+        instanceIndex={sliceIndex}
+        instanceCount={series.instance_count}
+        {...settings}
+        onInstanceChange={(index) => setProgress(getProgressFromSlice(index, series.instance_count, settings.offset))}
+        onPanChange={
+          isComparing
+            ? undefined
+            : (panX, panY) => {
+                updatePanelSetting(date, { panX, panY });
+              }
+        }
+        onZoomChange={(zoom) => updatePanelSetting(date, { zoom })}
+      />
+
+      <OverlayAnnotationLayers
+        comboId={comboId}
+        date={date}
+        series={series}
+        settings={settings}
+        effectiveSliceIndex={effectiveSliceIndex}
+        imageSize={imageSize}
+        viewerRef={viewerRef}
+        annotation={annotation}
+        nativeAnnotationsAvailable={nativeAnnotationsAvailable}
+        isComparing={isComparing}
+      />
+    </>
+  );
+}
+
+type OverlayComparePresentation = {
+  isComparing: boolean;
+  isAligning: boolean;
+  showSavedTumor: boolean;
+  tumorToolOpen: boolean;
+};
+
+function OverlayComparisonLayer({
+  study,
+  presentation,
+  setProgress,
+}: {
+  study: OverlayCompareStudy;
+  presentation: OverlayComparePresentation;
+  setProgress: (progress: number) => void;
+}) {
+  const { series, settings, sliceIndex, effectiveSliceIndex, imageSize, nativeAnnotationsAvailable } = study;
+  const { isComparing, isAligning, showSavedTumor, tumorToolOpen } = presentation;
+
+  return (
+    <div className={`absolute inset-0 ${isComparing ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+      <DicomViewer
+        studyId={series.study_id}
+        seriesUid={series.series_uid}
+        interactionBlocked={isAligning || isComparing}
+        instanceIndex={sliceIndex}
+        instanceCount={series.instance_count}
+        {...settings}
+        onInstanceChange={(index) => {
+          setProgress(getProgressFromSlice(index, series.instance_count, settings.offset));
+        }}
+        onPanChange={undefined}
+        onZoomChange={undefined}
+      />
+
+      {nativeAnnotationsAvailable && showSavedTumor && !tumorToolOpen && isComparing ? (
+        <Suspense fallback={null}>
+          <TumorSavedSegmentationOverlay
+            enabled
+            seriesUid={series.series_uid}
+            effectiveInstanceIndex={effectiveSliceIndex}
+            viewerTransform={settings}
+            imageSize={imageSize}
+          />
+        </Suspense>
+      ) : null}
+    </div>
+  );
+}
+
+function OverlayStudyFooter({
+  presentation,
+  instanceIndex,
+  instanceCount,
+  settings,
+  onUpdate,
+}: {
+  presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean };
+  instanceIndex: number;
+  instanceCount: number;
+  settings: PanelSettings;
+  onUpdate: (update: Partial<PanelSettings>) => void;
+}) {
+  return (
+    <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+      <span className="truncate text-xs text-[var(--text-secondary)]">
+        {presentation.isComparing
+          ? 'Comparing examination'
+          : presentation.isAligned
+            ? 'Aligned presentation'
+            : 'Acquired image'}
+      </span>
+      <div
+        inert={presentation.isComparing || presentation.isAligning}
+        className={presentation.isComparing ? 'pointer-events-none opacity-40' : ''}
+      >
+        <StepControl
+          title="Slice offset"
+          value={`${instanceIndex + 1}/${instanceCount}`}
+          valueWidth="w-16"
+          tabular
+          accent
+          onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
+          onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function OverlayStudyHeader({
+  date,
+  settings,
+  instanceIndex,
+  instanceCount,
+  presentation,
+  annotation,
+  onUpdate,
+}: {
+  date: string;
+  settings: PanelSettings;
+  instanceIndex: number;
+  instanceCount: number;
+  presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean; nativeAnnotationsAvailable: boolean };
+  annotation: {
+    showSavedTumor: boolean;
+    tumorToolOpen: boolean;
+    gtPolygonToolOpen: boolean;
+    setShowSavedTumor: React.Dispatch<React.SetStateAction<boolean>>;
+    setTumorToolOpen: React.Dispatch<React.SetStateAction<boolean>>;
+    setGtPolygonToolOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  };
+  onUpdate: (update: Partial<PanelSettings>) => void;
+}) {
+  return (
+    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+      <div className="flex shrink-0 items-center gap-2">
+        <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
+          {formatDate(date)}
+        </span>
+        {presentation.isAligned ? <VerifiedAlignmentBadge /> : null}
+      </div>
+
+      <div
+        inert={presentation.isComparing || presentation.isAligning}
+        className={`ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100 ${
+          presentation.isComparing ? 'pointer-events-none opacity-40' : 'study-controls'
+        }`}
+      >
+        <StudyAnnotationControls {...annotation} nativeAnnotationsAvailable={presentation.nativeAnnotationsAvailable} />
+
+        <ImageControls
+          settings={settings}
+          instanceIndex={instanceIndex}
+          instanceCount={instanceCount}
+          onUpdate={onUpdate}
+          showSliceControl={false}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function OverlayView({
   comboId,
   overlayColumns,
@@ -85,6 +375,15 @@ export function OverlayView({
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
+  const overlayCellRef = useRef<HTMLDivElement | null>(null);
+  const selectedImageSize = useMemo(
+    () => ({ w: overlaySelectedRef?.columns ?? 512, h: overlaySelectedRef?.rows ?? 512 }),
+    [overlaySelectedRef?.columns, overlaySelectedRef?.rows],
+  );
+  const compareImageSize = useMemo(
+    () => ({ w: overlayCompareRef?.columns ?? 512, h: overlayCompareRef?.rows ?? 512 }),
+    [overlayCompareRef?.columns, overlayCompareRef?.rows],
+  );
 
   // Compare mode is read-only: ensure the tumor tool isn't active.
   // We schedule the close to avoid calling setState synchronously inside the effect body.
@@ -105,7 +404,7 @@ export function OverlayView({
       ? getEffectiveInstanceIndex(
           overlaySelectedSliceIndex,
           overlaySelectedRef.instance_count,
-          overlaySelectedSettings.reverseSliceOrder
+          overlaySelectedSettings.reverseSliceOrder,
         )
       : 0;
 
@@ -114,169 +413,92 @@ export function OverlayView({
       ? getEffectiveInstanceIndex(
           overlayCompareSliceIndex,
           overlayCompareRef.instance_count,
-          overlayCompareSettings.reverseSliceOrder
+          overlayCompareSettings.reverseSliceOrder,
         )
       : 0;
 
+  const selectedDerivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
+    overlaySelectedRef ? getDerivedAlignmentFrame(overlaySelectedRef.series_uid, tumorEffectiveSliceIndex) : null,
+  );
+  const compareDerivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
+    overlayCompareRef ? getDerivedAlignmentFrame(overlayCompareRef.series_uid, compareEffectiveSliceIndex) : null,
+  );
+  const displayedDerivedFrame = isOverlayComparing ? compareDerivedFrame : selectedDerivedFrame;
+  const displayedImageSize = {
+    width: displayedDerivedFrame?.columns ?? overlayDisplayedRef?.columns ?? 512,
+    height: displayedDerivedFrame?.rows ?? overlayDisplayedRef?.rows ?? 512,
+  };
+  const nativeAnnotationsAvailable = displayedDerivedFrame === null;
+
   return (
-    <div className="flex-1 flex items-center justify-center p-4">
+    <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden p-3">
       {overlayColumns.length === 0 ? (
         <div className="text-[var(--text-secondary)]">Select dates to view</div>
       ) : overlayDisplayedRef && overlayDisplayedDate ? (
         <div
-          className="relative rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
-          style={{ width: overlayViewerSize, height: overlayViewerSize }}
+          className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
+          data-controls-visible={(isOverlayViewerHovered || tumorToolOpen || gtPolygonToolOpen) && !isOverlayComparing}
+          data-alignment-state={displayedDerivedFrame ? 'aligned' : 'acquired'}
+          style={{ width: overlayViewerSize, height: overlayViewerSize + GRID_CELL_METADATA_HEIGHT }}
           onMouseEnter={() => setIsOverlayViewerHovered(true)}
           onMouseLeave={() => setIsOverlayViewerHovered(false)}
         >
-          {/* Cell controls (shown on hover, matches grid cell style) */}
-          <div
-            className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
-              isOverlayComparing
-                ? 'opacity-70 pointer-events-none'
-                : isOverlayViewerHovered
-                ? 'opacity-100 pointer-events-auto'
-                : 'opacity-0 pointer-events-none'
-            }`}
-          >
-            <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowSavedTumor((v) => !v)}
-                  disabled={tumorToolOpen}
-                  className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                    tumorToolOpen
-                      ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]'
-                      : showSavedTumor
-                        ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                        : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-                  }`}
-                  title={
-                    tumorToolOpen ? 'Close segmentation tool to view saved tumor overlay' : 'Toggle saved tumor segmentation overlay'
-                  }
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Tumor
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setGtPolygonToolOpen((v) => {
-                      const next = !v;
-                      if (next) setTumorToolOpen(false);
-                      return next;
-                    });
-                  }}
-                  className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                    gtPolygonToolOpen
-                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                      : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-                  }`}
-                  title="Ground truth polygon tool (debug)"
-                >
-                  <Pencil className="w-3.5 h-3.5" />
-                  GT
-                </button>
-              </div>
-
-              <ImageControls
-                settings={overlayDisplayedSettings}
-                instanceIndex={overlayDisplayedSliceIndex}
-                instanceCount={overlayDisplayedRef.instance_count}
-                onUpdate={(update) => {
-                  updatePanelSetting(overlayDisplayedDate, update);
-                }}
-                showSliceControl={false}
-              />
-            </div>
-          </div>
-
-          {/* Slice selector (shown on hover, bottom-right corner, matches grid cell style) */}
-          <div
-            className={`absolute bottom-2 right-2 z-10 transition-opacity ${
-              isOverlayComparing
-                ? 'opacity-70 pointer-events-none'
-                : isOverlayViewerHovered
-                ? 'opacity-100 pointer-events-auto'
-                : 'opacity-0 pointer-events-none'
-            }`}
-          >
-            <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
-              <StepControl
-                title="Slice offset"
-                value={`${overlayDisplayedSliceIndex + 1}/${overlayDisplayedRef.instance_count}`}
-                valueWidth="w-16"
-                tabular
-                accent
-                onDecrement={() => {
-                  updatePanelSetting(overlayDisplayedDate, { offset: overlayDisplayedSettings.offset - 1 });
-                }}
-                onIncrement={() => {
-                  updatePanelSetting(overlayDisplayedDate, { offset: overlayDisplayedSettings.offset + 1 });
-                }}
-              />
-            </div>
-          </div>
-
-          <DragRectActionOverlay
-            className="absolute inset-0 cursor-crosshair"
-            geometry={{
-              panX: overlayDisplayedSettings.panX,
-              panY: overlayDisplayedSettings.panY,
-              zoom: overlayDisplayedSettings.zoom,
-              rotation: overlayDisplayedSettings.rotation,
-              affine00: overlayDisplayedSettings.affine00,
-              affine01: overlayDisplayedSettings.affine01,
-              affine10: overlayDisplayedSettings.affine10,
-              affine11: overlayDisplayedSettings.affine11,
+          <OverlayStudyHeader
+            date={overlayDisplayedDate}
+            settings={overlayDisplayedSettings}
+            instanceIndex={overlayDisplayedSliceIndex}
+            instanceCount={overlayDisplayedRef.instance_count}
+            presentation={{
+              isComparing: isOverlayComparing,
+              isAligning,
+              isAligned: Boolean(displayedDerivedFrame),
+              nativeAnnotationsAvailable,
             }}
-            disabled={isAligning || isOverlayComparing || gtPolygonToolOpen}
-            actions={[
-              {
-                key: 'align-all',
-                label: 'Align All',
-                title: `Align all other dates to ${formatDate(overlayDisplayedDate)}`,
-                icon: <Link2 className="w-4 h-4" />,
-                variant: 'primary',
-                minSizeSpace: 'base',
-                disabled: overlayColumns.length < 2 || isAligning,
-                onConfirm: (masks) => {
-                  void startAlignAll(
-                    {
-                      date: overlayDisplayedDate,
-                      seriesUid: overlayDisplayedRef.series_uid,
-                      sliceIndex: overlayDisplayedEffectiveSliceIndex,
-                      sliceCount: overlayDisplayedRef.instance_count,
-                      settings: overlayDisplayedSettings,
-                    },
-                    masks.base
-                  );
-                },
-              },
-              {
-                key: 'segment-tumor',
-                label: 'Segment',
-                title: 'Segment tumor from this rectangle',
-                icon: <Sparkles className="w-4 h-4" />,
-                variant: 'secondary',
-                minSizeSpace: 'screen',
-                disabled: isAligning || isOverlayComparing,
-                onConfirm: (masks) => {
-                  setTumorToolOpen(true);
-                  setTumorSeedBoxToStart({
-                    x0: masks.screen.x,
-                    y0: masks.screen.y,
-                    x1: masks.screen.x + masks.screen.width,
-                    y1: masks.screen.y + masks.screen.height,
-                  });
-                  setGtPolygonToolOpen(false);
-                },
-              },
-            ]}
+            annotation={{
+              showSavedTumor,
+              tumorToolOpen,
+              gtPolygonToolOpen,
+              setShowSavedTumor,
+              setTumorToolOpen,
+              setGtPolygonToolOpen,
+            }}
+            onUpdate={(update) => updatePanelSetting(overlayDisplayedDate, update)}
+          />
+
+          <div
+            ref={overlayCellRef}
+            data-diagnostic-surface="true"
+            className="relative min-h-0 flex-1 bg-[var(--bg-primary)]"
           >
-            {/*
+            <StudySelectionSurface
+              reference={{
+                date: overlayDisplayedDate,
+                series: overlayDisplayedRef,
+                sliceIndex: overlayDisplayedEffectiveSliceIndex,
+                settings: overlayDisplayedSettings,
+                imageSize: displayedImageSize,
+                surfaceRef: overlayCellRef,
+              }}
+              presentation={{
+                columnCount: overlayColumns.length,
+                isAligning,
+                isComparing: isOverlayComparing,
+                groundTruthOpen: gtPolygonToolOpen,
+                nativeAnnotationsAvailable,
+              }}
+              startAlignAll={startAlignAll}
+              onSegment={(selection) => {
+                setTumorToolOpen(true);
+                setTumorSeedBoxToStart({
+                  x0: selection.x,
+                  y0: selection.y,
+                  x1: selection.x + selection.width,
+                  y1: selection.y + selection.height,
+                });
+                setGtPolygonToolOpen(false);
+              }}
+            >
+              {/*
             Space compare should feel instant.
 
             Previously we updated a single viewer's series/settings on Space keydown.
@@ -286,162 +508,80 @@ export function OverlayView({
             To avoid that, we keep BOTH the selected date and the compare target mounted
             and simply toggle which one is visible.
           */}
-            <div
-              className={`absolute inset-0 ${isOverlayComparing ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-            >
-              {overlaySelectedRef && overlaySelectedDate ? (
-                <>
-                <DicomViewer
-                    ref={tumorViewerRef}
-                  // Important: do not key by series/date.
-                  // Remounting the viewer forces Cornerstone to re-enable the element,
-                  // which causes a visible black flash when toggling dates.
-                  studyId={overlaySelectedRef.study_id}
-                  seriesUid={overlaySelectedRef.series_uid}
-                  instanceIndex={overlaySelectedSliceIndex}
-                  instanceCount={overlaySelectedRef.instance_count}
-                  reverseSliceOrder={overlaySelectedSettings.reverseSliceOrder}
-                  onInstanceChange={(i) => {
-                    setProgress(
-                      getProgressFromSlice(i, overlaySelectedRef.instance_count, overlaySelectedSettings.offset)
-                    );
-                  }}
-                  brightness={overlaySelectedSettings.brightness}
-                  contrast={overlaySelectedSettings.contrast}
-                  zoom={overlaySelectedSettings.zoom}
-                  rotation={overlaySelectedSettings.rotation}
-                  panX={overlaySelectedSettings.panX}
-                  panY={overlaySelectedSettings.panY}
-                  affine00={overlaySelectedSettings.affine00}
-                  affine01={overlaySelectedSettings.affine01}
-                  affine10={overlaySelectedSettings.affine10}
-                  affine11={overlaySelectedSettings.affine11}
-                  onPanChange={
-                    isOverlayComparing
-                      ? undefined
-                      : (newPanX, newPanY) => {
-                          updatePanelSetting(overlaySelectedDate, { panX: newPanX, panY: newPanY });
-                        }
-                  }
-                  onZoomChange={(newZoom) => {
-                    updatePanelSetting(overlaySelectedDate, { zoom: newZoom });
-                  }}
-                />
-
-                  <TumorSavedSegmentationOverlay
-                    enabled={showSavedTumor && !tumorToolOpen && !isOverlayComparing}
-                    seriesUid={overlaySelectedRef.series_uid}
-                    effectiveInstanceIndex={tumorEffectiveSliceIndex}
-                    viewerTransform={overlaySelectedSettings}
-                  />
-
-                  <TumorSegmentationOverlay
-                    enabled={tumorToolOpen && !isOverlayComparing}
-                    onRequestClose={() => {
-                      setTumorToolOpen(false);
-                      setTumorSeedBoxToStart(null);
-                    }}
-                    seedBoxToStart={tumorSeedBoxToStart}
-                    onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
-                    viewerRef={tumorViewerRef}
-                    comboId={comboId}
-                    dateIso={overlaySelectedDate}
-                    studyId={overlaySelectedRef.study_id}
-                    seriesUid={overlaySelectedRef.series_uid}
-                    effectiveInstanceIndex={tumorEffectiveSliceIndex}
-                    viewerTransform={overlaySelectedSettings}
-                  />
-
-                  <GroundTruthPolygonOverlay
-                    enabled={gtPolygonToolOpen && !isOverlayComparing}
-                    onRequestClose={() => setGtPolygonToolOpen(false)}
-                    comboId={comboId}
-                    dateIso={overlaySelectedDate}
-                    studyId={overlaySelectedRef.study_id}
-                    seriesUid={overlaySelectedRef.series_uid}
-                    effectiveInstanceIndex={tumorEffectiveSliceIndex}
-                    viewerTransform={overlaySelectedSettings}
-                  />
-                </>
-              ) : null}
-            </div>
-
-            {hasOverlayCompareTarget && overlayCompareRef && overlayCompareDate ? (
               <div
-                className={`absolute inset-0 ${isOverlayComparing ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                className={`absolute inset-0 ${isOverlayComparing ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
               >
-                <DicomViewer
-                  studyId={overlayCompareRef.study_id}
-                  seriesUid={overlayCompareRef.series_uid}
-                  instanceIndex={overlayCompareSliceIndex}
-                  instanceCount={overlayCompareRef.instance_count}
-                  reverseSliceOrder={overlayCompareSettings.reverseSliceOrder}
-                  onInstanceChange={(i) => {
-                    setProgress(
-                      getProgressFromSlice(i, overlayCompareRef.instance_count, overlayCompareSettings.offset)
-                    );
-                  }}
-                  brightness={overlayCompareSettings.brightness}
-                  contrast={overlayCompareSettings.contrast}
-                  zoom={overlayCompareSettings.zoom}
-                  rotation={overlayCompareSettings.rotation}
-                  panX={overlayCompareSettings.panX}
-                  panY={overlayCompareSettings.panY}
-                  affine00={overlayCompareSettings.affine00}
-                  affine01={overlayCompareSettings.affine01}
-                  affine10={overlayCompareSettings.affine10}
-                  affine11={overlayCompareSettings.affine11}
-                  // Compare mode is read-only for geometry edits.
-                  onPanChange={undefined}
-                  onZoomChange={(newZoom) => {
-                    updatePanelSetting(overlayCompareDate, { zoom: newZoom });
-                  }}
-                />
-
-                <TumorSavedSegmentationOverlay
-                  enabled={showSavedTumor && !tumorToolOpen && isOverlayComparing}
-                  seriesUid={overlayCompareRef.series_uid}
-                  effectiveInstanceIndex={compareEffectiveSliceIndex}
-                  viewerTransform={overlayCompareSettings}
-                />
+                {overlaySelectedRef && overlaySelectedDate ? (
+                  <OverlaySelectedLayer
+                    comboId={comboId}
+                    study={{
+                      date: overlaySelectedDate,
+                      series: overlaySelectedRef,
+                      settings: overlaySelectedSettings,
+                      sliceIndex: overlaySelectedSliceIndex,
+                      effectiveSliceIndex: tumorEffectiveSliceIndex,
+                      imageSize: selectedImageSize,
+                      nativeAnnotationsAvailable: !selectedDerivedFrame,
+                    }}
+                    annotation={{
+                      showSavedTumor,
+                      tumorToolOpen,
+                      gtPolygonToolOpen,
+                      tumorSeedBoxToStart,
+                      closeTumor: () => {
+                        setTumorToolOpen(false);
+                        setTumorSeedBoxToStart(null);
+                      },
+                      consumeTumorSeed: () => setTumorSeedBoxToStart(null),
+                      closeGroundTruth: () => setGtPolygonToolOpen(false),
+                    }}
+                    viewerRef={tumorViewerRef}
+                    presentation={{ isComparing: isOverlayComparing, isAligning }}
+                    setProgress={setProgress}
+                    updatePanelSetting={updatePanelSetting}
+                  />
+                ) : null}
               </div>
-            ) : null}
 
-            {isAligning && alignmentProgress && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-black/70 border border-white/10 shadow-xl">
-                  <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-white">
-                      {alignmentProgress.phase === 'capturing'
-                        ? 'Preparing reference…'
-                        : alignmentProgress.currentDate
-                        ? `Aligning ${formatDate(alignmentProgress.currentDate)} (${alignmentProgress.dateIndex + 1}/${alignmentProgress.totalDates})`
-                        : 'Aligning…'}
-                    </div>
-                    {alignmentProgress.phase !== 'capturing' && alignmentProgress.slicesChecked ? (
-                      <div className="text-xs text-white/70">
-                        {alignmentProgress.slicesChecked} slices · Score {alignmentProgress.bestMiSoFar.toFixed(3)}
-                      </div>
-                    ) : null}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={abortAlignment}
-                    className="shrink-0 px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs"
-                    title="Cancel alignment"
-                  >
-                    Cancel
-                  </button>
+              {hasOverlayCompareTarget && overlayCompareRef && overlayCompareDate ? (
+                <OverlayComparisonLayer
+                  study={{
+                    series: overlayCompareRef,
+                    settings: overlayCompareSettings,
+                    sliceIndex: overlayCompareSliceIndex,
+                    effectiveSliceIndex: compareEffectiveSliceIndex,
+                    imageSize: compareImageSize,
+                    nativeAnnotationsAvailable: !compareDerivedFrame,
+                  }}
+                  presentation={{
+                    isComparing: isOverlayComparing,
+                    isAligning,
+                    showSavedTumor,
+                    tumorToolOpen,
+                  }}
+                  setProgress={setProgress}
+                />
+              ) : null}
+
+              {isAligning && alignmentProgress ? (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                  <AlignmentProgressCard progress={alignmentProgress} onAbort={abortAlignment} />
                 </div>
-              </div>
-            )}
+              ) : null}
+            </StudySelectionSurface>
+          </div>
 
-            {/* Date overlay (matches grid cell style) */}
-            <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
-              {formatDate(overlayDisplayedDate)}
-            </div>
-          </DragRectActionOverlay>
+          <OverlayStudyFooter
+            presentation={{
+              isComparing: isOverlayComparing,
+              isAligning,
+              isAligned: Boolean(displayedDerivedFrame),
+            }}
+            instanceIndex={overlayDisplayedSliceIndex}
+            instanceCount={overlayDisplayedRef.instance_count}
+            settings={overlayDisplayedSettings}
+            onUpdate={(update) => updatePanelSetting(overlayDisplayedDate, update)}
+          />
         </div>
       ) : (
         <div className="text-[var(--text-secondary)]">No data</div>

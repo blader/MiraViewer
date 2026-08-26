@@ -9,10 +9,13 @@ import {
 } from '../utils/localApi';
 import {
   normalizeViewerTransform,
+  imagePolygonToViewerPolygon,
   remapPointBetweenViewerTransforms,
   remapPointsBetweenViewerTransforms,
   polygonToSvgPath,
   remapPolygonBetweenViewerTransforms,
+  restoreImagePolygon,
+  viewerPolygonToImagePolygon,
 } from '../utils/viewTransform';
 import { clamp01 } from '../utils/math';
 
@@ -29,9 +32,15 @@ export type GroundTruthPolygonOverlayProps = {
 
   /** Current viewer transform (pan/zoom/rotation/affine). */
   viewerTransform: ViewerTransform;
+  imageSize?: { w: number; h: number };
 };
 
-export function GroundTruthPolygonOverlay({
+export function GroundTruthPolygonOverlay(props: GroundTruthPolygonOverlayProps) {
+  if (!props.enabled) return null;
+  return <GroundTruthPolygonEditor key={`${props.seriesUid}:${props.effectiveInstanceIndex}`} {...props} />;
+}
+
+function useGroundTruthPolygonEditor({
   enabled,
   onRequestClose,
   comboId,
@@ -40,6 +49,7 @@ export function GroundTruthPolygonOverlay({
   seriesUid,
   effectiveInstanceIndex,
   viewerTransform,
+  imageSize,
 }: GroundTruthPolygonOverlayProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -57,13 +67,16 @@ export function GroundTruthPolygonOverlay({
   const [draftViewTransform, setDraftViewTransform] = useState<ViewerTransform | null>(null);
 
   const [savedPolygon, setSavedPolygon] = useState<TumorPolygon | null>(null);
+  const [savedImageSize, setSavedImageSize] = useState<{ w: number; h: number } | null>(null);
   const [savedViewTransform, setSavedViewTransform] = useState<ViewerTransform | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const sliceGenerationRef = useRef(0);
 
   // Load existing saved polygon when enabled or when slice changes.
   useEffect(() => {
     if (!enabled) return;
+    const generation = ++sliceGenerationRef.current;
 
     let cancelled = false;
     (async () => {
@@ -71,8 +84,18 @@ export function GroundTruthPolygonOverlay({
         setError(null);
         const sop = await getSopInstanceUidForInstanceIndex(seriesUid, effectiveInstanceIndex);
         const row = await getTumorGroundTruthForInstance(seriesUid, sop);
-        if (cancelled) return;
-        setSavedPolygon(row?.polygon ?? null);
+        if (cancelled || generation !== sliceGenerationRef.current) return;
+        const restored = row ? restoreImagePolygon(row.polygon, row, imageSize) : null;
+        if (restored && 'error' in restored) {
+          setSavedPolygon(null);
+          setSavedImageSize(null);
+          setError(
+            `Saved ground-truth annotation cannot be displayed safely: its ${restored.error}. The stored annotation is preserved.`,
+          );
+          return;
+        }
+        setSavedPolygon(restored?.polygon ?? null);
+        setSavedImageSize(restored?.imageSize ?? null);
         setSavedViewTransform(row?.viewTransform ?? normalizeViewerTransform(null));
       } catch (e) {
         console.error(e);
@@ -82,16 +105,10 @@ export function GroundTruthPolygonOverlay({
     return () => {
       cancelled = true;
     };
-  }, [enabled, seriesUid, effectiveInstanceIndex]);
+  }, [enabled, seriesUid, effectiveInstanceIndex, imageSize]);
 
   // Reset draft state when turning on.
-  useEffect(() => {
-    if (!enabled) return;
-    setDraftPoints([]);
-    setIsClosed(false);
-    setDraftViewTransform({ ...viewerTransformRef.current });
-    setError(null);
-  }, [enabled]);
+  // The keyed editor is recreated for each enabled acquired slice.
 
   // Track container size (used for hit-testing / close threshold).
   useEffect(() => {
@@ -129,7 +146,7 @@ export function GroundTruthPolygonOverlay({
       const dy = (p.y - first.y) * containerSize.h;
       return Math.hypot(dx, dy) <= closeRadiusPx;
     },
-    [containerSize.h, containerSize.w]
+    [containerSize.h, containerSize.w],
   );
 
   const didClickRef = useRef(false);
@@ -157,7 +174,7 @@ export function GroundTruthPolygonOverlay({
       // when the user pans/zooms/rotates.
       let baseView = draftViewTransform;
       if (!baseView) {
-        baseView = { ...viewerTransform };
+        baseView = { ...viewerTransformRef.current };
         setDraftViewTransform(baseView);
       }
 
@@ -167,41 +184,38 @@ export function GroundTruthPolygonOverlay({
           ? remapPointBetweenViewerTransforms(pCurrent, size, viewerTransform, baseView)
           : pCurrent;
 
-      setDraftPoints((prev) => {
-        if (prev.length >= 3) {
-          const firstDraft = prev[0]!;
-          const firstCurrent =
-            size.w > 0 && size.h > 0
-              ? remapPointBetweenViewerTransforms(firstDraft, size, baseView!, viewerTransform)
-              : firstDraft;
+      if (draftPoints.length >= 3) {
+        const firstDraft = draftPoints[0]!;
+        const firstCurrent =
+          size.w > 0 && size.h > 0
+            ? remapPointBetweenViewerTransforms(firstDraft, size, baseView, viewerTransform)
+            : firstDraft;
 
-          if (isNearFirstPoint(pCurrent, firstCurrent)) {
-            // Close polygon by clicking near the first point.
-            setIsClosed(true);
-            return prev;
-          }
+        if (isNearFirstPoint(pCurrent, firstCurrent)) {
+          // Close polygon by clicking near the first point.
+          setIsClosed(true);
+          return;
         }
+      }
 
-        // Avoid adding duplicate points (in draft/view space).
-        const last = prev[prev.length - 1];
-        if (last && Math.hypot(last.x - pDraft.x, last.y - pDraft.y) < 0.0015) {
-          return prev;
-        }
+      // Avoid adding duplicate points (in draft/view space).
+      const last = draftPoints[draftPoints.length - 1];
+      if (last && Math.hypot(last.x - pDraft.x, last.y - pDraft.y) < 0.0015) return;
 
-        return [...prev, pDraft];
-      });
+      setDraftPoints([...draftPoints, pDraft]);
     },
     [
       containerSize.h,
       containerSize.w,
       didClickRef,
+      draftPoints,
       draftViewTransform,
       enabled,
       getLocalNormPoint,
       isClosed,
       isNearFirstPoint,
       viewerTransform,
-    ]
+    ],
   );
 
   const onClickCapture = useCallback((e: React.MouseEvent) => {
@@ -233,6 +247,7 @@ export function GroundTruthPolygonOverlay({
 
     setBusy(true);
     setError(null);
+    const generation = sliceGenerationRef.current;
 
     try {
       const sop = await getSopInstanceUidForInstanceIndex(seriesUid, effectiveInstanceIndex);
@@ -243,6 +258,9 @@ export function GroundTruthPolygonOverlay({
         containerSize.w > 0 && containerSize.h > 0
           ? { w: Math.round(containerSize.w), h: Math.round(containerSize.h) }
           : undefined;
+      const polygon = { points: draftPoints };
+      const canCanonicalize = imageSize && viewportSize;
+      const saved = canCanonicalize ? viewerPolygonToImagePolygon(polygon, viewportSize, imageSize, view) : polygon;
 
       await saveTumorGroundTruth({
         comboId,
@@ -250,41 +268,64 @@ export function GroundTruthPolygonOverlay({
         studyId,
         seriesUid,
         sopInstanceUid: sop,
-        polygon: { points: draftPoints },
+        polygon: saved,
+        coordinateSpace: canCanonicalize ? 'image-normalized' : 'viewer-normalized',
+        imageSize,
         viewTransform: view,
         viewportSize,
       });
 
-      setSavedPolygon({ points: draftPoints });
+      if (generation !== sliceGenerationRef.current) return;
+      setSavedPolygon(saved);
+      setSavedImageSize(canCanonicalize ? imageSize : null);
       setSavedViewTransform(view);
     } catch (err) {
+      if (generation !== sliceGenerationRef.current) return;
       console.error(err);
       setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
-      setBusy(false);
+      setBusy((current) => (generation === sliceGenerationRef.current ? false : current));
     }
-  }, [comboId, containerSize.h, containerSize.w, dateIso, draftPoints, draftViewTransform, effectiveInstanceIndex, enabled, isClosed, seriesUid, studyId, viewerTransform]);
+  }, [
+    comboId,
+    containerSize.h,
+    containerSize.w,
+    dateIso,
+    draftPoints,
+    draftViewTransform,
+    effectiveInstanceIndex,
+    enabled,
+    imageSize,
+    isClosed,
+    seriesUid,
+    studyId,
+    viewerTransform,
+  ]);
 
   const onDelete = useCallback(async () => {
     if (!enabled) return;
 
     setBusy(true);
     setError(null);
+    const generation = sliceGenerationRef.current;
 
     try {
       const sop = await getSopInstanceUidForInstanceIndex(seriesUid, effectiveInstanceIndex);
       await deleteTumorGroundTruth(seriesUid, sop);
+      if (generation !== sliceGenerationRef.current) return;
       setSavedPolygon(null);
+      setSavedImageSize(null);
       setSavedViewTransform(null);
 
       // Also clear draft so there is no confusion about what's saved.
       setDraftPoints([]);
       setIsClosed(false);
     } catch (err) {
+      if (generation !== sliceGenerationRef.current) return;
       console.error(err);
       setError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
-      setBusy(false);
+      setBusy((current) => (generation === sliceGenerationRef.current ? false : current));
     }
   }, [effectiveInstanceIndex, enabled, seriesUid]);
 
@@ -293,6 +334,18 @@ export function GroundTruthPolygonOverlay({
     if (!enabled) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target instanceof HTMLElement ? e.target : document.activeElement;
+      if (
+        e.defaultPrevented ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest(
+              'input, select, textarea, [contenteditable=""], [contenteditable="true"], [role="dialog"], [aria-modal="true"]',
+            )))
+      ) {
+        return;
+      }
+
       if (e.key === 'Escape') {
         // If the user is mid-draw, Esc cancels the draft. Otherwise it closes the tool.
         if (draftPoints.length > 0 && !isClosed) {
@@ -326,8 +379,8 @@ export function GroundTruthPolygonOverlay({
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [draftPoints.length, enabled, isClosed, onClear, onRequestClose, onUndo]);
 
   const viewSize = useMemo(() => ({ w: containerSize.w, h: containerSize.h }), [containerSize.h, containerSize.w]);
@@ -335,14 +388,20 @@ export function GroundTruthPolygonOverlay({
   const savedPath = useMemo(() => {
     if (!savedPolygon) return '';
 
-    const from = savedViewTransform ?? viewerTransform;
     const displayPoly =
       viewSize.w > 0 && viewSize.h > 0
-        ? remapPolygonBetweenViewerTransforms(savedPolygon, viewSize, from, viewerTransform)
+        ? savedImageSize
+          ? imagePolygonToViewerPolygon(savedPolygon, viewSize, savedImageSize, viewerTransform)
+          : remapPolygonBetweenViewerTransforms(
+              savedPolygon,
+              viewSize,
+              savedViewTransform ?? viewerTransform,
+              viewerTransform,
+            )
         : savedPolygon;
 
     return polygonToSvgPath(displayPoly);
-  }, [savedPolygon, savedViewTransform, viewSize, viewerTransform]);
+  }, [savedImageSize, savedPolygon, savedViewTransform, viewSize, viewerTransform]);
 
   const draftPointsDisplay = useMemo(() => {
     if (draftPoints.length === 0) return [];
@@ -358,11 +417,52 @@ export function GroundTruthPolygonOverlay({
     return polygonToSvgPath({ points: draftPointsDisplay });
   }, [draftPointsDisplay, isClosed]);
 
-  if (!enabled) return null;
-
   const canUndo = draftPoints.length > 0 && !busy;
   const canClear = (draftPoints.length > 0 || isClosed) && !busy;
   const canSave = isClosed && draftPoints.length >= 3 && !busy;
+
+  return {
+    containerRef,
+    onPointerDown,
+    onClickCapture,
+    onUndo,
+    onClear,
+    onSave,
+    onDelete,
+    busy,
+    error,
+    isClosed,
+    draftPointsDisplay,
+    savedPolygon,
+    savedPath,
+    draftPath,
+    canUndo,
+    canClear,
+    canSave,
+  };
+}
+
+function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
+  const { enabled, onRequestClose } = props;
+  const {
+    containerRef,
+    onPointerDown,
+    onClickCapture,
+    onUndo,
+    onClear,
+    onSave,
+    onDelete,
+    busy,
+    error,
+    isClosed,
+    draftPointsDisplay,
+    savedPolygon,
+    savedPath,
+    draftPath,
+    canUndo,
+    canClear,
+    canSave,
+  } = useGroundTruthPolygonEditor(props);
 
   return (
     <div
@@ -383,16 +483,17 @@ export function GroundTruthPolygonOverlay({
         Otherwise it visually overlaps the control bar in GridView/OverlayView.
       */}
       <div className="absolute top-12 left-2 z-20 flex items-center gap-2" data-gt-ui="true">
-        <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-xs flex items-center gap-2">
-          <Pencil className="w-3.5 h-3.5 text-cyan-300" />
+        <div className="flex items-center gap-2 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-primary)]">
+          <Pencil className="h-3.5 w-3.5 text-[var(--signal-metal)]" />
           GT Polygon
-          {busy ? <span className="text-white/70">…</span> : null}
+          {busy ? <span className="text-[var(--text-secondary)]">…</span> : null}
         </div>
 
         <button
           type="button"
           onClick={onRequestClose}
-          className="p-1 rounded bg-black/70 border border-white/10 text-white/80 hover:text-white"
+          aria-label="Close ground-truth polygon tool"
+          className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
           title="Close ground truth tool"
         >
           <X className="w-4 h-4" />
@@ -403,11 +504,12 @@ export function GroundTruthPolygonOverlay({
         <button
           type="button"
           onClick={onUndo}
+          aria-label="Undo last polygon point"
           disabled={!canUndo}
-          className={`p-1.5 rounded border ${
+          className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] ${
             canUndo
-              ? 'bg-black/70 border-white/10 text-white/90 hover:text-white'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              : 'text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Undo last point (Backspace)"
         >
@@ -418,10 +520,10 @@ export function GroundTruthPolygonOverlay({
           type="button"
           onClick={onClear}
           disabled={!canClear}
-          className={`px-2 py-1.5 rounded border text-xs ${
+          className={`min-h-9 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1.5 text-xs ${
             canClear
-              ? 'bg-black/70 border-white/10 text-white/90 hover:text-white'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              : 'text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Clear draft polygon"
         >
@@ -432,10 +534,10 @@ export function GroundTruthPolygonOverlay({
           type="button"
           onClick={() => void onSave()}
           disabled={!canSave}
-          className={`px-2 py-1.5 rounded border text-xs flex items-center gap-1.5 ${
+          className={`flex min-h-9 items-center gap-1.5 rounded-[4px] border px-2 py-1.5 text-xs ${
             canSave
-              ? 'bg-cyan-500/80 border-cyan-300/30 text-white hover:bg-cyan-500'
-              : 'bg-black/40 border-white/10 text-white/40'
+              ? 'border-[var(--accent)] bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
+              : 'border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-tertiary)] opacity-50'
           }`}
           title="Save ground truth polygon"
         >
@@ -447,11 +549,10 @@ export function GroundTruthPolygonOverlay({
           <button
             type="button"
             onClick={() => void onDelete()}
+            aria-label="Delete saved ground-truth polygon"
             disabled={busy}
-            className={`p-1.5 rounded border ${
-              busy
-                ? 'bg-black/40 border-white/10 text-white/40'
-                : 'bg-red-500/20 border-red-300/20 text-red-200 hover:bg-red-500/30'
+            className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] ${
+              busy ? 'text-[var(--text-tertiary)] opacity-50' : 'text-[var(--danger)] hover:bg-[var(--bg-tertiary)]'
             }`}
             title="Delete saved ground truth"
           >
@@ -463,21 +564,22 @@ export function GroundTruthPolygonOverlay({
       {/* Error / status */}
       {error ? (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-red-900/60 border border-red-400/30 text-red-100 text-xs"
+          role="alert"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border-l-2 border-l-[var(--danger)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--danger)]"
           data-gt-ui="true"
         >
           {error}
         </div>
       ) : !isClosed ? (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-black/60 border border-white/10 text-white/80 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-gt-ui="true"
         >
           Click to add points. Click the first point (or press Enter) to close.
         </div>
       ) : (
         <div
-          className="absolute bottom-2 left-2 right-2 z-20 px-2 py-1 rounded bg-black/60 border border-white/10 text-white/80 text-xs"
+          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-gt-ui="true"
         >
           Polygon closed. Save to persist.

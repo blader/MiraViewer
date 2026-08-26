@@ -1,15 +1,18 @@
-import { useState, useRef } from 'react';
-import { Link2, Pencil, Sparkles } from 'lucide-react';
-import type { AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
+import { Crosshair, Link2, Loader2, ScanLine } from 'lucide-react';
+import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls } from '../ImageControls';
+import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
-import { GroundTruthPolygonOverlay } from '../GroundTruthPolygonOverlay';
-import { TumorSavedSegmentationOverlay } from '../TumorSavedSegmentationOverlay';
-import { TumorSegmentationOverlay } from '../TumorSegmentationOverlaySeedGrow';
+import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
+import {
+  GroundTruthPolygonOverlay,
+  TumorSavedSegmentationOverlay,
+  TumorSegmentationOverlay,
+} from './LazyStudyOverlays';
 
 export type GridCellProps = {
   comboId: string;
@@ -30,6 +33,133 @@ export type GridCellProps = {
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
 
+export function AlignmentProgressCard({ progress, onAbort }: { progress: AlignmentProgress; onAbort: () => void }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
+    >
+      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-[var(--text-primary)]">
+          {progress.phase === 'capturing'
+            ? 'Preparing reference…'
+            : progress.currentDate
+              ? `Aligning ${formatDate(progress.currentDate)} (${progress.dateIndex + 1}/${progress.totalDates})`
+              : 'Aligning…'}
+        </div>
+        {progress.phase !== 'capturing' && progress.slicesChecked ? (
+          <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
+            {progress.slicesChecked} slices · Score {progress.bestMiSoFar.toFixed(3)}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={onAbort}
+        className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        title="Cancel alignment"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+export function StudySelectionSurface({
+  reference,
+  presentation,
+  startAlignAll,
+  onSegment,
+  children,
+}: {
+  reference: {
+    date: string;
+    series: SeriesRef;
+    sliceIndex: number;
+    settings: PanelSettings;
+    imageSize: { width: number; height: number };
+    surfaceRef: React.RefObject<HTMLDivElement | null>;
+  };
+  presentation: {
+    columnCount: number;
+    isAligning: boolean;
+    isComparing: boolean;
+    groundTruthOpen: boolean;
+    nativeAnnotationsAvailable: boolean;
+  };
+  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
+  onSegment: (selection: ExclusionMask) => void;
+  children: React.ReactNode;
+}) {
+  const { date, series, sliceIndex, settings, imageSize, surfaceRef } = reference;
+  const { columnCount, isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
+  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
+    const bounds = surfaceRef.current?.getBoundingClientRect();
+    void startAlignAll(
+      {
+        date,
+        seriesUid: series.series_uid,
+        sliceIndex,
+        sliceCount: series.instance_count,
+        patientKey: series.patient_key,
+        studyUid: series.study_uid ?? series.study_id,
+        frameOfReferenceUid: series.frame_of_reference_uid,
+        imageSize,
+        viewportSize:
+          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
+        settings,
+        ...(alignmentFocus ? { alignmentFocus } : {}),
+      },
+      exclusion,
+    );
+  };
+
+  return (
+    <DragRectActionOverlay
+      className="absolute inset-0 cursor-crosshair"
+      imageSize={imageSize}
+      geometry={settings}
+      disabled={isAligning || isComparing || groundTruthOpen}
+      actions={[
+        {
+          key: 'align-all',
+          label: 'Align All',
+          title: `Align all other dates to ${formatDate(date)}`,
+          icon: <Link2 className="w-4 h-4" />,
+          variant: 'primary',
+          minSizeSpace: 'base',
+          disabled: columnCount < 2 || isAligning,
+          onConfirm: (masks) => startAlignment(masks.base),
+        },
+        {
+          key: 'align-tumor',
+          label: 'Align Tumor',
+          title: 'Match tumor across dates; uses pixels inside the selected region',
+          icon: <Crosshair className="w-4 h-4" />,
+          variant: 'secondary',
+          minSizeSpace: 'base',
+          disabled: columnCount < 2 || isAligning || isComparing || !nativeAnnotationsAvailable,
+          onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
+        },
+        {
+          key: 'segment-tumor',
+          label: 'Segment',
+          title: 'Segment tumor from this rectangle',
+          icon: <ScanLine className="w-4 h-4" />,
+          variant: 'secondary',
+          minSizeSpace: 'screen',
+          disabled: isAligning || isComparing || !nativeAnnotationsAvailable,
+          onConfirm: (masks) => onSegment(masks.screen),
+        },
+      ]}
+    >
+      {children}
+    </DragRectActionOverlay>
+  );
+}
+
 export function GridCell({
   comboId,
   date,
@@ -48,168 +178,105 @@ export function GridCell({
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
+  const studyCellRef = useRef<HTMLDivElement | null>(null);
+  const nativeImageSize = useMemo(
+    () => ({ w: refData?.columns ?? 512, h: refData?.rows ?? 512 }),
+    [refData?.columns, refData?.rows],
+  );
+  const idx = refData ? getSliceIndex(refData.instance_count, progress, settings.offset) : 0;
+  const effectiveIdx = refData ? getEffectiveInstanceIndex(idx, refData.instance_count, settings.reverseSliceOrder) : 0;
+  const derivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
+    refData ? getDerivedAlignmentFrame(refData.series_uid, effectiveIdx) : null,
+  );
+  const displayedImageSize = {
+    width: derivedFrame?.columns ?? nativeImageSize.w,
+    height: derivedFrame?.rows ?? nativeImageSize.h,
+  };
+  const nativeAnnotationsAvailable = derivedFrame === null;
 
   if (!refData) {
     return (
-      <div className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] bg-[var(--bg-primary)]">
-        <div className="px-3 py-2 text-xs text-[var(--text-secondary)] bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
+      <div className="relative flex min-h-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]">
+        <div className="flex min-h-10 items-center border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
           {formatDate(date)}
         </div>
-        <div className="flex-1 flex items-center justify-center text-[var(--text-secondary)]">No series</div>
+        <div className="flex flex-1 items-center justify-center text-sm text-[var(--text-secondary)]">No series</div>
       </div>
     );
   }
 
-  const idx = getSliceIndex(refData.instance_count, progress, settings.offset);
-  const effectiveIdx = getEffectiveInstanceIndex(idx, refData.instance_count, settings.reverseSliceOrder);
-
   return (
     <div
       data-grid-cell-date={date}
-      className="relative flex flex-col rounded-lg overflow-hidden border border-[var(--border-color)] cursor-crosshair"
+      data-alignment-state={derivedFrame ? 'aligned' : 'acquired'}
+      data-controls-visible={isHovered || tumorToolOpen || gtPolygonToolOpen}
+      className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
     >
-      {/* Cell controls (shown on hover) */}
-      <div
-        className={`absolute top-0 left-0 right-0 z-10 transition-opacity ${
-          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        <div className="px-2 py-1 text-xs bg-[var(--bg-secondary)]/90 backdrop-blur border-b border-[var(--border-color)] flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowSavedTumor((v) => !v)}
-              disabled={tumorToolOpen}
-              className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                tumorToolOpen
-                  ? 'bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] border-[var(--border-color)]'
-                  : showSavedTumor
-                    ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                    : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-              }`}
-              title={tumorToolOpen ? 'Close segmentation tool to view saved tumor overlay' : 'Toggle saved tumor segmentation overlay'}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              Tumor
-            </button>
+      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
+            {formatDate(date)}
+          </span>
+          {derivedFrame ? <VerifiedAlignmentBadge /> : null}
+        </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setGtPolygonToolOpen((v) => {
-                  const next = !v;
-                  if (next) setTumorToolOpen(false);
-                  return next;
-                });
-              }}
-              className={`px-2 py-1 rounded border text-xs flex items-center gap-1.5 ${
-                gtPolygonToolOpen
-                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                  : 'bg-[var(--bg-primary)] text-[var(--text-secondary)] border-[var(--border-color)] hover:text-[var(--text-primary)]'
-              }`}
-              title="Ground truth polygon tool (debug)"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              GT
-            </button>
-          </div>
+        <div
+          inert={isAligning}
+          className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100"
+        >
+          <StudyAnnotationControls
+            showSavedTumor={showSavedTumor}
+            tumorToolOpen={tumorToolOpen}
+            gtPolygonToolOpen={gtPolygonToolOpen}
+            nativeAnnotationsAvailable={nativeAnnotationsAvailable}
+            setShowSavedTumor={setShowSavedTumor}
+            setTumorToolOpen={setTumorToolOpen}
+            setGtPolygonToolOpen={setGtPolygonToolOpen}
+          />
 
           <ImageControls
             settings={settings}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
-            onUpdate={(update) => {
-              updatePanelSetting(date, update);
-            }}
+            onUpdate={(update) => updatePanelSetting(date, update)}
             showSliceControl={false}
           />
         </div>
       </div>
 
-      {/* Slice selector (shown on hover, bottom-right corner) */}
-      <div
-        className={`absolute bottom-2 right-2 z-10 transition-opacity ${
-          isHovered ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="px-2 py-1 rounded bg-[var(--bg-secondary)]/90 backdrop-blur border border-[var(--border-color)]">
-          <StepControl
-            title="Slice offset"
-            value={`${idx + 1}/${refData.instance_count}`}
-            valueWidth="w-16"
-            tabular
-            accent
-            onDecrement={() => {
-              updatePanelSetting(date, { offset: settings.offset - 1 });
-            }}
-            onIncrement={() => {
-              updatePanelSetting(date, { offset: settings.offset + 1 });
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="flex-1 min-h-0 bg-black relative">
-        <DragRectActionOverlay
-          className="absolute inset-0 cursor-crosshair"
-          geometry={{
-            panX: settings.panX,
-            panY: settings.panY,
-            zoom: settings.zoom,
-            rotation: settings.rotation,
-            affine00: settings.affine00,
-            affine01: settings.affine01,
-            affine10: settings.affine10,
-            affine11: settings.affine11,
+      <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
+        <StudySelectionSurface
+          reference={{
+            date,
+            series: refData,
+            sliceIndex: effectiveIdx,
+            settings,
+            imageSize: displayedImageSize,
+            surfaceRef: studyCellRef,
           }}
-          disabled={isAligning || gtPolygonToolOpen}
-          actions={[
-            {
-              key: 'align-all',
-              label: 'Align All',
-              title: `Align all other dates to ${formatDate(date)}`,
-              icon: <Link2 className="w-4 h-4" />,
-              variant: 'primary',
-              minSizeSpace: 'base',
-              disabled: overlayColumns.length < 2 || isAligning,
-              onConfirm: (masks) => {
-                void startAlignAll(
-                  {
-                    date,
-                    seriesUid: refData.series_uid,
-                    sliceIndex: effectiveIdx,
-                    sliceCount: refData.instance_count,
-                    settings,
-                  },
-                  masks.base
-                );
-              },
-            },
-            {
-              key: 'segment-tumor',
-              label: 'Segment',
-              title: 'Segment tumor from this rectangle',
-              icon: <Sparkles className="w-4 h-4" />,
-              variant: 'secondary',
-              minSizeSpace: 'screen',
-              disabled: isAligning,
-              onConfirm: (masks) => {
-                setTumorToolOpen(true);
-                setTumorSeedBoxToStart({
-                  x0: masks.screen.x,
-                  y0: masks.screen.y,
-                  x1: masks.screen.x + masks.screen.width,
-                  y1: masks.screen.y + masks.screen.height,
-                });
-              },
-            },
-          ]}
+          presentation={{
+            columnCount: overlayColumns.length,
+            isAligning,
+            isComparing: false,
+            groundTruthOpen: gtPolygonToolOpen,
+            nativeAnnotationsAvailable,
+          }}
+          startAlignAll={startAlignAll}
+          onSegment={(selection) => {
+            setTumorToolOpen(true);
+            setTumorSeedBoxToStart({
+              x0: selection.x,
+              y0: selection.y,
+              x1: selection.x + selection.width,
+              y1: selection.y + selection.height,
+            });
+          }}
         >
           <DicomViewer
             ref={tumorViewerRef}
             studyId={refData.study_id}
             seriesUid={refData.series_uid}
+            interactionBlocked={isAligning}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
             reverseSliceOrder={settings.reverseSliceOrder}
@@ -234,46 +301,68 @@ export function GridCell({
             }}
           />
 
-          <TumorSavedSegmentationOverlay
-            enabled={showSavedTumor && !tumorToolOpen}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+          <Suspense fallback={null}>
+            {nativeAnnotationsAvailable && showSavedTumor && !tumorToolOpen ? (
+              <TumorSavedSegmentationOverlay
+                enabled
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+                imageSize={nativeImageSize}
+              />
+            ) : null}
 
-          <TumorSegmentationOverlay
-            enabled={tumorToolOpen}
-            onRequestClose={() => {
-              setTumorToolOpen(false);
-              setTumorSeedBoxToStart(null);
-            }}
-            seedBoxToStart={tumorSeedBoxToStart}
-            onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
-            viewerRef={tumorViewerRef}
-            comboId={comboId}
-            dateIso={date}
-            studyId={refData.study_id}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+            {nativeAnnotationsAvailable && tumorToolOpen ? (
+              <TumorSegmentationOverlay
+                enabled
+                onRequestClose={() => {
+                  setTumorToolOpen(false);
+                  setTumorSeedBoxToStart(null);
+                }}
+                seedBoxToStart={tumorSeedBoxToStart}
+                onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
+                viewerRef={tumorViewerRef}
+                comboId={comboId}
+                dateIso={date}
+                studyId={refData.study_id}
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+              />
+            ) : null}
 
-          <GroundTruthPolygonOverlay
-            enabled={gtPolygonToolOpen}
-            onRequestClose={() => setGtPolygonToolOpen(false)}
-            comboId={comboId}
-            dateIso={date}
-            studyId={refData.study_id}
-            seriesUid={refData.series_uid}
-            effectiveInstanceIndex={effectiveIdx}
-            viewerTransform={settings}
-          />
+            {nativeAnnotationsAvailable && gtPolygonToolOpen ? (
+              <GroundTruthPolygonOverlay
+                enabled
+                onRequestClose={() => setGtPolygonToolOpen(false)}
+                comboId={comboId}
+                dateIso={date}
+                studyId={refData.study_id}
+                seriesUid={refData.series_uid}
+                effectiveInstanceIndex={effectiveIdx}
+                viewerTransform={settings}
+                imageSize={nativeImageSize}
+              />
+            ) : null}
+          </Suspense>
+        </StudySelectionSurface>
+      </div>
 
-          {/* Date overlay (matches overlay view style) */}
-          <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-white text-xs font-medium pointer-events-none">
-            {formatDate(date)}
-          </div>
-        </DragRectActionOverlay>
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
+        <span className="truncate text-xs text-[var(--text-secondary)]">
+          {derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+        </span>
+        <div inert={isAligning}>
+          <StepControl
+            title="Slice offset"
+            value={`${idx + 1}/${refData.instance_count}`}
+            valueWidth="w-16"
+            tabular
+            accent
+            onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}
+            onIncrement={() => updatePanelSetting(date, { offset: settings.offset + 1 })}
+          />
+        </div>
       </div>
     </div>
   );

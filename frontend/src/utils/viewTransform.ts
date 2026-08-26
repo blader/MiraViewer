@@ -1,4 +1,5 @@
 import type { NormalizedPoint, TumorPolygon, ViewerTransform } from '../db/schema';
+import { imageNormToViewerNorm, viewerNormToImageNorm, type ImageSizePx } from './viewportMapping';
 
 export type ViewportSize = { w: number; h: number };
 
@@ -53,7 +54,7 @@ function computeLinearMatrix(t: ViewerTransform): { m00: number; m01: number; m1
 function applyViewerTransformPx(
   p: { x: number; y: number },
   size: ViewportSize,
-  t: ViewerTransform
+  t: ViewerTransform,
 ): { x: number; y: number } {
   const { w, h } = size;
 
@@ -78,7 +79,7 @@ function applyViewerTransformPx(
 function invertViewerTransformPx(
   p: { x: number; y: number },
   size: ViewportSize,
-  t: ViewerTransform
+  t: ViewerTransform,
 ): { x: number; y: number } {
   const { w, h } = size;
 
@@ -115,7 +116,7 @@ export function remapPointBetweenViewerTransforms(
   p: NormalizedPoint,
   size: ViewportSize,
   from: ViewerTransform,
-  to: ViewerTransform
+  to: ViewerTransform,
 ): NormalizedPoint {
   if (size.w <= 0 || size.h <= 0) return p;
 
@@ -132,9 +133,76 @@ export function remapPointsBetweenViewerTransforms(
   points: NormalizedPoint[],
   size: ViewportSize,
   from: ViewerTransform,
-  to: ViewerTransform
+  to: ViewerTransform,
 ): NormalizedPoint[] {
   return points.map((p) => remapPointBetweenViewerTransforms(p, size, from, to));
+}
+
+/** Convert a transformed viewport point into the stable normalized native-image frame. */
+export function viewerPointToImagePoint(
+  point: NormalizedPoint,
+  viewport: ViewportSize,
+  image: ImageSizePx,
+  transform: ViewerTransform,
+): NormalizedPoint {
+  const untransformed = remapPointBetweenViewerTransforms(point, viewport, transform, normalizeViewerTransform(null));
+  return viewerNormToImageNorm(untransformed, viewport, image);
+}
+
+/** Project a canonical native-image point into the current transformed viewport. */
+export function imagePointToViewerPoint(
+  point: NormalizedPoint,
+  viewport: ViewportSize,
+  image: ImageSizePx,
+  transform: ViewerTransform,
+): NormalizedPoint {
+  const untransformed = imageNormToViewerNorm(point, viewport, image);
+  return remapPointBetweenViewerTransforms(untransformed, viewport, normalizeViewerTransform(null), transform);
+}
+
+export function viewerPolygonToImagePolygon(
+  polygon: TumorPolygon,
+  viewport: ViewportSize,
+  image: ImageSizePx,
+  transform: ViewerTransform,
+): TumorPolygon {
+  return { points: polygon.points.map((point) => viewerPointToImagePoint(point, viewport, image, transform)) };
+}
+
+/** Restore persisted annotations only when their authored coordinate space can be proven. */
+export function restoreImagePolygon(
+  polygon: TumorPolygon,
+  metadata: {
+    coordinateSpace?: 'image-normalized' | 'viewer-normalized';
+    imageSize?: ImageSizePx;
+    viewportSize?: ViewportSize;
+    viewTransform?: ViewerTransform;
+  },
+  imageSize?: ImageSizePx,
+): { polygon: TumorPolygon; imageSize: ImageSizePx } | { error: string } {
+  if (metadata.coordinateSpace === 'image-normalized') {
+    const savedImageSize = metadata.imageSize ?? imageSize;
+    return savedImageSize
+      ? { polygon, imageSize: savedImageSize }
+      : { error: 'source image dimensions are unavailable' };
+  }
+
+  const viewport = metadata.viewportSize;
+  if (!imageSize || !viewport || viewport.w <= 0 || viewport.h <= 0) {
+    return { error: 'original viewport or image dimensions are unavailable' };
+  }
+
+  const transform = metadata.viewTransform ?? normalizeViewerTransform(null);
+  return { polygon: viewerPolygonToImagePolygon(polygon, viewport, imageSize, transform), imageSize };
+}
+
+export function imagePolygonToViewerPolygon(
+  polygon: TumorPolygon,
+  viewport: ViewportSize,
+  image: ImageSizePx,
+  transform: ViewerTransform,
+): TumorPolygon {
+  return { points: polygon.points.map((point) => imagePointToViewerPoint(point, viewport, image, transform)) };
 }
 
 /**
@@ -157,7 +225,7 @@ export function remapPolygonBetweenViewerTransforms(
   polygon: TumorPolygon,
   size: ViewportSize,
   from: ViewerTransform,
-  to: ViewerTransform
+  to: ViewerTransform,
 ): TumorPolygon {
   return {
     points: remapPointsBetweenViewerTransforms(polygon.points ?? [], size, from, to),

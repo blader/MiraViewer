@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   computeMindDescriptor2D,
+  createMindDescriptorScratch,
   scoreMindDescriptorAgreement,
 } from '../src/utils/mindDescriptor';
 import {
@@ -81,13 +82,8 @@ test('same anatomy under nonfunctional contrast beats an exact-histogram wrong s
   const labels = makeTissueLabelPhantom(size);
   const referencePixels = renderTissueContrast(labels, REFERENCE_CONTRAST);
   const matchingPixels = renderTissueContrast(labels, NONFUNCTIONAL_CONTRAST);
-  const wrongPixels = renderTissueContrast(
-    relocateInternalStructures(labels, size),
-    REFERENCE_CONTRAST,
-  );
-  const weights = Float32Array.from(labels, (label) =>
-    label === Tissue.canvas ? 0 : 1,
-  );
+  const wrongPixels = renderTissueContrast(relocateInternalStructures(labels, size), REFERENCE_CONTRAST);
+  const weights = Float32Array.from(labels, (label) => (label === Tissue.canvas ? 0 : 1));
   const validity = new Float32Array(size * size).fill(1);
 
   const reference = computeMindDescriptor2D(referencePixels, size);
@@ -97,12 +93,7 @@ test('same anatomy under nonfunctional contrast beats an exact-histogram wrong s
     weights,
     validity,
   );
-  const wrong = scoreMindDescriptorAgreement(
-    reference,
-    computeMindDescriptor2D(wrongPixels, size),
-    weights,
-    validity,
-  );
+  const wrong = scoreMindDescriptorAgreement(reference, computeMindDescriptor2D(wrongPixels, size), weights, validity);
 
   expect(matching.score).toBeGreaterThan(wrong.score);
   expect(matching.meanDistance).toBeLessThan(wrong.meanDistance);
@@ -113,9 +104,7 @@ test('descriptor agreement keeps invalid footprint in the fixed denominator', ()
   const labels = makeTissueLabelPhantom(size);
   const pixels = renderTissueContrast(labels, REFERENCE_CONTRAST);
   const descriptor = computeMindDescriptor2D(pixels, size);
-  const weights = Float32Array.from(labels, (label) =>
-    label === Tissue.canvas ? 0 : 1,
-  );
+  const weights = Float32Array.from(labels, (label) => (label === Tissue.canvas ? 0 : 1));
   const full = new Float32Array(size * size).fill(1);
   const cropped = new Float32Array(size * size).fill(1);
   for (let y = 0; y < size; y++) {
@@ -123,12 +112,7 @@ test('descriptor agreement keeps invalid footprint in the fixed denominator', ()
   }
 
   const fullScore = scoreMindDescriptorAgreement(descriptor, descriptor, weights, full);
-  const croppedScore = scoreMindDescriptorAgreement(
-    descriptor,
-    descriptor,
-    weights,
-    cropped,
-  );
+  const croppedScore = scoreMindDescriptorAgreement(descriptor, descriptor, weights, cropped);
 
   expect(fullScore.score).toBeGreaterThan(croppedScore.score);
   expect(fullScore.coverageNumerator).toBeGreaterThan(croppedScore.coverageNumerator);
@@ -139,9 +123,7 @@ test('self agreement is exact and descriptor borders are explicitly invalid', ()
   const labels = makeTissueLabelPhantom(size);
   const pixels = renderTissueContrast(labels, REFERENCE_CONTRAST);
   const descriptor = computeMindDescriptor2D(pixels, size);
-  const weights = Float32Array.from(labels, (label) =>
-    label === Tissue.canvas ? 0 : 1,
-  );
+  const weights = Float32Array.from(labels, (label) => (label === Tissue.canvas ? 0 : 1));
   const validity = new Float32Array(size * size).fill(1);
   const self = scoreMindDescriptorAgreement(descriptor, descriptor, weights, validity);
 
@@ -152,23 +134,29 @@ test('self agreement is exact and descriptor borders are explicitly invalid', ()
   expect(self.meanDistance).toBeCloseTo(0, 6);
 });
 
+test('serial candidate descriptors reuse bounded scratch without changing their structural values', () => {
+  const size = 64;
+  const labels = makeTissueLabelPhantom(size);
+  const pixels = renderTissueContrast(labels, REFERENCE_CONTRAST);
+  const independentlyAllocated = computeMindDescriptor2D(pixels, size);
+  const scratch = createMindDescriptorScratch(size);
+
+  const first = computeMindDescriptor2D(pixels, size, scratch);
+  const retainedBuffer = first.values;
+  const second = computeMindDescriptor2D(pixels, size, scratch);
+
+  expect(second.values).toBe(retainedBuffer);
+  expect(second.values).toEqual(independentlyAllocated.values);
+  expect(second.validCenters).toEqual(independentlyAllocated.validCenters);
+});
+
 test('fractional validity contributes once against the fixed denominator', () => {
   const size = 64;
   const labels = makeTissueLabelPhantom(size);
-  const descriptor = computeMindDescriptor2D(
-    renderTissueContrast(labels, REFERENCE_CONTRAST),
-    size,
-  );
-  const weights = Float32Array.from(labels, (label) =>
-    label === Tissue.canvas ? 0 : 1,
-  );
+  const descriptor = computeMindDescriptor2D(renderTissueContrast(labels, REFERENCE_CONTRAST), size);
+  const weights = Float32Array.from(labels, (label) => (label === Tissue.canvas ? 0 : 1));
   const halfValidity = new Float32Array(size * size).fill(0.5);
-  const score = scoreMindDescriptorAgreement(
-    descriptor,
-    descriptor,
-    weights,
-    halfValidity,
-  );
+  const score = scoreMindDescriptorAgreement(descriptor, descriptor, weights, halfValidity);
 
   expect(score.score).toBeCloseTo(0.5, 6);
 });
@@ -206,11 +194,8 @@ test('uses the fixed ordered patch descriptor in pixel-major layout', () => {
     }
     return distance;
   });
-  const localVariation =
-    (patchDistances[0] + patchDistances[1] + patchDistances[2] + patchDistances[3]) / 4;
-  const expected = patchDistances.map((distance) =>
-    Math.exp(-distance / Math.max(localVariation, 1e-6)),
-  );
+  const localVariation = (patchDistances[0] + patchDistances[1] + patchDistances[2] + patchDistances[3]) / 4;
+  const expected = patchDistances.map((distance) => Math.exp(-distance / Math.max(localVariation, 1e-6)));
   const maximum = Math.max(...expected);
   const pixelIndex = y * size + x;
 
@@ -253,12 +238,7 @@ test('rejects invalid image sizes, incompatible lengths, and descriptor layouts'
     ),
   ).toThrow(/descriptor size/i);
   expect(() =>
-    scoreMindDescriptorAgreement(
-      descriptor,
-      descriptor,
-      new Float32Array(1),
-      new Float32Array(64 * 64),
-    ),
+    scoreMindDescriptorAgreement(descriptor, descriptor, new Float32Array(1), new Float32Array(64 * 64)),
   ).toThrow(/weights/i);
 
   const reversedOffsets = {
@@ -296,19 +276,12 @@ test('rejects invalid image sizes, incompatible lengths, and descriptor layouts'
     truncatedValues,
     truncatedCenters,
   ]) {
-    expect(() =>
-      scoreMindDescriptorAgreement(descriptor, incompatible, weights, validity),
-    ).toThrow(/descriptor (layout|length)/i);
+    expect(() => scoreMindDescriptorAgreement(descriptor, incompatible, weights, validity)).toThrow(
+      /descriptor (layout|length)/i,
+    );
   }
-  expect(() =>
-    scoreMindDescriptorAgreement(truncatedValues, descriptor, weights, validity),
-  ).toThrow(/descriptor length/i);
-  expect(() =>
-    scoreMindDescriptorAgreement(
-      descriptor,
-      descriptor,
-      weights,
-      new Float32Array(1),
-    ),
-  ).toThrow(/validity/i);
+  expect(() => scoreMindDescriptorAgreement(truncatedValues, descriptor, weights, validity)).toThrow(
+    /descriptor length/i,
+  );
+  expect(() => scoreMindDescriptorAgreement(descriptor, descriptor, weights, new Float32Array(1))).toThrow(/validity/i);
 });

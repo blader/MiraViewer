@@ -1,11 +1,19 @@
 import type { ExclusionMask } from '../types/api';
-import { buildSoftForegroundSupportSquare, computeGradientMagnitudeL1Square } from './imageFeatures';
+import type { WarpTransform } from './alignmentTransform';
+import {
+  buildSoftForegroundSupportSquare,
+  computeGradientMagnitudeL1Square,
+  erodeFractionalSupportSquare,
+} from './imageFeatures';
 import {
   computeMindDescriptor2D,
+  createMindDescriptorScratch,
   scoreMindDescriptorAgreement,
   type MindDescriptor2D,
+  type MindDescriptorScratch,
 } from './mindDescriptor';
-import { resample2dAreaAverage } from './svr/resample2d';
+import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from './svr/resample2d';
+import { warpGrayscaleAffineWithValidity } from './warpAffine';
 
 const HISTOGRAM_BINS = 1024;
 const CHANNEL_RANGE_EPSILON = 1e-6;
@@ -54,14 +62,28 @@ export type PreparedPerceptualReference = {
   scales: PreparedPerceptualScale[];
 };
 
+export type PerceptualScoringScratch = { descriptorBySize: Map<number, MindDescriptorScratch> };
+
+export function createPerceptualScoringScratch(): PerceptualScoringScratch {
+  return { descriptorBySize: new Map() };
+}
+
 export type PreparePerceptualReferenceOptions = {
   scales?: number[];
   exclusionRect?: ExclusionMask;
+  /** Original user-selected anatomy, independent of any expanded exclusion-safety margin. */
+  focusRect?: ExclusionMask;
+  validity?: Float32Array | Uint8Array;
 };
 
 export type NormalizePerceptualSourceOptions = {
   /** Source-space region omitted only from the robust intensity-basis histogram. */
   exclusionRect?: ExclusionMask;
+  /** Explicit acquired-pixel support, independent of modality intensity and display values. */
+  validity?: Float32Array | Uint8Array;
+  // The stable anatomy owns the intensity basis, but explicit tumor focus must
+  // not clip the lesion itself to that healthy tissue's 98th percentile.
+  preserveExcludedIntensity?: boolean;
 };
 
 export type PerceptualCandidate = {
@@ -96,7 +118,7 @@ function quantileFromHistogram(
   count: number,
   min: number,
   max: number,
-  quantile: number
+  quantile: number,
 ): number {
   const target = Math.max(0, Math.min(count - 1, Math.floor((count - 1) * quantile)));
   let cumulative = 0;
@@ -119,37 +141,50 @@ function quantileFromHistogram(
 export function normalizePerceptualSource(
   pixels: Float32Array,
   size: number,
-  options: NormalizePerceptualSourceOptions = {}
+  options: NormalizePerceptualSourceOptions = {},
 ): Float32Array {
   assertSquare(pixels, size, 'normalizePerceptualSource');
 
+  const validity = options.validity;
+  if (validity && validity.length !== pixels.length) {
+    throw new Error('normalizePerceptualSource: validity does not match source image dimensions');
+  }
   const exclusion = options.exclusionRect;
   const exclusionX0 = exclusion ? Math.max(0, Math.floor(exclusion.x * size)) : 0;
   const exclusionY0 = exclusion ? Math.max(0, Math.floor(exclusion.y * size)) : 0;
   const exclusionX1 = exclusion ? Math.min(size, Math.ceil((exclusion.x + exclusion.width) * size)) : 0;
   const exclusionY1 = exclusion ? Math.min(size, Math.ceil((exclusion.y + exclusion.height) * size)) : 0;
   const includedInBasis = (index: number) => {
+    if (validity && (!(validity[index]! > 0) || !Number.isFinite(validity[index]))) return false;
     if (!exclusion) return true;
     const x = index % size;
     const y = Math.floor(index / size);
     return x < exclusionX0 || x >= exclusionX1 || y < exclusionY0 || y >= exclusionY1;
   };
 
-  let maximum = 0;
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < pixels.length; i++) {
     if (!includedInBasis(i)) continue;
     const value = pixels[i] ?? 0;
-    if (Number.isFinite(value) && value > maximum) maximum = value;
+    if (!Number.isFinite(value)) continue;
+    minimum = Math.min(minimum, value);
+    maximum = Math.max(maximum, value);
   }
-  if (!(maximum > 0)) {
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || !(maximum > minimum)) {
     // An exclusion that removes the entire usable foreground is an intentionally empty basis.
     // Re-admitting the excluded pixels here would let the pathology define normalization.
     return new Float32Array(pixels.length);
   }
 
+  // Signed pixel buffers and modality intercepts can put the entire image below zero.
+  // Translate its native background before robust foreground estimation; display windows never enter.
+  const background = minimum;
+  const shiftedMaximum = maximum - background;
+
   // Rendered MRI backgrounds are normally exactly zero. The tiny relative floor keeps interpolation
   // noise around that background out of the source-space intensity basis.
-  const foregroundFloor = Math.max(1e-6, maximum * 0.002);
+  const foregroundFloor = background + Math.max(1e-6, shiftedMaximum * 0.002);
   let minimumForeground = Number.POSITIVE_INFINITY;
   let maximumForeground = Number.NEGATIVE_INFINITY;
   let foregroundCount = 0;
@@ -185,10 +220,11 @@ export function normalizePerceptualSource(
 
   for (let i = 0; i < pixels.length; i++) {
     const value = pixels[i] ?? 0;
-    if (!Number.isFinite(value) || value <= foregroundFloor) continue;
-    const normalized = robustRange > 1e-8 ? clamp01((value - low) / robustRange) : 1;
+    if ((validity && !(validity[i]! > 0)) || !Number.isFinite(value) || value <= foregroundFloor) continue;
+    const normalized = robustRange > 1e-8 ? (value - low) / robustRange : 1;
+    const preserveExcluded = options.preserveExcludedIntensity && exclusion && !includedInBasis(i);
     // Keep low-valued foreground distinct from the zero-valued canvas used by warps.
-    output[i] = 0.05 + 0.95 * normalized;
+    output[i] = preserveExcluded ? Math.max(0, 0.05 + 0.95 * normalized) : 0.05 + 0.95 * clamp01(normalized);
   }
   return output;
 }
@@ -319,7 +355,9 @@ function buildReferenceWeights(
   reference: Float32Array,
   size: number,
   exclusionRect: ExclusionMask | undefined,
-  safeBorder: number
+  safeBorder: number,
+  validity?: Float32Array,
+  focusRect: ExclusionMask | undefined = exclusionRect,
 ): Float32Array {
   const support = buildSoftForegroundSupportSquare(reference, size);
   const gradients = computeGradientMagnitudeL1Square(reference, size);
@@ -331,11 +369,24 @@ function buildReferenceWeights(
   let exclusionY0 = 0;
   let exclusionX1 = 0;
   let exclusionY1 = 0;
+  let focusX0 = 0;
+  let focusY0 = 0;
+  let focusX1 = 0;
+  let focusY1 = 0;
+  let proximityRadiusSquared = 1;
+  const localizeAnatomy = Boolean(focusRect && focusRect.width * focusRect.height <= 0.04);
   if (exclusionRect) {
     exclusionX0 = Math.floor(exclusionRect.x * size) - safeBorder;
     exclusionY0 = Math.floor(exclusionRect.y * size) - safeBorder;
     exclusionX1 = Math.ceil((exclusionRect.x + exclusionRect.width) * size) + safeBorder;
     exclusionY1 = Math.ceil((exclusionRect.y + exclusionRect.height) * size) + safeBorder;
+  }
+  if (focusRect) {
+    focusX0 = Math.floor(focusRect.x * size) - safeBorder;
+    focusY0 = Math.floor(focusRect.y * size) - safeBorder;
+    focusX1 = Math.ceil((focusRect.x + focusRect.width) * size) + safeBorder;
+    focusY1 = Math.ceil((focusRect.y + focusRect.height) * size) + safeBorder;
+    proximityRadiusSquared = Math.max(safeBorder, focusRect.width * size, focusRect.height * size) ** 2;
   }
 
   for (let y = safeBorder; y < size - safeBorder; y++) {
@@ -345,10 +396,18 @@ function buildReferenceWeights(
       const index = y * size + x;
       const structuralSignal = Math.min(
         1,
-        3 * (gradients[index] ?? 0) + 5 * Math.sqrt(Math.max(0, variance[index] ?? 0))
+        3 * (gradients[index] ?? 0) + 5 * Math.sqrt(Math.max(0, variance[index] ?? 0)),
       );
+      const distanceX = localizeAnatomy ? Math.max(focusX0 - x, 0, x - focusX1 + 1) : 0;
+      const distanceY = localizeAnatomy ? Math.max(focusY0 - y, 0, y - focusY1 + 1) : 0;
+      const anatomicalProximity = localizeAnatomy
+        ? 0.2 + 0.8 / (1 + (distanceX * distanceX + distanceY * distanceY) / proximityRadiusSquared)
+        : 1;
       // The floor gives target-only boundaries a cost. Foreground and reference structure remain dominant.
-      weights[index] = Math.min(1.5, 0.1 + 0.45 * (support[index] ?? 0) + 0.95 * structuralSignal);
+      weights[index] =
+        Math.min(1.5, 0.1 + 0.45 * (support[index] ?? 0) + 0.95 * structuralSignal) *
+        (validity ? clamp01(validity[index] ?? 0) : 1) *
+        anatomicalProximity;
     }
   }
   return weights;
@@ -357,27 +416,46 @@ function buildReferenceWeights(
 export function preparePerceptualReference(
   normalizedReference: Float32Array,
   size: number,
-  options: PreparePerceptualReferenceOptions = {}
+  options: PreparePerceptualReferenceOptions = {},
 ): PreparedPerceptualReference {
   assertSquare(normalizedReference, size, 'preparePerceptualReference');
+  if (options.validity && options.validity.length !== normalizedReference.length) {
+    throw new Error('preparePerceptualReference: validity does not match reference image dimensions');
+  }
   const requestedScales = options.scales ?? [256, 128, 64];
-  const scaleSizes = [...new Set(requestedScales.map(Math.round).filter((value) => value > 0 && value <= size))].sort(
-    (a, b) => b - a
-  );
+  const uniqueScales = new Set<number>();
+  for (const requestedScale of requestedScales) {
+    const roundedScale = Math.round(requestedScale);
+    if (roundedScale > 0 && roundedScale <= size) uniqueScales.add(roundedScale);
+  }
+  const scaleSizes = [...uniqueScales].sort((a, b) => b - a);
   if (scaleSizes.length === 0) scaleSizes.push(size);
 
   const scales = scaleSizes.map((scaleSize): PreparedPerceptualScale => {
-    const reference =
-      scaleSize === size
-        ? Float32Array.from(normalizedReference)
-        : resample2dAreaAverage(normalizedReference, size, size, scaleSize, scaleSize);
+    const scaled = options.validity
+      ? scaleSize === size
+        ? { pixels: Float32Array.from(normalizedReference), validity: Float32Array.from(options.validity) }
+        : resample2dAreaAverageWithValidity(normalizedReference, options.validity, size, size, scaleSize, scaleSize)
+      : {
+          pixels:
+            scaleSize === size
+              ? Float32Array.from(normalizedReference)
+              : resample2dAreaAverage(normalizedReference, size, size, scaleSize, scaleSize),
+          validity: undefined,
+        };
+    const reference = scaled.pixels;
     const mind = computeMindDescriptor2D(reference, scaleSize);
     const safeBorder = Math.max(LOCAL_RADIUS + 1, mind.footprintRadius);
+    const descriptorValidity = scaled.validity
+      ? erodeFractionalSupportSquare(scaled.validity, scaleSize, safeBorder)
+      : undefined;
     const weights = buildReferenceWeights(
       reference,
       scaleSize,
       options.exclusionRect,
-      safeBorder
+      safeBorder,
+      descriptorValidity,
+      options.focusRect ?? options.exclusionRect,
     );
     const gradients = computeCentralGradients(reference, scaleSize);
     let totalWeight = 0;
@@ -410,7 +488,8 @@ function weightedLowerQuartile(histogram: Float64Array, totalWeight: number): nu
 function scoreScale(
   prepared: PreparedPerceptualScale,
   candidate: Float32Array,
-  validity: Float32Array
+  validity: Float32Array,
+  scratch?: PerceptualScoringScratch,
 ): { coverageNumerator: number; components: PerceptualScaleComponents } {
   const {
     size,
@@ -421,13 +500,13 @@ function scoreScale(
     mind: referenceMind,
     totalWeight,
   } = prepared;
-  const candidateMind = computeMindDescriptor2D(candidate, size);
-  const mindAgreement = scoreMindDescriptorAgreement(
-    referenceMind,
-    candidateMind,
-    weights,
-    validity
-  );
+  let descriptorScratch = scratch?.descriptorBySize.get(size);
+  if (scratch && !descriptorScratch) {
+    descriptorScratch = createMindDescriptorScratch(size);
+    scratch.descriptorBySize.set(size, descriptorScratch);
+  }
+  const candidateMind = computeMindDescriptor2D(candidate, size, descriptorScratch);
+  const mindAgreement = scoreMindDescriptorAgreement(referenceMind, candidateMind, weights, validity);
   const candidateGradients = computeCentralGradients(candidate, size);
   let coverageNumerator = 0;
   let csSum = 0;
@@ -508,7 +587,7 @@ function scoreScale(
         clamp01(validity[center - 1] ?? 0),
         clamp01(validity[center + 1] ?? 0),
         clamp01(validity[center - size] ?? 0),
-        clamp01(validity[center + size] ?? 0)
+        clamp01(validity[center + size] ?? 0),
       );
       const referenceDx = referenceGradientX[center] ?? 0;
       const referenceDy = referenceGradientY[center] ?? 0;
@@ -518,13 +597,12 @@ function scoreScale(
       const candidateMagnitudeSquared = candidateDx * candidateDx + candidateDy * candidateDy;
       const dot = referenceDx * candidateDx + referenceDy * candidateDy;
       const ngfDenominator =
-        (referenceMagnitudeSquared + gradientEpsilonSquared) *
-        (candidateMagnitudeSquared + gradientEpsilonSquared);
+        (referenceMagnitudeSquared + gradientEpsilonSquared) * (candidateMagnitudeSquared + gradientEpsilonSquared);
       const ngfAgreement = clamp01((dot * dot) / Math.max(1e-12, ngfDenominator));
       // Flat/flat regions are neutral rather than perfect boundary evidence. The union gate turns
       // on for either a reference or target edge, so target-only boundaries become disagreements.
       const unionGradientGate = clamp01(
-        (referenceMagnitudeSquared + candidateMagnitudeSquared) / (4 * gradientEpsilonSquared)
+        (referenceMagnitudeSquared + candidateMagnitudeSquared) / (4 * gradientEpsilonSquared),
       );
       const mappedNgf = clamp01(0.5 + 0.5 * unionGradientGate * (2 * ngfAgreement - 1));
 
@@ -566,7 +644,8 @@ export function scoreAlignedCandidate(
   preparedReference: PreparedPerceptualReference,
   normalizedAlignedCandidate: Float32Array,
   validity: Float32Array,
-  alignedSize: number
+  alignedSize: number,
+  scratch?: PerceptualScoringScratch,
 ): PerceptualComponents {
   assertSquare(normalizedAlignedCandidate, alignedSize, 'scoreAlignedCandidate candidate');
   assertSquare(validity, alignedSize, 'scoreAlignedCandidate validity');
@@ -583,7 +662,7 @@ export function scoreAlignedCandidate(
             alignedSize,
             alignedSize,
             preparedScale.size,
-            preparedScale.size
+            preparedScale.size,
           );
     const scaleValidity =
       preparedScale.size === alignedSize
@@ -596,7 +675,7 @@ export function scoreAlignedCandidate(
       const sampleValidity = clamp01(scaleValidity[index] ?? 0);
       candidate[index] = sampleValidity > 1e-6 ? (premultipliedCandidate[index] ?? 0) / sampleValidity : 0;
     }
-    const result = scoreScale(preparedScale, candidate, scaleValidity);
+    const result = scoreScale(preparedScale, candidate, scaleValidity, scratch);
     perScale.push(result.components);
     weightedCoverageNumerator += result.coverageNumerator;
     totalReferenceWeight += preparedScale.totalWeight;
@@ -605,6 +684,22 @@ export function scoreAlignedCandidate(
   return {
     coverage: totalReferenceWeight > 0 ? clamp01(weightedCoverageNumerator / totalReferenceWeight) : 0,
     perScale,
+  };
+}
+
+/** Compose acquired-pixel support with geometric support without double-weighting intensity. */
+export function warpPerceptualCandidateWithValidity(
+  normalized: Float32Array,
+  size: number,
+  warp: WarpTransform,
+  acquiredValidity?: Float32Array,
+): { pixels: Float32Array; validity: Float32Array } {
+  if (!acquiredValidity) return warpGrayscaleAffineWithValidity(normalized, size, warp);
+  assertSquare(acquiredValidity, size, 'warpPerceptualCandidateWithValidity validity');
+  const premultiplied = Float32Array.from(normalized, (value, index) => value * clamp01(acquiredValidity[index] ?? 0));
+  return {
+    pixels: warpGrayscaleAffineWithValidity(premultiplied, size, warp).pixels,
+    validity: warpGrayscaleAffineWithValidity(acquiredValidity, size, warp).pixels,
   };
 }
 
@@ -640,20 +735,17 @@ function average(values: readonly number[]): number | null {
   return sum / values.length;
 }
 
-function fusePerceptualRanks(
-  structuralRank: number | null,
-  appearanceRank: number | null,
-  priorRank: number,
-): number {
+function fusePerceptualRanks(structuralRank: number | null, appearanceRank: number | null, priorRank: number): number {
   if (structuralRank != null && appearanceRank != null) {
     return 0.8 * structuralRank + 0.2 * appearanceRank;
   }
   return structuralRank ?? appearanceRank ?? priorRank;
 }
 
-export function choosePerceptualWinner<
-  T extends { index: number; perceptualRank: number },
->(candidates: readonly T[], seedIndex: number): T {
+export function choosePerceptualWinner<T extends { index: number; perceptualRank: number }>(
+  candidates: readonly T[],
+  seedIndex: number,
+): T {
   if (candidates.length === 0) {
     throw new Error('Align All produced no fine slice candidates');
   }
@@ -672,13 +764,15 @@ export function choosePerceptualWinner<
  */
 export function rankFixedCandidateSet<T extends PerceptualCandidate>(
   candidates: readonly T[],
-  seedIndex: number
+  seedIndex: number,
 ): Array<RankedPerceptualCandidate<T>> {
   if (candidates.length === 0) return [];
   const mindByCandidate = candidates.map(() => [] as number[]);
   const appearanceByCandidate = candidates.map(() => [] as number[]);
   const boundaryByCandidate = candidates.map(() => [] as number[]);
-  const scaleKeys = [...new Set(candidates.flatMap((candidate) => candidate.components.perScale.map((scale) => scale.size)))];
+  const scaleKeys = [
+    ...new Set(candidates.flatMap((candidate) => candidate.components.perScale.map((scale) => scale.size))),
+  ];
 
   for (const size of scaleKeys) {
     const mindRanks = midranks(
@@ -691,43 +785,38 @@ export function rankFixedCandidateSet<T extends PerceptualCandidate>(
     }
     for (const metric of ['contrastStructure', 'lncc'] as const) {
       const ranks = midranks(
-        candidates.map((candidate) => candidate.components.perScale.find((scale) => scale.size === size)?.[metric] ?? 0)
+        candidates.map(
+          (candidate) => candidate.components.perScale.find((scale) => scale.size === size)?.[metric] ?? 0,
+        ),
       );
-      if (ranks) for (let index = 0; index < candidates.length; index++) appearanceByCandidate[index]?.push(ranks[index] ?? 0);
+      if (ranks)
+        for (let index = 0; index < candidates.length; index++) appearanceByCandidate[index]?.push(ranks[index] ?? 0);
     }
     const ranks = midranks(
-      candidates.map((candidate) => candidate.components.perScale.find((scale) => scale.size === size)?.ngf ?? 0)
+      candidates.map((candidate) => candidate.components.perScale.find((scale) => scale.size === size)?.ngf ?? 0),
     );
-    if (ranks) for (let index = 0; index < candidates.length; index++) boundaryByCandidate[index]?.push(ranks[index] ?? 0);
+    if (ranks)
+      for (let index = 0; index < candidates.length; index++) boundaryByCandidate[index]?.push(ranks[index] ?? 0);
   }
 
   const mindRanks = mindByCandidate.map(average);
   const appearanceRanks = appearanceByCandidate.map(average);
   const boundaryRanks = boundaryByCandidate.map(average);
   const structuralRanks = candidates.map((_, index) =>
-    average(
-      [mindRanks[index], boundaryRanks[index]].filter(
-        (value): value is number => value !== null,
-      ),
-    ),
+    average([mindRanks[index], boundaryRanks[index]].filter((value): value is number => value !== null)),
   );
   const hasAnyMetricFamily =
-    structuralRanks.some((value) => value !== null) ||
-    appearanceRanks.some((value) => value !== null);
+    structuralRanks.some((value) => value !== null) || appearanceRanks.some((value) => value !== null);
   const priorRanks = hasAnyMetricFamily
     ? null
-    : midranks(candidates.map((candidate) => -Math.abs(candidate.index - seedIndex))) ?? candidates.map(() => 0.5);
+    : (midranks(candidates.map((candidate) => -Math.abs(candidate.index - seedIndex))) ?? candidates.map(() => 0.5));
 
   return candidates.map((candidate, index) => {
     const mindRank = mindRanks[index];
     const appearanceRank = appearanceRanks[index];
     const boundaryRank = boundaryRanks[index];
     const structuralRank = structuralRanks[index];
-    const perceptualRank = fusePerceptualRanks(
-      structuralRank,
-      appearanceRank,
-      priorRanks?.[index] ?? 0.5,
-    );
+    const perceptualRank = fusePerceptualRanks(structuralRank, appearanceRank, priorRanks?.[index] ?? 0.5);
     return {
       ...candidate,
       mindRank: mindRank ?? perceptualRank,

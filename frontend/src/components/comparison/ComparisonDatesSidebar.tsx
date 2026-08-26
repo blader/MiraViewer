@@ -1,4 +1,4 @@
-import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { formatDate } from '../../utils/format';
 
 type ComparisonDatesSidebarProps = {
@@ -12,6 +12,7 @@ type ComparisonDatesSidebarProps = {
   onSelectAllDates: () => void;
   onSelectNoDates: () => void;
   onToggleDate: (date: string) => void;
+  alignmentInProgress?: boolean;
 };
 
 export function ComparisonDatesSidebar({
@@ -23,47 +24,60 @@ export function ComparisonDatesSidebar({
   onSelectAllDates,
   onSelectNoDates,
   onToggleDate,
+  alignmentInProgress = false,
 }: ComparisonDatesSidebarProps) {
   return (
     <>
-      {/* Right sidebar toggle (compact) */}
       <button
+        type="button"
+        disabled={alignmentInProgress}
         onClick={onToggleOpen}
-        className="absolute right-2 top-1/2 -translate-y-1/2 z-20 p-1 rounded-full bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]"
+        aria-label={open ? 'Hide examination dates' : 'Show examination dates'}
+        aria-expanded={open}
+        aria-controls="comparison-dates-panel"
+        className="absolute right-2 top-1/2 z-40 inline-flex min-h-9 min-w-9 -translate-y-1/2 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
         title={open ? 'Hide dates' : 'Show dates'}
       >
         {open ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
       </button>
 
-      {/* Right sidebar - Dates */}
-      <div
-        className={`flex-shrink-0 bg-[var(--bg-secondary)] border-l border-[var(--border-color)] transition-all duration-200 ease-in-out overflow-hidden ${
-          open ? 'w-56' : 'w-0'
+      <aside
+        id="comparison-dates-panel"
+        aria-label="Examination dates"
+        data-open={open}
+        data-side="right"
+        inert={!open}
+        className={`comparison-sidebar shrink-0 overflow-hidden border-l border-[var(--border-color)] bg-[var(--bg-secondary)] ${
+          open ? 'w-48' : 'w-0'
         }`}
       >
-        <div className="w-56 h-full overflow-y-auto p-4">
-          <div className="text-xs uppercase font-semibold text-[var(--text-secondary)] mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CalendarDays className="w-4 h-4" />Dates
-            </div>
-            <div className="flex gap-1">
+        <div className="comparison-sidebar-content h-full w-48 overflow-y-auto px-4 py-6">
+          <div className="mb-4 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+              Examinations
+            </span>
+            <div className="flex items-center gap-1">
               <button
+                type="button"
+                disabled={alignmentInProgress}
                 onClick={onSelectAllDates}
-                className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                className="min-h-8 rounded-[3px] px-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title="Select all dates"
               >
                 All
               </button>
               <button
+                type="button"
+                disabled={alignmentInProgress}
                 onClick={onSelectNoDates}
-                className="px-1.5 py-0.5 text-[10px] rounded bg-[var(--bg-tertiary)] hover:bg-[var(--border-color)] text-[var(--text-secondary)]"
+                className="min-h-8 rounded-[3px] px-1.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title="Deselect all dates"
               >
                 None
               </button>
             </div>
           </div>
-          <div className="space-y-1">
+          <div className="space-y-1 border-l border-[var(--border-color)]">
             {sortedDates.map((d) => {
               const enabled = enabledDates.has(d);
               const hasData = datesWithDataForSequence.has(d);
@@ -71,35 +85,39 @@ export function ComparisonDatesSidebar({
               return (
                 <button
                   key={d}
-                  onMouseDown={(e) => e.preventDefault()}
+                  type="button"
                   onClick={() => onToggleDate(d)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 focus:outline-none ${
+                  disabled={alignmentInProgress || (!hasData && !enabled)}
+                  aria-pressed={enabled}
+                  data-study-state={enabled ? 'selected' : 'available'}
+                  className={`relative flex min-h-11 w-full items-center gap-2 border-l-2 px-3 text-left text-[13px] transition-colors ${
                     enabled
                       ? hasData
-                        ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--accent)] text-white opacity-50'
+                        ? 'border-[var(--signal-metal)] bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
+                        : 'border-[var(--signal-metal)] text-[var(--text-secondary)]'
                       : hasData
-                      ? 'hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                      : 'text-[var(--text-tertiary)] opacity-50'
+                        ? 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]'
+                        : 'border-transparent text-[var(--text-tertiary)]'
                   }`}
                   title={hasData ? undefined : 'No data for selected sequence'}
                 >
                   <span
-                    className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${
+                    aria-hidden="true"
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] border text-xs ${
                       enabled
-                        ? 'bg-white text-[var(--accent)] border-white'
+                        ? 'border-[var(--signal-metal)] text-[var(--signal-metal)]'
                         : 'border-[var(--border-color)]'
                     }`}
                   >
                     {enabled && '✓'}
                   </span>
-                  {formatDate(d)}
+                  <span className="font-[family-name:var(--font-mono)] tabular-nums">{formatDate(d)}</span>
                 </button>
               );
             })}
           </div>
         </div>
-      </div>
+      </aside>
     </>
   );
 }

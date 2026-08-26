@@ -53,12 +53,8 @@ export function yieldToMain(): Promise<void> {
 /**
  * Checks if a voxel coordinate is within the support of trilinear interpolation.
  *
- * For trilinear sampling/splatting, we need both the floor and ceil of each
- * coordinate to be valid indices:
- * - floor >= 0
- * - ceil < dim
- *
- * This is equivalent to: 0 <= coord < dim - 1
+ * Exact final voxel centers are valid samples: interpolation clamps their
+ * unused, zero-weight neighbor to the same boundary voxel.
  *
  * @param dims - Volume dimensions
  * @param x - X coordinate in voxel space
@@ -67,7 +63,7 @@ export function yieldToMain(): Promise<void> {
  * @returns true if the coordinate is within valid trilinear interpolation bounds
  */
 export function withinTrilinearSupport(dims: VolumeDims, x: number, y: number, z: number): boolean {
-  return x >= 0 && y >= 0 && z >= 0 && x < dims.nx - 1 && y < dims.ny - 1 && z < dims.nz - 1;
+  return x >= 0 && y >= 0 && z >= 0 && x <= dims.nx - 1 && y <= dims.ny - 1 && z <= dims.nz - 1;
 }
 
 /**

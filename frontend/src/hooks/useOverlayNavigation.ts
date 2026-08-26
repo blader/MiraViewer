@@ -30,20 +30,21 @@ function readPersistedOverlayNav(): PersistedOverlayNav {
 }
 
 function getUtcDateMs(date: string) {
-  // Expecting YYYY-MM-DD. Use a UTC timestamp to avoid timezone shifts.
-  const parts = date.split('-');
-  if (parts.length !== 3) return null;
-  const year = Number(parts[0]);
-  const month = Number(parts[1]);
-  const day = Number(parts[2]);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
-  return Date.UTC(year, month - 1, day);
+  const timestamp = date.split('#', 1)[0];
+  if (!timestamp) return null;
+  const utcTimestamp =
+    timestamp.includes('T') && !/(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp) ? `${timestamp}Z` : timestamp;
+  const milliseconds = Date.parse(utcTimestamp);
+  return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
 export function useOverlayNavigation(
-  overlayColumns: { date: string; ref?: SeriesRef }[]
+  overlayColumns: { date: string; ref?: SeriesRef }[],
+  options: { interactionBlocked?: boolean } = {},
 ) {
-  const persistedRef = useRef<PersistedOverlayNav>(readPersistedOverlayNav());
+  const { interactionBlocked = false } = options;
+  const [initialPersistedNav] = useState(readPersistedOverlayNav);
+  const persistedRef = useRef<PersistedOverlayNav>(initialPersistedNav);
 
   const persist = useCallback((update: PersistedOverlayNav) => {
     const next: PersistedOverlayNav = { ...persistedRef.current, ...update };
@@ -51,19 +52,25 @@ export function useOverlayNavigation(
     writeLocalStorageJson(OVERLAY_NAV_STORAGE_KEY, next);
   }, []);
 
-  const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(() => {
-    const restored = readPersistedOverlayNav().viewMode;
-    return restored === 'overlay' ? 'overlay' : restored === 'svr3d' ? 'svr3d' : 'grid';
+  const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(initialPersistedNav.viewMode ?? 'grid');
+  const [overlayDateNavigation, setOverlayDateNavigation] = useState<{ current: number; previous: number | null }>({
+    current: 0,
+    previous: null,
   });
-  const [overlayDateIndex, setOverlayDateIndexState] = useState(0);
-  const [previousOverlayDateIndex, setPreviousOverlayDateIndex] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeedState] = useState(() => {
-    return readPersistedOverlayNav().playSpeed ?? 1000;
-  }); // ms between frames
+  const [playSpeed, setPlaySpeedState] = useState(initialPersistedNav.playSpeed ?? 1000); // ms between frames
 
   // Track spacebar held state for compare feature
   const [spaceHeld, setSpaceHeld] = useState(false);
+
+  useEffect(() => {
+    if (!interactionBlocked) return;
+    const timer = window.setTimeout(() => {
+      setSpaceHeld(false);
+      setIsPlaying(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [interactionBlocked]);
 
   const setViewMode = useCallback((next: 'grid' | 'overlay' | 'svr3d') => {
     setViewModeState(next);
@@ -92,21 +99,18 @@ export function useOverlayNavigation(
 
   const setOverlayDateIndex = useCallback(
     (next: number | ((prev: number) => number)) => {
-      setOverlayDateIndexState((prev) => {
-        const safePrev = Math.max(0, Math.min(maxOverlayIndex, prev));
+      setOverlayDateNavigation((previous) => {
+        const safePrev = Math.max(0, Math.min(maxOverlayIndex, previous.current));
         const resolved = typeof next === 'function' ? next(safePrev) : next;
         const clamped = Math.max(0, Math.min(maxOverlayIndex, resolved));
-        if (clamped !== safePrev) {
-          setPreviousOverlayDateIndex(safePrev);
-        }
-        return clamped;
+        return clamped === safePrev ? previous : { current: clamped, previous: safePrev };
       });
     },
-    [maxOverlayIndex]
+    [maxOverlayIndex],
   );
 
   // Read-only, clamped indices (avoid setState in effects when columns shrink).
-  const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateIndex));
+  const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.current));
 
   // Hydrate the overlay date from storage (once) after we know which dates are available.
   // If we do restore, skip the first persist pass so we don't overwrite the stored value
@@ -132,13 +136,13 @@ export function useOverlayNavigation(
     const idx = overlayColumns.findIndex((c) => c.date === stored);
     if (idx >= 0 && idx !== safeOverlayDateIndex) {
       skipNextPersistOverlayDateRef.current = true;
-      setOverlayDateIndexState(idx);
+      setOverlayDateNavigation((previous) => ({ ...previous, current: idx }));
     }
   }, [overlayColumns, safeOverlayDateIndex]);
   const safePreviousOverlayDateIndex =
-    previousOverlayDateIndex === null
+    overlayDateNavigation.previous === null
       ? null
-      : Math.max(0, Math.min(maxOverlayIndex, previousOverlayDateIndex));
+      : Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.previous));
 
   // Space-hold compare behavior:
   // - Prefer the actual navigation history (previousOverlayDateIndex)
@@ -177,7 +181,7 @@ export function useOverlayNavigation(
       ? safePreviousOverlayDateIndex
       : fallbackCompareIndex;
 
-  const displayedOverlayIndex = spaceHeld ? compareTargetIndex : safeOverlayDateIndex;
+  const displayedOverlayIndex = spaceHeld && !interactionBlocked ? compareTargetIndex : safeOverlayDateIndex;
 
   // Persist the currently-selected date (not the displayed compare date).
   useEffect(() => {
@@ -193,20 +197,26 @@ export function useOverlayNavigation(
 
   // Auto-play effect for overlay mode
   useEffect(() => {
-    if (!isPlaying || viewMode !== 'overlay' || overlayColumns.length < 2) return;
+    if (interactionBlocked || !isPlaying || viewMode !== 'overlay' || overlayColumns.length < 2) return;
     const interval = setInterval(() => {
       setOverlayDateIndex((prev) => (prev + 1) % overlayColumns.length);
     }, playSpeed);
     return () => clearInterval(interval);
-  }, [isPlaying, viewMode, overlayColumns.length, playSpeed, setOverlayDateIndex]);
-  
+  }, [interactionBlocked, isPlaying, viewMode, overlayColumns.length, playSpeed, setOverlayDateIndex]);
+
   // Keyboard shortcuts for overlay mode
   useEffect(() => {
-    if (viewMode !== 'overlay') return;
+    if (interactionBlocked || viewMode !== 'overlay') return;
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore if focus is on an input, select, or textarea
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA') {
+      const target = e.target instanceof HTMLElement ? e.target : document.body;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'SELECT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable ||
+        target.closest('[role="dialog"], [aria-modal="true"]')
+      ) {
         return;
       }
 
@@ -220,11 +230,11 @@ export function useOverlayNavigation(
       }
       // Arrow keys for prev/next
       if (e.key === 'ArrowLeft') {
-        setOverlayDateIndex(prev => Math.max(0, prev - 1));
+        setOverlayDateIndex((prev) => Math.max(0, prev - 1));
         setIsPlaying(false);
       }
       if (e.key === 'ArrowRight') {
-        setOverlayDateIndex(prev => Math.min(overlayColumns.length - 1, prev + 1));
+        setOverlayDateIndex((prev) => Math.min(overlayColumns.length - 1, prev + 1));
         setIsPlaying(false);
       }
       // Space: hold to show comparison target (history previous; otherwise nearest adjacent date)
@@ -237,7 +247,7 @@ export function useOverlayNavigation(
         target.blur();
       }
     };
-    
+
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === ' ') {
         setSpaceHeld(false);
@@ -247,7 +257,7 @@ export function useOverlayNavigation(
     const handleBlur = () => {
       setSpaceHeld(false);
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur);
@@ -256,7 +266,7 @@ export function useOverlayNavigation(
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [viewMode, overlayColumns.length, setOverlayDateIndex]);
+  }, [interactionBlocked, viewMode, overlayColumns.length, setOverlayDateIndex]);
 
   return {
     viewMode,
@@ -267,7 +277,7 @@ export function useOverlayNavigation(
     // when the user holds Space.
     compareTargetIndex,
     displayedOverlayIndex,
-    isPlaying,
+    isPlaying: interactionBlocked ? false : isPlaying,
     setIsPlaying,
     playSpeed,
     setPlaySpeed,

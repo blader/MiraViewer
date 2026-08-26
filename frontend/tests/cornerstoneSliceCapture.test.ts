@@ -33,7 +33,7 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
   test('rejects promptly when lookup is aborted', async () => {
     mocks.getImageIdForInstance.mockReturnValue(pendingPromise<string>());
     const controller = new AbortController();
-    const capture = renderSliceToPixels(document.createElement('div'), 'series', 7, 128, undefined, {
+    const capture = renderSliceToPixels('series', 7, 128, {
       signal: controller.signal,
     });
 
@@ -55,7 +55,7 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
     vi.useFakeTimers();
     mocks.getImageIdForInstance.mockReturnValue(pendingPromise<string>());
     let outcome: unknown = 'still-pending';
-    void renderSliceToPixels(document.createElement('div'), 'series', 7).then(
+    void renderSliceToPixels('series', 7).then(
       () => {
         outcome = 'resolved';
       },
@@ -75,7 +75,7 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
     mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
     mocks.loadImage.mockReturnValue(pendingPromise());
     const controller = new AbortController();
-    const capture = renderSliceToPixels(document.createElement('div'), 'series', 7, 128, undefined, {
+    const capture = renderSliceToPixels('series', 7, 128, {
       signal: controller.signal,
     });
     await vi.waitFor(() => expect(mocks.loadImage).toHaveBeenCalledTimes(1));
@@ -98,7 +98,7 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
     mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
     mocks.loadImage.mockReturnValue(pendingPromise());
     let outcome: unknown = 'still-pending';
-    void renderSliceToPixels(document.createElement('div'), 'series', 7).then(
+    void renderSliceToPixels('series', 7).then(
       () => {
         outcome = 'resolved';
       },
@@ -112,5 +112,41 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
 
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toMatch(/load.*timed out/i);
+  });
+
+  test('reads modality-scaled source pixels without rendering or quantizing the display', async () => {
+    mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
+    mocks.loadImage.mockResolvedValue({
+      imageId: 'wadouri:decoded-instance',
+      rows: 2,
+      columns: 2,
+      slope: 2,
+      intercept: -100,
+      getPixelData: () => new Uint16Array([100, 512, 1000, 4095]),
+    });
+
+    const result = await renderSliceToPixels('series', 0, 2);
+
+    expect(Array.from(result.pixels)).toEqual([100, 924, 1900, 8090]);
+    expect(result.imageId).toBe('miradb:instance');
+    expect(result.timingMs.capture).toBeGreaterThanOrEqual(0);
+  });
+
+  test('carries stored-domain padding support through registration capture', async () => {
+    mocks.getImageIdForInstance.mockResolvedValue('miradb:instance');
+    mocks.loadImage.mockResolvedValue({
+      imageId: 'miradb:instance',
+      rows: 2,
+      columns: 2,
+      slope: 2,
+      intercept: 1000,
+      pixelPaddingValue: -2000,
+      getPixelData: () => Int16Array.from([-2000, 100, 200, -2000]),
+    });
+
+    const result = await renderSliceToPixels('series', 0, 2);
+
+    expect(Array.from(result.pixels)).toEqual([0, 1200, 1400, 0]);
+    expect(Array.from(result.validity ?? [])).toEqual([0, 1, 1, 0]);
   });
 });

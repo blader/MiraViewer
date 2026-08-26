@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
 import { CONTROL_LIMITS } from '../../utils/constants';
 import { clamp01 } from '../../utils/math';
@@ -27,7 +27,73 @@ export type SliceLoopNavigatorProps = {
   progressRef: React.MutableRefObject<number>;
   /** Setter for progress. */
   setProgress: (nextProgress: number) => void;
+  /** Modal dialogs and active registration own navigation until they complete. */
+  interactionBlocked?: boolean;
 };
+
+type LoopRangeHandlesProps = {
+  loopStart: number;
+  loopEnd: number;
+  playbackInstanceCount: number;
+  interactionBlocked: boolean;
+  draggingPointerIdRef: React.MutableRefObject<number | null>;
+  setDraggingHandle: (handle: 'start' | 'end') => void;
+  updateLoop: (nextStart: number, nextEnd: number) => void;
+};
+
+function LoopRangeHandles({
+  loopStart,
+  loopEnd,
+  playbackInstanceCount,
+  interactionBlocked,
+  draggingPointerIdRef,
+  setDraggingHandle,
+  updateLoop,
+}: LoopRangeHandlesProps) {
+  return (['start', 'end'] as const).map((handle) => {
+    const pos = handle === 'start' ? loopStart : loopEnd;
+
+    return (
+      <button
+        key={handle}
+        type="button"
+        role="slider"
+        aria-label={handle === 'start' ? 'Loop start position' : 'Loop end position'}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pos * 100)}
+        disabled={interactionBlocked}
+        className="absolute top-1/2 inline-flex min-h-8 min-w-6 -translate-x-1/2 -translate-y-1/2 touch-none cursor-ew-resize items-center justify-center rounded-[2px] bg-transparent [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+        style={{ left: `${pos * 100}%` }}
+        onPointerDown={(event) => {
+          if (interactionBlocked || (event.button !== undefined && event.button !== 0)) return;
+          event.preventDefault();
+          draggingPointerIdRef.current = event.pointerId ?? null;
+          setDraggingHandle(handle);
+        }}
+        onKeyDown={(event) => {
+          const direction =
+            event.key === 'ArrowLeft' || event.key === 'ArrowDown'
+              ? -1
+              : event.key === 'ArrowRight' || event.key === 'ArrowUp'
+                ? 1
+                : 0;
+          if (direction === 0) return;
+          event.preventDefault();
+          const step = direction / Math.max(1, playbackInstanceCount - 1);
+          if (handle === 'start') updateLoop(loopStart + step, loopEnd);
+          else updateLoop(loopStart, loopEnd + step);
+        }}
+        title={handle === 'start' ? 'Loop start' : 'Loop end'}
+      >
+        <span
+          aria-hidden="true"
+          className="h-6 w-2 rounded-[2px] border border-[var(--signal-metal)] bg-[var(--bg-secondary)]"
+        />
+      </button>
+    );
+  });
+}
 
 export function SliceLoopNavigator({
   selectedSeqId,
@@ -35,6 +101,7 @@ export function SliceLoopNavigator({
   progress,
   progressRef,
   setProgress,
+  interactionBlocked = false,
 }: SliceLoopNavigatorProps) {
   // Loop playback for slice navigation
   const [loopStart, setLoopStart] = useState(0);
@@ -47,8 +114,15 @@ export function SliceLoopNavigator({
   const loopStepAccumRef = useRef(0);
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
+  const draggingPointerIdRef = useRef<number | null>(null);
 
   const playbackHydratedSeqIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!interactionBlocked) return;
+    const timer = window.setTimeout(() => setIsLooping(false), 0);
+    return () => window.clearTimeout(timer);
+  }, [interactionBlocked]);
 
   // Hydrate playback settings when the user switches sequence combos.
   // Layout effect prevents a one-frame flash of the previous combo's handles.
@@ -93,12 +167,21 @@ export function SliceLoopNavigator({
       progressRef.current = clamped;
       setProgress(clamped);
     },
-    [progressRef, setProgress]
+    [progressRef, setProgress],
   );
+
+  const moveDraggedHandle = useEffectEvent((event: PointerEvent) => {
+    if (draggingPointerIdRef.current !== null && event.pointerId !== draggingPointerIdRef.current) return;
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const position = clamp01((event.clientX - rect.left) / rect.width);
+    if (draggingHandle === 'start') updateLoop(position, loopEnd);
+    else if (draggingHandle === 'end') updateLoop(loopStart, position);
+  });
 
   // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
   useEffect(() => {
-    if (!isLooping) {
+    if (!isLooping || interactionBlocked) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       lastTsRef.current = null;
@@ -165,7 +248,7 @@ export function SliceLoopNavigator({
       lastTsRef.current = null;
       loopStepAccumRef.current = 0;
     };
-  }, [isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, progressRef, setProgress]);
+  }, [interactionBlocked, isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, progressRef, setProgress]);
 
   // Stop looping if bounds collapse
   useEffect(() => {
@@ -179,33 +262,36 @@ export function SliceLoopNavigator({
   useEffect(() => {
     if (!draggingHandle) return;
 
-    const handleMove = (e: MouseEvent) => {
-      const rect = trackRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const pct = clamp01((e.clientX - rect.left) / rect.width);
-      if (draggingHandle === 'start') {
-        updateLoop(pct, loopEnd);
-      } else {
-        updateLoop(loopStart, pct);
-      }
+    const handleMove = (event: PointerEvent) => moveDraggedHandle(event);
+
+    const handleUp = (e: PointerEvent) => {
+      if (draggingPointerIdRef.current !== null && e.pointerId !== draggingPointerIdRef.current) return;
+      draggingPointerIdRef.current = null;
+      setDraggingHandle(null);
     };
 
-    const handleUp = () => setDraggingHandle(null);
-
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
-  }, [draggingHandle, loopEnd, loopStart, updateLoop]);
+  }, [draggingHandle]);
+
+  const currentSlice =
+    playbackInstanceCount > 0 ? Math.round(clamp01(progress) * (playbackInstanceCount - 1)) + 1 : null;
 
   return (
-    <div className="px-4 py-3 bg-[var(--bg-secondary)] border-t border-[var(--border-color)] flex items-center gap-4">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:flex-nowrap sm:gap-5">
+      <div className="flex shrink-0 items-center gap-1">
         <button
           type="button"
-          className={`p-2 rounded-md border border-[var(--border-color)] ${isLooping ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+          aria-label={isLooping && !interactionBlocked ? 'Pause slice playback' : 'Play slices'}
+          aria-pressed={isLooping && !interactionBlocked}
+          disabled={interactionBlocked || currentSlice === null}
+          className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border disabled:cursor-not-allowed disabled:opacity-50 ${isLooping && !interactionBlocked ? 'border-[var(--signal-metal)] bg-[var(--bg-tertiary)] text-[var(--signal-metal)]' : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
           onClick={() => {
             // Ensure loop window has size before starting
             const minGap = 0.02;
@@ -220,12 +306,15 @@ export function SliceLoopNavigator({
         >
           {isLooping ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
         </button>
-        <div className="flex items-center gap-1 text-[10px] text-[var(--text-secondary)]">
+        <div className="flex items-center text-xs text-[var(--text-secondary)]">
           {[1, 2, 4].map((s) => (
             <button
               key={s}
               type="button"
-              className={`px-2 py-1 rounded border text-[10px] ${loopSpeed === s ? 'bg-[var(--accent)] text-white border-[var(--accent)]' : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-color)]'}`}
+              aria-label={`Playback speed ${s} times`}
+              aria-pressed={loopSpeed === s}
+              disabled={interactionBlocked || currentSlice === null}
+              className={`min-h-9 min-w-8 rounded-[3px] px-1 font-[family-name:var(--font-mono)] text-xs disabled:cursor-not-allowed disabled:opacity-50 ${loopSpeed === s ? 'text-[var(--signal-metal)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
               onClick={() => setLoopSpeed(s as 1 | 2 | 4)}
             >
               {s}x
@@ -234,13 +323,17 @@ export function SliceLoopNavigator({
         </div>
       </div>
 
-      <div className="text-xs text-[var(--text-secondary)] whitespace-nowrap">Slice</div>
+      <div className="shrink-0 whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
+        {currentSlice === null ? 'No slices' : `Slice ${currentSlice} / ${playbackInstanceCount}`}
+      </div>
 
-      <div className="relative flex-1 h-8" ref={trackRef}>
-        {/* Highlighted loop window */}
-        <div className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--bg-tertiary)] w-full" aria-hidden />
+      <div
+        className="relative order-3 h-11 min-w-12 basis-full sm:order-none sm:h-9 sm:flex-1 sm:basis-auto"
+        ref={trackRef}
+      >
+        <div className="absolute top-1/2 h-px w-full -translate-y-1/2 bg-[var(--border-color)]" aria-hidden />
         <div
-          className="absolute top-1/2 -translate-y-1/2 h-2 rounded bg-[var(--accent)] opacity-40"
+          className="absolute top-1/2 h-px -translate-y-1/2 bg-[var(--signal-metal)] opacity-70"
           style={{
             left: `${loopStart * 100}%`,
             width: `${Math.max(0, loopEnd - loopStart) * 100}%`,
@@ -248,42 +341,41 @@ export function SliceLoopNavigator({
           aria-hidden
         />
 
-        {/* Main progress slider */}
         <input
           type="range"
           min={0}
           max={CONTROL_LIMITS.SLICE_NAV.MAX_RANGE}
           step={1}
+          disabled={interactionBlocked || currentSlice === null}
           value={Math.round(progress * CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
           onChange={(e) => setProgress(parseInt(e.target.value, 10) / CONTROL_LIMITS.SLICE_NAV.MAX_RANGE)}
-          className="absolute inset-0 w-full h-8 opacity-0 cursor-pointer"
+          className="slice-position-input absolute inset-0 h-9 w-full cursor-pointer opacity-0"
           aria-label="Slice position"
+          aria-valuetext={
+            currentSlice === null ? 'No slices available' : `Slice ${currentSlice} of ${playbackInstanceCount}`
+          }
         />
 
-        {/* Visible thumb for current position */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-[var(--text-primary)] rounded pointer-events-none"
-          style={{ left: `calc(${progress * 100}% - 4px)` }}
-          aria-hidden
-        />
+        {currentSlice !== null ? (
+          <div
+            data-registration-datum="slice-position"
+            className="slice-position-thumb pointer-events-none absolute top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-[1px] bg-[var(--signal-metal)]"
+            style={{ left: `calc(${clamp01(progress) * 100}% - 1.5px)` }}
+            aria-hidden
+          />
+        ) : null}
 
-        {/* Loop handles */}
-        {(['start', 'end'] as const).map((handle) => {
-          const pos = handle === 'start' ? loopStart : loopEnd;
-          return (
-            <button
-              key={handle}
-              type="button"
-              className="absolute top-1/2 -translate-y-1/2 w-3 h-5 bg-white border border-[var(--accent)] rounded cursor-ew-resize"
-              style={{ left: `calc(${pos * 100}% - 6px)` }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                setDraggingHandle(handle);
-              }}
-              title={handle === 'start' ? 'Loop start' : 'Loop end'}
-            />
-          );
-        })}
+        {currentSlice !== null ? (
+          <LoopRangeHandles
+            loopStart={loopStart}
+            loopEnd={loopEnd}
+            playbackInstanceCount={playbackInstanceCount}
+            interactionBlocked={interactionBlocked}
+            draggingPointerIdRef={draggingPointerIdRef}
+            setDraggingHandle={setDraggingHandle}
+            updateLoop={updateLoop}
+          />
+        ) : null}
       </div>
     </div>
   );

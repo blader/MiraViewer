@@ -33,7 +33,7 @@ describe('useGlobalSliceWheelNavigation', () => {
         contextRef,
         progressRef,
         setProgressRef,
-      })
+      }),
     );
 
     const ev = new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true });
@@ -65,7 +65,7 @@ describe('useGlobalSliceWheelNavigation', () => {
         contextRef,
         progressRef,
         setProgressRef,
-      })
+      }),
     );
 
     const ev = new WheelEvent('wheel', { deltaY: 1, ctrlKey: true, cancelable: true, bubbles: true });
@@ -97,7 +97,7 @@ describe('useGlobalSliceWheelNavigation', () => {
         contextRef,
         progressRef,
         setProgressRef,
-      })
+      }),
     );
 
     const ev = new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true });
@@ -127,7 +127,7 @@ describe('useGlobalSliceWheelNavigation', () => {
         contextRef,
         progressRef,
         setProgressRef,
-      })
+      }),
     );
 
     const ev = new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true });
@@ -170,7 +170,7 @@ describe('useGlobalSliceWheelNavigation', () => {
         contextRef,
         progressRef,
         setProgressRef,
-      })
+      }),
     );
 
     const ev = new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true });
@@ -178,5 +178,39 @@ describe('useGlobalSliceWheelNavigation', () => {
 
     expect(onSetProgress).not.toHaveBeenCalled();
     expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it('does not change the displayed slice while registration or a modal owns interaction', () => {
+    const centerPane = document.createElement('div');
+    const target = document.createElement('div');
+    centerPane.appendChild(target);
+    document.body.appendChild(centerPane);
+
+    const centerPaneRef = { current: centerPane } as React.RefObject<HTMLElement>;
+    const contextRef = { current: { instanceCount: 10, offset: 0 } };
+    const progressRef = { current: 0.5 };
+    const onSetProgress = vi.fn();
+    const setProgressRef = { current: onSetProgress };
+
+    const { rerender } = renderHook(
+      ({ blocked }) =>
+        useGlobalSliceWheelNavigation({
+          centerPaneRef,
+          contextRef,
+          progressRef,
+          setProgressRef,
+          interactionBlocked: blocked,
+        }),
+      { initialProps: { blocked: true } },
+    );
+
+    const blockedEvent = new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true });
+    target.dispatchEvent(blockedEvent);
+    expect(onSetProgress).not.toHaveBeenCalled();
+    expect(blockedEvent.defaultPrevented).toBe(false);
+
+    rerender({ blocked: false });
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, cancelable: true, bubbles: true }));
+    expect(onSetProgress).toHaveBeenCalledOnce();
   });
 });

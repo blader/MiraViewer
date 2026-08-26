@@ -1,3 +1,6 @@
+import type { DerivedAlignmentFramePresentation } from '../db/schema';
+import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Comparison view types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,6 +18,30 @@ export interface SeriesRef {
   study_id: string;
   series_uid: string;
   instance_count: number;
+  /** Stable identity of the patient that owns this series. */
+  patient_key?: string;
+  /** Explicit spatial frame; distinct longitudinal frames are not directly comparable. */
+  frame_of_reference_uid?: string;
+  /** The selected examination's canonical study UID. */
+  study_uid?: string;
+  acquisition_time?: string;
+  rows?: number;
+  columns?: number;
+  pixel_spacing?: [number, number];
+}
+
+export interface ComparisonPatient {
+  key: string;
+  patient_id: string;
+  patient_name: string;
+  study_count: number;
+}
+
+export interface ComparisonExamination {
+  study_uid: string;
+  date_iso: string;
+  acquisition_time?: string;
+  patient_key: string;
 }
 
 export interface ComparisonData {
@@ -22,6 +49,12 @@ export interface ComparisonData {
   dates: string[]; // ISO date strings
   sequences: SequenceCombo[];
   series_map: Record<string, Record<string, SeriesRef>>; // comboId -> dateISO -> ref
+  /** Authoritative patient choices returned by the local database. */
+  patients?: ComparisonPatient[];
+  selected_patient_key?: string | null;
+  dataset_revision?: number;
+  /** Examination identity keyed by the visible comparison-column key. */
+  examinations?: Record<string, ComparisonExamination>;
 }
 
 // Persisted per-date viewer settings for a specific sequence combo.
@@ -95,6 +128,15 @@ export interface AlignmentReference {
   seriesUid: string;
   sliceIndex: number; // Instance index on reference date
   sliceCount: number; // Total slices in reference series
+  patientKey?: string;
+  sequenceId?: string;
+  studyUid?: string;
+  frameOfReferenceUid?: string;
+  datasetRevision?: number;
+  /** Actual viewer dimensions used to translate image-space results into panel pan. */
+  viewportSize?: { width: number; height: number };
+  /** Native image dimensions before contain/letterbox presentation. */
+  imageSize?: { width: number; height: number };
 
   // Settings that should be used as the *base* view transform for aligned targets.
   // (Targets get a recovered delta transform composed on top of these settings.)
@@ -105,6 +147,9 @@ export interface AlignmentReference {
    * Pixels inside this rect are ignored when computing MI/NMI for slice search and registration.
    */
   exclusionMask?: ExclusionMask;
+
+  /** Explicit opt-in: inspect the marked tissue only when choosing its through-plane location. */
+  alignmentFocus?: 'anatomy' | 'tumor';
 }
 
 // Result of aligning a single date to the reference.
@@ -116,6 +161,46 @@ export interface AlignmentResult {
   nmiScore: number;
   computedSettings: PanelSettings;
   slicesChecked: number; // For debugging/stats
+  /** Immutable producing-operation and target identities. */
+  runId?: string;
+  patientKey?: string;
+  sequenceId?: string;
+  referenceSeriesUid?: string;
+  datasetRevision?: number;
+  outputGrid?: OutputPlaneGrid;
+  outcome?: 'aligned' | 'ambiguous' | 'insufficient-overlap' | 'incompatible-geometry' | 'failed' | 'cancelled';
+  message?: string;
+  /** Explicit evidence, never a claim of clinical correctness probability. */
+  evidence?: {
+    structuralScore: number;
+    runnerUpGap: number;
+    coverage: number;
+    geometryMode: 'registered-3d' | 'physical-2d' | 'fallback-2d';
+    planeAngleDegrees?: number;
+    maximumNativePlaneDriftMm?: number;
+    /** Actual acquired through-plane spacing and contiguous native frames used by the derived presentation. */
+    presentationSliceSpacingMm?: number;
+    presentationSourceFrameCount?: number;
+    forwardAnatomicalSupport?: number;
+    reverseAnatomicalSupport?: number;
+    outputPlaneSupport?: number;
+    requiredRegionSupport?: number;
+    effectiveSampleCount?: number;
+    heldOutSampleCount?: number;
+    effectiveIndependentSamples?: number;
+    heldOutEffectiveIndependentSamples?: number;
+    minimumDistinguishableScoreMargin?: number;
+    inverseConsistencyError?: number;
+    outputGridFingerprint?: string;
+    translationMm?: [number, number, number];
+    rotationDegrees?: [number, number, number];
+  };
+  /** Verified rigidly resliced frame, explicitly identified as derived presentation. */
+  derivedFrame?: DerivedAlignmentFramePresentation & {
+    targetStudyUid?: string;
+    rigidTransform?: [number, number, number, number, number, number];
+    rotationCenterMm?: [number, number, number];
+  };
 }
 
 // Progress update during alignment.

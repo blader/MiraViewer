@@ -153,12 +153,6 @@ export function buildStructuralPhaseImageSquare(pixels: Float32Array, size: numb
   return output;
 }
 
-export type InclusionMaskBuildResult = {
-  mask: Uint8Array;
-  includedCount: number;
-  includedFrac: number;
-};
-
 export function buildSoftForegroundSupportSquare(
   pixels: Float32Array,
   size: number,
@@ -233,41 +227,4 @@ export function inpaintExclusionRectSquare(
     pixels: output,
     excludedFrac: ((x1 - x0) * (y1 - y0)) / (size * size),
   };
-}
-
-/**
- * Build a simple inclusion mask that keeps pixels above a fixed threshold.
- *
- * Returns null if the mask would be too sparse (so callers can fall back to "no mask").
- */
-export function buildInclusionMaskFromThresholdSquare(
-  pixels: Float32Array,
-  size: number,
-  threshold: number,
-  opts?: {
-    /** If includedFrac falls below this, return null. Default: 0.05 (5%). */
-    minIncludedFrac?: number;
-  },
-): InclusionMaskBuildResult | null {
-  assertSquareSize(pixels, size, 'buildInclusionMaskFromThresholdSquare');
-
-  const minIncludedFrac = opts?.minIncludedFrac ?? 0.05;
-
-  const mask = new Uint8Array(pixels.length);
-  let includedCount = 0;
-
-  for (let i = 0; i < pixels.length; i++) {
-    if ((pixels[i] ?? 0) > threshold) {
-      mask[i] = 1;
-      includedCount++;
-    }
-  }
-
-  const includedFrac = includedCount / Math.max(1, pixels.length);
-
-  if (!Number.isFinite(includedFrac) || includedFrac < minIncludedFrac) {
-    return null;
-  }
-
-  return { mask, includedCount, includedFrac };
 }

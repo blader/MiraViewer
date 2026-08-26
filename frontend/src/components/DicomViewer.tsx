@@ -6,13 +6,20 @@ import {
   useLayoutEffect,
   useCallback,
   useImperativeHandle,
+  useSyncExternalStore,
 } from 'react';
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
 import { getEffectiveInstanceIndex } from '../utils/math';
 import { CONTROL_LIMITS } from '../utils/constants';
-import { isDebugAlignmentEnabled } from '../utils/debugAlignment';
+import {
+  isDebugAlignmentEnabled,
+  isDebugAlignmentKeyHeld,
+  subscribeToDebugAlignmentKey,
+} from '../utils/debugAlignment';
 import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
+import { getDecodedFrame as loadDecodedFrame, loadCornerstoneImage, type DecodedFrame } from '../utils/decodedFrame';
+import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -34,6 +41,9 @@ export type DicomViewerHandle = {
    * This is useful because Cornerstone keeps the previous image visible while the next slice loads.
    */
   waitForDisplayedContentKey: (expectedKey: string, timeoutMs?: number) => Promise<void>;
+
+  /** Exact full-precision decoded DICOM frame; segmentation must never use a display screenshot. */
+  getDecodedFrame: () => Promise<DecodedFrame & { viewportSize: { w: number; h: number } }>;
 };
 
 function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
@@ -64,6 +74,8 @@ interface DicomViewerProps {
   instanceIndex: number;
   instanceCount: number;
   onInstanceChange: (index: number) => void;
+  /** Prevent any viewer-local scrolling or zoom from mutating an in-flight alignment reference. */
+  interactionBlocked?: boolean;
   /** If true, reverse through-plane order (logical 0 maps to last DICOM instance). */
   reverseSliceOrder?: boolean;
   /** If provided, this image URL will be displayed instead of the DICOM slice URL. */
@@ -123,187 +135,45 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
   );
 }
 
-export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(function DicomViewer(
-  {
-    studyId,
-    seriesUid,
-    instanceIndex,
-    instanceCount,
-    onInstanceChange,
-    reverseSliceOrder = false,
-    imageUrlOverride,
-    brightness = 100,
-    contrast = 100,
-    zoom = 1,
-    rotation = 0,
-    panX = 0,
-    panY = 0,
-    affine00 = 1,
-    affine01 = 0,
-    affine10 = 0,
-    affine11 = 1,
-    onPanChange,
-    onZoomChange,
-  }: DicomViewerProps,
-  ref
-) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+type DicomViewerHandleOptions = {
+  ref: React.ForwardedRef<DicomViewerHandle>;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  imgRef: React.RefObject<HTMLImageElement | null>;
+  displayedContentKeyRef: React.RefObject<string | null>;
+  derivedFrame: ReturnType<typeof getDerivedAlignmentFrame>;
+  seriesUid: string;
+  effectiveInstanceIndex: number;
+  affine00: number;
+  affine01: number;
+  affine10: number;
+  affine11: number;
+  brightness: number;
+  contrast: number;
+  panX: number;
+  panY: number;
+  rotation: number;
+  zoom: number;
+};
 
-  // Mouse wheel behavior:
-  // - Plain wheel events advance slices, matching the center-pane global wheel behavior.
-  // - Cmd+wheel zooms the hovered image when zoom control is available.
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
-
-      if (e.metaKey && onZoomChange) {
-        e.preventDefault();
-
-        const speed = (() => {
-          // deltaMode: 0=pixels, 1=lines, 2=pages
-          if (e.deltaMode === 1) return 0.08;
-          if (e.deltaMode === 2) return 0.25;
-          return 0.0015;
-        })();
-
-        const factor = Math.exp(-e.deltaY * speed);
-        let nextZoom = zoom * factor;
-        nextZoom = Math.max(CONTROL_LIMITS.ZOOM.MIN, Math.min(CONTROL_LIMITS.ZOOM.MAX, nextZoom));
-
-        // Reduce churn from very small deltas.
-        nextZoom = Math.round(nextZoom * 1000) / 1000;
-
-        if (nextZoom !== zoom) {
-          onZoomChange(nextZoom);
-        }
-
-        return;
-      }
-
-      // Trackpad pinch-zoom sends ctrlKey wheel events; don't interpret that as slice scrolling.
-      if (e.ctrlKey) return;
-
-      if (instanceCount <= 0) return;
-      e.preventDefault();
-      const delta = Math.sign(e.deltaY);
-      const nextIndex = Math.max(0, Math.min(instanceCount - 1, instanceIndex + delta));
-      if (nextIndex !== instanceIndex) {
-        onInstanceChange(nextIndex);
-      }
-    };
-
-    el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
-  }, [instanceCount, instanceIndex, onInstanceChange, onZoomChange, zoom]);
-
-  const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
-
-  // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
-  const [imageId, setImageId] = useState<string | null>(null);
-
-  // Track what slice is actually displayed in the viewer.
-  // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
-  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
-  const displayedContentKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    displayedContentKeyRef.current = displayedContentKey;
-  }, [displayedContentKey]);
-
-  const debugSliceScores = isDebugAlignmentEnabled();
-
-  // Only show the (very noisy) per-slice debug scores overlay while the user is holding 'Z'.
-  // This keeps the UI clean while still making it easy to inspect values on demand.
-  const [isZHeld, setIsZHeld] = useState(false);
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const isZKey = (e: KeyboardEvent) => (e.key || '').toLowerCase() === 'z';
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      // Ignore cmd/ctrl/alt modified combos (e.g. Cmd+Z) so we don't flash the overlay
-      // during common shortcuts.
-      if (!isZKey(e)) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      setIsZHeld(true);
-    };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (!isZKey(e)) return;
-      setIsZHeld(false);
-    };
-
-    const onBlur = () => {
-      setIsZHeld(false);
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
-    };
-  }, []);
-
-  const displayedForScores = displayedContentKey ? parseDicomViewerContentKey(displayedContentKey) : null;
-  const scoreSeriesUid = displayedForScores?.seriesUid ?? seriesUid;
-  const scoreInstanceIndex = displayedForScores?.instanceIndex ?? effectiveInstanceIndex;
-  const sliceScore = debugSliceScores ? getAlignmentSliceScore(scoreSeriesUid, scoreInstanceIndex) : null;
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const id = await getImageIdForInstance(seriesUid, effectiveInstanceIndex);
-        if (!cancelled) setImageId(id);
-      } catch (e) {
-        console.error(e);
-        if (!cancelled) setImageId(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [seriesUid, effectiveInstanceIndex]);
-
-  // CSS filter for brightness/contrast adjustments
-  const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
-  
-  // Convert normalized pan to pixels for transform
-  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
-  
-  // Track viewport size
-  useLayoutEffect(() => {
-    if (!containerRef.current) return;
-    const updateSize = () => {
-      if (containerRef.current) {
-        setViewportSize({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        });
-      }
-    };
-    updateSize();
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, []);
-  
-  // Convert normalized pan to pixels
-  const panXPx = panX * viewportSize.width;
-  const panYPx = panY * viewportSize.height;
-  
-  // Combined transform
-  //
-  // Order matters. We apply the hidden affine matrix first (rightmost), then user rotation/zoom,
-  // and finally pan translation in display space.
-  const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg) matrix(${affine00}, ${affine10}, ${affine01}, ${affine11}, 0, 0)`;
-
+function useDicomViewerHandle({
+  ref,
+  containerRef,
+  imgRef,
+  displayedContentKeyRef,
+  derivedFrame,
+  seriesUid,
+  effectiveInstanceIndex,
+  affine00,
+  affine01,
+  affine10,
+  affine11,
+  brightness,
+  contrast,
+  panX,
+  panY,
+  rotation,
+  zoom,
+}: DicomViewerHandleOptions) {
   const waitForImageLoad = useCallback(async (): Promise<HTMLImageElement> => {
     const img = imgRef.current;
     if (!img) {
@@ -330,26 +200,45 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     });
 
     return img;
-  }, []);
+  }, [imgRef]);
 
   const getDisplayedContentKey = useCallback((): string | null => {
     return displayedContentKeyRef.current;
-  }, []);
+  }, [displayedContentKeyRef]);
 
-  const waitForDisplayedContentKey = useCallback(async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
-    const t0 = performance.now();
-
-    // Fast path.
-    if (displayedContentKeyRef.current === expectedKey) return;
-
-    while (performance.now() - t0 < timeoutMs) {
-      if (displayedContentKeyRef.current === expectedKey) return;
-      // Yield so we don't block the UI thread.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+  const getDecodedFrame = useCallback(async () => {
+    if (derivedFrame) {
+      throw new Error('Segmentation is unavailable on a derived alignment plane; return to a native acquired slice');
     }
+    const frame = await loadDecodedFrame(seriesUid, effectiveInstanceIndex);
+    const element = containerRef.current;
+    const rect = element?.getBoundingClientRect();
+    return {
+      ...frame,
+      viewportSize: {
+        w: element?.clientWidth || rect?.width || 0,
+        h: element?.clientHeight || rect?.height || 0,
+      },
+    };
+  }, [containerRef, derivedFrame, effectiveInstanceIndex, seriesUid]);
 
-    throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
-  }, []);
+  const waitForDisplayedContentKey = useCallback(
+    async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
+      const t0 = performance.now();
+
+      // Fast path.
+      if (displayedContentKeyRef.current === expectedKey) return;
+
+      while (performance.now() - t0 < timeoutMs) {
+        if (displayedContentKeyRef.current === expectedKey) return;
+        // Yield so we don't block the UI thread.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+
+      throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
+    },
+    [displayedContentKeyRef],
+  );
 
   const captureVisiblePng = useCallback(
     async (options?: DicomViewerCaptureOptions): Promise<Blob> => {
@@ -448,23 +337,288 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         }, 'image/png');
       });
     },
-    [affine00, affine01, affine10, affine11, brightness, contrast, panX, panY, rotation, waitForImageLoad, zoom]
+    [
+      affine00,
+      affine01,
+      affine10,
+      affine11,
+      brightness,
+      containerRef,
+      contrast,
+      imgRef,
+      panX,
+      panY,
+      rotation,
+      waitForImageLoad,
+      zoom,
+    ],
   );
 
   useImperativeHandle(
     ref,
     () => ({
       captureVisiblePng,
+      getDecodedFrame,
       getDisplayedContentKey,
       waitForDisplayedContentKey,
     }),
-    [captureVisiblePng, getDisplayedContentKey, waitForDisplayedContentKey]
+    [captureVisiblePng, getDecodedFrame, getDisplayedContentKey, waitForDisplayedContentKey],
   );
+}
+
+function DicomAlignmentDiagnostics({ sliceScore }: { sliceScore: ReturnType<typeof getAlignmentSliceScore> }) {
+  return (
+    <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
+      <div className="rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[10px] tabular-nums leading-snug text-[var(--text-primary)]">
+        {sliceScore?.coverage != null ? (
+          <>
+            <div>
+              Stage: {sliceScore.stage ?? '—'}
+              {sliceScore.selected ? ' · selected' : sliceScore.retainedForFine ? ' · shortlisted' : ''}
+            </div>
+            <div>Coverage: {sliceScore.coverage.toFixed(4)}</div>
+            <div>CS: {sliceScore.ssim.toFixed(6)}</div>
+            <div>LNCC: {sliceScore.lncc.toFixed(6)}</div>
+            <div>MIND: {sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
+            <div>MIND rank: {formatDebugRank(sliceScore.mindRank, sliceScore.mindActive)}</div>
+            <div>NGF: {sliceScore.ngf.toFixed(6)}</div>
+            <div>Boundary rank: {formatDebugRank(sliceScore.boundaryRank, sliceScore.boundaryActive)}</div>
+            <div>Structural rank: {formatDebugRank(sliceScore.structuralRank, sliceScore.structuralActive)}</div>
+            <div>Appearance rank: {formatDebugRank(sliceScore.appearanceRank, sliceScore.appearanceActive)}</div>
+            <div>Perceptual rank: {sliceScore.perceptualRank?.toFixed(4) ?? '—'}</div>
+            <div>Phase input: {sliceScore.phaseInput?.replaceAll('-', ' ') ?? '—'}</div>
+            {sliceScore.finalAffineSelected != null ? (
+              <div>Final affine: {sliceScore.finalAffineSelected.replaceAll('-', ' ')}</div>
+            ) : null}
+            {sliceScore.finalAffineStructuralScore != null && sliceScore.finalAffineSeedStructuralScore != null ? (
+              <div>
+                Final affine structure: {sliceScore.finalAffineStructuralScore.toFixed(6)} (seed{' '}
+                {sliceScore.finalAffineSeedStructuralScore.toFixed(6)})
+              </div>
+            ) : null}
+            {sliceScore.coarseStage && sliceScore.fineStage ? (
+              <div>
+                Rank coarse→fine: {sliceScore.coarseStage.perceptualRank.toFixed(4)}→
+                {sliceScore.fineStage.perceptualRank.toFixed(4)}
+              </div>
+            ) : null}
+            <div>
+              Phase δ: {sliceScore.correctionX?.toFixed(2) ?? '—'}, {sliceScore.correctionY?.toFixed(2) ?? '—'}
+            </div>
+            <div>
+              Peak / PSR: {sliceScore.phase?.toFixed(4) ?? '—'} /{' '}
+              {sliceScore.phasePeakToSidelobeRatio?.toFixed(2) ?? '—'}
+            </div>
+          </>
+        ) : (
+          <>
+            <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
+            <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
+            <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
+            <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
+            <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
+            <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
+            <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
+            <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
+            <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(function DicomViewer(
+  {
+    studyId,
+    seriesUid,
+    instanceIndex,
+    instanceCount,
+    onInstanceChange,
+    interactionBlocked = false,
+    reverseSliceOrder = false,
+    imageUrlOverride,
+    brightness = 100,
+    contrast = 100,
+    zoom = 1,
+    rotation = 0,
+    panX = 0,
+    panY = 0,
+    affine00 = 1,
+    affine01 = 0,
+    affine10 = 0,
+    affine11 = 1,
+    onPanChange,
+    onZoomChange,
+  }: DicomViewerProps,
+  ref,
+) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // Mouse wheel behavior:
+  // - Plain wheel events advance slices, matching the center-pane global wheel behavior.
+  // - Cmd+wheel zooms the hovered image when zoom control is available.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || interactionBlocked) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
+
+      if (e.metaKey && onZoomChange) {
+        e.preventDefault();
+
+        const speed = (() => {
+          // deltaMode: 0=pixels, 1=lines, 2=pages
+          if (e.deltaMode === 1) return 0.08;
+          if (e.deltaMode === 2) return 0.25;
+          return 0.0015;
+        })();
+
+        const factor = Math.exp(-e.deltaY * speed);
+        let nextZoom = zoom * factor;
+        nextZoom = Math.max(CONTROL_LIMITS.ZOOM.MIN, Math.min(CONTROL_LIMITS.ZOOM.MAX, nextZoom));
+
+        // Reduce churn from very small deltas.
+        nextZoom = Math.round(nextZoom * 1000) / 1000;
+
+        if (nextZoom !== zoom) {
+          onZoomChange(nextZoom);
+        }
+
+        return;
+      }
+
+      // Trackpad pinch-zoom sends ctrlKey wheel events; don't interpret that as slice scrolling.
+      if (e.ctrlKey) return;
+
+      if (instanceCount <= 0) return;
+      e.preventDefault();
+      const delta = Math.sign(e.deltaY);
+      const nextIndex = Math.max(0, Math.min(instanceCount - 1, instanceIndex + delta));
+      if (nextIndex !== instanceIndex) {
+        onInstanceChange(nextIndex);
+      }
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [instanceCount, instanceIndex, interactionBlocked, onInstanceChange, onZoomChange, zoom]);
+
+  const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
+  const derivedFrame = useSyncExternalStore(
+    subscribeToDerivedAlignmentFrames,
+    () => getDerivedAlignmentFrame(seriesUid, effectiveInstanceIndex),
+    () => null,
+  );
+
+  // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
+  const [imageId, setImageId] = useState<string | null>(null);
+
+  // Track what slice is actually displayed in the viewer.
+  // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
+  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
+  const displayedContentKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    displayedContentKeyRef.current = displayedContentKey;
+  }, [displayedContentKey]);
+
+  const debugSliceScores = isDebugAlignmentEnabled();
+
+  const subscribeToVisibleDebugKey = useCallback(
+    (listener: () => void) => {
+      if (!debugSliceScores || interactionBlocked) return () => undefined;
+      return subscribeToDebugAlignmentKey(listener);
+    },
+    [debugSliceScores, interactionBlocked],
+  );
+  const isZHeld = useSyncExternalStore(
+    subscribeToVisibleDebugKey,
+    () => debugSliceScores && !interactionBlocked && isDebugAlignmentKeyHeld(),
+    () => false,
+  );
+
+  const displayedForScores = displayedContentKey ? parseDicomViewerContentKey(displayedContentKey) : null;
+  const scoreSeriesUid = displayedForScores?.seriesUid ?? seriesUid;
+  const scoreInstanceIndex = displayedForScores?.instanceIndex ?? effectiveInstanceIndex;
+  const sliceScore = debugSliceScores ? getAlignmentSliceScore(scoreSeriesUid, scoreInstanceIndex) : null;
+
+  useEffect(() => {
+    if (imageUrlOverride) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = derivedFrame?.imageId ?? (await getImageIdForInstance(seriesUid, effectiveInstanceIndex));
+        if (!cancelled) setImageId(id);
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setImageId(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [derivedFrame, effectiveInstanceIndex, imageUrlOverride, seriesUid]);
+
+  // CSS filter for brightness/contrast adjustments
+  const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
+
+  // Convert normalized pan to pixels for transform
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+
+  // Track viewport size
+  useLayoutEffect(() => {
+    if (!containerRef.current) return;
+    const updateSize = () => {
+      if (containerRef.current) {
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        setViewportSize((previous) =>
+          previous.width === width && previous.height === height ? previous : { width, height },
+        );
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  // Convert normalized pan to pixels
+  const panXPx = panX * viewportSize.width;
+  const panYPx = panY * viewportSize.height;
+
+  // Combined transform
+  //
+  // Order matters. We apply the hidden affine matrix first (rightmost), then user rotation/zoom,
+  // and finally pan translation in display space.
+  const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg) matrix(${affine00}, ${affine10}, ${affine01}, ${affine11}, 0, 0)`;
+
+  useDicomViewerHandle({
+    ref,
+    containerRef,
+    imgRef,
+    displayedContentKeyRef,
+    derivedFrame,
+    seriesUid,
+    effectiveInstanceIndex,
+    affine00,
+    affine01,
+    affine10,
+    affine11,
+    brightness,
+    contrast,
+    panX,
+    panY,
+    rotation,
+    zoom,
+  });
 
   // Click to set center - calculates offset to move clicked point to viewport center
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (!containerRef.current || !onPanChange) return;
+      if (interactionBlocked || !containerRef.current || !onPanChange) return;
 
       const rect = containerRef.current.getBoundingClientRect();
       const viewportCenterX = rect.width / 2;
@@ -488,17 +642,29 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
       onPanChange(normalizedX, normalizedY);
     },
-    [onPanChange, panX, panY]
+    [interactionBlocked, onPanChange, panX, panY],
   );
 
   // Double-click to reset pan
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (onPanChange) {
-      onPanChange(0, 0);
-    }
-  }, [onPanChange]);
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (interactionBlocked) return;
+      e.stopPropagation();
+      if (onPanChange) {
+        onPanChange(0, 0);
+      }
+    },
+    [interactionBlocked, onPanChange],
+  );
 
+  const handleViewportKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (interactionBlocked || !onPanChange || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+      onPanChange(0, 0);
+    },
+    [interactionBlocked, onPanChange],
+  );
 
   return (
     <div className="h-full bg-black">
@@ -506,8 +672,13 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       <div
         ref={containerRef}
         className="h-full overflow-hidden relative cursor-crosshair"
+        role="button"
+        tabIndex={interactionBlocked || !onPanChange ? -1 : 0}
+        aria-label={`Recenter MRI slice ${instanceIndex + 1}`}
+        aria-disabled={interactionBlocked || !onPanChange}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
+        onKeyDown={handleViewportKeyDown}
       >
         {imageUrlOverride ? (
           <ImageContent
@@ -533,66 +704,21 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
           </div>
         )}
 
-        {debugSliceScores && isZHeld ? (
-          <div className="absolute bottom-10 left-2 z-20 pointer-events-none">
-            <div className="px-2 py-1 rounded bg-black/70 border border-white/10 text-white text-[10px] font-mono tabular-nums leading-snug">
-              {sliceScore?.coverage != null ? (
-                <>
-                  <div>
-                    Stage: {sliceScore.stage ?? '—'}
-                    {sliceScore.selected ? ' · selected' : sliceScore.retainedForFine ? ' · shortlisted' : ''}
-                  </div>
-                  <div>Coverage: {sliceScore.coverage.toFixed(4)}</div>
-                  <div>CS: {sliceScore.ssim.toFixed(6)}</div>
-                  <div>LNCC: {sliceScore.lncc.toFixed(6)}</div>
-                  <div>MIND: {sliceScore.mind != null ? sliceScore.mind.toFixed(6) : '—'}</div>
-                  <div>MIND rank: {formatDebugRank(sliceScore.mindRank, sliceScore.mindActive)}</div>
-                  <div>NGF: {sliceScore.ngf.toFixed(6)}</div>
-                  <div>Boundary rank: {formatDebugRank(sliceScore.boundaryRank, sliceScore.boundaryActive)}</div>
-                  <div>Structural rank: {formatDebugRank(sliceScore.structuralRank, sliceScore.structuralActive)}</div>
-                  <div>Appearance rank: {formatDebugRank(sliceScore.appearanceRank, sliceScore.appearanceActive)}</div>
-                  <div>Perceptual rank: {sliceScore.perceptualRank?.toFixed(4) ?? '—'}</div>
-                  <div>Phase input: {sliceScore.phaseInput?.replaceAll('-', ' ') ?? '—'}</div>
-                  {sliceScore.finalAffineSelected != null ? (
-                    <div>Final affine: {sliceScore.finalAffineSelected.replaceAll('-', ' ')}</div>
-                  ) : null}
-                  {sliceScore.finalAffineStructuralScore != null &&
-                  sliceScore.finalAffineSeedStructuralScore != null ? (
-                    <div>
-                      Final affine structure: {sliceScore.finalAffineStructuralScore.toFixed(6)} (seed{' '}
-                      {sliceScore.finalAffineSeedStructuralScore.toFixed(6)})
-                    </div>
-                  ) : null}
-                  {sliceScore.coarseStage && sliceScore.fineStage ? (
-                    <div>
-                      Rank coarse→fine: {sliceScore.coarseStage.perceptualRank.toFixed(4)}→
-                      {sliceScore.fineStage.perceptualRank.toFixed(4)}
-                    </div>
-                  ) : null}
-                  <div>
-                    Phase δ: {sliceScore.correctionX?.toFixed(2) ?? '—'}, {sliceScore.correctionY?.toFixed(2) ?? '—'}
-                  </div>
-                  <div>
-                    Peak / PSR: {sliceScore.phase?.toFixed(4) ?? '—'} /{' '}
-                    {sliceScore.phasePeakToSidelobeRatio?.toFixed(2) ?? '—'}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div>SSIM: {sliceScore ? sliceScore.ssim.toFixed(6) : '—'}</div>
-                  <div>LNCC: {sliceScore ? sliceScore.lncc.toFixed(6) : '—'}</div>
-                  <div>ZNCC: {sliceScore ? sliceScore.zncc.toFixed(6) : '—'}</div>
-                  <div>NGF: {sliceScore ? sliceScore.ngf.toFixed(6) : '—'}</div>
-                  <div>Census: {sliceScore ? sliceScore.census.toFixed(6) : '—'}</div>
-                  <div>Phase: {sliceScore && sliceScore.phase != null ? sliceScore.phase.toFixed(6) : '—'}</div>
-                  <div>MI: {sliceScore ? sliceScore.mi.toFixed(6) : '—'}</div>
-                  <div>NMI: {sliceScore ? sliceScore.nmi.toFixed(6) : '—'}</div>
-                  <div>Score: {sliceScore ? sliceScore.score.toFixed(6) : '—'}</div>
-                </>
-              )}
-            </div>
+        {derivedFrame && !imageUrlOverride ? (
+          <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-1rem)] rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11px] text-[var(--signal-metal)]">
+            Derived 3D-aligned plane
+            {derivedFrame.nativeSliceSpacingMm
+              ? ` · ${derivedFrame.nativeSliceSpacingMm.toFixed(1)} mm native slices`
+              : ''}
+            {derivedFrame.outputGrid &&
+            (derivedFrame.outputGrid.rows > derivedFrame.outputGrid.sourceRows ||
+              derivedFrame.outputGrid.columns > derivedFrame.outputGrid.sourceColumns)
+              ? ` · ${derivedFrame.outputGrid.rows} × ${derivedFrame.outputGrid.columns} interpolated from ${derivedFrame.outputGrid.sourceRows} × ${derivedFrame.outputGrid.sourceColumns} acquisition`
+              : ''}
           </div>
         ) : null}
+
+        {debugSliceScores && isZHeld ? <DicomAlignmentDiagnostics sliceScore={sliceScore} /> : null}
       </div>
     </div>
   );
@@ -639,7 +765,7 @@ function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
 
   return (
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+      <div className="h-5 w-5 animate-spin rounded-full border border-[var(--signal-metal)] border-t-transparent" />
     </div>
   );
 }
@@ -663,14 +789,13 @@ function CornerstoneImage({
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
-  const enabledDeferredRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null);
-  if (enabledDeferredRef.current == null) {
+  const [enabledDeferred] = useState(() => {
     let resolve!: () => void;
     const promise = new Promise<void>((r) => {
       resolve = r;
     });
-    enabledDeferredRef.current = { promise, resolve };
-  }
+    return { promise, resolve };
+  });
 
   // Track which imageId has been loaded to derive status.
   // Note: we intentionally do NOT clear `loadedImageId` when navigating so the previous
@@ -698,9 +823,7 @@ function CornerstoneImage({
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
-    errorImageId === imageId ? 'error' :
-    loadedImageId === imageId ? 'loaded' :
-    'loading';
+    errorImageId === imageId ? 'error' : loadedImageId === imageId ? 'loaded' : 'loading';
 
   const isContentInSync = loadedImageId === imageId && loadedContentKey === contentKey;
 
@@ -734,7 +857,7 @@ function CornerstoneImage({
     }
 
     enabledRef.current = true;
-    enabledDeferredRef.current?.resolve();
+    enabledDeferred.resolve();
 
     return () => {
       try {
@@ -744,7 +867,7 @@ function CornerstoneImage({
         // ignore
       }
     };
-  }, []);
+  }, [enabledDeferred]);
 
   // Load image when imageId changes
   useEffect(() => {
@@ -757,10 +880,10 @@ function CornerstoneImage({
 
     const load = async () => {
       try {
-        await enabledDeferredRef.current!.promise;
+        await enabledDeferred.promise;
         if (cancelled) return;
 
-        const image = await cornerstone.loadImage(imageId);
+        const image = await loadCornerstoneImage(imageId);
         if (cancelled) return;
 
         const viewport = cornerstone.getDefaultViewportForImage(element, image);
@@ -782,7 +905,7 @@ function CornerstoneImage({
     return () => {
       cancelled = true;
     };
-  }, [imageId]);
+  }, [enabledDeferred, imageId]);
 
   // Handle resize
   useEffect(() => {
@@ -805,10 +928,7 @@ function CornerstoneImage({
   }, []);
 
   return (
-    <div
-      className="w-full h-full relative"
-      style={{ transform: appliedImageTransform, filter: appliedImageFilter }}
-    >
+    <div className="w-full h-full relative" style={{ transform: appliedImageTransform, filter: appliedImageFilter }}>
       <div
         ref={elementRef}
         className="w-full h-full"

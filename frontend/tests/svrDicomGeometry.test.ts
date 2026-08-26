@@ -4,6 +4,7 @@ import {
   parseImagePositionPatient,
   parsePixelSpacingMm,
   sliceCornersMm,
+  downsampledSliceOriginMm,
 } from '../src/utils/svr/dicomGeometry';
 
 describe('svr/dicomGeometry', () => {
@@ -34,6 +35,24 @@ describe('svr/dicomGeometry', () => {
     expect(axes.normalDir.z).toBeCloseTo(1);
   });
 
+  it('rejects zero-length, parallel, and materially nonorthogonal orientation axes', () => {
+    expect(parseImageOrientationPatient('0\\0\\0\\0\\1\\0')).toBeNull();
+    expect(parseImageOrientationPatient('1\\0\\0\\2\\0\\0')).toBeNull();
+    expect(parseImageOrientationPatient('1\\0\\0\\0.25\\1\\0')).toBeNull();
+  });
+
+  it('orthonormalizes minor scanner rounding while preserving the DICOM normal', () => {
+    const axes = parseImageOrientationPatient('1\\0\\0\\0.0001\\1\\0');
+    expect(axes).not.toBeNull();
+    if (!axes) return;
+
+    expect(axes.rowDir.x * axes.colDir.x + axes.rowDir.y * axes.colDir.y + axes.rowDir.z * axes.colDir.z).toBeCloseTo(
+      0,
+      10,
+    );
+    expect(axes.normalDir).toEqual({ x: 0, y: 0, z: 1 });
+  });
+
   it('computes slice corners using DICOM row/col conventions (non-square spacing)', () => {
     const axes = parseImageOrientationPatient('1\\0\\0\\0\\1\\0');
     expect(axes).not.toBeNull();
@@ -55,5 +74,23 @@ describe('svr/dicomGeometry', () => {
     expect(corners[2]).toEqual({ x: 0, y: 2, z: 0 });
     // (row=1,col=1)
     expect(corners[3]).toEqual({ x: 3, y: 2, z: 0 });
+  });
+
+  it('centers downsampled first pixels using anisotropic DICOM spacing and axes', () => {
+    expect(
+      downsampledSliceOriginMm(
+        {
+          ippMm: { x: 10, y: 20, z: 30 },
+          rowDir: { x: 1, y: 0, z: 0 },
+          colDir: { x: 0, y: 1, z: 0 },
+          rowSpacingMm: 2,
+          colSpacingMm: 3,
+          rows: 4,
+          cols: 6,
+        },
+        2,
+        2,
+      ),
+    ).toEqual({ x: 13, y: 21, z: 30 });
   });
 });

@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'vitest';
 import type { ViewerTransform } from '../src/db/schema';
 import {
+  imagePointToViewerPoint,
+  imagePolygonToViewerPolygon,
   remapPointBetweenViewerTransforms,
   remapPolygonBetweenViewerTransforms,
+  viewerPointToImagePoint,
+  viewerPolygonToImagePolygon,
   type ViewportSize,
 } from '../src/utils/viewTransform';
 
@@ -93,6 +97,41 @@ describe('viewTransform', () => {
     for (let i = 0; i < poly.points.length; i++) {
       expect(roundTripped.points[i]!.x).toBeCloseTo(poly.points[i]!.x, 8);
       expect(roundTripped.points[i]!.y).toBeCloseTo(poly.points[i]!.y, 8);
+    }
+  });
+
+  test('canonical image points survive letterboxing, affine transforms, and viewport resize', () => {
+    const transform: ViewerTransform = {
+      zoom: 1.3,
+      rotation: 17,
+      panX: 0.04,
+      panY: -0.03,
+      affine00: 1,
+      affine01: 0.08,
+      affine10: -0.05,
+      affine11: 0.97,
+    };
+    const image = { w: 512, h: 256 };
+    const firstViewport = { w: 420, h: 640 };
+    const resizedViewport = { w: 900, h: 360 };
+    const imagePoint = { x: 0.62, y: 0.41 };
+
+    const displayed = imagePointToViewerPoint(imagePoint, firstViewport, image, transform);
+    const canonical = viewerPointToImagePoint(displayed, firstViewport, image, transform);
+    expect(canonical.x).toBeCloseTo(imagePoint.x, 7);
+    expect(canonical.y).toBeCloseTo(imagePoint.y, 7);
+
+    const resized = imagePointToViewerPoint(canonical, resizedViewport, image, transform);
+    const restored = viewerPointToImagePoint(resized, resizedViewport, image, transform);
+    expect(restored.x).toBeCloseTo(imagePoint.x, 7);
+    expect(restored.y).toBeCloseTo(imagePoint.y, 7);
+
+    const polygon = { points: [displayed, { x: displayed.x + 0.03, y: displayed.y + 0.02 }] };
+    const canonicalPolygon = viewerPolygonToImagePolygon(polygon, firstViewport, image, transform);
+    const roundTrip = imagePolygonToViewerPolygon(canonicalPolygon, firstViewport, image, transform);
+    for (let index = 0; index < polygon.points.length; index++) {
+      expect(roundTrip.points[index]!.x).toBeCloseTo(polygon.points[index]!.x, 7);
+      expect(roundTrip.points[index]!.y).toBeCloseTo(polygon.points[index]!.y, 7);
     }
   });
 });

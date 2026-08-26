@@ -1,7 +1,12 @@
 import dicomParser from 'dicom-parser';
-import { getDB } from '../db/db';
+import { assertStorageHeadroom, DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation } from '../db/db';
 import type { DicomStudy, DicomSeries, DicomInstance } from '../db/schema';
 import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
+import {
+  parseImageOrientationPatient,
+  parseImagePositionPatient,
+  parsePixelSpacingMm,
+} from '../utils/svr/dicomGeometry';
 
 export type DicomIngestResult =
   | { status: 'ingested'; fileName: string; sopInstanceUid: string }
@@ -9,9 +14,20 @@ export type DicomIngestResult =
   | {
       status: 'skipped';
       fileName: string;
-      reason: 'non-dicom-file' | 'non-displayable' | 'missing-uids' | 'secondary-capture';
+      reason:
+        | 'non-dicom-file'
+        | 'non-displayable'
+        | 'missing-uids'
+        | 'secondary-capture'
+        | 'excluded-localizer-orientation'
+        | 'excluded-incompatible-series-orientation';
     }
-  | { status: 'error'; fileName: string; reason: 'parse-error' | 'db-error'; message: string };
+  | {
+      status: 'error';
+      fileName: string;
+      reason: 'parse-error' | 'db-error' | 'unsupported-multiframe';
+      message: string;
+    };
 
 export type ProcessFilesResult = {
   total: number;
@@ -21,6 +37,40 @@ export type ProcessFilesResult = {
   errors: number;
   /** A small sample of error messages (bounded) for display in the UI. */
   errorSamples: string[];
+  skipReasons?: Partial<Record<Extract<DicomIngestResult, { status: 'skipped' }>['reason'], number>>;
+  errorReasons?: Partial<Record<Extract<DicomIngestResult, { status: 'error' }>['reason'], number>>;
+  cancelled?: boolean;
+  affectedSeriesUids?: string[];
+};
+
+export type ProcessFilesProgress = Pick<ProcessFilesResult, 'ingested' | 'duplicates' | 'skipped' | 'errors'> & {
+  fileName?: string;
+};
+
+export type ProcessFilesOptions = {
+  signal?: AbortSignal;
+  total?: number;
+  batchMaxItems?: number;
+  batchMaxBytes?: number;
+  probeDuplicates?: boolean;
+};
+
+type PreparedDicom = {
+  status: 'prepared';
+  fileName: string;
+  file: File;
+  study: DicomStudy;
+  series: DicomSeries;
+  instance: Omit<DicomInstance, 'fileBlob'>;
+  sopClassUid: string;
+  imageType: string;
+};
+
+type ProbedDicom = {
+  status: 'probed';
+  fileName: string;
+  file: File;
+  instance: Pick<DicomInstance, 'sopInstanceUid' | 'studyInstanceUid' | 'seriesInstanceUid'>;
 };
 
 function basename(filename: string): string {
@@ -66,6 +116,17 @@ function getText(dataSet: dicomParser.DataSet, tag: string): string {
   return dataSet.string(tag) || '';
 }
 
+const NUMERIC_ACCESSORS = {
+  DS: 'floatString',
+  IS: 'intString',
+  US: 'uint16',
+  SS: 'int16',
+  UL: 'uint32',
+  SL: 'int32',
+  FL: 'float',
+  FD: 'double',
+} as const;
+
 function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   // IMPORTANT: Many numeric DICOM tags are *not* stored as ASCII.
   // For example, Rows/Columns are VR=US (binary). Reading them via dataSet.string()
@@ -74,52 +135,37 @@ function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   // We therefore try dicom-parser's typed accessors first, and fall back to
   // string parsing only if needed.
 
-  const vr = dataSet.elements?.[tag]?.vr;
+  const knownVr =
+    tag === 'x00280010' || tag === 'x00280011' || tag === 'x00280103'
+      ? 'US'
+      : tag === 'x00200011' || tag === 'x00200013' || tag === 'x00280008'
+        ? 'IS'
+        : tag === 'x00280120' || tag === 'x00280121'
+          ? getNumber(dataSet, 'x00280103') === 1
+            ? 'SS'
+            : 'US'
+          : undefined;
+  const vr = dataSet.elements?.[tag]?.vr ?? knownVr;
+  const preferred = vr ? NUMERIC_ACCESSORS[vr as keyof typeof NUMERIC_ACCESSORS] : undefined;
+  const candidates = preferred
+    ? [preferred, NUMERIC_ACCESSORS.DS, NUMERIC_ACCESSORS.IS]
+    : Object.values(NUMERIC_ACCESSORS);
 
-  const fromTypedAccessor = (): number | undefined => {
-    switch (vr) {
-      case 'DS':
-        return dataSet.floatString(tag, 0);
-      case 'IS':
-        return dataSet.intString(tag, 0);
-      case 'US':
-        return dataSet.uint16(tag, 0);
-      case 'SS':
-        return dataSet.int16(tag, 0);
-      case 'UL':
-        return dataSet.uint32(tag, 0);
-      case 'SL':
-        return dataSet.int32(tag, 0);
-      case 'FL':
-        return dataSet.float(tag, 0);
-      case 'FD':
-        return dataSet.double(tag, 0);
-      default:
-        return undefined;
+  for (const accessor of candidates) {
+    try {
+      const value = dataSet[accessor](tag, 0);
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    } catch {
+      // Malformed optional values must not abort an otherwise valid import.
     }
-  };
-
-  const fromCommonAccessors = (): number | undefined => {
-    // If VR is missing (common in implicit VR transfer syntaxes), try the
-    // most common numeric accessors in a safe order.
-    return (
-      dataSet.floatString(tag, 0) ??
-      dataSet.intString(tag, 0) ??
-      dataSet.uint16(tag, 0) ??
-      dataSet.int16(tag, 0) ??
-      dataSet.uint32(tag, 0) ??
-      dataSet.int32(tag, 0) ??
-      dataSet.float(tag, 0) ??
-      dataSet.double(tag, 0)
-    );
-  };
-
-  const n = fromTypedAccessor() ?? fromCommonAccessors();
-  if (typeof n === 'number' && Number.isFinite(n)) {
-    return n;
   }
 
-  const str = dataSet.string(tag, 0);
+  let str: string | undefined;
+  try {
+    str = dataSet.string(tag, 0);
+  } catch {
+    return 0;
+  }
   if (!str) return 0;
 
   // Handle multi-value strings by taking the first value.
@@ -128,41 +174,13 @@ function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function toErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function parseMultiNumberString(value: string): number[] {
-  // Multi-valued DICOM tags are typically separated by backslashes.
-  // Some exporters may use spaces/commas; accept those as well.
-  return value
-    .split(/[\\,\s]+/)
-    .filter(Boolean)
-    .map((s) => Number.parseFloat(s))
-    .filter((n) => Number.isFinite(n));
-}
-
 function inferPlaneFromImageOrientationPatient(iop: string): string | undefined {
-  // ImageOrientationPatient (0020,0037) is 6 values: row cosines (3) + column cosines (3).
-  // The slice normal is row x col. Dominant axis of the normal indicates plane.
-  const nums = parseMultiNumberString(iop);
-  if (nums.length < 6) return undefined;
+  const axes = parseImageOrientationPatient(iop);
+  if (!axes) return undefined;
 
-  const r0 = nums[0] ?? 0;
-  const r1 = nums[1] ?? 0;
-  const r2 = nums[2] ?? 0;
-  const c0 = nums[3] ?? 0;
-  const c1 = nums[4] ?? 0;
-  const c2 = nums[5] ?? 0;
-
-  // Cross product r x c
-  const nx = r1 * c2 - r2 * c1;
-  const ny = r2 * c0 - r0 * c2;
-  const nz = r0 * c1 - r1 * c0;
-
-  const ax = Math.abs(nx);
-  const ay = Math.abs(ny);
-  const az = Math.abs(nz);
+  const ax = Math.abs(axes.normalDir.x);
+  const ay = Math.abs(axes.normalDir.y);
+  const az = Math.abs(axes.normalDir.z);
 
   // In DICOM patient coordinates:
   // - Normal ~ X (L/R) => sagittal slices
@@ -173,12 +191,23 @@ function inferPlaneFromImageOrientationPatient(iop: string): string | undefined 
   return 'Axial';
 }
 
+function physicalSlicePosition(orientation: string, position: string): number | undefined {
+  const axes = parseImageOrientationPatient(orientation);
+  const point = parseImagePositionPatient(position);
+  if (!axes || !point) return undefined;
+  const projection = axes.normalDir.x * point.x + axes.normalDir.y * point.y + axes.normalDir.z * point.z;
+  return Number.isFinite(projection) ? projection : undefined;
+}
+
 // DICOM Tags
 const TAGS = {
   PatientName: 'x00100010',
   PatientID: 'x00100020',
+  PatientIDIssuer: 'x00100021',
   StudyInstanceUID: 'x0020000d',
   StudyDate: 'x00080020',
+  StudyTime: 'x00080030',
+  AcquisitionTime: 'x00080032',
   StudyDescription: 'x00081030',
   AccessionNumber: 'x00080050',
   Modality: 'x00080060',
@@ -190,12 +219,17 @@ const TAGS = {
   SeriesNumber: 'x00200011',
 
   // SOP Class UID identifies the *type* of object (MR Image Storage vs Secondary Capture, etc.).
+  ImageType: 'x00080008',
   SOPClassUID: 'x00080016',
   SOPInstanceUID: 'x00080018',
   InstanceNumber: 'x00200013',
+  FrameOfReferenceUID: 'x00200052',
+  NumberOfFrames: 'x00280008',
 
   Rows: 'x00280010',
   Columns: 'x00280011',
+  PixelPaddingValue: 'x00280120',
+  PixelPaddingRangeLimit: 'x00280121',
   SliceLocation: 'x00201041',
   ImagePositionPatient: 'x00200032',
   ImageOrientationPatient: 'x00200037',
@@ -207,14 +241,18 @@ const TAGS = {
 };
 
 // Common non-DICOM file extensions to skip
-const SKIP_EXTENSIONS = new Set([
-  '.txt', '.md', '.json', '.xml', '.html', '.htm', '.css', '.js',
-  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.pdf',
-  '.zip', '.tar', '.gz', '.rar', '.7z',
-  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-  '.log', '.csv', '.ini', '.cfg', '.conf',
-  '.ds_store', '.gitignore', '.gitkeep',
-]);
+const SKIP_EXTENSIONS = new Set(
+  [
+    '.txt .md .json .xml .html .htm .css .js',
+    '.jpg .jpeg .png .gif .bmp .tiff .pdf',
+    '.zip .tar .gz .rar .7z',
+    '.doc .docx .xls .xlsx .ppt .pptx',
+    '.log .csv .ini .cfg .conf',
+    '.ds_store .gitignore .gitkeep',
+  ]
+    .join(' ')
+    .split(' '),
+);
 
 function shouldSkipFile(filename: string): boolean {
   const base = basename(filename);
@@ -231,7 +269,11 @@ function shouldSkipFile(filename: string): boolean {
   return false;
 }
 
-export async function processDicomFile(file: File): Promise<DicomIngestResult> {
+export function isDicomCandidate(filename: string): boolean {
+  return !shouldSkipFile(filename);
+}
+
+async function prepareDicomFile(file: File): Promise<DicomIngestResult | PreparedDicom> {
   const fileName = basename(file.name);
 
   // Skip files that are obviously not DICOM
@@ -252,20 +294,31 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
       byteArray[128] === 0x44 && // D
       byteArray[129] === 0x49 && // I
       byteArray[130] === 0x43 && // C
-      byteArray[131] === 0x4D // M
+      byteArray[131] === 0x4d // M
     );
 
     // Parse DICOM
     dataSet = dicomParser.parseDicom(byteArray);
-  } catch (err) {
-    console.error('Error parsing DICOM file:', file.name, err);
-    return { status: 'error', fileName, reason: 'parse-error', message: toErrorMessage(err) };
+  } catch {
+    // dicom-parser exceptions can retain the complete dataset, patient tags, and pixels.
+    console.error('Failed to parse a DICOM image safely');
+    return { status: 'error', fileName, reason: 'parse-error', message: 'Invalid or unsupported DICOM data.' };
   }
 
   // Filter out non-image (or otherwise non-displayable) DICOM objects.
   // We do this before writing anything to IndexedDB.
   if (!hasDisplayablePixelData(dataSet)) {
     return { status: 'skipped', fileName, reason: 'non-displayable' };
+  }
+
+  const numberOfFrames = Math.max(1, Math.round(getNumber(dataSet, TAGS.NumberOfFrames)));
+  if (numberOfFrames > 1) {
+    return {
+      status: 'error',
+      fileName,
+      reason: 'unsupported-multiframe',
+      message: `Enhanced multi-frame DICOM (${numberOfFrames} frames) is not supported yet; no incomplete series was imported.`,
+    };
   }
 
   // Secondary Capture (SOPClassUID=1.2.840.10008.5.1.4.1.1.7*) is commonly included in
@@ -283,7 +336,7 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const instanceUid = getText(dataSet, TAGS.SOPInstanceUID);
 
   if (!studyUid || !seriesUid || !instanceUid) {
-    console.warn('Missing UIDs in DICOM file:', file.name);
+    console.warn('A DICOM image is missing required examination identifiers');
     return { status: 'skipped', fileName, reason: 'missing-uids' };
   }
 
@@ -291,9 +344,11 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   const study: DicomStudy = {
     studyInstanceUid: studyUid,
     studyDate: getText(dataSet, TAGS.StudyDate),
+    studyTime: getText(dataSet, TAGS.StudyTime) || undefined,
     studyDescription: getText(dataSet, TAGS.StudyDescription) || 'No Description',
     patientName: getText(dataSet, TAGS.PatientName),
     patientId: getText(dataSet, TAGS.PatientID),
+    patientIdIssuer: getText(dataSet, TAGS.PatientIDIssuer) || undefined,
     modality: getText(dataSet, TAGS.Modality),
     accessionNumber: getText(dataSet, TAGS.AccessionNumber),
   };
@@ -308,7 +363,27 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
   // Fallback: derive plane from orientation if text parsing didn't find it.
   const iop = getText(dataSet, TAGS.ImageOrientationPatient);
+  const imagePosition = getText(dataSet, TAGS.ImagePositionPatient);
+  const pixelSpacing = getText(dataSet, TAGS.PixelSpacing);
+  for (const [value, parser, label, consequence] of [
+    [iop, parseImageOrientationPatient, 'image orientation', 'positioned'],
+    [imagePosition, parseImagePositionPatient, 'image position', 'positioned'],
+    [pixelSpacing, parsePixelSpacingMm, 'pixel spacing', 'calibrated'],
+  ] as const) {
+    if (value && !parser(value)) {
+      return {
+        status: 'error',
+        fileName,
+        reason: 'parse-error',
+        message: `Invalid DICOM ${label}; the frame cannot be ${consequence} safely.`,
+      };
+    }
+  }
+  const frameOfReferenceUid = getText(dataSet, TAGS.FrameOfReferenceUID) || undefined;
+  const acquisitionTime = getText(dataSet, TAGS.AcquisitionTime) || undefined;
   const planeFromOrientation = iop ? inferPlaneFromImageOrientationPatient(iop) : undefined;
+  const rows = getNumber(dataSet, TAGS.Rows);
+  const columns = getNumber(dataSet, TAGS.Columns);
 
   const series: DicomSeries = {
     seriesInstanceUid: seriesUid,
@@ -319,106 +394,570 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
 
     protocolName: protocolName || undefined,
     sequenceName: sequenceName || undefined,
+    frameOfReferenceUid,
+    acquisitionTime,
+    rows,
+    columns,
+    pixelSpacing: pixelSpacing || undefined,
+    imageOrientationPatient: iop || undefined,
 
-    plane: parsedSeries.plane ?? planeFromOrientation,
+    plane: planeFromOrientation ?? parsedSeries.plane,
     weight: parsedSeries.weight,
     sequenceType: parsedSeries.sequenceType,
   };
 
   // Extract Instance Info
   // Handle multi-value strings for arrays
-  const pixelSpacing = getText(dataSet, TAGS.PixelSpacing); // "row\\col"
-
   // Window Center/Width can be multi-value. `getNumber()` takes the first value.
   const wc = getNumber(dataSet, TAGS.WindowCenter);
   const ww = getNumber(dataSet, TAGS.WindowWidth);
 
   const sliceThickness = getNumber(dataSet, TAGS.SliceThickness);
   const spacingBetweenSlices = getNumber(dataSet, TAGS.SpacingBetweenSlices);
+  const pixelPaddingValue =
+    dataSet.elements?.[TAGS.PixelPaddingValue] || getText(dataSet, TAGS.PixelPaddingValue)
+      ? getNumber(dataSet, TAGS.PixelPaddingValue)
+      : undefined;
+  const pixelPaddingRangeLimit =
+    pixelPaddingValue !== undefined &&
+    (dataSet.elements?.[TAGS.PixelPaddingRangeLimit] || getText(dataSet, TAGS.PixelPaddingRangeLimit))
+      ? getNumber(dataSet, TAGS.PixelPaddingRangeLimit)
+      : undefined;
 
-  const instanceBase = {
+  const instance: PreparedDicom['instance'] = {
     sopInstanceUid: instanceUid,
     seriesInstanceUid: seriesUid,
     studyInstanceUid: studyUid,
     instanceNumber: getNumber(dataSet, TAGS.InstanceNumber),
-    rows: getNumber(dataSet, TAGS.Rows),
-    columns: getNumber(dataSet, TAGS.Columns),
+    frameOfReferenceUid,
+    acquisitionTime,
+    numberOfFrames,
+    physicalSlicePosition: physicalSlicePosition(iop, imagePosition),
+    rows,
+    columns,
     sliceLocation: getNumber(dataSet, TAGS.SliceLocation),
-    imagePositionPatient: getText(dataSet, TAGS.ImagePositionPatient),
-    imageOrientationPatient: getText(dataSet, TAGS.ImageOrientationPatient),
+    imagePositionPatient: imagePosition,
+    imageOrientationPatient: iop,
     pixelSpacing: pixelSpacing,
     sliceThickness: sliceThickness > 0 ? sliceThickness : undefined,
     spacingBetweenSlices: spacingBetweenSlices > 0 ? spacingBetweenSlices : undefined,
+    pixelPaddingValue,
+    pixelPaddingRangeLimit,
     windowCenter: wc,
     windowWidth: ww,
   };
 
+  return {
+    status: 'prepared',
+    fileName,
+    file,
+    study,
+    series,
+    instance,
+    sopClassUid,
+    imageType: getText(dataSet, TAGS.ImageType),
+  };
+}
+
+class DicomAdmissionError extends Error {}
+
+const DEFAULT_BATCH_MAX_ITEMS = 64;
+const DEFAULT_BATCH_MAX_BYTES = 16 * 1024 * 1024;
+const ESTIMATED_IMAGE_METADATA_BYTES = 1024;
+const DUPLICATE_PROBE_MIN_FILE_BYTES = 32 * 1024;
+const DUPLICATE_HEADER_PROBE_BYTES = [4096, 16 * 1024] as const;
+
+function databaseError(fileName: string, error: unknown): DicomIngestResult {
+  console.error('A DICOM image could not be admitted to local storage safely');
+  const quotaExceeded =
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    (error.name === 'QuotaExceededError' ||
+      ('message' in error &&
+        typeof error.message === 'string' &&
+        error.message.startsWith('Insufficient browser storage')));
+  const message =
+    error instanceof DicomAdmissionError
+      ? error.message
+      : quotaExceeded
+        ? 'Insufficient browser storage for this import.'
+        : 'Failed to store the DICOM image safely.';
+  return { status: 'error', fileName, reason: 'db-error', message };
+}
+
+function persistedOwnershipResult(
+  existing: Pick<DicomInstance, 'seriesInstanceUid' | 'studyInstanceUid'>,
+  next: PreparedDicom | ProbedDicom,
+): DicomIngestResult {
+  if (
+    existing.seriesInstanceUid === next.instance.seriesInstanceUid &&
+    existing.studyInstanceUid === next.instance.studyInstanceUid
+  ) {
+    return { status: 'duplicate', fileName: next.fileName, sopInstanceUid: next.instance.sopInstanceUid };
+  }
+  return databaseError(
+    next.fileName,
+    new DicomAdmissionError('A DICOM instance UID already belongs to a different examination'),
+  );
+}
+
+async function probeDicomIdentity(file: File): Promise<ProbedDicom | undefined> {
+  if (file.size < DUPLICATE_PROBE_MIN_FILE_BYTES || shouldSkipFile(file.name)) return undefined;
+  for (const windowBytes of DUPLICATE_HEADER_PROBE_BYTES) {
+    let dataSet: dicomParser.DataSet | undefined;
+    try {
+      const bytes = new Uint8Array(await file.slice(0, windowBytes).arrayBuffer());
+      try {
+        dataSet = dicomParser.parseDicom(bytes, { untilTag: TAGS.SeriesInstanceUID });
+      } catch (error) {
+        // dicom-parser deliberately returns successfully decoded leading tags on
+        // bounded-input exhaustion. Never publish its patient-bearing exception.
+        if (typeof error === 'object' && error && 'dataSet' in error) {
+          dataSet = error.dataSet as dicomParser.DataSet;
+        }
+      }
+      if (!dataSet || getText(dataSet, TAGS.SOPClassUID).startsWith('1.2.840.10008.5.1.4.1.1.7')) continue;
+      const sopInstanceUid = getText(dataSet, TAGS.SOPInstanceUID);
+      const studyInstanceUid = getText(dataSet, TAGS.StudyInstanceUID);
+      const seriesInstanceUid = getText(dataSet, TAGS.SeriesInstanceUID);
+      if (sopInstanceUid && studyInstanceUid && seriesInstanceUid) {
+        return {
+          status: 'probed',
+          fileName: basename(file.name),
+          file,
+          instance: { sopInstanceUid, studyInstanceUid, seriesInstanceUid },
+        };
+      }
+    } catch {
+      // Short, compressed, malformed, or vendor-specific headers fall back to
+      // the original complete-image parser without weakening its validation.
+    }
+  }
+  return undefined;
+}
+
+async function readPersistedOwnership(
+  candidates: readonly (PreparedDicom | ProbedDicom)[],
+  database?: Awaited<ReturnType<typeof getDB>>,
+): Promise<Map<string, DicomInstance | undefined>> {
+  const db = database ?? (await getDB());
+  const transaction = db.transaction('instances', 'readonly');
+  const instanceUids = Array.from(new Set(candidates.map((candidate) => candidate.instance.sopInstanceUid)));
+  const [instances] = await Promise.all([
+    Promise.all(instanceUids.map((instanceUid) => transaction.store.get(instanceUid))),
+    transaction.done,
+  ]);
+  return new Map(instanceUids.map((instanceUid, index) => [instanceUid, instances[index]]));
+}
+
+function missingCanonicalValue(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'string' && !value.trim());
+}
+
+function enrichCanonicalParent<T extends object>(existing: T | undefined, incoming: T): { value: T; changed: boolean } {
+  if (!existing) return { value: incoming, changed: true };
+  let value = existing;
+  for (const key of Object.keys(incoming) as (keyof T)[]) {
+    if (!missingCanonicalValue(existing[key]) || missingCanonicalValue(incoming[key])) continue;
+    if (value === existing) value = { ...existing };
+    value[key] = incoming[key];
+  }
+  return { value, changed: value !== existing };
+}
+
+function validateCanonicalParents(
+  existingStudy: DicomStudy | undefined,
+  existingSeries: DicomSeries | undefined,
+  next: PreparedDicom,
+): void {
+  const study = next.study;
+  const series = next.series;
+  if (
+    existingStudy?.patientId?.trim() &&
+    study.patientId.trim() &&
+    existingStudy.patientId.trim() !== study.patientId.trim()
+  ) {
+    throw new DicomAdmissionError('A study UID cannot contain more than one patient identity');
+  }
+  if (
+    existingStudy?.patientIdIssuer?.trim() &&
+    study.patientIdIssuer?.trim() &&
+    existingStudy.patientIdIssuer.trim() !== study.patientIdIssuer.trim()
+  ) {
+    throw new DicomAdmissionError('A study UID cannot contain more than one patient-identifier issuer');
+  }
+  const canonicalName = existingStudy?.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  const incomingName = study.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  if (canonicalName && incomingName && canonicalName !== incomingName) {
+    throw new DicomAdmissionError('A study UID cannot contain conflicting patient names');
+  }
+  if (existingSeries && existingSeries.studyInstanceUid !== study.studyInstanceUid) {
+    throw new DicomAdmissionError('A series UID cannot belong to a different examination');
+  }
+  if (
+    existingSeries?.frameOfReferenceUid &&
+    series.frameOfReferenceUid &&
+    existingSeries.frameOfReferenceUid !== series.frameOfReferenceUid
+  ) {
+    throw new DicomAdmissionError('A series cannot mix incompatible spatial frames of reference');
+  }
+  if (
+    existingSeries &&
+    (((existingSeries.rows ?? 0) > 0 && existingSeries.rows !== series.rows) ||
+      ((existingSeries.columns ?? 0) > 0 && existingSeries.columns !== series.columns))
+  ) {
+    throw new DicomAdmissionError('A series cannot mix incompatible row or column dimensions');
+  }
+  if (existingSeries?.pixelSpacing && series.pixelSpacing) {
+    const expectedSpacing = parsePixelSpacingMm(existingSeries.pixelSpacing);
+    const actualSpacing = parsePixelSpacingMm(series.pixelSpacing);
+    if (
+      expectedSpacing &&
+      actualSpacing &&
+      (Math.abs(expectedSpacing.rowSpacingMm - actualSpacing.rowSpacingMm) > 1e-6 ||
+        Math.abs(expectedSpacing.colSpacingMm - actualSpacing.colSpacingMm) > 1e-6)
+    ) {
+      throw new DicomAdmissionError('A series cannot mix incompatible calibrated row or column spacing');
+    }
+  }
+  if (existingSeries?.imageOrientationPatient && series.imageOrientationPatient) {
+    const expectedAxes = parseImageOrientationPatient(existingSeries.imageOrientationPatient);
+    const actualAxes = parseImageOrientationPatient(series.imageOrientationPatient);
+    if (expectedAxes && actualAxes) {
+      const aligned = (['rowDir', 'colDir', 'normalDir'] as const).every((axis) => {
+        const expected = expectedAxes[axis];
+        const actual = actualAxes[axis];
+        return expected.x * actual.x + expected.y * actual.y + expected.z * actual.z >= 0.999;
+      });
+      if (!aligned) throw new DicomAdmissionError('A series cannot mix incompatible slice orientations');
+    }
+  }
+}
+
+function isLocalizerOrientationConflict(candidate: PreparedDicom, error: unknown): boolean {
+  if (!(error instanceof DicomAdmissionError) || !error.message.includes('slice orientations')) return false;
+  return /(?:locali[sz]er|scout|survey)/i.test(
+    [candidate.series.seriesDescription, candidate.series.protocolName, candidate.series.sequenceName]
+      .filter(Boolean)
+      .join(' '),
+  );
+}
+
+function isOrthogonalOriginalMrOrientationConflict(
+  existingSeries: DicomSeries | undefined,
+  candidate: PreparedDicom,
+  error: unknown,
+): boolean {
+  if (!(error instanceof DicomAdmissionError) || !error.message.includes('slice orientations')) return false;
+  if (
+    candidate.sopClassUid !== '1.2.840.10008.5.1.4.1.1.4' ||
+    candidate.series.modality !== 'MR' ||
+    !/(?:^|\\)ORIGINAL(?:\\|$)/i.test(candidate.imageType) ||
+    !/(?:^|\\)PRIMARY(?:\\|$)/i.test(candidate.imageType) ||
+    !existingSeries?.frameOfReferenceUid ||
+    existingSeries.frameOfReferenceUid !== candidate.series.frameOfReferenceUid ||
+    !candidate.instance.imagePositionPatient ||
+    !existingSeries.imageOrientationPatient ||
+    !candidate.series.imageOrientationPatient
+  ) {
+    return false;
+  }
+  const canonical = parseImageOrientationPatient(existingSeries.imageOrientationPatient);
+  const incoming = parseImageOrientationPatient(candidate.series.imageOrientationPatient);
+  if (!canonical || !incoming) return false;
+  const dot = (left: { x: number; y: number; z: number }, right: { x: number; y: number; z: number }) =>
+    left.x * right.x + left.y * right.y + left.z * right.z;
+  const normalsOrthogonal = Math.abs(dot(canonical.normalDir, incoming.normalDir)) <= 0.01;
+  const rowsShared = dot(canonical.rowDir, incoming.rowDir) >= 0.999;
+  const columnsShared = dot(canonical.colDir, incoming.colDir) >= 0.999;
+  const rowsOrthogonal = Math.abs(dot(canonical.rowDir, incoming.rowDir)) <= 0.01;
+  const columnsOrthogonal = Math.abs(dot(canonical.colDir, incoming.colDir)) <= 0.01;
+  return normalsOrthogonal && ((rowsShared && columnsOrthogonal) || (columnsShared && rowsOrthogonal));
+}
+
+function throwIfImportAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('DICOM import cancelled.', 'AbortError');
+}
+
+function isImportAbort(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+}
+
+async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSignal): Promise<DicomIngestResult[]> {
+  if (!candidates.length || signal?.aborted) return [];
+  const db = await getDB();
+  const ownership = await readPersistedOwnership(candidates, db);
+  if (signal?.aborted) return [];
+
+  const results: (DicomIngestResult | undefined)[] = Array(candidates.length);
+  const incoming = new Set<string>();
+  let incrementalBytes = 0;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const instanceUid = candidate.instance.sopInstanceUid;
+    const existing = ownership.get(instanceUid);
+    if (existing) {
+      results[index] = persistedOwnershipResult(existing, candidate);
+      continue;
+    }
+    if (!incoming.has(instanceUid)) {
+      incoming.add(instanceUid);
+      incrementalBytes += candidate.file.size + ESTIMATED_IMAGE_METADATA_BYTES;
+    }
+  }
+  if (!incoming.size) return results as DicomIngestResult[];
+  await assertStorageHeadroom(incrementalBytes);
+  if (signal?.aborted) return [];
+
+  const tx = db.transaction(['studies', 'series', 'instances', 'app_state'], 'readwrite');
+  const studies = tx.objectStore('studies');
+  const series = tx.objectStore('series');
+  const instances = tx.objectStore('instances');
+  const state = tx.objectStore('app_state');
+  const stagedStudies = new Map<string, DicomStudy>();
+  const stagedSeries = new Map<string, DicomSeries>();
+  const changedStudies = new Set<string>();
+  const changedSeries = new Set<string>();
+  const stagedInstances = new Map<string, Pick<DicomInstance, 'seriesInstanceUid' | 'studyInstanceUid'>>();
+  const accepted: { candidate: PreparedDicom; index: number }[] = [];
   try {
-    const db = await getDB();
+    const revision = await state.get(DATASET_REVISION_STATE_KEY);
+    for (let index = 0; index < candidates.length; index += 1) {
+      throwIfImportAborted(signal);
+      if (results[index]) continue;
+      const candidate = candidates[index];
+      const instanceUid = candidate.instance.sopInstanceUid;
+      const existingInstance = stagedInstances.get(instanceUid) ?? (await instances.get(instanceUid));
+      if (existingInstance) {
+        results[index] = persistedOwnershipResult(existingInstance, candidate);
+        continue;
+      }
 
-    // Duplicate protection: if an instance with this SOPInstanceUID already exists,
-    // don't store it again. This makes uploads idempotent and avoids wasting space.
-    //
-    // Note: Use getKey() so we don't read the whole value (which includes a Blob).
-    const existingKey = await db.getKey('instances', instanceUid);
-    if (existingKey) {
-      // Defensive: make sure study/series exist (these are small records).
-      const hasStudy = await db.getKey('studies', studyUid);
-      if (!hasStudy) await db.put('studies', study);
+      const studyUid = candidate.study.studyInstanceUid;
+      const seriesUid = candidate.series.seriesInstanceUid;
+      const existingStudy = stagedStudies.get(studyUid) ?? (await studies.get(studyUid));
+      const existingSeries = stagedSeries.get(seriesUid) ?? (await series.get(seriesUid));
+      try {
+        validateCanonicalParents(existingStudy, existingSeries, candidate);
+      } catch (error) {
+        if (isLocalizerOrientationConflict(candidate, error)) {
+          results[index] = {
+            status: 'skipped',
+            fileName: candidate.fileName,
+            reason: 'excluded-localizer-orientation',
+          };
+        } else if (isOrthogonalOriginalMrOrientationConflict(existingSeries, candidate, error)) {
+          results[index] = {
+            status: 'skipped',
+            fileName: candidate.fileName,
+            reason: 'excluded-incompatible-series-orientation',
+          };
+        } else {
+          results[index] = databaseError(candidate.fileName, error);
+        }
+        continue;
+      }
 
-      const hasSeries = await db.getKey('series', seriesUid);
-      if (!hasSeries) await db.put('series', series);
-
-      return { status: 'duplicate', fileName, sopInstanceUid: instanceUid };
+      const mergedStudy = enrichCanonicalParent(existingStudy, candidate.study);
+      const mergedSeries = enrichCanonicalParent(existingSeries, candidate.series);
+      stagedStudies.set(studyUid, mergedStudy.value);
+      stagedSeries.set(seriesUid, mergedSeries.value);
+      if (mergedStudy.changed) changedStudies.add(studyUid);
+      if (mergedSeries.changed) changedSeries.add(seriesUid);
+      stagedInstances.set(instanceUid, candidate.instance);
+      accepted.push({ candidate, index });
+      results[index] = { status: 'ingested', fileName: candidate.fileName, sopInstanceUid: instanceUid };
     }
 
-    // New instance: store study/series + the instance Blob.
-    // We use put() which acts as upsert.
-    const instance: DicomInstance = {
-      ...instanceBase,
-      // Store as Blob to maximize IndexedDB compatibility across browsers.
-      fileBlob: new Blob([file], { type: file.type || 'application/dicom' }),
-    };
+    if (accepted.length) {
+      for (const uid of changedStudies) {
+        throwIfImportAborted(signal);
+        await studies.put(stagedStudies.get(uid)!);
+      }
+      for (const uid of changedSeries) {
+        throwIfImportAborted(signal);
+        await series.put(stagedSeries.get(uid)!);
+      }
+      for (const { candidate } of accepted) {
+        throwIfImportAborted(signal);
+        // Store as Blob to maximize IndexedDB compatibility across browsers.
+        await instances.put({
+          ...candidate.instance,
+          fileBlob: new Blob([candidate.file], { type: candidate.file.type || 'application/dicom' }),
+        });
+      }
+      throwIfImportAborted(signal);
+      const previousRevision = typeof revision?.value === 'number' ? revision.value : 0;
+      await state.put({ key: DATASET_REVISION_STATE_KEY, value: previousRevision + accepted.length });
+    }
+    await tx.done;
+  } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      // An already-aborted transaction has no remaining work to cancel.
+    }
+    await tx.done.catch(() => undefined);
+    if (isImportAbort(error)) return [];
+    for (const { candidate, index } of accepted) results[index] = databaseError(candidate.fileName, error);
+    for (let index = 0; index < candidates.length; index += 1) {
+      if (!results[index]) results[index] = databaseError(candidates[index].fileName, error);
+    }
+    return results as DicomIngestResult[];
+  }
 
-    await db.put('studies', study);
-    await db.put('series', series);
-    await db.put('instances', instance);
+  for (const uid of new Set(accepted.map(({ candidate }) => candidate.series.seriesInstanceUid))) {
+    notifyDatasetMutation(uid);
+  }
+  return results as DicomIngestResult[];
+}
 
-    return { status: 'ingested', fileName, sopInstanceUid: instanceUid };
-  } catch (err) {
-    console.error('Error writing DICOM to IndexedDB:', file.name, err);
-    return { status: 'error', fileName, reason: 'db-error', message: toErrorMessage(err) };
+export async function processDicomFile(file: File): Promise<DicomIngestResult> {
+  try {
+    const prepared = await prepareDicomFile(file);
+    if (prepared.status !== 'prepared') return prepared;
+    return (await writePreparedBatch([prepared]))[0];
+  } catch (error) {
+    return databaseError(basename(file.name), error);
   }
 }
 
 export async function processFiles(
-  files: File[],
-  onProgress?: (current: number, total: number) => void
+  files: File[] | AsyncIterable<File>,
+  onProgress?: (current: number, total: number, detail?: ProcessFilesProgress) => void,
+  options: ProcessFilesOptions = {},
 ): Promise<ProcessFilesResult> {
+  const { signal } = options;
+  const knownTotal = options.total ?? (Array.isArray(files) ? files.length : undefined);
   const result: ProcessFilesResult = {
-    total: files.length,
+    total: knownTotal ?? 0,
     ingested: 0,
     duplicates: 0,
     skipped: 0,
     errors: 0,
     errorSamples: [],
   };
+  if (signal?.aborted) return { ...result, cancelled: true };
+  const maxItems = Math.max(1, Math.floor(options.batchMaxItems ?? DEFAULT_BATCH_MAX_ITEMS));
+  const maxBytes = Math.max(1, Math.floor(options.batchMaxBytes ?? DEFAULT_BATCH_MAX_BYTES));
+  const affectedSeries = new Set<string>();
+  let probeDuplicates = options.probeDuplicates ?? (await (await getDB()).count('instances')) > 0;
+  const pending: (PreparedDicom | ProbedDicom | DicomIngestResult)[] = [];
+  let pendingBytes = 0;
+  let completed = 0;
 
-  let count = 0;
-  for (const file of files) {
-    const r = await processDicomFile(file);
-    if (r.status === 'ingested') result.ingested += 1;
-    else if (r.status === 'duplicate') result.duplicates += 1;
-    else if (r.status === 'skipped') result.skipped += 1;
-    else result.errors += 1;
-
-    if (r.status === 'error' && result.errorSamples.length < 3) {
-      result.errorSamples.push(`${r.fileName}: ${r.message}`);
+  const publish = (outcome: DicomIngestResult) => {
+    if (outcome.status === 'ingested') result.ingested += 1;
+    else if (outcome.status === 'duplicate') result.duplicates += 1;
+    else if (outcome.status === 'skipped') {
+      result.skipped += 1;
+      result.skipReasons ??= {};
+      result.skipReasons[outcome.reason] = (result.skipReasons[outcome.reason] ?? 0) + 1;
+    } else {
+      result.errors += 1;
+      result.errorReasons ??= {};
+      result.errorReasons[outcome.reason] = (result.errorReasons[outcome.reason] ?? 0) + 1;
     }
+    if (outcome.status === 'error' && result.errorSamples.length < 3) {
+      result.errorSamples.push(`${outcome.fileName}: ${outcome.message}`);
+    }
+    completed += 1;
+    if (!onProgress) return;
+    if (onProgress.length > 2) {
+      onProgress(completed, result.total, {
+        ingested: result.ingested,
+        duplicates: result.duplicates,
+        skipped: result.skipped,
+        errors: result.errors,
+        fileName: outcome.fileName,
+      });
+    } else {
+      // Existing callers and test doubles observe exactly the historical two arguments.
+      onProgress(completed, result.total);
+    }
+  };
 
-    count += 1;
-    if (onProgress) onProgress(count, files.length);
+  const flush = async () => {
+    if (!pending.length) return;
+    const probes = pending.filter((candidate): candidate is ProbedDicom => candidate.status === 'probed');
+    if (probes.length) {
+      const ownership = await readPersistedOwnership(probes);
+      let duplicatesFound = 0;
+      for (let index = 0; index < pending.length; index += 1) {
+        const candidate = pending[index];
+        if (candidate.status !== 'probed') continue;
+        const existing = ownership.get(candidate.instance.sopInstanceUid);
+        if (existing) {
+          pending[index] = persistedOwnershipResult(existing, candidate);
+          if (pending[index].status === 'duplicate') duplicatesFound += 1;
+        } else {
+          pending[index] = await prepareDicomFile(candidate.file);
+        }
+      }
+      // Avoid double-parsing an entire new examination simply because unrelated
+      // prior scans are already present in the user's local database.
+      if (!duplicatesFound) probeDuplicates = false;
+    }
+    const prepared = pending.filter((candidate): candidate is PreparedDicom => candidate.status === 'prepared');
+    let written: DicomIngestResult[] = [];
+    if (prepared.length) {
+      try {
+        written = await writePreparedBatch(prepared, signal);
+      } catch (error) {
+        if (isImportAbort(error)) return;
+        written = prepared.map((candidate) => databaseError(candidate.fileName, error));
+      }
+      if (!written.length && signal?.aborted) return;
+    }
+    let writtenIndex = 0;
+    for (const candidate of pending) {
+      const outcome = candidate.status === 'prepared' ? written[writtenIndex++] : (candidate as DicomIngestResult);
+      if (candidate.status === 'prepared' && outcome.status === 'ingested') {
+        affectedSeries.add(candidate.series.seriesInstanceUid);
+      }
+      // A completed transaction is indivisible: report every durable row even if a
+      // progress callback requests cancellation while this batch is being published.
+      publish(outcome);
+    }
+    pending.length = 0;
+    pendingBytes = 0;
+  };
+
+  let iteratorCancelled = false;
+  try {
+    for await (const file of files) {
+      throwIfImportAborted(signal);
+      if (knownTotal === undefined) result.total += 1;
+      if (pending.length && (pending.length >= maxItems || pendingBytes + file.size > maxBytes)) {
+        await flush();
+        throwIfImportAborted(signal);
+      }
+
+      let candidate: PreparedDicom | ProbedDicom | DicomIngestResult;
+      try {
+        candidate = (probeDuplicates && (await probeDicomIdentity(file))) || (await prepareDicomFile(file));
+      } catch {
+        console.error('Failed to inspect a DICOM image safely');
+        candidate = {
+          status: 'error',
+          fileName: basename(file.name),
+          reason: 'parse-error',
+          message: 'Invalid or unsupported DICOM data.',
+        };
+      }
+      throwIfImportAborted(signal);
+      pending.push(candidate);
+      if (candidate.status === 'prepared' || candidate.status === 'probed') pendingBytes += file.size;
+      if (pending.length >= maxItems || pendingBytes >= maxBytes) await flush();
+      throwIfImportAborted(signal);
+    }
+    if (!signal?.aborted) await flush();
+  } catch (error) {
+    if (!isImportAbort(error)) throw error;
+    iteratorCancelled = true;
   }
-
+  if (iteratorCancelled || signal?.aborted) result.cancelled = true;
+  if (affectedSeries.size) result.affectedSeriesUids = [...affectedSeries];
   return result;
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { resample2dAreaAverage, resample2dLanczos3 } from '../src/utils/svr/resample2d';
+import {
+  resample2dAreaAverage,
+  resample2dAreaAverageWithValidity,
+  resample2dLanczos3,
+} from '../src/utils/svr/resample2d';
 
 describe('svr/resample2dAreaAverage', () => {
   it('returns an identical copy when dimensions match', () => {
@@ -30,6 +34,34 @@ describe('svr/resample2dAreaAverage', () => {
     expect(out[0]).toBeCloseTo(2.5, 6);
   });
 
+  it('normalizes mixed acquisition footprints by valid support instead of averaging padding into anatomy', () => {
+    const result = resample2dAreaAverageWithValidity(
+      Float32Array.from([-2000, 100, 100, 100]),
+      Float32Array.from([0, 1, 1, 1]),
+      1,
+      4,
+      1,
+      2,
+    );
+
+    expect(Array.from(result.pixels)).toEqual([100, 100]);
+    expect(Array.from(result.validity)).toEqual([0.5, 1]);
+  });
+
+  it('keeps an unsupported output footprint explicitly invalid', () => {
+    const result = resample2dAreaAverageWithValidity(
+      Float32Array.from([-2000, -2000, 100, 100]),
+      Float32Array.from([0, 0, 1, 1]),
+      1,
+      4,
+      1,
+      2,
+    );
+
+    expect(Array.from(result.pixels)).toEqual([0, 100]);
+    expect(Array.from(result.validity)).toEqual([0, 1]);
+  });
+
   it('downsamples 4x4 -> 2x2 by averaging 2x2 blocks', () => {
     // src:
     //  0  1  2  3
@@ -51,19 +83,11 @@ describe('svr/resample2dAreaAverage', () => {
 
   it('upsamples 2x2 -> 4x4 replicates pixels for integer scales', () => {
     // Each source pixel becomes a 2x2 block.
-    const src = new Float32Array([
-      1, 2,
-      3, 4,
-    ]);
+    const src = new Float32Array([1, 2, 3, 4]);
 
     const out = resample2dAreaAverage(src, 2, 2, 4, 4);
 
-    const expected = [
-      1, 1, 2, 2,
-      1, 1, 2, 2,
-      3, 3, 4, 4,
-      3, 3, 4, 4,
-    ];
+    const expected = [1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4];
 
     expect(out.length).toBe(16);
     expect(Array.from(out)).toEqual(expected);

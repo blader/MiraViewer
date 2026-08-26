@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, X, Loader2, CheckCircle, AlertCircle, Archive } from 'lucide-react';
+import { Download, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import { getStudies } from '../utils/localApi';
 import { exportStudiesToZip, type ExportProgress } from '../services/exportBackup';
+import { AccessibleDialog } from './ui/AccessibleDialog';
 
 type StudyItem = {
   study_id: string;
@@ -37,13 +38,15 @@ export function ExportModal({ onClose }: ExportModalProps) {
         const all = await getStudies();
         if (cancelled) return;
         setStudies(all);
-        setSelected(new Set(all.map(s => s.study_id)));
+        setSelected(new Set(all.map((s) => s.study_id)));
       } catch (e) {
         if (cancelled) return;
         setErrorMessage(e instanceof Error ? e.message : 'Failed to load studies');
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const selectedCount = selected.size;
@@ -51,7 +54,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
   const canExport = selectedCount > 0 && status !== 'exporting';
 
   const handleToggle = (id: string) => {
-    setSelected(prev => {
+    setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -95,113 +98,124 @@ export function ExportModal({ onClose }: ExportModalProps) {
   }, [progress]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-[520px] bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
-            <Archive className="w-4 h-4" />
-            Export Backup (ZIP)
-          </h3>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-            disabled={status === 'exporting'}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-6">
-          {status === 'success' ? (
-            <div className="flex flex-col items-center justify-center py-4 text-center">
-              <div className="w-12 h-12 rounded-full bg-green-500/20 text-green-500 flex items-center justify-center mb-3">
-                <CheckCircle className="w-6 h-6" />
-              </div>
-              <h4 className="text-[var(--text-primary)] font-medium mb-1">Export complete</h4>
+    <AccessibleDialog
+      title="Export Backup (ZIP)"
+      description="Create a complete local backup of the selected patient's imaging and saved work."
+      onClose={() => {
+        if (status !== 'exporting') onClose();
+      }}
+      closeOnBackdrop={status !== 'exporting'}
+      closeOnEscape={status !== 'exporting'}
+    >
+      <div className="overflow-y-auto px-5 py-6 sm:px-7">
+        {status === 'success' ? (
+          <div className="flex items-start gap-3 py-4" role="status">
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--evidence)]" aria-hidden="true" />
+            <div>
+              <h4 className="mb-1 font-medium text-[var(--text-primary)]">Export complete</h4>
               <p className="text-sm text-[var(--text-secondary)]">Your ZIP download should begin shortly.</p>
             </div>
-          ) : (
-            <>
-              <div className="text-xs text-[var(--text-secondary)] mb-3">
-                This creates a ZIP backup of selected studies, including DICOM files and metadata.
-              </div>
+          </div>
+        ) : (
+          <>
+            <p className="mb-2 font-[family-name:var(--font-mono)] text-[0.68rem] tracking-[0.13em] text-[var(--signal-metal)]">
+              COMPLETE BACKUP
+            </p>
+            <div className="mb-5 text-[0.82rem] leading-relaxed text-[var(--text-secondary)]">
+              This creates a complete, restorable backup of the selected patient’s scans, annotations, ground truth,
+              viewer settings, saved 3D segmentations, and local models.
+            </div>
 
-              <div className="max-h-64 overflow-auto border border-[var(--border-color)] rounded-lg divide-y divide-[var(--border-color)]">
-                {studies.length === 0 ? (
-                  <div className="p-4 text-sm text-[var(--text-secondary)]">No studies found.</div>
-                ) : (
-                  studies.map(study => {
-                    const checked = selected.has(study.study_id);
-                    return (
-                      <label key={study.study_id} className="flex items-start gap-3 p-3 text-sm cursor-pointer hover:bg-[var(--bg-tertiary)]">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => handleToggle(study.study_id)}
-                        />
-                        <div className="flex-1">
-                          <div className="text-[var(--text-primary)] font-medium">
-                            {formatDateShort(study.study_date)} · {study.scan_type || 'Study'}
-                          </div>
-                          <div className="text-[var(--text-secondary)] text-xs">
-                            {study.series_count} series · {study.total_instances} instances
-                          </div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-[family-name:var(--font-mono)] text-[0.68rem] tracking-[0.11em] text-[var(--text-secondary)]">
+                EXAMINATIONS
+              </span>
+              <span className="text-xs tabular-nums text-[var(--text-secondary)]">
+                {selectedCount}/{totalCount} selected
+              </span>
+            </div>
+            <div className="max-h-64 divide-y divide-[var(--border-color)] overflow-auto rounded-[3px] border border-[var(--border-color)]">
+              {studies.length === 0 ? (
+                <div className="p-4 text-sm text-[var(--text-secondary)]">No studies found.</div>
+              ) : (
+                studies.map((study) => {
+                  const checked = selected.has(study.study_id);
+                  return (
+                    <label
+                      key={study.study_id}
+                      className="flex min-h-14 cursor-pointer items-start gap-3 px-3 py-3 text-sm transition-colors hover:bg-[var(--bg-tertiary)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => handleToggle(study.study_id)}
+                        className="mt-1 accent-[var(--signal-metal)]"
+                      />
+                      <div className="flex-1">
+                        <div className="font-medium tabular-nums text-[var(--text-primary)]">
+                          {formatDateShort(study.study_date)} · {study.scan_type || 'Study'}
                         </div>
-                      </label>
-                    );
-                  })
-                )}
-              </div>
-
-              {status === 'exporting' && (
-                <div className="mt-4 flex items-center gap-2 text-[var(--text-secondary)] text-sm">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  {progressLabel || 'Exporting...'}
-                </div>
+                        <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                          {study.series_count} series · {study.total_instances} instances
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })
               )}
+            </div>
 
-              {errorMessage && (
-                <div className="mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-400/10 px-3 py-2 rounded-lg">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  {errorMessage}
-                </div>
-              )}
-
-              <div className="mt-6 flex justify-between items-center">
-                <div className="text-xs text-[var(--text-secondary)]">
-                  {selectedCount}/{totalCount} selected
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={onClose}
-                    disabled={status === 'exporting'}
-                    className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleExport}
-                    disabled={!canExport}
-                    className="px-4 py-2 text-sm bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    {status === 'exporting' ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Exporting…
-                      </>
-                    ) : (
-                      <>
-                        <Download className="w-4 h-4" />
-                        Export
-                      </>
-                    )}
-                  </button>
-                </div>
+            {status === 'exporting' && (
+              <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-secondary)]" role="status">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                {progressLabel || 'Exporting...'}
               </div>
-            </>
-          )}
-        </div>
+            )}
+
+            {errorMessage && (
+              <div
+                className="mt-4 flex items-center gap-2 rounded-[3px] border border-[var(--danger)] px-3 py-2 text-sm text-[var(--danger)]"
+                role="alert"
+              >
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                {errorMessage}
+              </div>
+            )}
+
+            <div className="mt-6 flex items-center justify-between gap-4 border-t border-[var(--border-color)] pt-5">
+              <div className="text-xs text-[var(--text-secondary)]">Stored on this device</div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={status === 'exporting'}
+                  className="min-h-11 rounded-[3px] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExport}
+                  disabled={!canExport}
+                  className="flex min-h-11 items-center gap-2 rounded-[3px] bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {status === 'exporting' ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      Exporting…
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" aria-hidden="true" />
+                      Export
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
-    </div>
+    </AccessibleDialog>
   );
 }

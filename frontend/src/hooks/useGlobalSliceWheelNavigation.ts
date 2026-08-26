@@ -28,10 +28,12 @@ export function useGlobalSliceWheelNavigation(opts: {
   contextRef: MutableRefObject<GlobalSliceWheelNavContext | null>;
   progressRef: MutableRefObject<number>;
   setProgressRef: MutableRefObject<(nextProgress: number) => void>;
+  interactionBlocked?: boolean;
 }) {
-  const { centerPaneRef, contextRef, progressRef, setProgressRef } = opts;
+  const { centerPaneRef, contextRef, progressRef, setProgressRef, interactionBlocked = false } = opts;
 
   useEffect(() => {
+    if (interactionBlocked) return;
     const handleWheel = (e: WheelEvent) => {
       // If a nested component (e.g. a DicomViewer) handled it already, don't double-apply.
       if (e.defaultPrevented) return;
@@ -76,5 +78,5 @@ export function useGlobalSliceWheelNavigation(opts: {
 
     window.addEventListener('wheel', handleWheel, { passive: false });
     return () => window.removeEventListener('wheel', handleWheel);
-  }, [centerPaneRef, contextRef, progressRef, setProgressRef]);
+  }, [centerPaneRef, contextRef, interactionBlocked, progressRef, setProgressRef]);
 }
