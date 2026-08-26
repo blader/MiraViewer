@@ -463,13 +463,14 @@ export function useAutoAlign() {
           exclusionRect: fineNormalizationExclusion,
           validity: referenceRender.validity,
         });
+        const protectedStructure = (pixels: Float32Array, exclusion: AlignmentReference['exclusionMask']) =>
+          buildStructuralPhaseImageSquare(
+            inpaintExclusionRectSquare(pixels, ALIGNMENT_IMAGE_SIZE, exclusion, 6).pixels,
+            ALIGNMENT_IMAGE_SIZE,
+          );
         let cachedReferenceStructure: Float32Array | undefined;
         const getReferenceStructure = () =>
-          (cachedReferenceStructure ??= buildStructuralPhaseImageSquare(
-            inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
-              .pixels,
-            ALIGNMENT_IMAGE_SIZE,
-          ));
+          (cachedReferenceStructure ??= protectedStructure(normalizedReferenceFine, fineNormalizationExclusion));
         if (debugAlignment) {
           console.info('[alignment] Perceptual slice-search config', {
             coarseImageSize: COARSE_IMAGE_SIZE,
@@ -826,10 +827,7 @@ export function useAutoAlign() {
             try {
               const { registerAffine2DWithElastix } = await import('../utils/elastixRegistration');
               ensureNotAborted();
-              const movingStructure = buildStructuralPhaseImageSquare(
-                inpaintExclusionRectSquare(normalized, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6).pixels,
-                ALIGNMENT_IMAGE_SIZE,
-              );
+              const movingStructure = protectedStructure(normalized, fineNormalizationExclusion);
               const residual = await registerAffine2DWithElastix(
                 getReferenceStructure(),
                 movingStructure,
@@ -1661,11 +1659,7 @@ export function useAutoAlign() {
               exclusionRect: sourceStructureExclusion,
               validity: bestRender.validity,
             });
-            const movingStructureSource = buildStructuralPhaseImageSquare(
-              inpaintExclusionRectSquare(normalizedBestForStructure, ALIGNMENT_IMAGE_SIZE, sourceStructureExclusion, 6)
-                .pixels,
-              ALIGNMENT_IMAGE_SIZE,
-            );
+            const movingStructureSource = protectedStructure(normalizedBestForStructure, sourceStructureExclusion);
             const prewarpedMovingStructure = fillInvalidWarpWithValidMean(
               warpPerceptualCandidateWithValidity(
                 movingStructureSource,

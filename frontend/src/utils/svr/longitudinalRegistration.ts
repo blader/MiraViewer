@@ -1363,16 +1363,18 @@ function refineAnatomicalPlaneDepth(
       }
     }
   }
-  let nativeBestScore = Number.NEGATIVE_INFINITY;
-  for (const entry of shortlist) {
-    assertNotAborted(options.signal);
-    const native = resliceStackToReferencePlane({
+  const resliceNative = (rigid: RigidParams) =>
+    resliceStackToReferencePlane({
       targetSlices: options.targetSlices,
       referenceSlice: reference,
-      targetToReference: entry.rigid,
+      targetToReference: rigid,
       centerMm: options.centerMm,
       signal: options.signal,
     });
+  let nativeBestScore = Number.NEGATIVE_INFINITY;
+  for (const entry of shortlist) {
+    assertNotAborted(options.signal);
+    const native = resliceNative(entry.rigid);
     if (native.coverage < minimumCoverage) continue;
     if (
       tumorBilateralLandmarks?.bilateral &&
@@ -1408,13 +1410,7 @@ function refineAnatomicalPlaneDepth(
         factor,
         'acquired',
       );
-      const presentation = resliceStackToReferencePlane({
-        targetSlices: options.targetSlices,
-        referenceSlice: reference,
-        targetToReference: candidate,
-        centerMm: options.centerMm,
-        signal: options.signal,
-      });
+      const presentation = resliceNative(candidate);
       if (presentation.coverage < minimumCoverage) continue;
       const score = scoreAnatomicalPlaneLandmarks(landmarks, presentation);
       if (score > nativeBestScore + 1e-7) {
