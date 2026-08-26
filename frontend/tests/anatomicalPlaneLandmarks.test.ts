@@ -40,6 +40,25 @@ function depthSensitivePhantom(size = 128, depth = 0): Float32Array {
   return pixels;
 }
 
+function physicalBilateralAnatomy() {
+  const rows = 128;
+  const cols = 128;
+  const pixels = anatomicalPhantom(rows, 0.23);
+  const valid = new Uint8Array(pixels.length).fill(1);
+  const prepared = prepareAnatomicalPlaneLandmarks({
+    pixels,
+    valid,
+    rows,
+    cols,
+    ippMm: { x: 0, y: 0, z: 0 },
+    rowDir: { x: 1, y: 0, z: 0 },
+    colDir: { x: 0, y: 1, z: 0 },
+    rowSpacingDsMm: 1,
+    colSpacingDsMm: 1,
+  });
+  return { rows, cols, pixels, valid, prepared };
+}
+
 type AnatomicalReference = Parameters<typeof prepareAnatomicalPlaneLandmarks>[0];
 type AnatomicalDepthContext = { previous?: AnatomicalReference; next?: AnatomicalReference };
 const prepareDepthAwareLandmarks = prepareAnatomicalPlaneLandmarks as (
@@ -87,21 +106,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
   });
 
   it('matches physically anterior bilateral cavity morphology and rejects absent or oversized anatomy', () => {
-    const rows = 128;
-    const cols = 128;
-    const pixels = anatomicalPhantom(rows, 0.23);
-    const valid = new Uint8Array(pixels.length).fill(1);
-    const prepared = prepareAnatomicalPlaneLandmarks({
-      pixels,
-      valid,
-      rows,
-      cols,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    });
+    const { rows, cols, pixels, valid, prepared } = physicalBilateralAnatomy();
     expect(prepared?.bilateral).toBeDefined();
     if (!prepared) return;
 
@@ -364,21 +369,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
   });
 
   it('trusts matched bilateral morphology when the reference already has physically symmetric orbits', () => {
-    const rows = 128;
-    const cols = 128;
-    const pixels = anatomicalPhantom(rows, 0.23);
-    const valid = new Uint8Array(pixels.length).fill(1);
-    const prepared = prepareAnatomicalPlaneLandmarks({
-      pixels,
-      valid,
-      rows,
-      cols,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    });
+    const { rows, cols, pixels, valid, prepared } = physicalBilateralAnatomy();
     if (!prepared?.bilateral) throw new Error('The physical orbital reference must be supported');
     const [left, right] = prepared.bilateral.components;
     expect(Math.min(left.area, right.area) / Math.max(left.area, right.area)).toBeGreaterThan(0.8);
@@ -394,21 +385,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
   });
 
   it('penalizes a supported remnant that does not preserve the displayed orbital component', () => {
-    const rows = 128;
-    const cols = 128;
-    const pixels = anatomicalPhantom(rows, 0.23);
-    const valid = new Uint8Array(pixels.length).fill(1);
-    const prepared = prepareAnatomicalPlaneLandmarks({
-      pixels,
-      valid,
-      rows,
-      cols,
-      ippMm: { x: 0, y: 0, z: 0 },
-      rowDir: { x: 1, y: 0, z: 0 },
-      colDir: { x: 0, y: 1, z: 0 },
-      rowSpacingDsMm: 1,
-      colSpacingDsMm: 1,
-    });
+    const { rows, cols, pixels, valid, prepared } = physicalBilateralAnatomy();
     if (!prepared?.bilateral) throw new Error('The physical orbital reference must be supported');
     const remnant = Float32Array.from(pixels);
     for (let row = 18; row < 40; row++) {

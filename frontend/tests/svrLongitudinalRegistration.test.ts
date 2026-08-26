@@ -76,6 +76,16 @@ function makeStack(
   });
 }
 
+function outputGridFrame(reference: SvrReconstructionSlice, pixelSpacing = '1\\1') {
+  return {
+    rows: reference.dsRows,
+    columns: reference.dsCols,
+    imagePositionPatient: `${reference.ippMm.x}\\${reference.ippMm.y}\\${reference.ippMm.z}`,
+    imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+    pixelSpacing,
+  };
+}
+
 describe('svr/longitudinalRegistration', () => {
   it('reslices an 18-degree target stack along the exact reference plane', async () => {
     const reference = makeStack({ frameUid: 'shared' });
@@ -164,14 +174,7 @@ describe('svr/longitudinalRegistration', () => {
     }));
     const reference = stack[9]!;
     const outputGrid = buildOutputPlaneGrid(
-      {
-        rows: reference.dsRows,
-        columns: reference.dsCols,
-        imagePositionPatient: `${reference.ippMm.x}\\${reference.ippMm.y}\\${reference.ippMm.z}`,
-        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
-        pixelSpacing: '1.5\\0.7',
-        sopInstanceUid: 'reference',
-      },
+      { ...outputGridFrame(reference, '1.5\\0.7'), sopInstanceUid: 'reference' },
       { mode: 'longest-edge', longestEdge: 12 },
     );
 
@@ -188,16 +191,7 @@ describe('svr/longitudinalRegistration', () => {
   it('preserves every acquired-footprint edge when an identity plane is presented on a 1024 grid', () => {
     const stack = makeStack();
     const reference = stack[9]!;
-    const outputGrid = buildOutputPlaneGrid(
-      {
-        rows: reference.dsRows,
-        columns: reference.dsCols,
-        imagePositionPatient: `${reference.ippMm.x}\\${reference.ippMm.y}\\${reference.ippMm.z}`,
-        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
-        pixelSpacing: '1\\1',
-      },
-      { mode: 'fixed-1024' },
-    );
+    const outputGrid = buildOutputPlaneGrid(outputGridFrame(reference), { mode: 'fixed-1024' });
 
     const result = resliceStackToReferencePlane({ targetSlices: stack, referenceSlice: reference, outputGrid });
 
@@ -221,16 +215,7 @@ describe('svr/longitudinalRegistration', () => {
       return { ...slice, pixels };
     });
     const reference = stack[9]!;
-    const outputGrid = buildOutputPlaneGrid(
-      {
-        rows: reference.dsRows,
-        columns: reference.dsCols,
-        imagePositionPatient: `${reference.ippMm.x}\\${reference.ippMm.y}\\${reference.ippMm.z}`,
-        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
-        pixelSpacing: '1\\1',
-      },
-      { mode: 'longest-edge', longestEdge: 9 },
-    );
+    const outputGrid = buildOutputPlaneGrid(outputGridFrame(reference), { mode: 'longest-edge', longestEdge: 9 });
 
     const result = resliceStackToReferencePlane({ targetSlices: stack, referenceSlice: reference, outputGrid });
 

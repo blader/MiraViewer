@@ -228,6 +228,29 @@ function computeSyntheticSvr(
   });
 }
 
+function privateDiagnostics(displaceCoronal = false) {
+  const allSlices = makeAllSlices();
+  const byOriginalUid = new Map([
+    ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
+    ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
+    ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789_PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987'],
+  ]);
+  for (const slice of allSlices) {
+    const originalUid = slice.seriesUid;
+    slice.seriesUid = byOriginalUid.get(originalUid)!;
+    slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
+    slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
+    if (displaceCoronal && originalUid === 's-cor') slice.ippMm.x += 40;
+  }
+  const spies = [
+    vi.spyOn(console, 'info').mockImplementation(() => {}),
+    vi.spyOn(console, 'warn').mockImplementation(() => {}),
+    vi.spyOn(console, 'log').mockImplementation(() => {}),
+  ];
+  const progress: string[] = [];
+  return { allSlices, spies, progress };
+}
+
 describe('svr/computeCore', () => {
   it('reconstructs valid zero and negative observations while rejecting explicitly invalid positive pixels', async () => {
     const occupancy = new Uint8Array(4);
@@ -796,25 +819,7 @@ describe('svr/computeCore', () => {
   });
 
   it('redacts source, patient, frame, and study identities from coarse-registration diagnostics', async () => {
-    const allSlices = makeAllSlices();
-    const byOriginalUid = new Map([
-      ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
-      ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
-      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789_PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987'],
-    ]);
-    for (const slice of allSlices) {
-      const originalUid = slice.seriesUid;
-      slice.seriesUid = byOriginalUid.get(originalUid)!;
-      slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
-      slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
-      if (originalUid === 's-cor') slice.ippMm.x += 40;
-    }
-    const spies = [
-      vi.spyOn(console, 'info').mockImplementation(() => {}),
-      vi.spyOn(console, 'warn').mockImplementation(() => {}),
-      vi.spyOn(console, 'log').mockImplementation(() => {}),
-    ];
-    const progress: string[] = [];
+    const { allSlices, spies, progress } = privateDiagnostics(true);
 
     try {
       await computeSyntheticSvr(
@@ -833,23 +838,7 @@ describe('svr/computeCore', () => {
   });
 
   it('redacts source identity from ROI registration plans, skipped-series warnings, and progress', async () => {
-    const allSlices = makeAllSlices();
-    const byOriginalUid = new Map([
-      ['s-ax', 'PRIVATE_SERIES_AXIAL_123'],
-      ['s-cor', 'PRIVATE_SERIES_CORONAL_456'],
-      ['s-sag', 'PRIVATE_SERIES_SAGITTAL_789_PRIVATE_PATIENT_NAME_PRIVATE_STUDY_987'],
-    ]);
-    for (const slice of allSlices) {
-      slice.seriesUid = byOriginalUid.get(slice.seriesUid)!;
-      slice.sopInstanceUid = `PRIVATE_SOP_${slice.sopInstanceUid}`;
-      slice.frameOfReferenceUid = 'PRIVATE_FRAME_ABC';
-    }
-    const spies = [
-      vi.spyOn(console, 'info').mockImplementation(() => {}),
-      vi.spyOn(console, 'warn').mockImplementation(() => {}),
-      vi.spyOn(console, 'log').mockImplementation(() => {}),
-    ];
-    const progress: string[] = [];
+    const { allSlices, spies, progress } = privateDiagnostics();
 
     try {
       await computeSyntheticSvr(

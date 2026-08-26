@@ -59,6 +59,16 @@ function makeManifest(
   };
 }
 
+function acceptedRegistration(overrides: Partial<LongitudinalRegistrationResult> = {}): LongitudinalRegistrationResult {
+  return {
+    ok: true,
+    targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+    centerMm: { x: 0, y: 0, z: 0 },
+    diagnostics: {},
+    ...overrides,
+  } as LongitudinalRegistrationResult;
+}
+
 describe('svr/longitudinalFrames', () => {
   beforeEach(() => {
     decode.load.mockClear();
@@ -638,12 +648,7 @@ describe('svr/longitudinalFrames', () => {
     const result = await densifyLongitudinalRegistration(
       target,
       selected,
-      {
-        ok: true,
-        targetToReference: rigid,
-        centerMm: { x: 0, y: 0, z: 0 },
-        diagnostics: {},
-      } as LongitudinalRegistrationResult,
+      acceptedRegistration({ targetToReference: rigid }),
       { referenceManifest: reference, referenceSliceIndex: 5, referenceExclusionMask: exclusion },
     );
 
@@ -691,22 +696,12 @@ describe('svr/longitudinalFrames', () => {
       nativeRefinement: { score: 0.9, sampleCount: 100 },
     });
 
-    const result = await densifyLongitudinalRegistration(
-      target,
-      selected,
-      {
-        ok: true,
-        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-        centerMm: { x: 0, y: 0, z: 0 },
-        diagnostics: {},
-      } as LongitudinalRegistrationResult,
-      {
-        outputGrid,
-        referenceManifest: reference,
-        referenceSliceIndex: 5,
-        referenceImage: { pixels, valid, rows: outputGrid.rows, columns: outputGrid.columns, outputGrid },
-      },
-    );
+    const result = await densifyLongitudinalRegistration(target, selected, acceptedRegistration(), {
+      outputGrid,
+      referenceManifest: reference,
+      referenceSliceIndex: 5,
+      referenceImage: { pixels, valid, rows: outputGrid.rows, columns: outputGrid.columns, outputGrid },
+    });
 
     expect(result.ok).toBe(true);
     const context = denseWorker.run.mock.calls[0]![0];
@@ -726,28 +721,18 @@ describe('svr/longitudinalFrames', () => {
       frameOfReferenceUid: reference.frameOfReferenceUid,
     });
     await expect(
-      densifyLongitudinalRegistration(
-        target,
-        selected,
-        {
-          ok: true,
-          targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-          centerMm: { x: 0, y: 0, z: 0 },
-          diagnostics: {},
-        } as LongitudinalRegistrationResult,
-        {
-          outputGrid,
-          referenceManifest: reference,
-          referenceSliceIndex: 5,
-          referenceImage: {
-            pixels,
-            valid,
-            rows: outputGrid.rows,
-            columns: outputGrid.columns,
-            outputGrid: differentGrid,
-          },
+      densifyLongitudinalRegistration(target, selected, acceptedRegistration(), {
+        outputGrid,
+        referenceManifest: reference,
+        referenceSliceIndex: 5,
+        referenceImage: {
+          pixels,
+          valid,
+          rows: outputGrid.rows,
+          columns: outputGrid.columns,
+          outputGrid: differentGrid,
         },
-      ),
+      }),
     ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('verified physical output grid') });
     expect(denseWorker.run).not.toHaveBeenCalled();
   });
@@ -799,22 +784,12 @@ describe('svr/longitudinalFrames', () => {
       contributingSourceSopInstanceUids: ['target-5'],
       nativeRefinement: { score: 0.9, sampleCount: 100 },
     });
-    const result = await densifyLongitudinalRegistration(
-      target,
-      selected,
-      {
-        ok: true,
-        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-        centerMm: { x: 0, y: 0, z: 0 },
-        diagnostics: {},
-      } as LongitudinalRegistrationResult,
-      {
-        outputGrid,
-        referenceManifest: anchor,
-        referenceSliceIndex: 5,
-        referenceAnatomy,
-      },
-    );
+    const result = await densifyLongitudinalRegistration(target, selected, acceptedRegistration(), {
+      outputGrid,
+      referenceManifest: anchor,
+      referenceSliceIndex: 5,
+      referenceAnatomy,
+    });
 
     expect(result.ok).toBe(true);
     const native = denseWorker.run.mock.calls[0]![0];
@@ -844,12 +819,7 @@ describe('svr/longitudinalFrames', () => {
     });
     const prepared = await prepareLongitudinalRegistrationInput(reference, target, 2, { outputGrid });
     const selected = prepared.referenceSlices[prepared.referenceSliceIndex]!;
-    const coarse = {
-      ok: true,
-      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-      centerMm: { x: 0, y: 0, z: 0 },
-      diagnostics: {},
-    } as LongitudinalRegistrationResult;
+    const coarse = acceptedRegistration();
     const validResult = {
       ok: true,
       pixels: new Float32Array(outputGrid.rows * outputGrid.columns),
@@ -891,13 +861,11 @@ describe('svr/longitudinalFrames', () => {
     const winner = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
 
     await expect(
-      densifyLongitudinalRegistration(target, prepared.referenceSlices[prepared.referenceSliceIndex]!, {
-        ok: true,
-        targetToReference: winner,
-        nativeCandidatePoses: [winner, { ...winner, tz: 1 }],
-        centerMm: { x: 0, y: 0, z: 0 },
-        diagnostics: {},
-      } as LongitudinalRegistrationResult),
+      densifyLongitudinalRegistration(
+        target,
+        prepared.referenceSlices[prepared.referenceSliceIndex]!,
+        acceptedRegistration({ targetToReference: winner, nativeCandidatePoses: [winner, { ...winner, tz: 1 }] }),
+      ),
     ).resolves.toMatchObject({ ok: false, reason: 'ambiguous' });
     expect(denseWorker.run).not.toHaveBeenCalled();
   });
@@ -922,13 +890,7 @@ describe('svr/longitudinalFrames', () => {
     const result = await densifyLongitudinalRegistration(
       target,
       selected,
-      {
-        ok: true,
-        targetToReference: winner,
-        nativeCandidatePoses: candidates,
-        centerMm: { x: 0, y: 0, z: 0 },
-        diagnostics: {},
-      } as LongitudinalRegistrationResult,
+      acceptedRegistration({ targetToReference: winner, nativeCandidatePoses: candidates }),
       { referenceManifest: reference, referenceSliceIndex: 50 },
     );
 

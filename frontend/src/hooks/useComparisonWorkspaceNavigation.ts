@@ -120,44 +120,14 @@ export function useComparisonWorkspaceNavigation({
     sliceIndex: overlayCompareSliceIndex,
   } = compare;
 
-  const svr3dSeed = useMemo(() => {
-    if (overlayDisplayedDate && overlayDisplayedRef) {
-      return {
-        defaultDateIso: overlayDisplayedDate,
-        fallbackRoiSeriesUid: overlayDisplayedRef.series_uid,
-        fallbackRoiSliceIndex: overlayDisplayedEffectiveSliceIndex,
-      };
-    }
-
-    const first = columns[0];
-    if (!first) {
-      return {
-        defaultDateIso: null,
-        fallbackRoiSeriesUid: null,
-        fallbackRoiSliceIndex: null,
-      };
-    }
-
-    const settings = panelSettings.get(first.date) || DEFAULT_PANEL_SETTINGS;
-    const sliceIndex = getSliceIndex(first.ref.instance_count, progress, settings.offset);
-
-    return {
-      defaultDateIso: first.date,
-      fallbackRoiSeriesUid: first.ref.series_uid,
-      fallbackRoiSliceIndex: getEffectiveInstanceIndex(
-        sliceIndex,
-        first.ref.instance_count,
-        settings.reverseSliceOrder,
-      ),
-    };
-  }, [
-    columns,
-    overlayDisplayedDate,
-    overlayDisplayedEffectiveSliceIndex,
-    overlayDisplayedRef,
-    panelSettings,
-    progress,
-  ]);
+  const svr3dSeed = useMemo(
+    () => ({
+      defaultDateIso: overlayDisplayedDate ?? null,
+      fallbackRoiSeriesUid: overlayDisplayedRef?.series_uid ?? null,
+      fallbackRoiSliceIndex: overlayDisplayedRef ? overlayDisplayedEffectiveSliceIndex : null,
+    }),
+    [overlayDisplayedDate, overlayDisplayedEffectiveSliceIndex, overlayDisplayedRef],
+  );
 
   const progressRef = useRef(progress);
   useEffect(() => {
