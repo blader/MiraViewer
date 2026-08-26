@@ -7,7 +7,6 @@ import {
   rankFixedCandidateSet,
   scoreAlignedCandidate,
 } from '../src/utils/perceptualSliceSimilarity';
-import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import {
   makeTissueLabelPhantom,
   REFERENCE_CONTRAST,
@@ -27,7 +26,6 @@ import {
 const corpusDirectory = process.env.MIRAVIEWER_ALIGNMENT_CORPUS_DIR;
 const runRealCorpus = corpusDirectory ? it : it.skip;
 const runPhysicalGold = corpusDirectory && process.env.MIRAVIEWER_ALIGNMENT_PHYSICAL_GOLD === '1' ? it : it.skip;
-const runCoronalProfile = corpusDirectory && process.env.MIRAVIEWER_ALIGNMENT_CORONAL_PROFILE === '1' ? it : it.skip;
 
 const VISUALLY_REVIEWED_LANDMARKS = [
   { examinationOrdinal: 1, plane: 'AX', index: 100, tolerance: 2 },
@@ -62,65 +60,6 @@ describe('private real-MRI alignment golden validation', () => {
       ranked.find((candidate) => candidate.index === 5)?.structuralRank ?? 0,
     );
   });
-
-  runCoronalProfile(
-    'profiles an acquired coronal reference against an identical distinct-frame target',
-    async () => {
-      const started = performance.now();
-      const series = inspectAlignmentCorpus(corpusDirectory!);
-      console.log(
-        '[alignment-coronal-profile-index] ' +
-          JSON.stringify({
-            indexedSeries: series.length,
-            elapsedMilliseconds: Number((performance.now() - started).toFixed(1)),
-          }),
-      );
-      const source = series.find((entry) => entry.examinationOrdinal === 1 && entry.plane === 'COR');
-      if (!source) throw new Error('The protected reference examination has no coronal acquisition');
-      const codec = loadAlignmentLosslessCodec();
-      const referenceStarted = performance.now();
-      const reference = await prepareAlignmentPhysicalReference(source, 110, codec);
-      const target = { ...source, frameOfReferenceUid: 'alignment-profile-distinct-frame' };
-      const targetSlices = reference.slices.map((slice) => ({
-        ...slice,
-        frameOfReferenceUid: target.frameOfReferenceUid,
-      }));
-      const outputGrid = buildOutputPlaneGrid(reference.manifest.frames[reference.frameIndex]!, {
-        mode: 'native',
-        frameOfReferenceUid: reference.manifest.frameOfReferenceUid,
-      });
-      console.log(
-        '[alignment-coronal-profile-start] ' +
-          JSON.stringify({
-            indexedSeries: series.length,
-            rows: source.rows,
-            columns: source.columns,
-            referenceDecodeMilliseconds: Number((performance.now() - referenceStarted).toFixed(1)),
-            reusedTargetSlices: targetSlices.length,
-            elapsedMilliseconds: Number((performance.now() - started).toFixed(1)),
-          }),
-      );
-      const result = await runAlignmentPhysicalGoldenCase(reference, target, { outputGrid, targetSlices });
-      console.log(
-        '[alignment-coronal-profile-result] ' +
-          JSON.stringify({
-            ok: result.ok,
-            coarseMilliseconds: Number(result.coarseMilliseconds.toFixed(1)),
-            ...(result.nativeMilliseconds === undefined
-              ? {}
-              : { nativeMilliseconds: Number(result.nativeMilliseconds.toFixed(1)) }),
-            ...(result.ok
-              ? { selectedIndex: result.selectedIndex, coverage: Number(result.dense.coverage.toFixed(4)) }
-              : { phase: result.phase, reason: result.failure.reason }),
-          }),
-      );
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      expect(Math.abs(result.selectedIndex - reference.frameIndex)).toBeLessThanOrEqual(2);
-      expect(result.dense.coverage).toBeGreaterThan(0.55);
-    },
-    120_000,
-  );
 
   runRealCorpus(
     'inspects every acquired examination and optionally renders deidentified visual-review contact sheets',

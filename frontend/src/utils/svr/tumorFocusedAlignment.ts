@@ -438,7 +438,7 @@ export function hasPersistentTumorTarget(
 ): boolean {
   return sections.some(({ supraHealthyComponents, healthySupraThresholdMass }) => {
     const sourceRadius = 1.5 * Math.sqrt(prepared.component.area / Math.PI);
-    const corresponding = supraHealthyComponents.filter((component) => {
+    const strongest = supraHealthyComponents.find((component) => {
       const sourceDistance = Math.hypot(
         component.row - prepared.component.row,
         component.column - prepared.component.column,
@@ -446,9 +446,6 @@ export function hasPersistentTumorTarget(
       const radius = Math.sqrt(component.area / Math.PI);
       return component.corePixelCount > 0 || sourceDistance <= radius + sourceRadius;
     });
-    const strongest = corresponding.sort(
-      (first, second) => second.area * second.contrast - first.area * first.contrast,
-    )[0];
     const dominantMass = (supraHealthyComponents[0]?.area ?? 0) * (supraHealthyComponents[0]?.contrast ?? 0);
     return Boolean(
       strongest &&
