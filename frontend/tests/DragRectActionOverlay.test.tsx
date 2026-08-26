@@ -64,6 +64,55 @@ describe('DragRectActionOverlay', () => {
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it('freezes viewer and global wheel navigation only while a selection is active', () => {
+    const onViewerWheel = vi.fn();
+    const onGlobalWheel = vi.fn();
+    const { container } = render(
+      <DragRectActionOverlay
+        className="relative"
+        geometry={DEFAULT_PANEL_SETTINGS}
+        actions={[{ key: 'align-all', label: 'Align All', onConfirm: vi.fn() }]}
+      >
+        <div onWheel={onViewerWheel}>Viewer</div>
+      </DragRectActionOverlay>,
+    );
+    const overlay = container.firstElementChild as HTMLElement;
+    const viewer = screen.getByText('Viewer');
+    const wheel = (target: HTMLElement, modifiers: Pick<WheelEventInit, 'metaKey' | 'ctrlKey'> = {}) => {
+      const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120, ...modifiers });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    window.addEventListener('wheel', onGlobalWheel);
+    try {
+      expect(wheel(viewer)).toBe(false);
+      expect(onViewerWheel).toHaveBeenCalledOnce();
+      expect(onGlobalWheel).toHaveBeenCalledOnce();
+
+      fireEvent.pointerDown(overlay, { pointerId: 2, button: 0, isPrimary: true, clientX: 50, clientY: 50 });
+      fireEvent.pointerMove(overlay, { pointerId: 2, isPrimary: true, clientX: 180, clientY: 180 });
+      expect(wheel(viewer)).toBe(true);
+      expect(wheel(viewer, { metaKey: true })).toBe(false);
+      expect(wheel(viewer, { ctrlKey: true })).toBe(false);
+      expect(onViewerWheel).toHaveBeenCalledTimes(3);
+      expect(onGlobalWheel).toHaveBeenCalledTimes(3);
+
+      fireEvent.pointerUp(overlay, { pointerId: 2, button: 0, isPrimary: true, clientX: 180, clientY: 180 });
+      expect(wheel(screen.getByRole('button', { name: 'Align All' }))).toBe(true);
+      expect(wheel(viewer)).toBe(true);
+      expect(onViewerWheel).toHaveBeenCalledTimes(3);
+      expect(onGlobalWheel).toHaveBeenCalledTimes(3);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+      expect(wheel(viewer)).toBe(false);
+      expect(onViewerWheel).toHaveBeenCalledTimes(4);
+      expect(onGlobalWheel).toHaveBeenCalledTimes(4);
+    } finally {
+      window.removeEventListener('wheel', onGlobalWheel);
+    }
+  });
+
   it.each([
     { side: 'right', start: 180, end: 300 },
     { side: 'left', start: 335, end: 465 },

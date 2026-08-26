@@ -96,6 +96,161 @@ describe('physical enclosed anatomical plane landmarks', () => {
     expect(correct).toBeGreaterThan(wrong + 0.1);
   });
 
+  it('prioritizes supported anatomy beside an excluded region without reading the region or discarding distant anatomy', () => {
+    const rows = 128;
+    const cols = 128;
+    const pixels = anatomicalPhantom(rows, 0.23);
+    const valid = new Uint8Array(pixels.length).fill(1);
+    const exclusion = new Uint8Array(pixels.length);
+    for (let row = 56; row < 76; row++) exclusion.fill(1, row * cols + 54, row * cols + 75);
+    const near = { firstRow: 77, firstColumn: 62 };
+    const far = { firstRow: 77, firstColumn: 30 };
+    for (const feature of [near, far]) {
+      for (let row = feature.firstRow; row < feature.firstRow + 9; row++) {
+        for (let column = feature.firstColumn; column < feature.firstColumn + 9; column++) {
+          pixels[row * cols + column] = (row - feature.firstRow + column - feature.firstColumn) % 3 === 0 ? 0.8 : 0.2;
+        }
+      }
+    }
+    const prepared = prepareAnatomicalPlaneLandmarks(
+      {
+        pixels,
+        valid,
+        rows,
+        cols,
+        ippMm: { x: 0, y: 0, z: 0 },
+        rowDir: { x: 1, y: 0, z: 0 },
+        colDir: { x: 0, y: 1, z: 0 },
+        rowSpacingDsMm: 1,
+        colSpacingDsMm: 1,
+      },
+      exclusion,
+    );
+    expect(prepared?.bilateral).toBeDefined();
+    if (!prepared) return;
+
+    const eraseFeature = (feature: typeof near) => {
+      const candidate = Float32Array.from(pixels);
+      for (let row = feature.firstRow; row < feature.firstRow + 9; row++) {
+        candidate.fill(0.5, row * cols + feature.firstColumn, row * cols + feature.firstColumn + 9);
+      }
+      return candidate;
+    };
+    const missingNear = scoreAnatomicalPlaneLandmarks(prepared, {
+      pixels: eraseFeature(near),
+      valid,
+      rows,
+      cols,
+    });
+    const missingFar = scoreAnatomicalPlaneLandmarks(prepared, { pixels: eraseFeature(far), valid, rows, cols });
+    expect(missingFar).toBeGreaterThan(missingNear + 0.03);
+    expect(
+      Array.from(
+        { length: 9 },
+        (_, offset) => prepared.weights[(far.firstRow + 1) * cols + far.firstColumn + offset]!,
+      ).some((weight) => weight > 0),
+    ).toBe(true);
+    expect(prepared.weights.some((weight, index) => exclusion[index] && weight > 0)).toBe(false);
+
+    const changedLesion = Float32Array.from(pixels);
+    for (let index = 0; index < exclusion.length; index++) {
+      if (exclusion[index]) changedLesion[index] = 25;
+    }
+    expect(scoreAnatomicalPlaneLandmarks(prepared, { pixels: changedLesion, valid, rows, cols })).toBeCloseTo(
+      scoreAnatomicalPlaneLandmarks(prepared, { pixels, valid, rows, cols }),
+      8,
+    );
+  });
+
+  it('measures distance from the excluded anatomy in physical millimeters and keeps a global support floor', () => {
+    const size = 128;
+    const pixels = anatomicalPhantom(size, 0.23);
+    const valid = new Uint8Array(pixels.length).fill(1);
+    const exclusion = new Uint8Array(pixels.length);
+    for (let row = 56; row < 76; row++) exclusion.fill(1, row * size + 56, row * size + 76);
+    const below = { firstRow: 85, firstColumn: 61 };
+    const right = { firstRow: 61, firstColumn: 85 };
+    for (const feature of [below, right]) {
+      for (let row = feature.firstRow; row < feature.firstRow + 7; row++) {
+        for (let column = feature.firstColumn; column < feature.firstColumn + 7; column++) {
+          pixels[row * size + column] = (row - feature.firstRow + column - feature.firstColumn) % 3 === 0 ? 0.8 : 0.2;
+        }
+      }
+    }
+    const reference = {
+      pixels,
+      valid,
+      rows: size,
+      cols: size,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+    };
+    const tallPixels = prepareAnatomicalPlaneLandmarks(
+      { ...reference, rowSpacingDsMm: 2, colSpacingDsMm: 0.5 },
+      exclusion,
+    );
+    const widePixels = prepareAnatomicalPlaneLandmarks(
+      { ...reference, rowSpacingDsMm: 0.5, colSpacingDsMm: 2 },
+      exclusion,
+    );
+    expect(tallPixels?.bilateral).toBeDefined();
+    expect(widePixels?.bilateral).toBeDefined();
+    if (!tallPixels || !widePixels) return;
+    const featureWeight = (weights: Float32Array, feature: typeof below) => {
+      let total = 0;
+      for (let row = feature.firstRow; row < feature.firstRow + 7; row++) {
+        for (let column = feature.firstColumn; column < feature.firstColumn + 7; column++) {
+          total += weights[row * size + column]!;
+        }
+      }
+      return total;
+    };
+    expect(featureWeight(tallPixels.weights, below)).toBeLessThan(featureWeight(widePixels.weights, below) * 0.7);
+    expect(featureWeight(widePixels.weights, right)).toBeLessThan(featureWeight(tallPixels.weights, right) * 0.7);
+    expect(featureWeight(tallPixels.weights, below)).toBeGreaterThan(0);
+    expect(featureWeight(widePixels.weights, right)).toBeGreaterThan(0);
+
+    const withoutExclusion = prepareAnatomicalPlaneLandmarks({
+      ...reference,
+      rowSpacingDsMm: 2,
+      colSpacingDsMm: 0.5,
+    });
+    const emptyExclusion = prepareAnatomicalPlaneLandmarks(
+      { ...reference, rowSpacingDsMm: 2, colSpacingDsMm: 0.5 },
+      new Uint8Array(pixels.length),
+    );
+    expect(withoutExclusion?.weights).toEqual(emptyExclusion?.weights);
+  });
+
+  it('preserves established global bilateral matching for a broad anatomical exclusion', () => {
+    const { rows, cols, pixels, valid } = physicalBilateralAnatomy();
+    const exclusion = new Uint8Array(pixels.length);
+    for (let row = 43; row < 85; row++) exclusion.fill(1, row * cols + 46, row * cols + 82);
+    const reference = {
+      pixels,
+      valid,
+      rows,
+      cols,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+      frameOfReferenceUid: 'reference-frame',
+    };
+    const original = prepareAnatomicalPlaneLandmarks(reference, exclusion);
+    const withAdjacentPlanes = prepareAnatomicalPlaneLandmarks(reference, exclusion, {
+      previous: { ...reference, pixels: anatomicalPhantom(rows, 0.22), ippMm: { x: 0, y: 0, z: -1 } },
+      next: { ...reference, pixels: anatomicalPhantom(rows, 0.24), ippMm: { x: 0, y: 0, z: 1 } },
+    });
+
+    expect(original?.bilateral?.reliable).toBe(true);
+    expect(original?.localizedAnatomy).toBeUndefined();
+    expect(withAdjacentPlanes?.weights).toEqual(original?.weights);
+    expect(withAdjacentPlanes?.totalWeight).toBe(original?.totalWeight);
+  });
+
   it('declines an image without supported enclosed anatomy', () => {
     const rows = 48;
     const cols = 48;
@@ -142,6 +297,55 @@ describe('physical enclosed anatomical plane landmarks', () => {
     expect(scoreAnatomicalPlaneLandmarks(prepared, { pixels: missing, valid, rows, cols })).toBe(
       Number.NEGATIVE_INFINITY,
     );
+  });
+
+  it('does not let physically tiny distant bilateral remnants veto acquired anatomy near the selected region', () => {
+    const size = 128;
+    const pixels = anatomicalPhantom(size, 0.23, 0.28);
+    const valid = new Uint8Array(pixels.length).fill(1);
+    const exclusion = new Uint8Array(pixels.length);
+    for (let row = 52; row < 64; row++) exclusion.fill(1, row * size + 57, row * size + 72);
+    const reference = {
+      pixels,
+      valid,
+      rows: size,
+      cols: size,
+      ippMm: { x: 0, y: 0, z: 0 },
+      rowDir: { x: 1, y: 0, z: 0 },
+      colDir: { x: 0, y: 1, z: 0 },
+      rowSpacingDsMm: 1.71875,
+      colSpacingDsMm: 1.71875,
+      frameOfReferenceUid: 'reference-frame',
+    };
+    const prepared = prepareAnatomicalPlaneLandmarks(reference, exclusion, {
+      previous: { ...reference, ippMm: { x: 0, y: 0, z: -1 } },
+      next: { ...reference, ippMm: { x: 0, y: 0, z: 1 } },
+    });
+    expect(prepared?.bilateral).toBeDefined();
+    if (!prepared?.bilateral) return;
+    expect(prepared.bilateral.reliable).toBe(false);
+    expect(prepared.localizedAnatomy).toBe(true);
+    const [left, right] = prepared.bilateral.components;
+    const equivalentDiameterMm = 2 * Math.sqrt((Math.sqrt(left.area * right.area) * 1.71875 * 1.71875) / Math.PI);
+    expect(equivalentDiameterMm).toBeLessThan(9);
+
+    const withoutDistantRemnants = Float32Array.from(pixels);
+    for (let row = 15; row < 45; row++) {
+      for (let column = 25; column < 103; column++) {
+        const index = row * size + column;
+        if (withoutDistantRemnants[index] === 0) withoutDistantRemnants[index] = 0.5;
+      }
+    }
+    const candidate = { pixels: withoutDistantRemnants, valid, rows: size, cols: size };
+    expect(scoreAnatomicalPlaneLandmarks(prepared, candidate)).toBeGreaterThan(0.8);
+    expect(minimumBilateralAnatomicalRetention(prepared, candidate)).toBe(Number.NEGATIVE_INFINITY);
+
+    const broadExclusion = new Uint8Array(pixels.length);
+    for (let row = 48; row < 88; row++) broadExclusion.fill(1, row * size + 45, row * size + 85);
+    const broad = prepareAnatomicalPlaneLandmarks(reference, broadExclusion);
+    expect(broad?.bilateral?.reliable).toBe(false);
+    expect(broad?.localizedAnatomy).toBeUndefined();
+    expect(scoreAnatomicalPlaneLandmarks(broad!, candidate)).toBe(Number.NEGATIVE_INFINITY);
   });
 
   it('follows DICOM patient-space anatomy through image flips and a 90-degree acquisition rotation', () => {

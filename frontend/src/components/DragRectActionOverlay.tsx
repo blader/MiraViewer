@@ -470,6 +470,20 @@ export function DragRectActionOverlay({
   }, []);
 
   useEffect(() => {
+    if (!selection && !drag?.didExceedThreshold) return;
+    const element = containerRef.current;
+    if (!element) return;
+
+    const preventSliceNavigation = (event: WheelEvent) => {
+      if (event.metaKey || event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    element.addEventListener('wheel', preventSliceNavigation, { capture: true, passive: false });
+    return () => element.removeEventListener('wheel', preventSliceNavigation, { capture: true });
+  }, [drag?.didExceedThreshold, selection]);
+
+  useEffect(() => {
     if (!selection) return;
 
     const onKeyDown = (e: KeyboardEvent) => {

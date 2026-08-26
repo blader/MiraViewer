@@ -340,6 +340,33 @@ describe('svr/longitudinalRegistration', () => {
     expect(result.pixels[9 * 19 + 9]).toBeGreaterThan(5);
   });
 
+  it('accounts for localized anatomical weighting without overstating independent native evidence', () => {
+    const reference = makeStack({ frameUid: 'shared' });
+    const target = makeStack({ frameUid: 'shared' });
+    const mask = new Uint8Array(19 * 19);
+    for (let row = 8; row <= 10; row++) mask.fill(1, row * 19 + 8, row * 19 + 11);
+
+    const result = resliceDenseLongitudinalPlane({
+      targetSlices: target,
+      referencePlane: reference[9]!,
+      nativeReferenceSlices: reference,
+      nativeReferenceSliceIndex: 9,
+      referenceExclusionMask: mask,
+      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      centerMm: { x: 0, y: 0, z: 0 },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.targetToReference).toEqual({ tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 });
+    expect(result.nativeRefinement!.effectiveIndependentSamples).toBeLessThan(
+      result.nativeRefinement!.sampleCount * 0.98,
+    );
+    expect(result.nativeRefinement!.heldOutEffectiveIndependentSamples).toBeLessThan(
+      result.nativeRefinement!.heldOutSampleCount * 0.98,
+    );
+  });
+
   it.each(['AX', 'COR', 'SAG'] as const)(
     'uses lesion correspondence only for explicitly requested native %s through-plane localization',
     (plane) => {

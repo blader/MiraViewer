@@ -400,6 +400,86 @@ describe('perceptual slice scoring', () => {
     expect(score.perScale[0].ngf).toBeLessThan(exact.perScale[0].ngf);
   });
 
+  test('gives supported healthy anatomy near an excluded lesion more influence without discarding distant anatomy', () => {
+    const size = 96;
+    const reference = normalizePerceptualSource(
+      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
+      size,
+    );
+    const exclusionRect = { x: 42 / size, y: 42 / size, width: 12 / size, height: 12 / size };
+    const original = preparePerceptualReference(reference, size, { scales: [size] }).scales[0]!;
+    const focused = preparePerceptualReference(reference, size, { scales: [size], exclusionRect }).scales[0]!;
+    const near = 48 * size + 62;
+    const distant = 48 * size + 17;
+
+    expect(original.weights[near]).toBeGreaterThan(0);
+    expect(original.weights[distant]).toBeGreaterThan(0);
+    expect(focused.weights[near]! / original.weights[near]!).toBeGreaterThan(
+      (focused.weights[distant]! / original.weights[distant]!) * 1.5,
+    );
+    expect(focused.weights[distant]).toBeGreaterThan(0);
+
+    for (let row = 42; row < 54; row++) {
+      for (let column = 42; column < 54; column++) {
+        expect(focused.weights[row * size + column]).toBe(0);
+      }
+    }
+  });
+
+  test('prefers matching healthy anatomy near the lesion when more distant structures disagree', () => {
+    const size = 96;
+    const reference = normalizePerceptualSource(
+      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
+      size,
+    );
+    const exclusionRect = { x: 42 / size, y: 42 / size, width: 12 / size, height: 12 / size };
+    const nearbyMatches = Float32Array.from(reference);
+    const distantMatches = Float32Array.from(reference);
+    for (let row = 26; row < 70; row++) {
+      for (let column = 12; column < 27; column++) {
+        const index = row * size + column;
+        if (nearbyMatches[index]) nearbyMatches[index] = 1.05 - nearbyMatches[index]!;
+      }
+    }
+    for (let row = 34; row < 65; row++) {
+      for (let column = 60; column < 76; column++) {
+        const index = row * size + column;
+        if (distantMatches[index]) distantMatches[index] = 1.05 - distantMatches[index]!;
+      }
+    }
+
+    const validity = new Float32Array(reference.length).fill(1);
+    const unfocused = preparePerceptualReference(reference, size, { scales: [size] });
+    const focused = preparePerceptualReference(reference, size, { scales: [size], exclusionRect });
+    const rank = (prepared: ReturnType<typeof preparePerceptualReference>) =>
+      rankFixedCandidateSet(
+        [
+          { index: 0, components: scoreAlignedCandidate(prepared, nearbyMatches, validity, size) },
+          { index: 1, components: scoreAlignedCandidate(prepared, distantMatches, validity, size) },
+        ],
+        1,
+      );
+
+    expect(choosePerceptualWinner(rank(unfocused), 1).index).toBe(1);
+    expect(choosePerceptualWinner(rank(focused), 1).index).toBe(0);
+  });
+
+  test('preserves global healthy-anatomy weighting when the selected exclusion is broad', () => {
+    const size = 96;
+    const reference = normalizePerceptualSource(
+      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
+      size,
+    );
+    const global = preparePerceptualReference(reference, size, { scales: [size] }).scales[0]!;
+    const excluded = preparePerceptualReference(reference, size, {
+      scales: [size],
+      exclusionRect: { x: 0.32, y: 0.31, width: 0.36, height: 0.34 },
+    }).scales[0]!;
+
+    expect(excluded.totalWeight).toBeLessThan(global.totalWeight);
+    expect(excluded.weights.every((weight, index) => weight === 0 || weight === global.weights[index])).toBe(true);
+  });
+
   test('dilates the exclusion so a high-contrast change cannot leak into local windows or gradients', () => {
     const size = 32;
     const reference = normalizePerceptualSource(makePattern(size), size);

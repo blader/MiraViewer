@@ -45,8 +45,18 @@ const REVIEWED_DESKTOP_LANDMARKS = [
   { examination: 17, plane: 'AX', sliceIndex: 96, tolerance: 2 },
 ] as const;
 
+const REVIEWED_EXTENSIONLESS_AXIAL = {
+  reference: { examination: 18, plane: 'AX', sliceIndex: 78 },
+  exclusion: { x: 0.445, y: 0.407, width: 0.116, height: 0.092 },
+  targets: [
+    { examination: 15, plane: 'AX', sliceIndex: 90, tolerance: 2 },
+    { examination: 17, plane: 'AX', sliceIndex: 94, tolerance: 2 },
+  ],
+} as const;
+
 const desktopRoot = process.env.MIRAVIEWER_ALIGNMENT_DESKTOP_CORPUS_DIR;
 const protectedRoot = process.env.MIRAVIEWER_ALIGNMENT_CORPUS_DIR;
+const includeExtensionlessDicom = process.env.MIRAVIEWER_ALIGNMENT_DESKTOP_INCLUDE_EXTENSIONLESS === '1';
 const runDesktopCorpus = desktopRoot && protectedRoot ? it : it.skip;
 const DARK_ANATOMY_THRESHOLD = 0.12;
 
@@ -151,6 +161,7 @@ function finalDerivedAnatomy(result: AlignmentPhysicalGoldenSuccess) {
   });
   return {
     score: Number(scoreAnatomicalPlaneLandmarks(prepared, result.dense).toFixed(4)),
+    reliable: prepared.bilateral.reliable,
     sides,
   };
 }
@@ -218,6 +229,13 @@ describe('deidentified longitudinal MRI desktop gold', () => {
         ({ sliceIndex, tolerance }) => Number.isSafeInteger(sliceIndex) && tolerance >= 2 && tolerance <= 4,
       ),
     ).toBe(true);
+    expect(REVIEWED_EXTENSIONLESS_AXIAL.reference).toEqual({ examination: 18, plane: 'AX', sliceIndex: 78 });
+    expect(
+      REVIEWED_EXTENSIONLESS_AXIAL.targets.map(({ examination, sliceIndex }) => [examination, sliceIndex]),
+    ).toEqual([
+      [15, 90],
+      [17, 94],
+    ]);
   });
 
   runDesktopCorpus(
@@ -244,10 +262,10 @@ describe('deidentified longitudinal MRI desktop gold', () => {
       const protectedExaminations = new Map(
         protectedSeries.map(({ studyUid, examinationOrdinal }) => [studyUid, examinationOrdinal]),
       );
-      const desktopSeries = inspectAlignmentCorpus(
-        desktopRoot!,
-        focusedStudyOrdinals.size ? { studyOrdinals: focusedStudyOrdinals } : undefined,
-      ).filter((source) => source.patientKey === patientKey && /flair/i.test(source.contrast));
+      const desktopSeries = inspectAlignmentCorpus(desktopRoot!, {
+        ...(focusedStudyOrdinals.size ? { studyOrdinals: focusedStudyOrdinals } : {}),
+        ...(includeExtensionlessDicom ? { includeExtensionlessDicom: true } : {}),
+      }).filter((source) => source.patientKey === patientKey && /flair/i.test(source.contrast));
       const grouped = new Map<string, AlignmentCorpusSeries[]>();
       for (const source of desktopSeries) {
         const series = grouped.get(source.studyUid) ?? [];
@@ -270,8 +288,11 @@ describe('deidentified longitudinal MRI desktop gold', () => {
       );
       if (!focusedStudyOrdinals.size) expect(additional.length).toBeGreaterThan(0);
 
+      const referenceLandmarks = includeExtensionlessDicom
+        ? [...REVIEWED_REFERENCE_LANDMARKS, REVIEWED_EXTENSIONLESS_AXIAL.reference]
+        : REVIEWED_REFERENCE_LANDMARKS;
       const reviewed = new Map<string, AlignmentCorpusSeries>();
-      for (const landmark of [...REVIEWED_REFERENCE_LANDMARKS, ...REVIEWED_DESKTOP_LANDMARKS]) {
+      for (const landmark of [...referenceLandmarks, ...REVIEWED_DESKTOP_LANDMARKS]) {
         if (focusedStudyOrdinals.size && !focusedStudyOrdinals.has(landmark.examination)) continue;
         const examination = examinations.find(({ examination }) => examination === landmark.examination);
         const source = examination?.[landmark.plane];
@@ -347,7 +368,7 @@ describe('deidentified longitudinal MRI desktop gold', () => {
       const requestedCases = Number(process.env.MIRAVIEWER_ALIGNMENT_DESKTOP_GOLD_LIMIT ?? Number.MAX_SAFE_INTEGER);
       const caseLimit = Number.isSafeInteger(requestedCases) && requestedCases > 0 ? requestedCases : 13;
       const references = [
-        ...REVIEWED_REFERENCE_LANDMARKS,
+        ...referenceLandmarks,
         ...REVIEWED_DESKTOP_LANDMARKS.filter(({ examination }) => examination === 9),
       ];
       const goldCases = new Set((process.env.MIRAVIEWER_ALIGNMENT_DESKTOP_GOLD_CASES ?? '').split(',').filter(Boolean));
@@ -365,13 +386,18 @@ describe('deidentified longitudinal MRI desktop gold', () => {
         ) {
           continue;
         }
-        const targets = REVIEWED_DESKTOP_LANDMARKS.filter(
+        const reviewedTargets =
+          sourceLandmark.examination === REVIEWED_EXTENSIONLESS_AXIAL.reference.examination
+            ? REVIEWED_EXTENSIONLESS_AXIAL.targets
+            : REVIEWED_DESKTOP_LANDMARKS;
+        const targets = reviewedTargets.filter(
           (target) =>
             target.plane === sourceLandmark.plane &&
             (!focusedStudyOrdinals.size || focusedStudyOrdinals.has(target.examination)) &&
             (sourceLandmark.examination === 1
               ? target.examination !== 17
-              : sourceLandmark.examination === 14
+              : sourceLandmark.examination === 14 ||
+                  sourceLandmark.examination === REVIEWED_EXTENSIONLESS_AXIAL.reference.examination
                 ? target.examination === 15 || target.examination === 17
                 : target.examination === 15) &&
             (!goldCases.size || goldCases.has(`${sourceLandmark.examination}:${target.examination}:${target.plane}`)) &&
@@ -381,7 +407,10 @@ describe('deidentified longitudinal MRI desktop gold', () => {
         if (!targets.length) continue;
         const source = reviewed.get(`${sourceLandmark.examination}:${sourceLandmark.plane}`)!;
         const reference = await prepareAlignmentPhysicalReference(source, sourceLandmark.sliceIndex, codec!, {
-          exclusion: { x: 0.36, y: 0.34, width: 0.28, height: 0.32 },
+          exclusion:
+            sourceLandmark.examination === REVIEWED_EXTENSIONLESS_AXIAL.reference.examination
+              ? REVIEWED_EXTENSIONLESS_AXIAL.exclusion
+              : { x: 0.36, y: 0.34, width: 0.28, height: 0.32 },
         });
         const outputGrid = buildOutputPlaneGrid(reference.manifest.frames[reference.frameIndex]!, {
           mode: 'native',
@@ -432,12 +461,23 @@ describe('deidentified longitudinal MRI desktop gold', () => {
           if (
             sourceLandmark.plane === 'AX' &&
             (!anatomy ||
-              anatomy.sides.some(
-                ({ referenceArea, candidateArea, sharedDark }) =>
-                  sharedDark === 0 || candidateArea < referenceArea * 0.35,
-              ))
+              (anatomy.reliable &&
+                anatomy.sides.some(
+                  ({ referenceArea, candidateArea, sharedDark }) =>
+                    sharedDark === 0 || candidateArea < referenceArea * 0.35,
+                )))
           ) {
             failures.push(`${caseLabel}: final derived presentation does not preserve both acquired orbital cavities`);
+          }
+          if (anatomy && !anatomy.reliable) {
+            if (!(anatomy.score >= 0.3)) {
+              failures.push(`${caseLabel}: final exclusion-safe local anatomy score ${anatomy.score} < 0.300`);
+            }
+            if (result.dense.coverage < 0.95) {
+              failures.push(
+                `${caseLabel}: final acquired anatomical support ${result.dense.coverage.toFixed(3)} < 0.950`,
+              );
+            }
           }
           if (process.env.MIRAVIEWER_ALIGNMENT_DESKTOP_RENDER_RESULTS === '1') {
             renderDerivedComparison(result, target);
@@ -446,6 +486,7 @@ describe('deidentified longitudinal MRI desktop gold', () => {
             `[alignment-desktop-physical-gold] ${JSON.stringify({
               case: caseLabel,
               targetDimensions: [target.rows, target.columns],
+              predictedIndex: result.predictedIndex,
               selectedIndex: result.selectedIndex,
               expectedIndex: targetLandmark.sliceIndex,
               tolerance: targetLandmark.tolerance,

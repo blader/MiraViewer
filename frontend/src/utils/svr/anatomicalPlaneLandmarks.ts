@@ -15,6 +15,7 @@ type BilateralAnatomicalTemplate = {
   rowSpacingMm: number;
   colSpacingMm: number;
   separationMm: number;
+  reliable: boolean;
 };
 
 export type AnatomicalPlaneLandmarks = {
@@ -25,6 +26,7 @@ export type AnatomicalPlaneLandmarks = {
   totalWeight: number;
   supportedPixels: number;
   exclusionRect?: ExclusionMask;
+  localizedAnatomy?: true;
   bilateral?: BilateralAnatomicalTemplate;
 };
 
@@ -263,8 +265,17 @@ function prepareBilateralAnatomicalTemplate(
     (fixedLeft.row - fixedRight.row) * rowSpacingMm,
     (fixedLeft.column - fixedRight.column) * colSpacingMm,
   );
+  const equivalentDiameterMm =
+    2 * Math.sqrt((Math.sqrt(fixedLeft.area * fixedRight.area) * rowSpacingMm * colSpacingMm) / Math.PI);
   return separationMm > 0
-    ? { sides, components: [fixedLeft, fixedRight], rowSpacingMm, colSpacingMm, separationMm }
+    ? {
+        sides,
+        components: [fixedLeft, fixedRight],
+        rowSpacingMm,
+        colSpacingMm,
+        separationMm,
+        reliable: equivalentDiameterMm >= 9,
+      }
     : undefined;
 }
 
@@ -427,11 +438,32 @@ export function prepareAnatomicalPlaneLandmarks(
     hasPhysicalGeometry && axialGeometry
       ? prepareBilateralAnatomicalTemplate(reference, normalized, scaled.validity, excluded)
       : undefined;
+  const localizeAnatomy = Boolean(
+    exclusionRect &&
+    exclusionRect.width * exclusionRect.height <= 0.04 &&
+    axialGeometry &&
+    Number.isFinite(reference.rowSpacingDsMm) &&
+    reference.rowSpacingDsMm! > 0 &&
+    Number.isFinite(reference.colSpacingDsMm) &&
+    reference.colSpacingDsMm! > 0,
+  );
   const depthAnatomy =
-    !bilateral && depthContext
+    (!bilateral || localizeAnatomy) && depthContext
       ? prepareDepthSensitiveAnatomy(reference, normalized, depthContext, exclusionRect)
       : undefined;
   if (hasPhysicalGeometry && !bilateral && !depthAnatomy) return null;
+  const rowSpacingMm = localizeAnatomy ? (reference.rowSpacingDsMm! * reference.rows) / LANDMARK_SIZE : 1;
+  const colSpacingMm = localizeAnatomy ? (reference.colSpacingDsMm! * reference.cols) / LANDMARK_SIZE : 1;
+  const localizationScaleMm = localizeAnatomy
+    ? Math.max(
+        rowSpacingMm,
+        colSpacingMm,
+        Math.min(
+          exclusionRect!.height * LANDMARK_SIZE * rowSpacingMm,
+          exclusionRect!.width * LANDMARK_SIZE * colSpacingMm,
+        ) / 2,
+      )
+    : 1;
   const weights = new Float32Array(normalized.length);
   let supportedWeight = 0;
   let supportedPixels = 0;
@@ -439,13 +471,38 @@ export function prepareAnatomicalPlaneLandmarks(
     for (let column = 2; column < LANDMARK_SIZE - 2; column++) {
       const index = row * LANDMARK_SIZE + column;
       if (excluded?.[index] || !(scaled.validity[index]! > 0)) continue;
+      if (
+        localizeAnatomy &&
+        (excluded?.[index - 1] ||
+          excluded?.[index + 1] ||
+          excluded?.[index - LANDMARK_SIZE] ||
+          excluded?.[index + LANDMARK_SIZE])
+      ) {
+        continue;
+      }
+      let proximity = 1;
+      if (localizeAnatomy) {
+        const rowDistance = Math.max(
+          exclusionRect!.y * LANDMARK_SIZE - row - 0.5,
+          row + 0.5 - (exclusionRect!.y + exclusionRect!.height) * LANDMARK_SIZE,
+          0,
+        );
+        const colDistance = Math.max(
+          exclusionRect!.x * LANDMARK_SIZE - column - 0.5,
+          column + 0.5 - (exclusionRect!.x + exclusionRect!.width) * LANDMARK_SIZE,
+          0,
+        );
+        const distanceMm = Math.hypot(rowDistance * rowSpacingMm, colDistance * colSpacingMm);
+        proximity = 0.2 + 0.8 * Math.exp(-(distanceMm * distanceMm) / (2 * localizationScaleMm * localizationScaleMm));
+      }
       if (depthAnatomy) {
         if (outside[index] || !(normalized[index]! > FOREGROUND_THRESHOLD) || !(depthAnatomy.validity[index]! >= 0.5)) {
           continue;
         }
         const edge = gradient[index]!;
         const depth = depthAnatomy.pixels[index]!;
-        const weight = (edge * edge + depth * depth) * scaled.validity[index]! * depthAnatomy.validity[index]!;
+        const weight =
+          (edge * edge + depth * depth) * scaled.validity[index]! * depthAnatomy.validity[index]! * proximity;
         if (!(weight > 0) || !Number.isFinite(weight)) continue;
         weights[index] = weight;
         supportedWeight += weight;
@@ -462,8 +519,11 @@ export function prepareAnatomicalPlaneLandmarks(
           }
         }
       }
-      if (!nearHole) continue;
-      const weight = (0.1 + Math.max(0, 1 - normalized[index]!) * gradient[index]!) * scaled.validity[index]!;
+      if (!nearHole && (!localizeAnatomy || !(gradient[index]! > 0))) continue;
+      const structure = nearHole
+        ? 0.1 + Math.max(0, 1 - normalized[index]!) * gradient[index]!
+        : gradient[index]! * gradient[index]!;
+      const weight = structure * scaled.validity[index]! * proximity;
       weights[index] = weight;
       supportedWeight += weight;
       supportedPixels++;
@@ -478,6 +538,7 @@ export function prepareAnatomicalPlaneLandmarks(
     totalWeight: supportedWeight,
     supportedPixels,
     ...(exclusionRect ? { exclusionRect } : {}),
+    ...(localizeAnatomy ? { localizedAnatomy: true as const } : {}),
     ...(bilateral ? { bilateral } : {}),
   };
 }
@@ -540,6 +601,7 @@ export function scoreAnatomicalPlaneLandmarks(prepared: AnatomicalPlaneLandmarks
   const structural = (product - (referenceSum * candidateSum) / weightSum) / Math.sqrt(fixedVariance * movingVariance);
   if (!prepared.bilateral) return structural;
   if (!(structural > 0)) return Number.NEGATIVE_INFINITY;
+  if (prepared.localizedAnatomy && !prepared.bilateral.reliable) return structural;
   const morphology = matchBilateralAnatomicalTemplate(prepared, normalized, scaled.validity);
   if (!morphology || !Number.isFinite(morphology.score) || !(morphology.score > 0)) {
     return Number.NEGATIVE_INFINITY;

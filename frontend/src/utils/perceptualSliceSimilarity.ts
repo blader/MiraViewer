@@ -366,11 +366,14 @@ function buildReferenceWeights(
   let exclusionY0 = 0;
   let exclusionX1 = 0;
   let exclusionY1 = 0;
+  let proximityRadiusSquared = 1;
+  const localizeAnatomy = Boolean(exclusionRect && exclusionRect.width * exclusionRect.height <= 0.04);
   if (exclusionRect) {
     exclusionX0 = Math.floor(exclusionRect.x * size) - safeBorder;
     exclusionY0 = Math.floor(exclusionRect.y * size) - safeBorder;
     exclusionX1 = Math.ceil((exclusionRect.x + exclusionRect.width) * size) + safeBorder;
     exclusionY1 = Math.ceil((exclusionRect.y + exclusionRect.height) * size) + safeBorder;
+    proximityRadiusSquared = Math.max(safeBorder, exclusionRect.width * size, exclusionRect.height * size) ** 2;
   }
 
   for (let y = safeBorder; y < size - safeBorder; y++) {
@@ -382,10 +385,16 @@ function buildReferenceWeights(
         1,
         3 * (gradients[index] ?? 0) + 5 * Math.sqrt(Math.max(0, variance[index] ?? 0)),
       );
+      const distanceX = localizeAnatomy ? Math.max(exclusionX0 - x, 0, x - exclusionX1 + 1) : 0;
+      const distanceY = localizeAnatomy ? Math.max(exclusionY0 - y, 0, y - exclusionY1 + 1) : 0;
+      const anatomicalProximity = localizeAnatomy
+        ? 0.2 + 0.8 / (1 + (distanceX * distanceX + distanceY * distanceY) / proximityRadiusSquared)
+        : 1;
       // The floor gives target-only boundaries a cost. Foreground and reference structure remain dominant.
       weights[index] =
         Math.min(1.5, 0.1 + 0.45 * (support[index] ?? 0) + 0.95 * structuralSignal) *
-        (validity ? clamp01(validity[index] ?? 0) : 1);
+        (validity ? clamp01(validity[index] ?? 0) : 1) *
+        anatomicalProximity;
     }
   }
   return weights;

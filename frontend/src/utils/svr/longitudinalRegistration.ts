@@ -759,6 +759,7 @@ function buildNativeRefinementSamples(params: {
   signal?: AbortSignal;
   maxSamples?: number;
 }): NativeRefinementSamples {
+  const selectedReference = params.selectedReference;
   const maxSamples = Math.max(256, Math.min(32_768, params.maxSamples ?? 4096));
   const totalPixels = params.slices.reduce((total, slice) => total + slice.pixels.length, 0);
   const stride = Math.max(1, Math.ceil(Math.sqrt(totalPixels / maxSamples)));
@@ -767,6 +768,36 @@ function buildNativeRefinementSamples(params: {
   const spatialFolds = new Uint8Array(maxSamples);
   const spatialBlockIds = new Uint32Array(maxSamples);
   const spatialBlocks = new Map<string, number>();
+  let firstExcludedRow = selectedReference.dsRows;
+  let lastExcludedRow = -1;
+  let firstExcludedCol = selectedReference.dsCols;
+  let lastExcludedCol = -1;
+  if (params.exclusionMask) {
+    for (let index = 0; index < params.exclusionMask.length; index++) {
+      if (!params.exclusionMask[index]) continue;
+      const row = Math.floor(index / selectedReference.dsCols);
+      const col = index % selectedReference.dsCols;
+      firstExcludedRow = Math.min(firstExcludedRow, row);
+      lastExcludedRow = Math.max(lastExcludedRow, row);
+      firstExcludedCol = Math.min(firstExcludedCol, col);
+      lastExcludedCol = Math.max(lastExcludedCol, col);
+    }
+  }
+  const excludedFraction =
+    ((lastExcludedRow - firstExcludedRow + 1) * (lastExcludedCol - firstExcludedCol + 1)) /
+    (selectedReference.dsRows * selectedReference.dsCols);
+  const proximityWeights =
+    lastExcludedRow >= firstExcludedRow && excludedFraction <= 0.04 && Math.abs(selectedReference.normalDir.z) >= 0.9
+      ? new Float32Array(maxSamples)
+      : undefined;
+  const proximityFalloffMm = Math.max(
+    2 * Math.max(selectedReference.rowSpacingDsMm, selectedReference.colSpacingDsMm),
+    0.45 *
+      Math.hypot(
+        (lastExcludedRow - firstExcludedRow + 1) * selectedReference.rowSpacingDsMm,
+        (lastExcludedCol - firstExcludedCol + 1) * selectedReference.colSpacingDsMm,
+      ),
+  );
   const rigid = params.initialTargetToReference ?? IDENTITY_RIGID;
   const rotation = mat3FromEulerXYZ(rigid.rx, rigid.ry, rigid.rz);
   const translation = v3(rigid.tx, rigid.ty, rigid.tz);
@@ -784,19 +815,17 @@ function buildNativeRefinementSamples(params: {
           ? applyRigidToPoint(sourcePoint, params.centerMm, rotation, translation)
           : sourcePoint;
         const referenceDelta = v3(
-          referencePoint.x - params.selectedReference.ippMm.x,
-          referencePoint.y - params.selectedReference.ippMm.y,
-          referencePoint.z - params.selectedReference.ippMm.z,
+          referencePoint.x - selectedReference.ippMm.x,
+          referencePoint.y - selectedReference.ippMm.y,
+          referencePoint.z - selectedReference.ippMm.z,
         );
-        const referenceRow =
-          dot(referenceDelta, params.selectedReference.colDir) / params.selectedReference.rowSpacingDsMm;
-        const referenceCol =
-          dot(referenceDelta, params.selectedReference.rowDir) / params.selectedReference.colSpacingDsMm;
+        const referenceRow = dot(referenceDelta, selectedReference.colDir) / selectedReference.rowSpacingDsMm;
+        const referenceCol = dot(referenceDelta, selectedReference.rowDir) / selectedReference.colSpacingDsMm;
         if (
           referenceRow < 1 ||
           referenceCol < 1 ||
-          referenceRow > params.selectedReference.dsRows - 2 ||
-          referenceCol > params.selectedReference.dsCols - 2
+          referenceRow > selectedReference.dsRows - 2 ||
+          referenceCol > selectedReference.dsCols - 2
         ) {
           continue;
         }
@@ -807,18 +836,18 @@ function buildNativeRefinementSamples(params: {
           const margin = Math.min(params.referenceStack.expectedSpacing / 2, (lastDepth - firstDepth) / 4);
           if (depth < firstDepth + margin || depth > lastDepth - margin) continue;
         }
-        if (nativePointIsExcluded(referencePoint, params.selectedReference, params.exclusionMask)) continue;
+        if (nativePointIsExcluded(referencePoint, selectedReference, params.exclusionMask)) continue;
         if (params.referenceStack && !sampleNativeSliceStack(params.referenceStack, referencePoint)) continue;
-        const rowBlock = Math.floor(referenceRow / Math.max(2, Math.ceil(1 / params.selectedReference.rowSpacingDsMm)));
-        const colBlock = Math.floor(referenceCol / Math.max(2, Math.ceil(1 / params.selectedReference.colSpacingDsMm)));
+        const rowBlock = Math.floor(referenceRow / Math.max(2, Math.ceil(1 / selectedReference.rowSpacingDsMm)));
+        const colBlock = Math.floor(referenceCol / Math.max(2, Math.ceil(1 / selectedReference.colSpacingDsMm)));
         const depthSpacing = Math.max(
           1e-6,
-          params.selectedReference.sliceThicknessMm ??
-            params.selectedReference.spacingBetweenSlicesMm ??
+          selectedReference.sliceThicknessMm ??
+            selectedReference.spacingBetweenSlicesMm ??
             params.referenceStack?.expectedSpacing ??
             1,
         );
-        const depthBlock = Math.floor(dot(referenceDelta, params.selectedReference.normalDir) / depthSpacing);
+        const depthBlock = Math.floor(dot(referenceDelta, selectedReference.normalDir) / depthSpacing);
         const fold = (((rowBlock + colBlock + depthBlock) % 2) + 2) % 2;
         const block = `${rowBlock}:${colBlock}:${depthBlock}`;
         let blockId = spatialBlocks.get(block);
@@ -832,6 +861,17 @@ function buildNativeRefinementSamples(params: {
         pos[count * 3] = sourcePoint.x;
         pos[count * 3 + 1] = sourcePoint.y;
         pos[count * 3 + 2] = sourcePoint.z;
+        if (proximityWeights) {
+          const rowDistanceMm =
+            Math.max(firstExcludedRow - referenceRow, 0, referenceRow - lastExcludedRow) *
+            selectedReference.rowSpacingDsMm;
+          const colDistanceMm =
+            Math.max(firstExcludedCol - referenceCol, 0, referenceCol - lastExcludedCol) *
+            selectedReference.colSpacingDsMm;
+          const normalizedDistanceSquared =
+            (rowDistanceMm * rowDistanceMm + colDistanceMm * colDistanceMm) / (proximityFalloffMm * proximityFalloffMm);
+          proximityWeights[count] = 0.18 + 0.82 * Math.exp(-0.5 * normalizedDistanceSquared);
+        }
         if (++count >= maxSamples) break sampling;
       }
     }
@@ -840,6 +880,7 @@ function buildNativeRefinementSamples(params: {
     obs: obs.subarray(0, count),
     pos: pos.subarray(0, count * 3),
     count,
+    ...(proximityWeights ? { weights: proximityWeights.subarray(0, count) } : {}),
     spatialFolds: spatialFolds.subarray(0, count),
     spatialBlockIds: spatialBlockIds.subarray(0, count),
   };
@@ -850,6 +891,7 @@ type NativeDirectionEvidence = {
   rawScore: number;
   coverage: number;
   used: number;
+  effectiveSampleCount?: number;
   supportedIndependentBlocks?: number;
 };
 
@@ -872,6 +914,8 @@ function scoreNativeRefinementDirection(params: {
   let sumAA = 0;
   let sumBB = 0;
   let sumAB = 0;
+  let sumWeight = 0;
+  let sumWeightSquared = 0;
   let eligible = 0;
   let used = 0;
   const supportedBlocks = params.trackSupportedBlocks ? new Set<number>() : undefined;
@@ -892,11 +936,14 @@ function scoreNativeRefinementDirection(params: {
     if (!counterpart) continue;
     const a = params.samples.obs[index]!;
     const b = counterpart.value;
-    sumA += a;
-    sumB += b;
-    sumAA += a * a;
-    sumBB += b * b;
-    sumAB += a * b;
+    const weight = params.samples.weights?.[index] ?? 1;
+    sumA += weight * a;
+    sumB += weight * b;
+    sumAA += weight * a * a;
+    sumBB += weight * b * b;
+    sumAB += weight * a * b;
+    sumWeight += weight;
+    sumWeightSquared += weight * weight;
     supportedBlocks?.add(params.samples.spatialBlockIds[index]!);
     used++;
   }
@@ -905,18 +952,19 @@ function scoreNativeRefinementDirection(params: {
   if (used < minimumSamples || coverage < params.minimumCoverage) {
     return { score: Number.NEGATIVE_INFINITY, rawScore: Number.NEGATIVE_INFINITY, coverage, used };
   }
-  const inverseCount = 1 / used;
-  const varianceA = sumAA - sumA * sumA * inverseCount;
-  const varianceB = sumBB - sumB * sumB * inverseCount;
+  const inverseWeight = 1 / sumWeight;
+  const varianceA = sumAA - sumA * sumA * inverseWeight;
+  const varianceB = sumBB - sumB * sumB * inverseWeight;
   if (varianceA <= Number.EPSILON * Math.max(1, sumAA) || varianceB <= Number.EPSILON * Math.max(1, sumBB)) {
     return { score: Number.NEGATIVE_INFINITY, rawScore: Number.NEGATIVE_INFINITY, coverage, used };
   }
-  const rawScore = (sumAB - sumA * sumB * inverseCount) / Math.sqrt(varianceA * varianceB);
+  const rawScore = (sumAB - sumA * sumB * inverseWeight) / Math.sqrt(varianceA * varianceB);
   return {
     score: rawScore * coverage,
     rawScore,
     coverage,
     used,
+    ...(params.samples.weights ? { effectiveSampleCount: (sumWeight * sumWeight) / sumWeightSquared } : {}),
     ...(supportedBlocks ? { supportedIndependentBlocks: supportedBlocks.size } : {}),
   };
 }
@@ -1081,12 +1129,16 @@ function refineNativeLongitudinalPose(
         final.reverse.supportedIndependentBlocks ?? 0,
         final.forward.used,
         final.reverse.used,
+        Math.floor(final.forward.effectiveSampleCount ?? final.forward.used),
+        Math.floor(final.reverse.effectiveSampleCount ?? final.reverse.used),
       ),
       heldOutEffectiveIndependentSamples: Math.min(
         heldOut.forward.supportedIndependentBlocks ?? 0,
         heldOut.reverse.supportedIndependentBlocks ?? 0,
         heldOut.forward.used,
         heldOut.reverse.used,
+        Math.floor(heldOut.forward.effectiveSampleCount ?? heldOut.forward.used),
+        Math.floor(heldOut.reverse.effectiveSampleCount ?? heldOut.reverse.used),
       ),
       translationStepMm,
       rotationStepRadians,
@@ -1163,14 +1215,16 @@ function refineAnatomicalPlaneDepth(
   const minimumCoverage = Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55));
   const targetBounds = stackBounds(options.targetSlices);
   const families = [initial.rigid];
+  const trustAlternativePose = !landmarks?.localizedAnatomy || !landmarks.bilateral || landmarks.bilateral.reliable;
   if (
     !tumorFocused &&
+    trustAlternativePose &&
     maximumPoseDisplacementMm(options.targetToReference, initial.rigid, targetBounds, options.centerMm) >
       COORDINATE_EPSILON_MM
   ) {
     families.push(options.targetToReference);
   }
-  if (!tumorFocused) {
+  if (!tumorFocused && trustAlternativePose) {
     for (const family of [...families]) {
       for (const factor of [0.5, 0.75]) {
         const candidate = attenuateLongitudinalPlaneTilt(
