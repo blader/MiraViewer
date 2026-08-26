@@ -188,57 +188,14 @@ function scaleTumorPlane(plane: TumorPlane, exclusionRect: ExclusionMask) {
     TUMOR_ALIGNMENT_SIZE,
     TUMOR_ALIGNMENT_SIZE,
   );
-  const pixels = normalizePerceptualSource(scaled.pixels, TUMOR_ALIGNMENT_SIZE, {
-    exclusionRect,
+  return {
+    pixels: normalizePerceptualSource(scaled.pixels, TUMOR_ALIGNMENT_SIZE, {
+      exclusionRect,
+      validity: scaled.validity,
+      preserveExcludedIntensity: true,
+    }),
     validity: scaled.validity,
-  });
-  const firstColumn = Math.max(0, Math.floor(exclusionRect.x * TUMOR_ALIGNMENT_SIZE));
-  const lastColumn = Math.min(
-    TUMOR_ALIGNMENT_SIZE,
-    Math.ceil((exclusionRect.x + exclusionRect.width) * TUMOR_ALIGNMENT_SIZE),
-  );
-  const firstRow = Math.max(0, Math.floor(exclusionRect.y * TUMOR_ALIGNMENT_SIZE));
-  const lastRow = Math.min(
-    TUMOR_ALIGNMENT_SIZE,
-    Math.ceil((exclusionRect.y + exclusionRect.height) * TUMOR_ALIGNMENT_SIZE),
-  );
-  let lowRaw = Number.POSITIVE_INFINITY;
-  let highRaw = Number.NEGATIVE_INFINITY;
-  let lowNormalized = 0;
-  let highNormalized = 0;
-  for (let index = 0; index < pixels.length; index++) {
-    const row = Math.floor(index / TUMOR_ALIGNMENT_SIZE);
-    const column = index % TUMOR_ALIGNMENT_SIZE;
-    if (
-      (row >= firstRow && row < lastRow && column >= firstColumn && column < lastColumn) ||
-      scaled.validity[index]! < 0.5 ||
-      !(pixels[index]! > 0.051 && pixels[index]! < 0.999)
-    ) {
-      continue;
-    }
-    const raw = scaled.pixels[index]!;
-    if (raw < lowRaw) {
-      lowRaw = raw;
-      lowNormalized = pixels[index]!;
-    }
-    if (raw > highRaw) {
-      highRaw = raw;
-      highNormalized = pixels[index]!;
-    }
-  }
-  if (highRaw > lowRaw + 1e-9 && highNormalized > lowNormalized) {
-    const gain = (highNormalized - lowNormalized) / (highRaw - lowRaw);
-    for (let row = firstRow; row < lastRow; row++) {
-      for (let column = firstColumn; column < lastColumn; column++) {
-        const index = row * TUMOR_ALIGNMENT_SIZE + column;
-        if (scaled.validity[index]! < 0.5) continue;
-        // The stable anatomy owns the intensity basis, but explicit tumor focus must
-        // not clip the lesion itself to that healthy tissue's 98th percentile.
-        pixels[index] = Math.max(0, lowNormalized + (scaled.pixels[index]! - lowRaw) * gain);
-      }
-    }
-  }
-  return { pixels, validity: scaled.validity };
+  };
 }
 
 export function prepareTumorFocusedAlignment(

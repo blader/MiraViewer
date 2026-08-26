@@ -482,14 +482,17 @@ export function prepareAnatomicalPlaneLandmarks(
   };
 }
 
-export function scoreAnatomicalPlaneLandmarks(prepared: AnatomicalPlaneLandmarks, candidate: CandidatePlane): number {
+function normalizeAnatomicalCandidate(
+  prepared: AnatomicalPlaneLandmarks,
+  candidate: CandidatePlane,
+): { pixels: Float32Array; validity: Float32Array } | null {
   if (
     candidate.rows < 2 ||
     candidate.cols < 2 ||
     candidate.pixels.length !== candidate.rows * candidate.cols ||
     candidate.valid.length !== candidate.pixels.length
   ) {
-    return Number.NEGATIVE_INFINITY;
+    return null;
   }
   const scaled = resample2dAreaAverageWithValidity(
     candidate.pixels,
@@ -499,10 +502,19 @@ export function scoreAnatomicalPlaneLandmarks(prepared: AnatomicalPlaneLandmarks
     prepared.size,
     prepared.size,
   );
-  const normalized = normalizePerceptualSource(scaled.pixels, prepared.size, {
-    exclusionRect: prepared.exclusionRect,
+  return {
+    pixels: normalizePerceptualSource(scaled.pixels, prepared.size, {
+      exclusionRect: prepared.exclusionRect,
+      validity: scaled.validity,
+    }),
     validity: scaled.validity,
-  });
+  };
+}
+
+export function scoreAnatomicalPlaneLandmarks(prepared: AnatomicalPlaneLandmarks, candidate: CandidatePlane): number {
+  const scaled = normalizeAnatomicalCandidate(prepared, candidate);
+  if (!scaled) return Number.NEGATIVE_INFINITY;
+  const normalized = scaled.pixels;
   let weightSum = 0;
   let referenceSum = 0;
   let candidateSum = 0;
@@ -540,29 +552,11 @@ export function minimumBilateralAnatomicalRetention(
   prepared: AnatomicalPlaneLandmarks,
   candidate: CandidatePlane,
 ): number {
-  if (
-    !prepared.bilateral ||
-    candidate.rows < 2 ||
-    candidate.cols < 2 ||
-    candidate.pixels.length !== candidate.rows * candidate.cols ||
-    candidate.valid.length !== candidate.pixels.length
-  ) {
-    return Number.NEGATIVE_INFINITY;
-  }
-  const scaled = resample2dAreaAverageWithValidity(
-    candidate.pixels,
-    candidate.valid,
-    candidate.rows,
-    candidate.cols,
-    prepared.size,
-    prepared.size,
-  );
-  const normalized = normalizePerceptualSource(scaled.pixels, prepared.size, {
-    exclusionRect: prepared.exclusionRect,
-    validity: scaled.validity,
-  });
+  if (!prepared.bilateral) return Number.NEGATIVE_INFINITY;
+  const scaled = normalizeAnatomicalCandidate(prepared, candidate);
+  if (!scaled) return Number.NEGATIVE_INFINITY;
   return (
-    matchBilateralAnatomicalTemplate(prepared, normalized, scaled.validity)?.minimumComponentRetention ??
+    matchBilateralAnatomicalTemplate(prepared, scaled.pixels, scaled.validity)?.minimumComponentRetention ??
     Number.NEGATIVE_INFINITY
   );
 }

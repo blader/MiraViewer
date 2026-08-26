@@ -219,17 +219,30 @@ describe('perceptual slice scoring', () => {
     const exclusionRect = { x: 0.35, y: 0.35, width: 0.25, height: 0.25 };
     const baseline = makePattern(size);
     const withBrightExclusion = Float32Array.from(baseline);
+    const validity = Float32Array.from(baseline, (_value, index) => Number(index !== 13 * size + 13));
+    const options = { exclusionRect, validity };
     for (let y = 12; y < 19; y++) {
       for (let x = 12; x < 19; x++) withBrightExclusion[y * size + x] = 100;
     }
 
-    const normalizedBaseline = normalizePerceptualSource(baseline, size, { exclusionRect });
-    const normalizedChanged = normalizePerceptualSource(withBrightExclusion, size, { exclusionRect });
+    const normalizedBaseline = normalizePerceptualSource(baseline, size, options);
+    const normalizedChanged = normalizePerceptualSource(withBrightExclusion, size, options);
+    const preserved = normalizePerceptualSource(withBrightExclusion, size, {
+      ...options,
+      preserveExcludedIntensity: true,
+    });
+
+    expect(normalizedChanged[12 * size + 12]).toBe(1);
+    expect(preserved[12 * size + 12]).toBeGreaterThan(1);
+    expect(preserved[13 * size + 13]).toBe(0);
 
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const excluded = x >= 11 && x < 20 && y >= 11 && y < 20;
-        if (!excluded) expect(normalizedChanged[y * size + x]).toBeCloseTo(normalizedBaseline[y * size + x], 6);
+        if (!excluded) {
+          expect(normalizedChanged[y * size + x]).toBeCloseTo(normalizedBaseline[y * size + x], 6);
+          expect(preserved[y * size + x]).toBe(normalizedChanged[y * size + x]);
+        }
       }
     }
   });
@@ -241,11 +254,14 @@ describe('perceptual slice scoring', () => {
       for (let x = 6; x < 10; x++) excludedOnly[y * size + x] = 100;
     }
 
-    const normalized = normalizePerceptualSource(excludedOnly, size, {
-      exclusionRect: { x: 5 / size, y: 5 / size, width: 6 / size, height: 6 / size },
-    });
+    for (const preserveExcludedIntensity of [false, true]) {
+      const normalized = normalizePerceptualSource(excludedOnly, size, {
+        exclusionRect: { x: 5 / size, y: 5 / size, width: 6 / size, height: 6 / size },
+        preserveExcludedIntensity,
+      });
 
-    expect(Array.from(normalized).every((value) => value === 0)).toBe(true);
+      expect(Array.from(normalized).every((value) => value === 0)).toBe(true);
+    }
   });
 
   test('keeps the same structure strong under foreground brightness and contrast remapping', () => {

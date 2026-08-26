@@ -33,6 +33,99 @@ export type GridCellProps = {
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
 
+export function StudySelectionSurface({
+  reference,
+  presentation,
+  startAlignAll,
+  onSegment,
+  children,
+}: {
+  reference: {
+    date: string;
+    series: SeriesRef;
+    sliceIndex: number;
+    settings: PanelSettings;
+    imageSize: { width: number; height: number };
+    surfaceRef: React.RefObject<HTMLDivElement | null>;
+  };
+  presentation: {
+    columnCount: number;
+    isAligning: boolean;
+    isComparing: boolean;
+    groundTruthOpen: boolean;
+    nativeAnnotationsAvailable: boolean;
+  };
+  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
+  onSegment: (selection: ExclusionMask) => void;
+  children: React.ReactNode;
+}) {
+  const { date, series, sliceIndex, settings, imageSize, surfaceRef } = reference;
+  const { columnCount, isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
+  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
+    const bounds = surfaceRef.current?.getBoundingClientRect();
+    void startAlignAll(
+      {
+        date,
+        seriesUid: series.series_uid,
+        sliceIndex,
+        sliceCount: series.instance_count,
+        patientKey: series.patient_key,
+        studyUid: series.study_uid ?? series.study_id,
+        frameOfReferenceUid: series.frame_of_reference_uid,
+        imageSize,
+        viewportSize:
+          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
+        settings,
+        ...(alignmentFocus ? { alignmentFocus } : {}),
+      },
+      exclusion,
+    );
+  };
+
+  return (
+    <DragRectActionOverlay
+      className="absolute inset-0 cursor-crosshair"
+      imageSize={imageSize}
+      geometry={settings}
+      disabled={isAligning || isComparing || groundTruthOpen}
+      actions={[
+        {
+          key: 'align-all',
+          label: 'Align All',
+          title: `Align all other dates to ${formatDate(date)}`,
+          icon: <Link2 className="w-4 h-4" />,
+          variant: 'primary',
+          minSizeSpace: 'base',
+          disabled: columnCount < 2 || isAligning,
+          onConfirm: (masks) => startAlignment(masks.base),
+        },
+        {
+          key: 'align-tumor',
+          label: 'Align Tumor',
+          title: 'Match tumor across dates; uses pixels inside the selected region',
+          icon: <Crosshair className="w-4 h-4" />,
+          variant: 'secondary',
+          minSizeSpace: 'base',
+          disabled: columnCount < 2 || isAligning || isComparing || !nativeAnnotationsAvailable,
+          onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
+        },
+        {
+          key: 'segment-tumor',
+          label: 'Segment',
+          title: 'Segment tumor from this rectangle',
+          icon: <ScanLine className="w-4 h-4" />,
+          variant: 'secondary',
+          minSizeSpace: 'screen',
+          disabled: isAligning || isComparing || !nativeAnnotationsAvailable,
+          onConfirm: (masks) => onSegment(masks.screen),
+        },
+      ]}
+    >
+      {children}
+    </DragRectActionOverlay>
+  );
+}
+
 export function GridCell({
   comboId,
   date,
@@ -78,27 +171,6 @@ export function GridCell({
     );
   }
 
-  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
-    const bounds = studyCellRef.current?.getBoundingClientRect();
-    void startAlignAll(
-      {
-        date,
-        seriesUid: refData.series_uid,
-        sliceIndex: effectiveIdx,
-        sliceCount: refData.instance_count,
-        patientKey: refData.patient_key,
-        studyUid: refData.study_uid ?? refData.study_id,
-        frameOfReferenceUid: refData.frame_of_reference_uid,
-        imageSize: displayedImageSize,
-        viewportSize:
-          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
-        settings,
-        ...(alignmentFocus ? { alignmentFocus } : {}),
-      },
-      exclusion,
-    );
-  };
-
   return (
     <div
       data-grid-cell-date={date}
@@ -139,60 +211,32 @@ export function GridCell({
       </div>
 
       <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
-        <DragRectActionOverlay
-          className="absolute inset-0 cursor-crosshair"
-          imageSize={displayedImageSize}
-          geometry={{
-            panX: settings.panX,
-            panY: settings.panY,
-            zoom: settings.zoom,
-            rotation: settings.rotation,
-            affine00: settings.affine00,
-            affine01: settings.affine01,
-            affine10: settings.affine10,
-            affine11: settings.affine11,
+        <StudySelectionSurface
+          reference={{
+            date,
+            series: refData,
+            sliceIndex: effectiveIdx,
+            settings,
+            imageSize: displayedImageSize,
+            surfaceRef: studyCellRef,
           }}
-          disabled={isAligning || gtPolygonToolOpen}
-          actions={[
-            {
-              key: 'align-all',
-              label: 'Align All',
-              title: `Align all other dates to ${formatDate(date)}`,
-              icon: <Link2 className="w-4 h-4" />,
-              variant: 'primary',
-              minSizeSpace: 'base',
-              disabled: overlayColumns.length < 2 || isAligning,
-              onConfirm: (masks) => startAlignment(masks.base),
-            },
-            {
-              key: 'align-tumor',
-              label: 'Align Tumor',
-              title: 'Match tumor across dates; uses pixels inside the selected region',
-              icon: <Crosshair className="w-4 h-4" />,
-              variant: 'secondary',
-              minSizeSpace: 'base',
-              disabled: overlayColumns.length < 2 || isAligning || !nativeAnnotationsAvailable,
-              onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
-            },
-            {
-              key: 'segment-tumor',
-              label: 'Segment',
-              title: 'Segment tumor from this rectangle',
-              icon: <ScanLine className="w-4 h-4" />,
-              variant: 'secondary',
-              minSizeSpace: 'screen',
-              disabled: isAligning || !nativeAnnotationsAvailable,
-              onConfirm: (masks) => {
-                setTumorToolOpen(true);
-                setTumorSeedBoxToStart({
-                  x0: masks.screen.x,
-                  y0: masks.screen.y,
-                  x1: masks.screen.x + masks.screen.width,
-                  y1: masks.screen.y + masks.screen.height,
-                });
-              },
-            },
-          ]}
+          presentation={{
+            columnCount: overlayColumns.length,
+            isAligning,
+            isComparing: false,
+            groundTruthOpen: gtPolygonToolOpen,
+            nativeAnnotationsAvailable,
+          }}
+          startAlignAll={startAlignAll}
+          onSegment={(selection) => {
+            setTumorToolOpen(true);
+            setTumorSeedBoxToStart({
+              x0: selection.x,
+              y0: selection.y,
+              x1: selection.x + selection.width,
+              y1: selection.y + selection.height,
+            });
+          }}
         >
           <DicomViewer
             ref={tumorViewerRef}
@@ -267,7 +311,7 @@ export function GridCell({
               />
             ) : null}
           </Suspense>
-        </DragRectActionOverlay>
+        </StudySelectionSurface>
       </div>
 
       <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">

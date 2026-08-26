@@ -809,13 +809,11 @@ export function assertValidDerivedAlignmentFrameShape(frame: DerivedAlignmentFra
   }
 }
 
-async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Promise<DerivedAlignmentFrameRow> {
+async function validateDerivedFrame(frame: DerivedAlignmentFrameRow, keys?: ReadonlyMap<string, string>) {
   assertValidDerivedAlignmentFrameShape(frame);
   const db = await getDB();
-  const studies = await db.getAll('studies');
-  const patientIdentityKeys = getPatientIdentityKeys(studies);
-  const targetStudy = studies.find((study) => study.studyInstanceUid === frame.targetStudyUid);
-  if (!targetStudy || patientIdentityKeys.get(targetStudy.studyInstanceUid) !== frame.patientKey) {
+  keys ??= getPatientIdentityKeys(await db.getAll('studies'));
+  if (keys.get(frame.targetStudyUid) !== frame.patientKey) {
     throw new Error('A derived alignment frame belongs to a missing or different patient');
   }
   const targetSeries = await db.get('series', frame.targetSeriesUid);
@@ -850,8 +848,7 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
     if (!referenceSeries || (frame.referenceStudyUid && referenceSeries.studyInstanceUid !== frame.referenceStudyUid)) {
       throw new Error('A derived alignment frame has an incompatible reference examination');
     }
-    const referenceStudy = studies.find((study) => study.studyInstanceUid === referenceSeries.studyInstanceUid);
-    if (!referenceStudy || patientIdentityKeys.get(referenceStudy.studyInstanceUid) !== frame.patientKey) {
+    if (keys.get(referenceSeries.studyInstanceUid) !== frame.patientKey) {
       throw new Error('A derived alignment frame reference belongs to a different patient');
     }
     if (
@@ -891,7 +888,7 @@ async function validateDerivedFrameIdentity(frame: DerivedAlignmentFrameRow): Pr
 }
 
 export async function saveDerivedAlignmentFrame(frame: DerivedAlignmentFrameRow): Promise<void> {
-  const normalized = await validateDerivedFrameIdentity(frame);
+  const normalized = await validateDerivedFrame(frame);
   const selectedPatient = await getSelectedPatientKey();
   if (selectedPatient && selectedPatient !== normalized.patientKey) {
     throw new Error('Cannot save a derived alignment frame for another patient');
@@ -924,11 +921,13 @@ export async function loadDerivedAlignmentFrames(
   if (datasetRevision !== undefined && datasetRevision !== currentRevision) return [];
   if (selectedPatient && selectedPatient !== patientKey) return [];
   const candidates = await db.getAllFromIndex('derived_alignment_frames', 'by-patient', patientKey);
+  let patientIdentityKeys: ReadonlyMap<string, string> | undefined;
   const frames: DerivedAlignmentFrameRow[] = [];
   for (const candidate of candidates) {
     if (candidate.datasetRevision !== currentRevision) continue;
     try {
-      frames.push(await validateDerivedFrameIdentity(candidate));
+      patientIdentityKeys ??= getPatientIdentityKeys(await db.getAll('studies'));
+      frames.push(await validateDerivedFrame(candidate, patientIdentityKeys));
     } catch {
       // Stale, incompatible, or orphaned presentation must never become visible anatomy.
     }

@@ -79,6 +79,9 @@ export type NormalizePerceptualSourceOptions = {
   exclusionRect?: ExclusionMask;
   /** Explicit acquired-pixel support, independent of modality intensity and display values. */
   validity?: Float32Array | Uint8Array;
+  // The stable anatomy owns the intensity basis, but explicit tumor focus must
+  // not clip the lesion itself to that healthy tissue's 98th percentile.
+  preserveExcludedIntensity?: boolean;
 };
 
 export type PerceptualCandidate = {
@@ -216,9 +219,10 @@ export function normalizePerceptualSource(
   for (let i = 0; i < pixels.length; i++) {
     const value = pixels[i] ?? 0;
     if ((validity && !(validity[i]! > 0)) || !Number.isFinite(value) || value <= foregroundFloor) continue;
-    const normalized = robustRange > 1e-8 ? clamp01((value - low) / robustRange) : 1;
+    const normalized = robustRange > 1e-8 ? (value - low) / robustRange : 1;
+    const preserveExcluded = options.preserveExcludedIntensity && exclusion && !includedInBasis(i);
     // Keep low-valued foreground distinct from the zero-valued canvas used by warps.
-    output[i] = 0.05 + 0.95 * normalized;
+    output[i] = preserveExcluded ? Math.max(0, 0.05 + 0.95 * normalized) : 0.05 + 0.95 * clamp01(normalized);
   }
   return output;
 }
