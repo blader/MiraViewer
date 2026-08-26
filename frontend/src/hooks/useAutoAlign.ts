@@ -63,11 +63,16 @@ import {
   measureLongitudinalPlaneDrift,
   prepareLongitudinalReferenceInput,
   prepareLongitudinalRegistrationInput,
+  type LongitudinalReferenceAnatomy,
   type PreparedLongitudinalReferenceInput,
 } from '../utils/svr/longitudinalFrames';
 import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
-import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from '../utils/svr/resample2d';
+import {
+  resample2dAreaAverage,
+  resample2dAreaAverageWithValidity,
+  retainFullySupportedPixels,
+} from '../utils/svr/resample2d';
 import { yieldToMain } from '../utils/svr/svrUtils';
 
 const COARSE_IMAGE_SIZE = 128;
@@ -291,14 +296,7 @@ export function useAutoAlign() {
         };
 
         let verifiedReferenceManifest: SeriesFrameManifest | undefined;
-        let referenceAnatomy:
-          | {
-              manifest: SeriesFrameManifest;
-              sourceIndex: number;
-              rigidTransform: [number, number, number, number, number, number];
-              rotationCenterMm: [number, number, number];
-            }
-          | undefined;
+        let referenceAnatomy: LongitudinalReferenceAnatomy | undefined;
         if (displayedDerivedReference) {
           const originalSeriesUid = displayedDerivedReference.referenceSeriesUid;
           const originalSliceIndex = displayedDerivedReference.referenceFrameIndex;
@@ -465,6 +463,13 @@ export function useAutoAlign() {
           exclusionRect: fineNormalizationExclusion,
           validity: referenceRender.validity,
         });
+        let cachedReferenceStructure: Float32Array | undefined;
+        const getReferenceStructure = () =>
+          (cachedReferenceStructure ??= buildStructuralPhaseImageSquare(
+            inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
+              .pixels,
+            ALIGNMENT_IMAGE_SIZE,
+          ));
         if (debugAlignment) {
           console.info('[alignment] Perceptual slice-search config', {
             coarseImageSize: COARSE_IMAGE_SIZE,
@@ -498,6 +503,14 @@ export function useAutoAlign() {
           reference.settings.contrast,
         );
         const referenceDisplayedStats = supportedHistogramStats(referenceDisplayedPixels, referenceRender.validity);
+        const pairedDisplayStats = (pixels: Float32Array | null, validity?: Float32Array) =>
+          pixels &&
+          computeCorrespondingDisplayStats(referenceDisplayedPixels, pixels, {
+            referenceValidity: referenceRender.validity,
+            movingValidity: validity,
+            exclusionRect: reference.exclusionMask,
+            columns: ALIGNMENT_IMAGE_SIZE,
+          });
         const targetManifests = new Map<string, SeriesFrameManifest>();
         let preparedPhysicalReference: Promise<PreparedLongitudinalReferenceInput> | undefined;
         const selectedReferenceFrame = referenceManifest?.frames[reference.sliceIndex];
@@ -648,20 +661,16 @@ export function useAutoAlign() {
                   valid,
                 };
               }
-              const resampled = resample2dAreaAverageWithValidity(
-                displayedDerivedReference.pixels,
-                sourceValidity,
-                displayedDerivedReference.rows,
-                displayedDerivedReference.columns,
-                rows,
-                columns,
+              return retainFullySupportedPixels(
+                resample2dAreaAverageWithValidity(
+                  displayedDerivedReference.pixels,
+                  sourceValidity,
+                  displayedDerivedReference.rows,
+                  displayedDerivedReference.columns,
+                  rows,
+                  columns,
+                ),
               );
-              const valid = new Uint8Array(resampled.validity.length);
-              for (let index = 0; index < valid.length; index++) {
-                if (resampled.validity[index]! >= 1 - 1e-6) valid[index] = 1;
-                else resampled.pixels[index] = 0;
-              }
-              return { pixels: resampled.pixels, valid };
             };
             selectedReference = {
               ...selectedReference,
@@ -817,17 +826,12 @@ export function useAutoAlign() {
             try {
               const { registerAffine2DWithElastix } = await import('../utils/elastixRegistration');
               ensureNotAborted();
-              const fixedStructure = buildStructuralPhaseImageSquare(
-                inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
-                  .pixels,
-                ALIGNMENT_IMAGE_SIZE,
-              );
               const movingStructure = buildStructuralPhaseImageSquare(
                 inpaintExclusionRectSquare(normalized, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6).pixels,
                 ALIGNMENT_IMAGE_SIZE,
               );
               const residual = await registerAffine2DWithElastix(
-                fixedStructure,
+                getReferenceStructure(),
                 movingStructure,
                 ALIGNMENT_IMAGE_SIZE,
                 {
@@ -889,14 +893,7 @@ export function useAutoAlign() {
             }
           }
           const movingDisplayPixels = windowDisplayPixels(resampled.pixels, nativeFrame);
-          const displayStats = movingDisplayPixels
-            ? computeCorrespondingDisplayStats(referenceDisplayedPixels, movingDisplayPixels, {
-                referenceValidity: referenceRender.validity,
-                movingValidity: resampled.validity,
-                exclusionRect: reference.exclusionMask,
-                columns: ALIGNMENT_IMAGE_SIZE,
-              })
-            : null;
+          const displayStats = pairedDisplayStats(movingDisplayPixels, resampled.validity);
           const computedSettings = computeAlignedSettings(
             displayStats?.reference ?? referenceDisplayedStats,
             displayStats?.moving ?? supportedHistogramStats(movingDisplayPixels ?? normalized, resampled.validity),
@@ -1664,11 +1661,6 @@ export function useAutoAlign() {
               exclusionRect: sourceStructureExclusion,
               validity: bestRender.validity,
             });
-            const referenceStructure = buildStructuralPhaseImageSquare(
-              inpaintExclusionRectSquare(normalizedReferenceFine, ALIGNMENT_IMAGE_SIZE, fineNormalizationExclusion, 6)
-                .pixels,
-              ALIGNMENT_IMAGE_SIZE,
-            );
             const movingStructureSource = buildStructuralPhaseImageSquare(
               inpaintExclusionRectSquare(normalizedBestForStructure, ALIGNMENT_IMAGE_SIZE, sourceStructureExclusion, 6)
                 .pixels,
@@ -1743,7 +1735,7 @@ export function useAutoAlign() {
             };
 
             await runOptimizerAttempt('intensity-elastix', referenceRegistrationPixels, prewarpedBestPixels);
-            await runOptimizerAttempt('structure-elastix', referenceStructure, prewarpedMovingStructure);
+            await runOptimizerAttempt('structure-elastix', getReferenceStructure(), prewarpedMovingStructure);
             ensureNotAborted();
 
             const finalAffineSelection = await activeScoringRunner.scoreFinal({
@@ -1881,14 +1873,7 @@ export function useAutoAlign() {
               selectedRawResample,
               targetManifest?.frames[winningCandidate.index],
             );
-            const displayStats = nativeDisplayPixels
-              ? computeCorrespondingDisplayStats(referenceDisplayedPixels, nativeDisplayPixels, {
-                  referenceValidity: referenceRender.validity,
-                  movingValidity: selectedWarpedPresentation.validity,
-                  exclusionRect: reference.exclusionMask,
-                  columns: ALIGNMENT_IMAGE_SIZE,
-                })
-              : null;
+            const displayStats = pairedDisplayStats(nativeDisplayPixels, selectedWarpedPresentation.validity);
             const targetStats =
               displayStats?.moving ??
               supportedHistogramStats(

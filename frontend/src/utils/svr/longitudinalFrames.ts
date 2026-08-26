@@ -17,7 +17,7 @@ import {
   type LongitudinalRegistrationResult,
 } from './longitudinalRegistration';
 import type { SvrReconstructionSlice } from './reconstructionCore';
-import { resample2dAreaAverageWithValidity } from './resample2d';
+import { resample2dAreaAverageWithValidity, retainFullySupportedPixels } from './resample2d';
 import {
   applyRigidToPoint,
   invertRigidParams,
@@ -321,17 +321,9 @@ async function decodeManifestSlices(
             pixelPaddingValue: frame.pixelPaddingValue,
             pixelPaddingRangeLimit: frame.pixelPaddingRangeLimit,
           });
-    const { pixels, validity } = decodeImageWithValidity(
-      decodedImage as Parameters<typeof decodeImageWithValidity>[0],
-      rows,
-      cols,
+    const { pixels, valid } = retainFullySupportedPixels(
+      decodeImageWithValidity(decodedImage as Parameters<typeof decodeImageWithValidity>[0], rows, cols),
     );
-    const valid = new Uint8Array(validity.length);
-    for (let index = 0; index < validity.length; index++) {
-      const support = validity[index]!;
-      if (Number.isFinite(support) && support >= 1 - 1e-6) valid[index] = 1;
-      else pixels[index] = 0;
-    }
 
     output.push({
       pixels,
@@ -833,19 +825,16 @@ export async function densifyLongitudinalRegistration(
       nativeReferenceSliceIndex = context.sourceIndices.indexOf(context.selectedIndex);
       if (referenceImage) {
         const selectedNative = nativeReferenceSlices[nativeReferenceSliceIndex]!;
-        const { pixels, validity } = resample2dAreaAverageWithValidity(
-          referenceImage.pixels,
-          referenceImage.valid,
-          referenceImage.rows,
-          referenceImage.columns,
-          selectedNative.dsRows,
-          selectedNative.dsCols,
+        const { pixels, valid } = retainFullySupportedPixels(
+          resample2dAreaAverageWithValidity(
+            referenceImage.pixels,
+            referenceImage.valid,
+            referenceImage.rows,
+            referenceImage.columns,
+            selectedNative.dsRows,
+            selectedNative.dsCols,
+          ),
         );
-        const valid = new Uint8Array(pixels.length);
-        for (let index = 0; index < pixels.length; index++) {
-          if (validity[index]! >= 1 - 1e-6) valid[index] = 1;
-          else pixels[index] = 0;
-        }
         nativeReferenceSlices[nativeReferenceSliceIndex] = { ...selectedNative, pixels, valid };
       }
       if (options.referenceExclusionMask) {

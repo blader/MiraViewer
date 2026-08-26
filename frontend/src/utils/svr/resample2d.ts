@@ -141,6 +141,17 @@ export function resample2dAreaAverageWithValidity(
   return { pixels, validity };
 }
 
+export function retainFullySupportedPixels(resampled: { pixels: Float32Array; validity: Float32Array }) {
+  const { pixels, validity } = resampled;
+  const valid = new Uint8Array(pixels.length);
+  for (let index = 0; index < pixels.length; index++) {
+    const support = validity[index]!;
+    if (Number.isFinite(support) && support >= 1 - 1e-6) valid[index] = 1;
+    else pixels[index] = 0;
+  }
+  return { pixels, valid };
+}
+
 function sinc(x: number): number {
   if (x === 0) return 1;
   const px = Math.PI * x;

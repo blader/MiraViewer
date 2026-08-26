@@ -5,7 +5,7 @@ import {
   scoreAnatomicalPlaneLandmarks,
 } from './anatomicalPlaneLandmarks';
 import { sliceCornersMm } from './dicomGeometry';
-import { exclusionMaskBounds, resample2dAreaAverageWithValidity } from './resample2d';
+import { exclusionMaskBounds, resample2dAreaAverageWithValidity, retainFullySupportedPixels } from './resample2d';
 import {
   applyRigidToPoint,
   boundsCenterMm,
@@ -280,19 +280,16 @@ function prepareScoringSlices(
     const colScale = slice.dsCols / cols;
     const rowOffsetMm = ((rowScale - 1) * slice.rowSpacingDsMm) / 2;
     const colOffsetMm = ((colScale - 1) * slice.colSpacingDsMm) / 2;
-    const { pixels, validity } = resample2dAreaAverageWithValidity(
-      slice.pixels,
-      slice.valid ?? new Uint8Array(slice.pixels.length).fill(1),
-      slice.dsRows,
-      slice.dsCols,
-      rows,
-      cols,
+    const { pixels, valid } = retainFullySupportedPixels(
+      resample2dAreaAverageWithValidity(
+        slice.pixels,
+        slice.valid ?? new Uint8Array(slice.pixels.length).fill(1),
+        slice.dsRows,
+        slice.dsCols,
+        rows,
+        cols,
+      ),
     );
-    const valid = new Uint8Array(pixels.length);
-    for (let index = 0; index < pixels.length; index++) {
-      if (validity[index]! >= 1 - 1e-6) valid[index] = 1;
-      else pixels[index] = 0;
-    }
 
     return {
       ...slice,
