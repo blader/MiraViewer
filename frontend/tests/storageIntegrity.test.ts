@@ -117,6 +117,18 @@ function makeImplicitDicom(options: SyntheticDicomOptions = {}): File {
   return new File([bytes], `${instanceUid}.dcm`, { type: 'application/dicom' });
 }
 
+function importPatientStudy(patientId: string, studyUid: string, options: Partial<SyntheticDicomOptions> = {}) {
+  return processDicomFile(
+    makeImplicitDicom({
+      patientId,
+      studyUid,
+      seriesUid: `${studyUid}.1`,
+      instanceUid: `${studyUid}.1.1`,
+      ...options,
+    }),
+  );
+}
+
 function makeDerivedFrame(overrides: Partial<DerivedAlignmentFrameRow> = {}): DerivedAlignmentFrameRow {
   return {
     id: 'derived-1',
@@ -288,30 +300,9 @@ describe('durable MRI storage and import contracts', () => {
   });
 
   it('isolates patients and keeps same-day examinations distinct', async () => {
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'patient-a',
-        studyUid: '1.2.10',
-        seriesUid: '1.2.10.1',
-        instanceUid: '1.2.10.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'patient-a',
-        studyUid: '1.2.11',
-        seriesUid: '1.2.11.1',
-        instanceUid: '1.2.11.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'patient-b',
-        studyUid: '1.2.12',
-        seriesUid: '1.2.12.1',
-        instanceUid: '1.2.12.1.1',
-      }),
-    );
+    await importPatientStudy('patient-a', '1.2.10');
+    await importPatientStudy('patient-a', '1.2.11');
+    await importPatientStudy('patient-b', '1.2.12');
 
     await setSelectedPatientKey('patient-a');
     const first = await getComparisonData();
@@ -328,36 +319,13 @@ describe('durable MRI storage and import contracts', () => {
   });
 
   it('scopes persisted viewer settings to their selected patient', async () => {
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'patient-a',
-        studyUid: '1.2.13',
-        seriesUid: '1.2.13.1',
-        instanceUid: '1.2.13.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'patient-b',
-        studyUid: '1.2.14',
-        seriesUid: '1.2.14.1',
-        instanceUid: '1.2.14.1.1',
-      }),
-    );
+    await importPatientStudy('patient-a', '1.2.13');
+    await importPatientStudy('patient-b', '1.2.14');
     await setSelectedPatientKey('patient-a');
     await savePanelSettings('axial-t2-flair', 'synthetic-date', {
+      ...DEFAULT_PANEL_SETTINGS,
       offset: 1,
-      reverseSliceOrder: false,
       zoom: 2,
-      rotation: 0,
-      brightness: 100,
-      contrast: 100,
-      panX: 0,
-      panY: 0,
-      affine00: 1,
-      affine01: 0,
-      affine10: 0,
-      affine11: 1,
       progress: 0.5,
     });
     await setSelectedPatientKey('patient-b');
@@ -367,22 +335,8 @@ describe('durable MRI storage and import contracts', () => {
   });
 
   it('keeps an in-flight viewer-settings write bound to its original patient after durable selection changes', async () => {
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'synthetic-patient-a',
-        studyUid: '1.2.15',
-        seriesUid: '1.2.15.1',
-        instanceUid: '1.2.15.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'synthetic-patient-b',
-        studyUid: '1.2.16',
-        seriesUid: '1.2.16.1',
-        instanceUid: '1.2.16.1.1',
-      }),
-    );
+    await importPatientStudy('synthetic-patient-a', '1.2.15');
+    await importPatientStudy('synthetic-patient-b', '1.2.16');
 
     await setSelectedPatientKey('synthetic-patient-a');
     const pendingFirstPatientWrite = savePanelSettings(
@@ -410,46 +364,20 @@ describe('durable MRI storage and import contracts', () => {
   });
 
   it('does not merge separate examinations with missing patient identities', async () => {
-    await processDicomFile(
-      makeImplicitDicom({ patientId: '', studyUid: '1.2.21', seriesUid: '1.2.21.1', instanceUid: '1.2.21.1.1' }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({ patientId: '', studyUid: '1.2.22', seriesUid: '1.2.22.1', instanceUid: '1.2.22.1.1' }),
-    );
+    await importPatientStudy('', '1.2.21');
+    await importPatientStudy('', '1.2.22');
     const data = await getComparisonData();
     expect(data.patients).toHaveLength(2);
     expect(data.dates).toHaveLength(1);
   });
 
   it('isolates reused patient identifiers when issuer or nonempty names conflict', async () => {
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'reused-id',
-        patientName: 'Synthetic^One',
-        studyUid: '1.2.23',
-        seriesUid: '1.2.23.1',
-        instanceUid: '1.2.23.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'reused-id',
-        patientName: 'Synthetic^Two',
-        studyUid: '1.2.24',
-        seriesUid: '1.2.24.1',
-        instanceUid: '1.2.24.1.1',
-      }),
-    );
-    await processDicomFile(
-      makeImplicitDicom({
-        patientId: 'reused-id',
-        patientName: 'Synthetic^One',
-        patientIdIssuer: 'another-facility',
-        studyUid: '1.2.25',
-        seriesUid: '1.2.25.1',
-        instanceUid: '1.2.25.1.1',
-      }),
-    );
+    await importPatientStudy('reused-id', '1.2.23', { patientName: 'Synthetic^One' });
+    await importPatientStudy('reused-id', '1.2.24', { patientName: 'Synthetic^Two' });
+    await importPatientStudy('reused-id', '1.2.25', {
+      patientName: 'Synthetic^One',
+      patientIdIssuer: 'another-facility',
+    });
     const data = await getComparisonData();
     expect(data.patients).toHaveLength(3);
     expect(data.dates).toHaveLength(1);

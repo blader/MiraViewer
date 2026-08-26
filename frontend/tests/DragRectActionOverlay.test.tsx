@@ -18,6 +18,20 @@ describe('DragRectActionOverlay', () => {
     });
   });
 
+  const mockViewport = (width: number, height: number): void => {
+    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
+      width,
+      height,
+      top: 0,
+      left: 0,
+      right: width,
+      bottom: height,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+  };
+
   it('runs an action on the first click after drawing a rectangle', () => {
     const onConfirm = vi.fn();
 
@@ -85,17 +99,7 @@ describe('DragRectActionOverlay', () => {
   });
 
   it('keeps every compact action reachable when a selection ends near the lower-right viewport edge', () => {
-    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
-      width: 180,
-      height: 150,
-      top: 0,
-      left: 0,
-      right: 180,
-      bottom: 150,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
+    mockViewport(180, 150);
     const onTumorAlignment = vi.fn();
     const { container } = render(
       <DragRectActionOverlay
@@ -141,17 +145,7 @@ describe('DragRectActionOverlay', () => {
   });
 
   it('stores exclusion masks in image coordinates when the viewport contains horizontal letterboxing', () => {
-    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
-      width: 1000,
-      height: 500,
-      top: 0,
-      left: 0,
-      right: 1000,
-      bottom: 500,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
+    mockViewport(1000, 500);
 
     const onConfirm = vi.fn();
     const { container } = render(
@@ -178,17 +172,7 @@ describe('DragRectActionOverlay', () => {
   });
 
   it('clips both exclusion-mask endpoints when a selection begins outside letterboxed image content', () => {
-    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
-      width: 1000,
-      height: 500,
-      top: 0,
-      left: 0,
-      right: 1000,
-      bottom: 500,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    });
+    mockViewport(1000, 500);
 
     const onConfirm = vi.fn();
     const { container } = render(

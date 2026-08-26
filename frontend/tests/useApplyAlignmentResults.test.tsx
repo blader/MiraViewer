@@ -86,16 +86,18 @@ function alignmentFixture({
     alignmentResults: AlignmentResult[],
     options: Partial<Parameters<typeof useApplyAlignmentResults>[0]> = {},
   ) =>
-    renderHook(() =>
-      useApplyAlignmentResults({
-        isAligning: true,
-        alignmentResults,
-        panelSettings: new Map(),
-        data,
-        selectedSeqId: sequenceId,
-        batchUpdateSettings: vi.fn(),
-        ...options,
-      }),
+    renderHook(
+      ({ alignmentResults }: { alignmentResults: AlignmentResult[] }) =>
+        useApplyAlignmentResults({
+          isAligning: true,
+          alignmentResults,
+          panelSettings: new Map(),
+          data,
+          selectedSeqId: sequenceId,
+          batchUpdateSettings: vi.fn(),
+          ...options,
+        }),
+      { initialProps: { alignmentResults } },
     );
 
   return { date, sequenceId, seriesUid, data, frame, result, publishPreviousPlane, applyResults };
@@ -463,7 +465,7 @@ describe('useApplyAlignmentResults', () => {
     { predecessor: 'finishes late', fails: false },
     { predecessor: 'fails late', fails: true },
   ])('does not resurrect an obsolete derived plane when its older durable write $predecessor', async ({ fails }) => {
-    const { sequenceId, data, frame, result } = alignmentFixture();
+    const { frame, result, applyResults } = alignmentFixture();
     const operations: string[] = [];
     const onPersistenceError = vi.fn();
     const predecessorError = new Error('Previous aligned-plane write failed');
@@ -490,19 +492,7 @@ describe('useApplyAlignmentResults', () => {
     const derivedResult = result({ runId: 'previous-derived-run', derivedFrame: frame() });
 
     try {
-      const { rerender } = renderHook(
-        ({ alignmentResults }: { alignmentResults: AlignmentResult[] }) =>
-          useApplyAlignmentResults({
-            isAligning: true,
-            alignmentResults,
-            panelSettings: new Map(),
-            data,
-            selectedSeqId: sequenceId,
-            batchUpdateSettings: vi.fn(),
-            onPersistenceError,
-          }),
-        { initialProps: { alignmentResults: [derivedResult] } },
-      );
+      const { rerender } = applyResults([derivedResult], { onPersistenceError });
       await waitFor(() => expect(save).toHaveBeenCalledOnce());
 
       await act(async () => {
@@ -535,7 +525,7 @@ describe('useApplyAlignmentResults', () => {
     { predecessor: 'completes late', fails: false },
     { predecessor: 'fails late', fails: true },
   ])('preserves a newer derived plane when an older durable deletion $predecessor', async ({ fails }) => {
-    const { sequenceId, data, frame, result } = alignmentFixture();
+    const { frame, result, applyResults } = alignmentFixture();
     const operations: string[] = [];
     const onPersistenceError = vi.fn();
     const predecessorError = new Error('Previous aligned-plane removal failed');
@@ -567,19 +557,7 @@ describe('useApplyAlignmentResults', () => {
     const nativeResult = result({ runId: 'previous-native-run' });
 
     try {
-      const { rerender } = renderHook(
-        ({ alignmentResults }: { alignmentResults: AlignmentResult[] }) =>
-          useApplyAlignmentResults({
-            isAligning: true,
-            alignmentResults,
-            panelSettings: new Map(),
-            data,
-            selectedSeqId: sequenceId,
-            batchUpdateSettings: vi.fn(),
-            onPersistenceError,
-          }),
-        { initialProps: { alignmentResults: [nativeResult] } },
-      );
+      const { rerender } = applyResults([nativeResult], { onPersistenceError });
       await waitFor(() => expect(clearPersisted).toHaveBeenCalledOnce());
 
       await act(async () => {

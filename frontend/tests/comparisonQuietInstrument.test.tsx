@@ -125,13 +125,48 @@ function alignedResult(series: SeriesRef, date: string): AlignmentResult {
   };
 }
 
-function overlayProps(startAlignAll = vi.fn(async () => undefined)) {
+function comparisonProps(startAlignAll = vi.fn(async () => undefined)) {
   return {
     comboId: 'synthetic-sequence',
     overlayColumns: [
       { date: selectedDate, ref: selectedSeries },
       { date: compareDate, ref: compareSeries },
     ],
+    isAligning: false,
+    updatePanelSetting: vi.fn(),
+    startAlignAll,
+    setProgress: vi.fn(),
+  };
+}
+
+function gridCellProps(startAlignAll = vi.fn(async () => undefined)) {
+  return {
+    ...comparisonProps(startAlignAll),
+    date: selectedDate,
+    refData: selectedSeries,
+    settings: DEFAULT_PANEL_SETTINGS,
+    progress: 0,
+    isHovered: true,
+  };
+}
+
+function gridViewProps(columns: Array<{ date: string; ref: SeriesRef }>, gridCols: number, gridCellSize: number) {
+  return {
+    ...comparisonProps(),
+    columns,
+    overlayColumns: columns,
+    gridCols,
+    gridCellSize,
+    panelSettings: new Map(),
+    progress: 0,
+    alignmentProgress: null,
+    abortAlignment: vi.fn(),
+  };
+}
+
+function overlayProps(startAlignAll = vi.fn(async () => undefined)) {
+  return {
+    ...comparisonProps(startAlignAll),
     overlayViewerSize: 420,
     overlayDisplayedRef: selectedSeries,
     overlayDisplayedDate: selectedDate,
@@ -148,12 +183,8 @@ function overlayProps(startAlignAll = vi.fn(async () => undefined)) {
     overlayCompareSliceIndex: 0,
     isOverlayComparing: false,
     hasOverlayCompareTarget: true,
-    isAligning: false,
     alignmentProgress: null,
     abortAlignment: vi.fn(),
-    updatePanelSetting: vi.fn(),
-    startAlignAll,
-    setProgress: vi.fn(),
   };
 }
 
@@ -180,21 +211,7 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(rows * (cellSize + GRID_CELL_METADATA_HEIGHT) + (rows - 1) * 8).toBeLessThanOrEqual(viewportHeight - 48);
 
     const { container } = render(
-      <GridView
-        comboId="synthetic-sequence"
-        columns={[{ date: selectedDate, ref: selectedSeries }]}
-        gridCols={1}
-        gridCellSize={cellSize}
-        panelSettings={new Map()}
-        progress={0}
-        setProgress={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        overlayColumns={[{ date: selectedDate, ref: selectedSeries }]}
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
-        startAlignAll={vi.fn(async () => undefined)}
-      />,
+      <GridView {...gridViewProps([{ date: selectedDate, ref: selectedSeries }], 1, cellSize)} />,
     );
 
     expect(container.querySelector<HTMLElement>('[style*="grid-auto-rows"]')?.style.gridAutoRows).toBe(
@@ -227,21 +244,7 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(result.current.cellSize).toBeGreaterThan(viewportWidth * 0.8);
 
     const { container } = render(
-      <GridView
-        comboId="synthetic-sequence"
-        columns={examinations}
-        gridCols={result.current.cols}
-        gridCellSize={result.current.cellSize}
-        panelSettings={new Map()}
-        progress={0}
-        setProgress={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        overlayColumns={examinations}
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
-        startAlignAll={vi.fn(async () => undefined)}
-      />,
+      <GridView {...gridViewProps(examinations, result.current.cols, result.current.cellSize)} />,
     );
 
     const scrollSurface = container.firstElementChild as HTMLElement;
@@ -343,19 +346,7 @@ describe('Quiet Instrument comparison surfaces', () => {
 
   it('shows a registration datum only for an existing validated derived frame and never over anatomy', () => {
     const { container } = render(
-      <GridCell
-        comboId="synthetic-sequence"
-        date={selectedDate}
-        refData={selectedSeries}
-        settings={DEFAULT_PANEL_SETTINGS}
-        progress={0}
-        setProgress={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        isHovered
-        overlayColumns={[{ date: selectedDate, ref: selectedSeries }]}
-        isAligning={false}
-        startAlignAll={vi.fn(async () => undefined)}
-      />,
+      <GridCell {...gridCellProps()} overlayColumns={[{ date: selectedDate, ref: selectedSeries }]} />,
     );
 
     const cell = container.querySelector('[data-grid-cell-date]');
@@ -378,22 +369,7 @@ describe('Quiet Instrument comparison surfaces', () => {
   });
 
   it('makes grid examination geometry and slice controls inert while alignment owns their presentation', () => {
-    const props = {
-      comboId: 'synthetic-sequence',
-      date: selectedDate,
-      refData: selectedSeries,
-      settings: DEFAULT_PANEL_SETTINGS,
-      progress: 0,
-      setProgress: vi.fn(),
-      updatePanelSetting: vi.fn(),
-      isHovered: true,
-      overlayColumns: [
-        { date: selectedDate, ref: selectedSeries },
-        { date: compareDate, ref: compareSeries },
-      ],
-      isAligning: true,
-      startAlignAll: vi.fn(async () => undefined),
-    };
+    const props = { ...gridCellProps(), isAligning: true };
     const { container, rerender } = render(<GridCell {...props} />);
     const zoom = container.querySelector<HTMLButtonElement>('[aria-label="Increase Zoom"]');
     const slice = container.querySelector<HTMLButtonElement>('[aria-label="Increase Slice offset"]');
@@ -420,24 +396,7 @@ describe('Quiet Instrument comparison surfaces', () => {
       pixels: new Float32Array(96 * 384),
     };
     act(() => setDerivedAlignmentFrame(result));
-    render(
-      <GridCell
-        comboId="synthetic-sequence"
-        date={selectedDate}
-        refData={selectedSeries}
-        settings={DEFAULT_PANEL_SETTINGS}
-        progress={0}
-        setProgress={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        isHovered
-        overlayColumns={[
-          { date: selectedDate, ref: selectedSeries },
-          { date: compareDate, ref: compareSeries },
-        ]}
-        isAligning={false}
-        startAlignAll={startAlignAll}
-      />,
-    );
+    render(<GridCell {...gridCellProps(startAlignAll)} />);
     const overlay = screen.getByTestId('diagnostic-drag-overlay');
 
     expect(overlay).toHaveAttribute('data-image-width', '384');
@@ -452,24 +411,7 @@ describe('Quiet Instrument comparison surfaces', () => {
 
   it('offers explicitly disclosed opt-in tumor alignment without changing ordinary grid alignment', () => {
     const startAlignAll = vi.fn(async () => undefined);
-    render(
-      <GridCell
-        comboId="synthetic-sequence"
-        date={selectedDate}
-        refData={selectedSeries}
-        settings={DEFAULT_PANEL_SETTINGS}
-        progress={0}
-        setProgress={vi.fn()}
-        updatePanelSetting={vi.fn()}
-        isHovered
-        overlayColumns={[
-          { date: selectedDate, ref: selectedSeries },
-          { date: compareDate, ref: compareSeries },
-        ]}
-        isAligning={false}
-        startAlignAll={startAlignAll}
-      />,
-    );
+    render(<GridCell {...gridCellProps(startAlignAll)} />);
     const overlay = screen.getByTestId('diagnostic-drag-overlay');
 
     expect(overlay).toHaveAttribute(

@@ -194,20 +194,9 @@ describe('svr/renderLod', () => {
     const observedSupport = new Uint8Array([1, 1, 0, 1]);
     const dims = { nx: 4, ny: 1, nz: 1 };
 
-    const floatVolume = await buildRenderVolumeTexData({
-      src,
-      srcObservedSupport: observedSupport,
-      srcDims: dims,
-      plan: { dims, kind: 'f32' },
-      isCancelled: () => false,
-    });
-    const byteVolume = await buildRenderVolumeTexData({
-      src,
-      srcObservedSupport: observedSupport,
-      srcDims: dims,
-      plan: { dims, kind: 'u8' },
-      isCancelled: () => false,
-    });
+    const options = { src, srcObservedSupport: observedSupport, srcDims: dims, isCancelled: () => false };
+    const floatVolume = await buildRenderVolumeTexData({ ...options, plan: { dims, kind: 'f32' } });
+    const byteVolume = await buildRenderVolumeTexData({ ...options, plan: { dims, kind: 'u8' } });
 
     expect(floatVolume.data).toBe(src);
     expect(floatVolume.observedSupport).toBe(observedSupport);

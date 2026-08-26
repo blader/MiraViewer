@@ -86,17 +86,37 @@ function outputGridFrame(reference: SvrReconstructionSlice, pixelSpacing = '1\\1
   };
 }
 
+function registerSyntheticStacks(referenceSlices: SvrReconstructionSlice[], targetSlices: SvrReconstructionSlice[]) {
+  return registerAndResliceLongitudinal({
+    referenceSlices,
+    targetSlices,
+    referenceSliceIndex: 9,
+    maxDimension: 32,
+    maxSamples: 4000,
+  });
+}
+
+function denseRegistrationOptions(
+  referenceSlices: SvrReconstructionSlice[],
+  targetSlices: SvrReconstructionSlice[],
+  referenceExclusionMask: Uint8Array,
+) {
+  return {
+    targetSlices,
+    referencePlane: referenceSlices[9]!,
+    nativeReferenceSlices: referenceSlices.slice(7, 12),
+    nativeReferenceSliceIndex: 2,
+    referenceExclusionMask,
+    targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+    centerMm: { x: 0, y: 0, z: 0 },
+  };
+}
+
 describe('svr/longitudinalRegistration', () => {
   it('reslices an 18-degree target stack along the exact reference plane', async () => {
     const reference = makeStack({ frameUid: 'shared' });
     const target = makeStack({ angleDeg: 18, frameUid: 'shared' });
-    const result = await registerAndResliceLongitudinal({
-      referenceSlices: reference,
-      targetSlices: target,
-      referenceSliceIndex: 9,
-      maxDimension: 32,
-      maxSamples: 4000,
-    });
+    const result = await registerSyntheticStacks(reference, target);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -126,13 +146,7 @@ describe('svr/longitudinalRegistration', () => {
       frameUid: 'target-frame',
       offset: { x: 50, y: -30, z: 10 },
     });
-    const result = await registerAndResliceLongitudinal({
-      referenceSlices: reference,
-      targetSlices: target,
-      referenceSliceIndex: 9,
-      maxDimension: 32,
-      maxSamples: 4000,
-    });
+    const result = await registerSyntheticStacks(reference, target);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -142,13 +156,10 @@ describe('svr/longitudinalRegistration', () => {
   });
 
   it('optimizes physically indistinguishable cross-frame seed poses only once', async () => {
-    const result = await registerAndResliceLongitudinal({
-      referenceSlices: makeStack({ frameUid: 'reference-frame' }),
-      targetSlices: makeStack({ frameUid: 'target-frame' }),
-      referenceSliceIndex: 9,
-      maxDimension: 32,
-      maxSamples: 4000,
-    });
+    const result = await registerSyntheticStacks(
+      makeStack({ frameUid: 'reference-frame' }),
+      makeStack({ frameUid: 'target-frame' }),
+    );
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -320,15 +331,7 @@ describe('svr/longitudinalRegistration', () => {
       }
     }
 
-    const result = resliceDenseLongitudinalPlane({
-      targetSlices: target,
-      referencePlane: reference[9]!,
-      nativeReferenceSlices: reference.slice(7, 12),
-      nativeReferenceSliceIndex: 2,
-      referenceExclusionMask: mask,
-      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-      centerMm: { x: 0, y: 0, z: 0 },
-    });
+    const result = resliceDenseLongitudinalPlane(denseRegistrationOptions(reference, target, mask));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -364,15 +367,7 @@ describe('svr/longitudinalRegistration', () => {
       addLesion(reference[9]!, 3);
       for (const index of [11, 12, 13]) addLesion(target[index]!, index === 12 ? 3 : 2);
 
-      const options = {
-        targetSlices: target,
-        referencePlane: reference[9]!,
-        nativeReferenceSlices: reference.slice(7, 12),
-        nativeReferenceSliceIndex: 2,
-        referenceExclusionMask: mask,
-        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-        centerMm: { x: 0, y: 0, z: 0 },
-      };
+      const options = denseRegistrationOptions(reference, target, mask);
       const anatomy = resliceDenseLongitudinalPlane(options);
       const focused = resliceDenseLongitudinalPlane({ ...options, alignmentFocus: 'tumor' });
 
@@ -450,15 +445,7 @@ describe('svr/longitudinalRegistration', () => {
     expect(prepared?.bilateral).toBeDefined();
     if (!prepared) return;
 
-    const options = {
-      targetSlices: target,
-      referencePlane: reference[9]!,
-      nativeReferenceSlices: reference.slice(7, 12),
-      nativeReferenceSliceIndex: 2,
-      referenceExclusionMask: mask,
-      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
-      centerMm: { x: 0, y: 0, z: 0 },
-    };
+    const options = denseRegistrationOptions(reference, target, mask);
     const anatomy = resliceDenseLongitudinalPlane(options);
     const result = resliceDenseLongitudinalPlane({ ...options, alignmentFocus: 'tumor' });
 
@@ -520,13 +507,7 @@ describe('svr/longitudinalRegistration', () => {
       };
     });
 
-    const result = await registerAndResliceLongitudinal({
-      referenceSlices: reference,
-      targetSlices: target,
-      referenceSliceIndex: 9,
-      maxDimension: 32,
-      maxSamples: 4000,
-    });
+    const result = await registerSyntheticStacks(reference, target);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
