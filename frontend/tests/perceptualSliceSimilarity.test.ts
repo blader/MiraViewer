@@ -31,6 +31,10 @@ function makePattern(size: number): Float32Array {
   return out;
 }
 
+function tissueReference(size: number): Float32Array {
+  return normalizePerceptualSource(renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST), size);
+}
+
 function translate(input: Float32Array, size: number, dx: number): Float32Array {
   const out = new Float32Array(input.length);
   for (let y = 0; y < size; y++) {
@@ -402,10 +406,7 @@ describe('perceptual slice scoring', () => {
 
   test('gives supported healthy anatomy near an excluded lesion more influence without discarding distant anatomy', () => {
     const size = 96;
-    const reference = normalizePerceptualSource(
-      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
-      size,
-    );
+    const reference = tissueReference(size);
     const exclusionRect = { x: 42 / size, y: 42 / size, width: 12 / size, height: 12 / size };
     const original = preparePerceptualReference(reference, size, { scales: [size] }).scales[0]!;
     const focused = preparePerceptualReference(reference, size, { scales: [size], exclusionRect }).scales[0]!;
@@ -428,10 +429,7 @@ describe('perceptual slice scoring', () => {
 
   test('prefers matching healthy anatomy near the lesion when more distant structures disagree', () => {
     const size = 96;
-    const reference = normalizePerceptualSource(
-      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
-      size,
-    );
+    const reference = tissueReference(size);
     const exclusionRect = { x: 42 / size, y: 42 / size, width: 12 / size, height: 12 / size };
     const nearbyMatches = Float32Array.from(reference);
     const distantMatches = Float32Array.from(reference);
@@ -466,10 +464,7 @@ describe('perceptual slice scoring', () => {
 
   test('preserves global healthy-anatomy weighting when the selected exclusion is broad', () => {
     const size = 96;
-    const reference = normalizePerceptualSource(
-      renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST),
-      size,
-    );
+    const reference = tissueReference(size);
     const global = preparePerceptualReference(reference, size, { scales: [size] }).scales[0]!;
     const excluded = preparePerceptualReference(reference, size, {
       scales: [size],

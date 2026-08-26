@@ -1,7 +1,7 @@
 import type { ExclusionMask } from '../../types/api';
 import { computeGradientMagnitudeL1Square } from '../imageFeatures';
 import { normalizePerceptualSource } from '../perceptualSliceSimilarity';
-import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from './resample2d';
+import { exclusionMaskBounds, resample2dAreaAverage, resample2dAreaAverageWithValidity } from './resample2d';
 import { cross, dot, norm, type Vec3 } from './vec3';
 
 const LANDMARK_SIZE = 128;
@@ -366,30 +366,7 @@ export function prepareAnatomicalPlaneLandmarks(
     LANDMARK_SIZE,
     LANDMARK_SIZE,
   );
-  let minimumColumn = reference.cols;
-  let maximumColumn = -1;
-  let minimumRow = reference.rows;
-  let maximumRow = -1;
-  if (exclusionMask) {
-    for (let index = 0; index < exclusionMask.length; index++) {
-      if (!exclusionMask[index]) continue;
-      const row = Math.floor(index / reference.cols);
-      const column = index % reference.cols;
-      minimumColumn = Math.min(minimumColumn, column);
-      maximumColumn = Math.max(maximumColumn, column);
-      minimumRow = Math.min(minimumRow, row);
-      maximumRow = Math.max(maximumRow, row);
-    }
-  }
-  const exclusionRect: ExclusionMask | undefined =
-    maximumColumn >= minimumColumn && maximumRow >= minimumRow
-      ? {
-          x: minimumColumn / reference.cols,
-          y: minimumRow / reference.rows,
-          width: (maximumColumn - minimumColumn + 1) / reference.cols,
-          height: (maximumRow - minimumRow + 1) / reference.rows,
-        }
-      : undefined;
+  const exclusionRect = exclusionMaskBounds(exclusionMask, reference.rows, reference.cols);
   const normalized = normalizePerceptualSource(scaled.pixels, LANDMARK_SIZE, {
     exclusionRect,
     validity: scaled.validity,

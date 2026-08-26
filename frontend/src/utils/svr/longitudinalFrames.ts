@@ -1,5 +1,5 @@
 import { decodeImageWithValidity, loadCornerstoneImage } from '../decodedFrame';
-import type { getSeriesFrameManifest } from '../localApi';
+import type { SeriesFrameManifest } from '../localApi';
 import {
   outputGridFingerprint,
   outputGridPixelToWorld,
@@ -28,8 +28,6 @@ import {
 import { runLongitudinalDenseReslice } from './runLongitudinalRegistration';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { dot, v3, type Vec3 } from './vec3';
-
-type SeriesFrameManifest = Awaited<ReturnType<typeof getSeriesFrameManifest>>;
 
 export type LongitudinalReferenceAnatomy = {
   manifest: SeriesFrameManifest;

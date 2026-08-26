@@ -5,7 +5,7 @@ import {
   scoreAnatomicalPlaneLandmarks,
 } from './anatomicalPlaneLandmarks';
 import { sliceCornersMm } from './dicomGeometry';
-import { resample2dAreaAverageWithValidity } from './resample2d';
+import { exclusionMaskBounds, resample2dAreaAverageWithValidity } from './resample2d';
 import {
   applyRigidToPoint,
   boundsCenterMm,
@@ -768,21 +768,11 @@ function buildNativeRefinementSamples(params: {
   const spatialFolds = new Uint8Array(maxSamples);
   const spatialBlockIds = new Uint32Array(maxSamples);
   const spatialBlocks = new Map<string, number>();
-  let firstExcludedRow = selectedReference.dsRows;
-  let lastExcludedRow = -1;
-  let firstExcludedCol = selectedReference.dsCols;
-  let lastExcludedCol = -1;
-  if (params.exclusionMask) {
-    for (let index = 0; index < params.exclusionMask.length; index++) {
-      if (!params.exclusionMask[index]) continue;
-      const row = Math.floor(index / selectedReference.dsCols);
-      const col = index % selectedReference.dsCols;
-      firstExcludedRow = Math.min(firstExcludedRow, row);
-      lastExcludedRow = Math.max(lastExcludedRow, row);
-      firstExcludedCol = Math.min(firstExcludedCol, col);
-      lastExcludedCol = Math.max(lastExcludedCol, col);
-    }
-  }
+  const exclusion = exclusionMaskBounds(params.exclusionMask, selectedReference.dsRows, selectedReference.dsCols);
+  const firstExcludedRow = exclusion ? Math.round(exclusion.y * selectedReference.dsRows) : selectedReference.dsRows;
+  const lastExcludedRow = exclusion ? Math.round((exclusion.y + exclusion.height) * selectedReference.dsRows) - 1 : -1;
+  const firstExcludedCol = exclusion ? Math.round(exclusion.x * selectedReference.dsCols) : selectedReference.dsCols;
+  const lastExcludedCol = exclusion ? Math.round((exclusion.x + exclusion.width) * selectedReference.dsCols) - 1 : -1;
   const excludedFraction =
     ((lastExcludedRow - firstExcludedRow + 1) * (lastExcludedCol - firstExcludedCol + 1)) /
     (selectedReference.dsRows * selectedReference.dsCols);

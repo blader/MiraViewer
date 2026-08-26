@@ -1,3 +1,27 @@
+export function exclusionMaskBounds(mask: Uint8Array | undefined, rows: number, columns: number) {
+  if (!mask) return undefined;
+  let firstRow = rows;
+  let lastRow = -1;
+  let firstColumn = columns;
+  let lastColumn = -1;
+  for (let index = 0; index < mask.length; index++) {
+    if (!mask[index]) continue;
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    firstRow = Math.min(firstRow, row);
+    lastRow = Math.max(lastRow, row);
+    firstColumn = Math.min(firstColumn, column);
+    lastColumn = Math.max(lastColumn, column);
+  }
+  if (lastRow < firstRow) return undefined;
+  return {
+    x: firstColumn / columns,
+    y: firstRow / rows,
+    width: (lastColumn - firstColumn + 1) / columns,
+    height: (lastRow - firstRow + 1) / rows,
+  };
+}
+
 export function resample2dAreaAverage(
   src: ArrayLike<number>,
   srcRows: number,

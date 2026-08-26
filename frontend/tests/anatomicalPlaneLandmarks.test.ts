@@ -59,14 +59,6 @@ function physicalBilateralAnatomy() {
   return { rows, cols, pixels, valid, prepared };
 }
 
-type AnatomicalReference = Parameters<typeof prepareAnatomicalPlaneLandmarks>[0];
-type AnatomicalDepthContext = { previous?: AnatomicalReference; next?: AnatomicalReference };
-const prepareDepthAwareLandmarks = prepareAnatomicalPlaneLandmarks as (
-  reference: AnatomicalReference,
-  exclusionMask?: Uint8Array,
-  depthContext?: AnatomicalDepthContext,
-) => ReturnType<typeof prepareAnatomicalPlaneLandmarks>;
-
 describe('physical enclosed anatomical plane landmarks', () => {
   it('prefers preserved paired enclosed anatomy while excluding a biologically changed lesion', () => {
     const rows = 128;
@@ -465,7 +457,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
         rowSpacingDsMm: 1,
         colSpacingDsMm: 1,
       };
-      const prepared = prepareDepthAwareLandmarks(reference, undefined, {
+      const prepared = prepareAnatomicalPlaneLandmarks(reference, undefined, {
         previous: {
           ...reference,
           pixels: depthSensitivePhantom(rows, -1),
@@ -522,7 +514,7 @@ describe('physical enclosed anatomical plane landmarks', () => {
     };
     const previous = { ...reference, pixels: depthSensitivePhantom(rows, -1), ippMm: { x: 0, y: 1, z: 0 } };
     const next = { ...reference, pixels: depthSensitivePhantom(rows, 1), ippMm: { x: 0, y: -1, z: 0 } };
-    const prepared = prepareDepthAwareLandmarks(reference, exclusion, { previous, next });
+    const prepared = prepareAnatomicalPlaneLandmarks(reference, exclusion, { previous, next });
     expect(prepared).not.toBeNull();
     if (!prepared) return;
 
@@ -540,19 +532,19 @@ describe('physical enclosed anatomical plane landmarks', () => {
       }),
     ).toBe(Number.NEGATIVE_INFINITY);
     expect(
-      prepareDepthAwareLandmarks(reference, exclusion, {
+      prepareAnatomicalPlaneLandmarks(reference, exclusion, {
         previous: { ...previous, valid: new Uint8Array(valid.length) },
         next: { ...next, valid: new Uint8Array(valid.length) },
       }),
     ).toBeNull();
     expect(
-      prepareDepthAwareLandmarks(reference, exclusion, {
+      prepareAnatomicalPlaneLandmarks(reference, exclusion, {
         previous,
         next: { ...next, rowDir: { x: 0, y: 1, z: 0 } },
       }),
     ).toBeNull();
     expect(
-      prepareDepthAwareLandmarks(reference, exclusion, {
+      prepareAnatomicalPlaneLandmarks(reference, exclusion, {
         previous,
         next: { ...next, frameOfReferenceUid: 'different-frame' },
       }),

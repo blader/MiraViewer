@@ -1,6 +1,6 @@
 import type { ExclusionMask } from '../../types/api';
 import { normalizePerceptualSource } from '../perceptualSliceSimilarity';
-import { resample2dAreaAverage, resample2dAreaAverageWithValidity } from './resample2d';
+import { exclusionMaskBounds, resample2dAreaAverage, resample2dAreaAverageWithValidity } from './resample2d';
 
 const TUMOR_ALIGNMENT_SIZE = 128;
 const MINIMUM_COMPONENT_PIXELS = 4;
@@ -212,26 +212,8 @@ export function prepareTumorFocusedAlignment(
     return null;
   }
 
-  let firstRow = reference.rows;
-  let lastRow = -1;
-  let firstColumn = reference.cols;
-  let lastColumn = -1;
-  for (let index = 0; index < tumorRegionMask.length; index++) {
-    if (!tumorRegionMask[index]) continue;
-    const row = Math.floor(index / reference.cols);
-    const column = index % reference.cols;
-    firstRow = Math.min(firstRow, row);
-    lastRow = Math.max(lastRow, row);
-    firstColumn = Math.min(firstColumn, column);
-    lastColumn = Math.max(lastColumn, column);
-  }
-  if (lastRow < firstRow || lastColumn < firstColumn) return null;
-  const exclusionRect = {
-    x: firstColumn / reference.cols,
-    y: firstRow / reference.rows,
-    width: (lastColumn - firstColumn + 1) / reference.cols,
-    height: (lastRow - firstRow + 1) / reference.rows,
-  };
+  const exclusionRect = exclusionMaskBounds(tumorRegionMask, reference.rows, reference.cols);
+  if (!exclusionRect) return null;
   const scaledRegion = resample2dAreaAverage(
     tumorRegionMask,
     reference.rows,
