@@ -45,17 +45,15 @@ function SvrVolume3DViewer({
   labels,
   initialSelection,
   busy,
-  refineRegion,
   ...props
 }: SvrVolume3DViewerProps & {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
   initialSelection?: SvrLabelVolume;
   busy?: boolean;
-  refineRegion?: (labels: SvrLabelVolume) => void;
 }) {
   return (
-    <SvrImagingContext.Provider value={{ volume, labels, initialSelection, busy, refineRegion }}>
+    <SvrImagingContext.Provider value={{ volume, labels, initialSelection, busy }}>
       <ContextViewer {...props} />
     </SvrImagingContext.Provider>
   );

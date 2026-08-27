@@ -41,7 +41,11 @@
   font-size: 15px;
   font-weight: 500;
 }
-.svr-selection-review-state {
+.svr-selection-review-state,
+.svr-selection-brush,
+.svr-selection-display-controls,
+.svr-selection-toolbar button,
+.svr-selection-guidance {
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -66,8 +70,6 @@
   border: 1px solid var(--border-color);
   border-radius: 4px;
   background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
   white-space: nowrap;
 }
 .svr-selection-toolbar button:hover:not(:disabled) {
@@ -110,15 +112,15 @@
   min-width: 34px;
   padding: 0 6px;
 }
-.svr-selection-zoom span {
-  min-width: 36px;
-  text-align: center;
+.svr-selection-zoom span,
+.svr-selection-slice-number,
+.svr-selection-image > span {
   font: 11px var(--font-mono);
   color: var(--text-secondary);
 }
-.svr-selection-brush {
-  font-size: 12px;
-  color: var(--text-secondary);
+.svr-selection-zoom span {
+  min-width: 36px;
+  text-align: center;
 }
 .svr-selection-brush input {
   width: 72px;
@@ -141,9 +143,7 @@
 .svr-selection-guidance {
   margin-top: 8px;
   min-height: 18px;
-  font-size: 12px;
   line-height: 1.5;
-  color: var(--text-secondary);
 }
 .svr-selection-warning {
   margin-top: 6px;
@@ -155,8 +155,6 @@
 }
 .svr-selection-display-controls {
   margin-top: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 .svr-selection-display-controls summary {
   width: fit-content;
@@ -219,12 +217,15 @@
 .svr-selection-grid[data-expanded='volume'] > :not([data-view='volume']) {
   display: none;
 }
+.svr-selection-pane-actions,
+.svr-selection-pane-heading > span:last-child:not(:first-child) {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
 .svr-selection-pane-actions {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: var(--text-secondary);
-  font-size: 11px;
 }
 .svr-selection-pane-actions button {
   display: inline-flex;
@@ -261,14 +262,6 @@
   background: var(--bg-secondary);
   font-size: 12px;
 }
-.svr-selection-pane-heading > span:last-child:not(:first-child) {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-.svr-selection-slice-number {
-  font: 11px var(--font-mono);
-  color: var(--text-secondary);
-}
 .svr-selection-slice-number input {
   width: 44px;
   height: 26px;
@@ -301,8 +294,6 @@
   position: absolute;
   z-index: 1;
   pointer-events: none;
-  font: 11px var(--font-mono);
-  color: var(--text-secondary);
 }
 .svr-orientation-left {
   left: 10px;
@@ -1384,10 +1375,6 @@ textarea {
   min-height: 36px;
   cursor: pointer;
   line-height: 36px;
-}
-
-.svr-slice-inspector-mount:empty {
-  display: none;
 }
 
 .svr-volume-details {

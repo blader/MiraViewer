@@ -18,6 +18,7 @@ export function AutomaticAlignmentStatus({
   onRealign: () => void;
 }) {
   const complete = targets > 0 && aligned === targets;
+  const ToggleIcon = enabled ? Pause : Play;
   const label = !enabled
     ? 'Alignment paused'
     : busy
@@ -49,11 +50,7 @@ export function AutomaticAlignmentStatus({
         title={enabled ? 'Pause automatic alignment' : 'Resume automatic alignment'}
         aria-label={enabled ? 'Pause automatic alignment' : 'Resume automatic alignment'}
       >
-        {enabled ? (
-          <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-        ) : (
-          <Play className="h-3.5 w-3.5" aria-hidden="true" />
-        )}
+        <ToggleIcon className="h-3.5 w-3.5" aria-hidden="true" />
       </button>
       <button
         type="button"
