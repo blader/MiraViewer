@@ -1,4 +1,4 @@
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, ReactNode, RefObject, SetStateAction } from 'react';
 import { CalendarDays, Download, HelpCircle, MoreVertical, PanelLeft, Pause, Play, Trash2, Upload } from 'lucide-react';
 import type { AlignmentResult, ComparisonData, SequenceCombo, SeriesRef } from '../../types/api';
 import { formatPatientName, formatSequenceLabel } from '../../utils/clinicalData';
@@ -44,6 +44,8 @@ type InstrumentNotices = {
 };
 
 export type ComparisonInstrumentHeaderProps = {
+  alignmentControls?: ReactNode;
+  backgroundAlignment?: boolean;
   clinical: InstrumentClinicalContext;
   navigation: InstrumentNavigation;
   actions: InstrumentActions;
@@ -305,10 +307,12 @@ function InstrumentContextRail({
   notices,
   noticesVisible,
   unsuccessfulResults,
+  alignmentControls,
   panels,
 }: ComparisonInstrumentHeaderProps & {
   noticesVisible: boolean;
   unsuccessfulResults: AlignmentResult[];
+  alignmentControls?: ReactNode;
 }) {
   const showStudyFilmstrip = navigation.viewMode === 'overlay' || navigation.viewMode === 'svr3d';
 
@@ -354,9 +358,7 @@ function InstrumentContextRail({
         ) : null}
       </div>
 
-      {!showStudyFilmstrip && !noticesVisible && navigation.overlayColumns.length > 1 ? (
-        <span className="instrument-workflow-hint">Draw a region on a reference image to align or segment</span>
-      ) : null}
+      {alignmentControls}
 
       {navigation.viewMode === 'overlay' && navigation.overlayColumns.length > 0 ? (
         <div className="instrument-context-playback">
@@ -441,16 +443,21 @@ function InstrumentContextRail({
 export function ComparisonInstrumentHeader({
   clinical,
   navigation,
-  actions,
+  actions: operationActions,
   notices,
   panels,
+  alignmentControls,
+  backgroundAlignment = false,
 }: ComparisonInstrumentHeaderProps) {
+  const actions = backgroundAlignment ? { ...operationActions, isAligning: false } : operationActions;
   const unsuccessfulResults =
-    !actions.isAligning && !notices.alignmentError
+    !operationActions.isAligning && !notices.alignmentError
       ? notices.alignmentResults.filter((result) => result.outcome && result.outcome !== 'aligned')
       : [];
   const noticesVisible = Boolean(
-    notices.persistenceError || (notices.alignmentError && !actions.isAligning) || unsuccessfulResults.length > 0,
+    notices.persistenceError ||
+    (notices.alignmentError && !operationActions.isAligning) ||
+    unsuccessfulResults.length > 0,
   );
 
   return (
@@ -476,6 +483,7 @@ export function ComparisonInstrumentHeader({
           panels={panels}
           noticesVisible={noticesVisible}
           unsuccessfulResults={unsuccessfulResults}
+          alignmentControls={alignmentControls}
         />
       ) : null}
     </header>

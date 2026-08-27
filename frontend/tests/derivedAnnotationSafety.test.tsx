@@ -94,7 +94,6 @@ describe('native annotation coordinate-space safety', () => {
         updatePanelSetting={vi.fn()}
         overlayColumns={[{ date: '2025-01-01T00:00:00.000Z', ref: series }]}
         isAligning={false}
-        startAlignAll={vi.fn(async () => undefined)}
       />,
     );
 
@@ -138,7 +137,6 @@ describe('native annotation coordinate-space safety', () => {
         alignmentProgress={null}
         abortAlignment={vi.fn()}
         updatePanelSetting={vi.fn()}
-        startAlignAll={vi.fn(async () => undefined)}
         setProgress={vi.fn()}
       />,
     );

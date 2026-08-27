@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   getSeriesFrameManifest: vi.fn(),
   prepare: vi.fn(),
   prepareReference: vi.fn(),
+  decodeReference: vi.fn(),
   planeDrift: vi.fn(),
   register3d: vi.fn(),
   densify: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock('../src/utils/elastixRegistration', () => ({
 vi.mock('../src/utils/svr/longitudinalFrames', () => ({
   densifyLongitudinalRegistration: mocks.densify,
   prepareLongitudinalReferenceInput: mocks.prepareReference,
+  decodeLongitudinalReferenceFrame: mocks.decodeReference,
   prepareLongitudinalRegistrationInput: mocks.prepare,
   measureLongitudinalPlaneDrift: mocks.planeDrift,
 }));
@@ -217,6 +219,75 @@ describe('physically registered longitudinal auto-alignment', () => {
   });
 
   afterEach(() => clearDerivedAlignmentFrames());
+
+  it('estimates at an informative slab, preserves a blank browsing plane, and reuses the verified pose', async () => {
+    const fixed = manifest('reference-series');
+    const informativeGrid = buildOutputPlaneGrid(fixed.frames[1]!, { frameOfReferenceUid: fixed.frameOfReferenceUid });
+    const informative = { dsRows: 4, dsCols: 4, pixels: Float32Array.from({ length: 16 }, (_, i) => i) };
+    mocks.prepareReference.mockResolvedValue({
+      referenceSourceIndex: 1,
+      referenceSlices: [informative],
+      referenceSliceIndex: 0,
+      referenceSourceIndices: [1],
+      outputGrid: informativeGrid,
+    });
+    mocks.prepare.mockResolvedValue({
+      referenceSlices: [informative],
+      targetSlices: [informative],
+      referenceSliceIndex: 0,
+      referenceSourceIndices: [1],
+      targetSourceIndices: [0, 1, 2],
+      outputGrid: informativeGrid,
+    });
+    mocks.decodeReference.mockResolvedValue(informative);
+    mocks.captureSlice.mockImplementation(async (_series, _index, size) => ({
+      pixels: new Float32Array(size * size),
+      imageId: 'blank-current-plane',
+      timingMs: {},
+    }));
+    mocks.densify.mockImplementation(async (_manifest, _reference, estimate, options) => ({
+      ...estimate,
+      pixels: new Float32Array(16).fill(50),
+      rows: 4,
+      cols: 4,
+      coverage: 1,
+      outputGrid: options.outputGrid,
+    }));
+    const { result } = renderHook(useAutoAlign);
+    const run = async (sliceIndex: number, revision = reference.datasetRevision) => {
+      let aligned: AlignmentResult[] = [];
+      await act(async () => {
+        aligned = await result.current.alignAllDates(
+          { ...reference, sliceIndex, datasetRevision: revision, exclusionMask: undefined },
+          ['target'],
+          { target },
+          sliceIndex / 2,
+          { reuseRegistration: true, requestKey: `view-${sliceIndex}` },
+        );
+      });
+      expect(aligned[0]?.outcome).toBe('aligned');
+      return aligned[0]!;
+    };
+    const first = await run(0);
+    expect(first.derivedFrame?.referenceFrameIndex).toBe(0);
+    expect(first.outputGrid?.referenceSopInstanceUid).toBe('reference-series-0');
+    expect(mocks.prepareReference.mock.calls[0]![2].selectInformativeReference).toBe(true);
+    expect(mocks.register3d.mock.calls[0]![0].outputGrid).toEqual(informativeGrid);
+    expect(mocks.densify.mock.calls[0]![3]).toMatchObject({ referenceSliceIndex: 1, refinePose: true });
+    expect(mocks.densify.mock.calls[1]![3].refinePose).toBe(false);
+    const next = await run(2);
+    expect(next.derivedFrame?.referenceFrameIndex).toBe(2);
+    expect(next.derivedFrame?.rigidTransform).toEqual(first.derivedFrame?.rigidTransform);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.densify).toHaveBeenCalledTimes(3);
+    expect(mocks.densify.mock.lastCall![3].refinePose).toBe(false);
+    await run(2, 10);
+    expect(mocks.register3d).toHaveBeenCalledTimes(2);
+    act(() => result.current.clearRegistrationCache());
+    await run(2, 10);
+    expect(mocks.register3d).toHaveBeenCalledTimes(3);
+  });
 
   it('keeps a selected derived reference stationary while registering against its verified displayed physical plane', async () => {
     const originalManifest = manifest('original-reference-series', 'patient-a', 'original-frame');

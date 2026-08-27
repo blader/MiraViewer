@@ -69,22 +69,25 @@ export function HelpModal({ onClose }: HelpModalProps) {
           </h3>
           <ul className="space-y-2">
             <li>
-              <Label>Drag a rectangle</Label> on any image (Grid or Overlay), then choose an action:
-              <Label>Align All</Label> (exclude the selected region), <Label>Align Tumor</Label> (match its tumor
-              slice), or <Label>Segment</Label> (start a tumor segmentation).
+              Visible scans align automatically after you stop browsing. The first visible examination stays fixed; the
+              others follow its slice position and display adjustments. No tumor selection is required.
             </li>
             <li>
-              <Label>Align All</Label> ignores pixels inside the selected region when matching scans.
+              Alignment uses anatomical detail across neighboring slices, independently of the slice on screen. A cached
+              transform is reused as you browse; an empty slice does not trigger a new pose estimate.
             </li>
             <li>
-              <Label>Align Tumor</Label> still aligns pose using surrounding healthy anatomy, then uses pixels inside
-              the selected region only to match the tumor slice.
+              Use <Label>Pause automatic alignment</Label> to stop background adjustments without changing the current
+              view. Manual adjustments to a target examination are kept until you choose <Label>Realign</Label>.
             </li>
             <li>
-              Press <Kbd>Esc</Kbd> or the <Label>X</Label> button to clear the selection.
+              <Label>Drag a rectangle</Label> on an image to <Label>Segment</Label> a region. Press <Kbd>Esc</Kbd>
+              to clear the selection; selections do not change automatic alignment. For an aligned panel, choose{' '}
+              <Label>View acquired</Label> first to annotate its original source image.
             </li>
             <li>
-              Click <Label>Cancel</Label> to abort alignment while running.
+              Aligned images are derived presentations, not new acquired detail. Always review anatomical
+              correspondence; automatic alignment does not identify or diagnose a tumor.
             </li>
           </ul>
         </section>

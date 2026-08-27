@@ -1,4 +1,5 @@
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
+import type { AlignmentDisplayTone } from '../utils/alignmentDisplayTone';
 
 export interface DicomStudy {
   studyInstanceUid: string;
@@ -272,6 +273,7 @@ export interface VolumeSegmentationRow {
 }
 
 export interface DerivedAlignmentFramePresentation {
+  displayTone?: AlignmentDisplayTone;
   pixels: Float32Array;
   valid?: Uint8Array;
   rows: number;

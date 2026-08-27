@@ -104,6 +104,37 @@ function alignmentFixture({
 }
 
 describe('useApplyAlignmentResults', () => {
+  it('ignores late background results for a different visible view', () => {
+    const { result, frame, applyResults, seriesUid } = alignmentFixture();
+    clearDerivedAlignmentFrames();
+    const batchUpdateSettings = vi.fn();
+    applyResults([result({ requestKey: 'old-view', derivedFrame: frame() })], {
+      activeRequestKey: 'new-view',
+      batchUpdateSettings,
+    });
+    expect(batchUpdateSettings).not.toHaveBeenCalled();
+    expect(getDerivedAlignmentFrame(seriesUid, 1)).toBeNull();
+  });
+
+  it('applies current background frames without per-slice persistence or undo entries', () => {
+    const { result, frame, applyResults, seriesUid } = alignmentFixture();
+    clearDerivedAlignmentFrames();
+    const save = vi.spyOn(localApi, 'saveDerivedAlignmentFrame').mockResolvedValue();
+    const batchUpdateSettings = vi.fn();
+    try {
+      applyResults([result({ requestKey: 'current-view', derivedFrame: frame() })], {
+        activeRequestKey: 'current-view',
+        batchUpdateSettings,
+      });
+      expect(batchUpdateSettings).toHaveBeenCalledWith(expect.any(Map), 'verified-run', true);
+      expect(save).not.toHaveBeenCalled();
+      expect(getDerivedAlignmentFrame(seriesUid, 1)).not.toBeNull();
+    } finally {
+      save.mockRestore();
+      clearDerivedAlignmentFrames();
+    }
+  });
+
   it('keeps all sixteen aligned examinations and their selected derived reference visible', async () => {
     const { sequenceId, data, frame, result, applyResults } = alignmentFixture();
     const examinations = Array.from({ length: 16 }, (_, index) => ({

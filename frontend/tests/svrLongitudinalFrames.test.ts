@@ -78,6 +78,45 @@ describe('svr/longitudinalFrames', () => {
     denseWorker.run.mockReset();
   });
 
+  it('prepares the same informative source slab independently of a low-information browsing position', async () => {
+    const original = decode.resample.getMockImplementation()!;
+    const reference = makeManifest('reference', 101);
+    reference.frames = reference.frames.map((frame) => ({ ...frame, rows: 64, columns: 64 }));
+    decode.resample.mockImplementation((image, rows, cols) => {
+      const sourceIndex = Number((image as { imageId: string }).imageId.split('-').at(-1));
+      return {
+        pixels: Float32Array.from({ length: rows * cols }, (_, i) => {
+          if (sourceIndex < 25 || sourceIndex > 75) return 0;
+          const x = (i % cols) / cols - 0.5,
+            y = Math.floor(i / cols) / rows - 0.5;
+          return x * x + y * y < 0.16 ? 1 + Math.sin(x * 12) * Math.cos(y * 10) * 0.4 : 0;
+        }),
+        validity: new Float32Array(rows * cols).fill(1),
+      };
+    });
+    try {
+      const first = await prepareLongitudinalReferenceInput(reference, 14, {
+        selectInformativeReference: true,
+        maxSlices: 5,
+        maxDimension: 64,
+      });
+      const second = await prepareLongitudinalReferenceInput(reference, 86, {
+        selectInformativeReference: true,
+        maxSlices: 5,
+        maxDimension: 64,
+      });
+      expect(first.referenceSourceIndex).toBe(50);
+      expect(second.referenceSourceIndex).toBe(50);
+      expect(first.outputGrid?.referenceSopInstanceUid).toBe('reference-50');
+      expect(second.outputGrid).toEqual(first.outputGrid);
+      expect(first.referenceSourceIndices).toEqual([0, 25, 50, 75, 100]);
+      expect(decode.load).not.toHaveBeenCalledWith('miradb:reference-14');
+      expect(decode.load).not.toHaveBeenCalledWith('miradb:reference-86');
+    } finally {
+      decode.resample.mockImplementation(original);
+    }
+  });
+
   it('decodes bounded physical stacks while retaining the exact selected reference and source provenance', async () => {
     const result = await prepareLongitudinalRegistrationInput(
       makeManifest('reference', 21),
@@ -438,6 +477,7 @@ describe('svr/longitudinalFrames', () => {
     const bounded = await prepareDenseLongitudinalResliceInput(target, selected, aligned, centerMm, {
       ...options,
       maxSlices: 5,
+      refinePose: false,
     });
     expect(bounded.sourceIndices.length).toBeLessThanOrEqual(5);
     expect(bounded.nativeCandidatePoses).toBeUndefined();
@@ -524,7 +564,7 @@ describe('svr/longitudinalFrames', () => {
         referenceSliceIndex: 50,
       },
     );
-    expect(expanded.sourceIndices).toEqual(Array.from({ length: 19 }, (_, index) => index + 41));
+    expect(expanded.sourceIndices).toEqual(Array.from({ length: 43 }, (_, index) => index + 29));
     await expect(
       prepareDenseLongitudinalResliceInput(
         target,
@@ -570,7 +610,7 @@ describe('svr/longitudinalFrames', () => {
       },
     );
 
-    expect(expanded.sourceIndices).toEqual(Array.from({ length: 27 }, (_, index) => index + 37));
+    expect(expanded.sourceIndices).toEqual(Array.from({ length: 31 }, (_, index) => index + 35));
 
     const bounded = await prepareDenseLongitudinalResliceInput(
       target,
@@ -579,6 +619,7 @@ describe('svr/longitudinalFrames', () => {
       { x: 0, y: 0, z: 0 },
       {
         maxSlices: 5,
+        refinePose: false,
         referenceManifest: reference,
         referenceSliceIndex: 50,
         referenceExclusionMask: exclusion,
@@ -592,13 +633,13 @@ describe('svr/longitudinalFrames', () => {
       selected,
       rigid,
       { x: 0, y: 0, z: 0 },
-      { referenceManifest: reference, referenceSliceIndex: 50, referenceExclusionMask: exclusion },
+      { referenceManifest: reference, referenceSliceIndex: 50, referenceExclusionMask: exclusion, refinePose: false },
     );
 
     expect(sameFrame.sourceIndices).toEqual([49, 50, 51]);
   });
 
-  it('preserves minimal sagittal and coronal envelopes without applying axial-only depth correction', async () => {
+  it('preserves minimal sagittal and coronal envelopes when reslicing an already estimated pose', async () => {
     const orient = (manifest: SeriesFrameManifest, plane: 'sagittal' | 'coronal'): SeriesFrameManifest => ({
       ...manifest,
       frames: manifest.frames.map((frame, index) => ({
@@ -621,6 +662,7 @@ describe('svr/longitudinalFrames', () => {
         {
           referenceManifest: reference,
           referenceSliceIndex: 50,
+          refinePose: false,
           ...(plane === 'coronal'
             ? { referenceExclusionMask: new Uint8Array(selected.dsRows * selected.dsCols).fill(1) }
             : {}),
@@ -856,14 +898,18 @@ describe('svr/longitudinalFrames', () => {
     expect(result.ok).toBe(true);
     const native = denseWorker.run.mock.calls[0]![0];
     expect(native.nativeReferenceSlices.map((slice: { sopInstanceUid: string }) => slice.sopInstanceUid)).toEqual([
+      'selected-1',
+      'selected-2',
       'selected-3',
       'selected-4',
       'selected-5',
       'selected-6',
       'selected-7',
+      'selected-8',
+      'selected-9',
     ]);
-    expect(native.nativeReferenceSlices[2]!.ippMm).toEqual(selected.ippMm);
-    expect(native.nativeReferenceSlices[1]!.ippMm).toEqual({ x: 0, y: 0, z: 4 });
+    expect(native.nativeReferenceSlices[native.nativeReferenceSliceIndex]!.ippMm).toEqual(selected.ippMm);
+    expect(native.nativeReferenceSlices[native.nativeReferenceSliceIndex - 1]!.ippMm).toEqual({ x: 0, y: 0, z: 4 });
 
     await expect(
       prepareLongitudinalReferenceInput(anchor, 5, {
@@ -963,7 +1009,7 @@ describe('svr/longitudinalFrames', () => {
     expect(options.nativeReferenceSlices[0].sopInstanceUid).toBe('reference-44');
     expect(options.nativeReferenceSlices[12].sopInstanceUid).toBe('reference-56');
     expect(options.targetSlices.map((slice: { sopInstanceUid: string }) => slice.sopInstanceUid)).toEqual(
-      Array.from({ length: 19 }, (_, index) => `target-${index + 41}`),
+      Array.from({ length: 43 }, (_, index) => `target-${index + 29}`),
     );
     expect(options.nativeCandidatePoses).toEqual(candidates);
   });

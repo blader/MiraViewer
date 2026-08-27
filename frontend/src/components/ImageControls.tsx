@@ -26,6 +26,20 @@ export const VerifiedAlignmentBadge = () => (
   </span>
 );
 
+export function AcquiredImageAction({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="study-acquired-action min-h-9 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      title="View the acquired image and pause alignment for this examination so you can annotate it"
+      aria-label="View acquired image"
+    >
+      Aligned · View acquired
+    </button>
+  );
+}
+
 export function StudyAnnotationControls({
   showSavedTumor,
   tumorToolOpen,

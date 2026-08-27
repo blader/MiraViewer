@@ -1,8 +1,8 @@
 import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import type { AlignmentProgress, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
@@ -43,9 +43,9 @@ export type OverlayViewProps = {
   isAligning: boolean;
   alignmentProgress: AlignmentProgress | null;
   abortAlignment: () => void;
+  onUseAcquired?: (date: string) => void;
 
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
-  startAlignAll: (reference: AlignmentReference, exclusionMask: ExclusionMask) => Promise<void>;
   setProgress: (nextProgress: number) => void;
 };
 
@@ -257,22 +257,28 @@ function OverlayStudyFooter({
   instanceCount,
   settings,
   onUpdate,
+  onUseAcquired,
 }: {
   presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean };
   instanceIndex: number;
   instanceCount: number;
   settings: PanelSettings;
   onUpdate: (update: Partial<PanelSettings>) => void;
+  onUseAcquired?: () => void;
 }) {
   return (
     <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-      <span className="truncate text-xs text-[var(--text-secondary)]">
-        {presentation.isComparing
-          ? 'Comparing examination'
-          : presentation.isAligned
-            ? 'Aligned presentation'
-            : 'Acquired image'}
-      </span>
+      {presentation.isAligned && !presentation.isComparing && onUseAcquired ? (
+        <AcquiredImageAction onClick={onUseAcquired} />
+      ) : (
+        <span className="truncate text-xs text-[var(--text-secondary)]">
+          {presentation.isComparing
+            ? 'Comparing examination'
+            : presentation.isAligned
+              ? 'Aligned presentation'
+              : 'Acquired image'}
+        </span>
+      )}
       <div
         inert={presentation.isComparing || presentation.isAligning}
         className={presentation.isComparing ? 'pointer-events-none opacity-40' : ''}
@@ -345,7 +351,6 @@ export function OverlayView({
   overlayDisplayedDate,
   overlayDisplayedSettings,
   overlayDisplayedSliceIndex,
-  overlayDisplayedEffectiveSliceIndex,
   overlaySelectedRef,
   overlaySelectedDate,
   overlaySelectedSettings,
@@ -359,8 +364,8 @@ export function OverlayView({
   isAligning,
   alignmentProgress,
   abortAlignment,
+  onUseAcquired,
   updatePanelSetting,
-  startAlignAll,
   setProgress,
 }: OverlayViewProps) {
   const [showSavedTumor, setShowSavedTumor] = useState(false);
@@ -462,21 +467,15 @@ export function OverlayView({
           >
             <StudySelectionSurface
               reference={{
-                date: overlayDisplayedDate,
-                series: overlayDisplayedRef,
-                sliceIndex: overlayDisplayedEffectiveSliceIndex,
                 settings: overlayDisplayedSettings,
                 imageSize: displayedImageSize,
-                surfaceRef: overlayCellRef,
               }}
               presentation={{
-                columnCount: overlayColumns.length,
                 isAligning,
                 isComparing: isOverlayComparing,
                 groundTruthOpen: gtPolygonToolOpen,
                 nativeAnnotationsAvailable,
               }}
-              startAlignAll={startAlignAll}
               onSegment={(selection) => {
                 setTumorToolOpen(true);
                 setTumorSeedBoxToStart({
@@ -562,6 +561,7 @@ export function OverlayView({
           </div>
 
           <OverlayStudyFooter
+            onUseAcquired={onUseAcquired ? () => onUseAcquired(overlayDisplayedDate) : undefined}
             presentation={{
               isComparing: isOverlayComparing,
               isAligning,

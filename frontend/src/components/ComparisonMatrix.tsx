@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback } from 'react';
-import type { AlignmentReference, ComparisonData, ExclusionMask } from '../types/api';
+import { lazy, Suspense } from 'react';
+import type { ComparisonData } from '../types/api';
 import { CalendarDays, Upload } from 'lucide-react';
 import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
@@ -19,8 +19,8 @@ import { useComparisonInstrumentUi } from '../hooks/useComparisonInstrumentUi';
 import { useComparisonSequenceAvailability } from '../hooks/useComparisonSequenceAvailability';
 import { useComparisonWorkspaceNavigation } from '../hooks/useComparisonWorkspaceNavigation';
 import { usePanelSettings } from '../hooks/usePanelSettings';
-import { useAutoAlign } from '../hooks/useAutoAlign';
-import { useApplyAlignmentResults } from '../hooks/useApplyAlignmentResults';
+import { useComparisonAlignment } from '../hooks/useComparisonAlignment';
+import { AutomaticAlignmentStatus } from './comparison/AutomaticAlignmentStatus';
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
 type ComparisonStageProps = {
@@ -29,7 +29,7 @@ type ComparisonStageProps = {
   hasData: boolean;
   navigation: ReturnType<typeof useComparisonWorkspaceNavigation>;
   panel: Pick<ReturnType<typeof usePanelSettings>, 'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting'>;
-  alignment: Pick<GridViewProps, 'isAligning' | 'alignmentProgress' | 'abortAlignment' | 'startAlignAll'>;
+  alignment: Pick<GridViewProps, 'isAligning' | 'alignmentProgress' | 'abortAlignment' | 'onUseAcquired'>;
   onOpenUpload: () => void;
   onOpenExaminations: () => void;
 };
@@ -120,16 +120,6 @@ export function ComparisonMatrix() {
   } = useComparisonFilters(data);
 
   const {
-    isAligning,
-    progress: alignmentProgress,
-    results: alignmentResults,
-    error: alignmentError,
-    clearState: clearAlignmentState,
-    alignAllDates,
-    abort: abortAlignment,
-  } = useAutoAlign();
-
-  const {
     uiState,
     setUiState,
     sidebarOpen,
@@ -143,28 +133,23 @@ export function ComparisonMatrix() {
     setHeaderMenuOpen,
     headerMenuRef,
     interactionBlocked,
-  } = useComparisonInstrumentUi(isAligning);
+  } = useComparisonInstrumentUi(false);
 
+  const panel = usePanelSettings(
+    selectedSeqId,
+    enabledDatesKey,
+    data?.selected_patient_key ?? null,
+    interactionBlocked,
+  );
   const {
     panelSettings,
     progress,
     setProgress,
     updatePanelSetting,
-    batchUpdateSettings,
     persistenceError,
     clearPersistenceError,
     reportPersistenceError,
-  } = usePanelSettings(selectedSeqId, enabledDatesKey, data?.selected_patient_key ?? null, isAligning);
-
-  useApplyAlignmentResults({
-    isAligning,
-    alignmentResults,
-    panelSettings,
-    data,
-    selectedSeqId,
-    batchUpdateSettings,
-    onPersistenceError: reportPersistenceError,
-  });
+  } = panel;
 
   const { sequencesForPlane, sequencesWithDataForDates, datesWithDataForSequence } = useComparisonSequenceAvailability({
     data,
@@ -197,51 +182,23 @@ export function ComparisonMatrix() {
     playbackInstanceCount,
   } = workspaceNavigation;
 
-  const startAlignAll = useCallback(
-    async (reference: AlignmentReference, exclusionMask: ExclusionMask) => {
-      if (isAligning) {
-        abortAlignment();
-        return;
-      }
-
-      if (!data || !selectedSeqId) return;
-
-      const seriesMap = data.series_map[selectedSeqId] || {};
-
-      // Get all dates except the reference date.
-      const targetDates: string[] = [];
-      for (const column of overlayColumns) {
-        if (column.ref && column.date !== reference.date) targetDates.push(column.date);
-      }
-      if (targetDates.length === 0) return;
-
-      try {
-        const finalReference: AlignmentReference = {
-          ...reference,
-          exclusionMask,
-          patientKey: data.selected_patient_key ?? reference.patientKey,
-          sequenceId: selectedSeqId,
-          datasetRevision: data.dataset_revision,
-        };
-        const results = await alignAllDates(finalReference, targetDates, seriesMap, progress, {
-          outputMode: alignmentOutputMode,
-        });
-
-        // Results are applied incrementally via an effect so the UI updates per-date.
-        const aligned = results.filter((result) => result.outcome === 'aligned');
-        if (aligned.length > 0) {
-          console.log(
-            `[Alignment] Aligned ${aligned.length} of ${results.length} examinations. Average NMI: ${(
-              aligned.reduce((sum, result) => sum + result.nmiScore, 0) / aligned.length
-            ).toFixed(3)}`,
-          );
-        }
-      } catch (err) {
-        console.error('[Alignment] Failed:', err);
-      }
-    },
-    [abortAlignment, alignAllDates, alignmentOutputMode, data, isAligning, overlayColumns, progress, selectedSeqId],
-  );
+  const alignment = useComparisonAlignment({
+    data,
+    sequenceId: selectedSeqId,
+    columns: workspaceNavigation.columns,
+    panel,
+    viewportSize: viewMode === 'overlay' ? workspaceNavigation.overlayViewerSize : workspaceNavigation.gridCellSize,
+    outputMode: alignmentOutputMode,
+    enabled: uiState.automaticAlignment && !interactionBlocked && !isPlaying && viewMode !== 'svr3d',
+  });
+  const {
+    isAligning,
+    results: visibleResults,
+    error: alignmentError,
+    clearState: clearAlignmentState,
+    abort: abortAlignment,
+    useAcquiredImage,
+  } = alignment;
 
   if (loading) {
     return (
@@ -284,6 +241,23 @@ export function ComparisonMatrix() {
       )}
 
       <ComparisonInstrumentHeader
+        backgroundAlignment
+        alignmentControls={
+          workspaceNavigation.columns.length > 1 && viewMode !== 'svr3d' ? (
+            <AutomaticAlignmentStatus
+              enabled={uiState.automaticAlignment}
+              busy={isAligning}
+              aligned={visibleResults.filter((result) => result.outcome === 'aligned').length}
+              targets={alignment.targetCount}
+              manual={alignment.hasManualAdjustments}
+              onToggle={() => setUiState({ ...uiState, automaticAlignment: !uiState.automaticAlignment })}
+              onRealign={() => {
+                alignment.realign();
+                setUiState({ ...uiState, automaticAlignment: true });
+              }}
+            />
+          ) : null
+        }
         clinical={{
           data,
           hasData: Boolean(hasData),
@@ -310,7 +284,13 @@ export function ComparisonMatrix() {
           abortAlignment,
           openDialog: setActiveDialog,
         }}
-        notices={{ persistenceError, clearPersistenceError, alignmentError, alignmentResults, clearAlignmentState }}
+        notices={{
+          persistenceError,
+          clearPersistenceError,
+          alignmentError,
+          alignmentResults: visibleResults,
+          clearAlignmentState,
+        }}
         panels={{
           filtersOpen: sidebarOpen,
           datesOpen: rightSidebarOpen,
@@ -330,7 +310,6 @@ export function ComparisonMatrix() {
               className="comparison-drawer-dismiss"
               data-filters-open={sidebarOpen}
               data-dates-open={rightSidebarOpen}
-              disabled={isAligning}
               onClick={() => setUiState({ ...uiState, sidebarOpen: false, rightSidebarOpen: false })}
             />
           ) : null}
@@ -347,7 +326,7 @@ export function ComparisonMatrix() {
               onSelectSequence={selectSequence}
               alignmentOutputMode={alignmentOutputMode}
               onAlignmentOutputModeChange={(mode) => setUiState({ ...uiState, alignmentOutputMode: mode })}
-              alignmentInProgress={isAligning}
+              alignmentInProgress={false}
             />
           ) : null}
 
@@ -357,7 +336,7 @@ export function ComparisonMatrix() {
             hasData={Boolean(hasData)}
             navigation={workspaceNavigation}
             panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
-            alignment={{ isAligning, alignmentProgress, abortAlignment, startAlignAll }}
+            alignment={{ isAligning: false, alignmentProgress: null, abortAlignment, onUseAcquired: useAcquiredImage }}
             onOpenUpload={() => setActiveDialog('upload')}
             onOpenExaminations={() => setRightSidebarOpen(true)}
           />
@@ -372,7 +351,7 @@ export function ComparisonMatrix() {
               onSelectAllDates={selectAllDates}
               onSelectNoDates={selectNoDates}
               onToggleDate={toggleDate}
-              alignmentInProgress={isAligning}
+              alignmentInProgress={false}
             />
           ) : null}
         </div>

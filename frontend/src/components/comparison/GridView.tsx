@@ -1,5 +1,5 @@
 import { AlignmentProgressCard, GridCell } from './GridCell';
-import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import type { AlignmentProgress, PanelSettings, SeriesRef } from '../../types/api';
 import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
 
 export type GridViewProps = {
@@ -12,11 +12,10 @@ export type GridViewProps = {
   progress: number;
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
-  overlayColumns: { date: string; ref?: SeriesRef }[];
   isAligning: boolean;
   alignmentProgress: AlignmentProgress | null;
   abortAlignment: () => void;
-  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
+  onUseAcquired?: (date: string) => void;
 };
 
 export function GridView({
@@ -28,11 +27,10 @@ export function GridView({
   progress,
   setProgress,
   updatePanelSetting,
-  overlayColumns,
   isAligning,
   alignmentProgress,
   abortAlignment,
-  startAlignAll,
+  onUseAcquired,
 }: GridViewProps) {
   const stackedStudies = gridCols === 1 && columns.length > 1;
 
@@ -68,9 +66,8 @@ export function GridView({
               progress={progress}
               setProgress={setProgress}
               updatePanelSetting={updatePanelSetting}
-              overlayColumns={overlayColumns}
               isAligning={isAligning}
-              startAlignAll={startAlignAll}
+              onUseAcquired={onUseAcquired}
             />
           );
         })}

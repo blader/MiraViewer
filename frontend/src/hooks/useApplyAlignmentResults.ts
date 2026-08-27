@@ -15,11 +15,20 @@ export function useApplyAlignmentResults(opts: {
   panelSettings: Map<string, PanelSettings>;
   data: ComparisonData | null;
   selectedSeqId: string | null;
-  batchUpdateSettings: (updates: Map<string, PanelSettings>, operationId?: string) => void;
+  batchUpdateSettings: (updates: Map<string, PanelSettings>, operationId?: string, automatic?: boolean) => void;
   onPersistenceError?: (error: unknown) => void;
+  activeRequestKey?: string | null;
 }) {
-  const { isAligning, alignmentResults, panelSettings, data, selectedSeqId, batchUpdateSettings, onPersistenceError } =
-    opts;
+  const {
+    isAligning,
+    alignmentResults,
+    panelSettings,
+    data,
+    selectedSeqId,
+    batchUpdateSettings,
+    onPersistenceError,
+    activeRequestKey,
+  } = opts;
 
   // A date can be aligned again when an in-flight run is superseded.
   const appliedAlignmentResultsRef = useRef(new Set<string>());
@@ -57,6 +66,7 @@ export function useApplyAlignmentResults(opts: {
     for (const r of alignmentResults) {
       const applicationKey = `${r.runId ?? ''}:${r.date}`;
       if (appliedAlignmentResultsRef.current.has(applicationKey)) continue;
+      if (r.requestKey && r.requestKey !== activeRequestKey) continue;
 
       // The live dataset, selected patient, and current sequence are the only application authority.
       // An async result produced before a patient switch, re-import, or sequence change is stale.
@@ -140,13 +150,15 @@ export function useApplyAlignmentResults(opts: {
       const verifiedPatient = patientKey && r.patientKey === patientKey ? patientKey : null;
       if (r.derivedFrame) {
         setDerivedAlignmentFrame(r);
-        queuePersistence(r.seriesUid, async () => {
-          if (verifiedPatient) await clearPersistedDerivedAlignmentFrames(verifiedPatient, r.seriesUid);
-          await persistDerivedAlignmentFrame(r);
-        });
+        if (!r.requestKey) {
+          queuePersistence(r.seriesUid, async () => {
+            if (verifiedPatient) await clearPersistedDerivedAlignmentFrames(verifiedPatient, r.seriesUid);
+            await persistDerivedAlignmentFrame(r);
+          });
+        }
       } else {
         clearDerivedAlignmentFrame(r.seriesUid);
-        if (verifiedPatient) {
+        if (verifiedPatient && !r.requestKey) {
           queuePersistence(r.seriesUid, () => clearPersistedDerivedAlignmentFrames(verifiedPatient, r.seriesUid));
         }
       }
@@ -154,7 +166,8 @@ export function useApplyAlignmentResults(opts: {
     }
 
     if (pending.size > 0) {
-      batchUpdateSettings(pending, operationId);
+      if (activeRequestKey) batchUpdateSettings(pending, operationId, true);
+      else batchUpdateSettings(pending, operationId);
     }
-  }, [alignmentResults, batchUpdateSettings, data, onPersistenceError, panelSettings, selectedSeqId]);
+  }, [activeRequestKey, alignmentResults, batchUpdateSettings, data, onPersistenceError, panelSettings, selectedSeqId]);
 }

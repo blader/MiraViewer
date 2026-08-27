@@ -117,6 +117,7 @@ export async function hydrateDerivedAlignmentFrames(
       rows: row.rows,
       columns: row.columns,
       sourceImageId: row.sourceImageId,
+      displayTone: row.displayTone,
       referenceStudyUid: row.referenceStudyUid,
       referenceSeriesUid: row.referenceSeriesUid,
       referenceSopInstanceUid: row.referenceSopInstanceUid,

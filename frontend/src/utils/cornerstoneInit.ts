@@ -7,6 +7,7 @@ import dicomParser from 'dicom-parser';
 import { getDB } from '../db/db';
 import { getDerivedAlignmentFrameByImageId } from './derivedAlignmentFrame';
 import { loadCornerstoneImage } from './decodedFrame';
+import { applyAlignmentDisplayTone, validAlignmentDisplayTone } from './alignmentDisplayTone';
 
 // Configure external dependencies
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
@@ -105,11 +106,15 @@ function miraDerivedLoader(imageId: string) {
       const preserveSourceWindow =
         Number.isFinite(source.windowCenter) && Number.isFinite(source.windowWidth) && source.windowWidth > 0;
       const presentationPixels = new Uint16Array(frame.pixels.length);
+      const tone = frame.displayTone && validAlignmentDisplayTone(frame.displayTone) ? frame.displayTone : undefined;
       for (let index = 0; index < frame.pixels.length; index++) {
         const pixel = frame.pixels[index]!;
         if ((frame.valid && !frame.valid[index]) || !Number.isFinite(pixel)) continue;
-        presentationPixels[index] =
-          intensityRange > 0 ? 1 + Math.round(((pixel - minimum) / intensityRange) * 65_534) : 1;
+        presentationPixels[index] = tone
+          ? 1 + Math.round(applyAlignmentDisplayTone(pixel, tone) * 65_534)
+          : intensityRange > 0
+            ? 1 + Math.round(((pixel - minimum) / intensityRange) * 65_534)
+            : 1;
       }
 
       return {
@@ -126,11 +131,11 @@ function miraDerivedLoader(imageId: string) {
           imageOrientationPatient: [...frame.outputGrid.rowDirection, ...frame.outputGrid.columnDirection],
         }),
         minPixelValue: 1,
-        maxPixelValue: intensityRange > 0 ? 65_535 : 1,
-        windowCenter: preserveSourceWindow ? source.windowCenter : (minimum + maximum) / 2,
-        windowWidth: preserveSourceWindow ? source.windowWidth : Math.max(1, intensityRange),
-        slope: intensityScale,
-        intercept: minimum - intensityScale,
+        maxPixelValue: tone || intensityRange > 0 ? 65_535 : 1,
+        windowCenter: tone ? 32_768 : preserveSourceWindow ? source.windowCenter : (minimum + maximum) / 2,
+        windowWidth: tone ? 65_534 : preserveSourceWindow ? source.windowWidth : Math.max(1, intensityRange),
+        slope: tone ? 1 : intensityScale,
+        intercept: tone ? 0 : minimum - intensityScale,
         pixelPaddingValue: 0,
         pixelPaddingRangeLimit: 0,
         cachedLut: undefined,

@@ -1,9 +1,9 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Crosshair, Link2, Loader2, ScanLine } from 'lucide-react';
-import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { Loader2, ScanLine } from 'lucide-react';
+import type { AlignmentProgress, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
 import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
@@ -24,10 +24,8 @@ export type GridCellProps = {
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
 
-  overlayColumns: { date: string; ref?: SeriesRef }[];
   isAligning: boolean;
-
-  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
+  onUseAcquired?: (date: string) => void;
 };
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
@@ -69,51 +67,24 @@ export function AlignmentProgressCard({ progress, onAbort }: { progress: Alignme
 export function StudySelectionSurface({
   reference,
   presentation,
-  startAlignAll,
   onSegment,
   children,
 }: {
   reference: {
-    date: string;
-    series: SeriesRef;
-    sliceIndex: number;
     settings: PanelSettings;
     imageSize: { width: number; height: number };
-    surfaceRef: React.RefObject<HTMLDivElement | null>;
   };
   presentation: {
-    columnCount: number;
     isAligning: boolean;
     isComparing: boolean;
     groundTruthOpen: boolean;
     nativeAnnotationsAvailable: boolean;
   };
-  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
   onSegment: (selection: ExclusionMask) => void;
   children: React.ReactNode;
 }) {
-  const { date, series, sliceIndex, settings, imageSize, surfaceRef } = reference;
-  const { columnCount, isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
-  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
-    const bounds = surfaceRef.current?.getBoundingClientRect();
-    void startAlignAll(
-      {
-        date,
-        seriesUid: series.series_uid,
-        sliceIndex,
-        sliceCount: series.instance_count,
-        patientKey: series.patient_key,
-        studyUid: series.study_uid ?? series.study_id,
-        frameOfReferenceUid: series.frame_of_reference_uid,
-        imageSize,
-        viewportSize:
-          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
-        settings,
-        ...(alignmentFocus ? { alignmentFocus } : {}),
-      },
-      exclusion,
-    );
-  };
+  const { settings, imageSize } = reference;
+  const { isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
 
   return (
     <DragRectActionOverlay
@@ -122,26 +93,6 @@ export function StudySelectionSurface({
       geometry={settings}
       disabled={isAligning || isComparing || groundTruthOpen}
       actions={[
-        {
-          key: 'align-all',
-          label: 'Align All',
-          title: `Align all other dates to ${formatDate(date)}`,
-          icon: <Link2 className="w-4 h-4" />,
-          variant: 'primary',
-          minSizeSpace: 'base',
-          disabled: columnCount < 2 || isAligning,
-          onConfirm: (masks) => startAlignment(masks.base),
-        },
-        {
-          key: 'align-tumor',
-          label: 'Align Tumor',
-          title: 'Match tumor across dates; uses pixels inside the selected region',
-          icon: <Crosshair className="w-4 h-4" />,
-          variant: 'secondary',
-          minSizeSpace: 'base',
-          disabled: columnCount < 2 || isAligning || isComparing || !nativeAnnotationsAvailable,
-          onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
-        },
         {
           key: 'segment-tumor',
           label: 'Segment',
@@ -167,9 +118,8 @@ export function GridCell({
   progress,
   setProgress,
   updatePanelSetting,
-  overlayColumns,
   isAligning,
-  startAlignAll,
+  onUseAcquired,
 }: GridCellProps) {
   const [showSavedTumor, setShowSavedTumor] = useState(false);
   const [tumorToolOpen, setTumorToolOpen] = useState(false);
@@ -239,21 +189,15 @@ export function GridCell({
       <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
         <StudySelectionSurface
           reference={{
-            date,
-            series: refData,
-            sliceIndex: effectiveIdx,
             settings,
             imageSize: displayedImageSize,
-            surfaceRef: studyCellRef,
           }}
           presentation={{
-            columnCount: overlayColumns.length,
             isAligning,
             isComparing: false,
             groundTruthOpen: gtPolygonToolOpen,
             nativeAnnotationsAvailable,
           }}
-          startAlignAll={startAlignAll}
           onSegment={(selection) => {
             setTumorToolOpen(true);
             setTumorSeedBoxToStart({
@@ -341,12 +285,16 @@ export function GridCell({
       </div>
 
       <div className="flex h-12 shrink-0 items-center justify-between gap-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-2">
-        <span
-          className="truncate text-xs text-[var(--text-secondary)]"
-          title={derivedFrame ? 'Aligned presentation' : 'Acquired image'}
-        >
-          {derivedFrame ? 'Aligned' : 'Acquired'}
-        </span>
+        {derivedFrame && onUseAcquired ? (
+          <AcquiredImageAction onClick={() => onUseAcquired(date)} />
+        ) : (
+          <span
+            className="truncate text-xs text-[var(--text-secondary)]"
+            title={derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+          >
+            {derivedFrame ? 'Aligned' : 'Acquired'}
+          </span>
+        )}
         <div inert={isAligning}>
           <StepControl
             title="Slice offset"

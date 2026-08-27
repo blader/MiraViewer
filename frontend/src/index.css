@@ -1,5 +1,37 @@
 @import 'tailwindcss';
 
+.study-acquired-action {
+  font-size: 12px;
+}
+
+.instrument-alignment-status,
+.instrument-alignment-status > [role='status'] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.instrument-alignment-status {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.instrument-alignment-status > [role='status'] {
+  margin-right: 4px;
+}
+
+@media (max-width: 1100px) {
+  .instrument-alignment-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
 :root {
   --bg-primary: #111210;
   --bg-secondary: #181a18;

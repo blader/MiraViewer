@@ -243,6 +243,73 @@ describe('usePanelSettings', () => {
     vi.useRealTimers();
   });
 
+  it('does not let automatic presentation updates fill undo history or write per-slice settings', async () => {
+    const { result, unmount } = renderHook(() => usePanelSettings('seq-auto', '2024-01-01,2024-02-01'));
+    await act(async () => {});
+    act(() => result.current.updatePanelSetting('2024-02-01', { zoom: 1.4 }));
+    vi.mocked(savePanelSettings).mockClear();
+    act(() =>
+      result.current.batchUpdateSettings(
+        new Map([['2024-01-01', { ...DEFAULT_PANEL_SETTINGS, zoom: 1.2, offset: 5 }]]),
+        'automatic-view',
+        true,
+      ),
+    );
+    expect(savePanelSettings).not.toHaveBeenCalled();
+    expect(result.current.manuallyAdjustedDates.has('2024-01-01')).toBe(false);
+    expect(result.current.manuallyAdjustedDates.has('2024-02-01')).toBe(true);
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true })));
+    expect(result.current.panelSettings.get('2024-02-01')?.zoom).toBe(1);
+    expect(result.current.panelSettings.get('2024-01-01')).toMatchObject({ zoom: 1.2, offset: 5 });
+    unmount();
+  });
+
+  it('finishes owner hydration when visible dates change before the first read completes', async () => {
+    let resolveFirst!: (settings: Record<string, typeof DEFAULT_PANEL_SETTINGS>) => void;
+    vi.mocked(getPanelSettings)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 } });
+    const { result, rerender, unmount } = renderHook(({ dates }) => usePanelSettings('seq-loading', dates, 'patient'), {
+      initialProps: { dates: '2024-01-01,2024-02-01' },
+    });
+    expect(result.current.settingsReady).toBe(false);
+    await act(async () => rerender({ dates: '2024-01-01' }));
+    expect(result.current.settingsReady).toBe(true);
+    expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1.5);
+    await act(async () => resolveFirst({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 4 } }));
+    expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1.5);
+    unmount();
+  });
+
+  it('preserves current automatic and manual settings while hydrating a newly visible examination', async () => {
+    vi.mocked(getPanelSettings)
+      .mockResolvedValueOnce({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 1.1 } })
+      .mockResolvedValueOnce({
+        '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 1.1 },
+        '2024-02-01': { ...DEFAULT_PANEL_SETTINGS },
+      });
+    const { result, rerender, unmount } = renderHook(({ dates }) => usePanelSettings('seq-visible', dates, 'patient'), {
+      initialProps: { dates: '2024-01-01' },
+    });
+    await act(async () => {});
+    act(() =>
+      result.current.batchUpdateSettings(
+        new Map([['2024-01-01', { ...DEFAULT_PANEL_SETTINGS, zoom: 1.3 }]]),
+        'auto',
+        true,
+      ),
+    );
+    await act(async () => rerender({ dates: '2024-01-01,2024-02-01' }));
+    expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1.3);
+    expect(result.current.panelSettings.has('2024-02-01')).toBe(true);
+    unmount();
+  });
+
   it('updates and persists settings', async () => {
     const { result, unmount } = renderHook(() => usePanelSettings('seq-1', '2024-01-01T00:00:00'));
     await act(async () => {});

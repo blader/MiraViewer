@@ -39,8 +39,14 @@ export function usePanelSettings(
   const [activePanel, setActivePanel] = useState<string | null>(null); // date of panel being adjusted
   const [progress, setProgress] = useState(0); // 0..1 normalized
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
-  const [settingsPatientKey, setSettingsPatientKey] = useState(patientKey);
-  const settingsBelongToPatient = settingsPatientKey === patientKey;
+  const [settingsOwner, setSettingsOwner] = useState({ patientKey, sequenceId: null as string | null });
+  const settingsBelongToPatient = settingsOwner.patientKey === patientKey && settingsOwner.sequenceId === selectedSeqId;
+  const [manuallyAdjustedDates, setManuallyAdjustedDates] = useState<Set<string>>(() => new Set());
+  const clearManualAdjustments = useCallback(() => setManuallyAdjustedDates(new Set()), []);
+  const holdAlignment = useCallback(
+    (date: string) => setManuallyAdjustedDates((dates) => new Set(dates).add(date)),
+    [],
+  );
 
   const reportPersistenceFailure = useCallback((error: unknown) => {
     setPersistenceError(error instanceof Error ? error.message : 'Viewer settings could not be saved locally');
@@ -58,8 +64,6 @@ export function usePanelSettings(
   // Refs for persistence
   const panelSettingsRef = useRef(panelSettings);
   const selectedSeqIdRef = useRef(selectedSeqId);
-  const prevPatientKeyRef = useRef(patientKey);
-  const prevSeqIdRef = useRef<string | null>(null);
   const prevDatesRef = useRef<Set<string>>(new Set());
 
   // Undo/redo stacks for panel settings changes (pan/zoom/rotation/etc).
@@ -88,6 +92,7 @@ export function usePanelSettings(
       next.set(date, settings);
       panelSettingsRef.current = next;
       setPanelSettings(next);
+      setManuallyAdjustedDates((dates) => new Set(dates).add(date));
 
       // Persist to local storage (fire-and-forget)
       savePanelSettings(seqId, date, settings, patientKey).catch(reportPersistenceFailure);
@@ -198,20 +203,17 @@ export function usePanelSettings(
 
   // Load panel settings from local storage when the patient, sequence, or dates change.
   useEffect(() => {
-    const patientChanged = patientKey !== prevPatientKeyRef.current;
-    prevPatientKeyRef.current = patientKey;
     if (!selectedSeqId) return;
     const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
     if (currentDates.size === 0) return;
 
     // Determine if the settings owner changed or which dates are new.
-    const scopeChanged = patientChanged || selectedSeqId !== prevSeqIdRef.current;
+    const scopeChanged = !settingsBelongToPatient;
     const newDates = scopeChanged
       ? currentDates
       : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
 
     // Update refs
-    prevSeqIdRef.current = selectedSeqId;
     prevDatesRef.current = currentDates;
 
     // If no new dates to fetch, nothing to do (keep all settings in memory)
@@ -231,15 +233,13 @@ export function usePanelSettings(
           // Keep existing settings only when the same patient and sequence still own them.
           if (!scopeChanged) {
             for (const [date, settings] of prev) {
-              if (currentDates.has(date)) {
-                next.set(date, settings);
-              }
+              next.set(date, settings);
             }
           }
 
           // Hydrate all stored settings (not just enabled dates) so toggling dates later preserves saved values.
           for (const [date, s] of Object.entries(stored)) {
-            next.set(date, normalizePanelSettingsPartial(s));
+            if (!next.has(date)) next.set(date, normalizePanelSettingsPartial(s));
           }
 
           // Ensure enabled dates not present in storage still get defaults.
@@ -251,7 +251,8 @@ export function usePanelSettings(
 
           return next;
         });
-        setSettingsPatientKey(patientKey);
+        setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
+        if (scopeChanged) setManuallyAdjustedDates(new Set());
         setPersistenceError(null);
 
         // Restore slice position only from settings belonging to the current owner.
@@ -278,13 +279,14 @@ export function usePanelSettings(
           return next;
         });
         if (scopeChanged) setProgress(0);
-        setSettingsPatientKey(patientKey);
+        setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
+        if (scopeChanged) setManuallyAdjustedDates(new Set());
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [patientKey, selectedSeqId, enabledDatesKey, reportPersistenceFailure]);
+  }, [patientKey, selectedSeqId, enabledDatesKey, reportPersistenceFailure, settingsBelongToPatient]);
 
   // Update a panel's settings
   const updatePanelSetting = useCallback(
@@ -303,6 +305,7 @@ export function usePanelSettings(
       const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
 
       if (shouldRecordHistory && isMeaningfulChange) {
+        setManuallyAdjustedDates((dates) => new Set(dates).add(date));
         undoStackRef.current.push({
           date,
           before: { ...current },
@@ -332,7 +335,7 @@ export function usePanelSettings(
   // Batch update multiple panels at once (for alignment results).
   // The undo stack groups all entries with the same batchId so Cmd/Ctrl+Z reverts the whole batch.
   const batchUpdateSettings = useCallback(
-    (updates: Map<string, PanelSettings>, operationId?: string) => {
+    (updates: Map<string, PanelSettings>, operationId?: string, automatic = false) => {
       if (!selectedSeqId || !settingsBelongToPatient || updates.size === 0) return;
 
       const batchId = operationId ?? `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
@@ -349,17 +352,21 @@ export function usePanelSettings(
         });
       }
 
-      undoStackRef.current.push(...historyEntries);
-      redoStackRef.current.length = 0;
-      while (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
+      if (!automatic) {
+        undoStackRef.current.push(...historyEntries);
+        redoStackRef.current.length = 0;
+        while (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
+      }
 
       const next = new Map(panelSettingsRef.current);
       for (const { date, after } of historyEntries) next.set(date, after);
       panelSettingsRef.current = next;
       setPanelSettings(next);
 
-      for (const { date, after } of historyEntries) {
-        savePanelSettings(selectedSeqId, date, after, patientKey).catch(reportPersistenceFailure);
+      if (!automatic) {
+        for (const { date, after } of historyEntries) {
+          savePanelSettings(selectedSeqId, date, after, patientKey).catch(reportPersistenceFailure);
+        }
       }
     },
     [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
@@ -395,6 +402,10 @@ export function usePanelSettings(
 
   return {
     panelSettings: scopedPanelSettings,
+    settingsReady: settingsBelongToPatient,
+    manuallyAdjustedDates,
+    holdAlignment,
+    clearManualAdjustments,
     activePanel: settingsBelongToPatient ? effectiveActivePanel : null,
     setActivePanel,
     progress: settingsBelongToPatient ? progress : 0,
