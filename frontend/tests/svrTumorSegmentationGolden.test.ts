@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { segmentSeededVolume, voxelIndex } from '../src/utils/segmentation/seededVolume';
 import { normalizeSvrIntensities } from '../src/utils/svr/intensityNormalization';
 import { reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
+import { segmentationQuality as quality } from './helpers/segmentationQuality';
 
 type TumorPhantom = {
   dims: [number, number, number];
@@ -98,12 +99,6 @@ function offCenterTumorPhantom(contrast: 'hyperintense' | 'hypointense') {
   const truth = new Uint8Array(volume.length);
   const healthySeed = { x: 23, y: 25, z: 25 };
   const lesionSeed = { x: 31, y: 31, z: 25 };
-  const region = {
-    mode: 'guide' as const,
-    min: { x: 6, y: 6, z: 6 },
-    max: { x: 40, y: 45, z: 45 },
-    outsideToleranceScale: 0.6,
-  };
 
   for (let z = 0; z < depth; z++) {
     for (let y = 0; y < height; y++) {
@@ -127,7 +122,7 @@ function offCenterTumorPhantom(contrast: 'hyperintense' | 'hypointense') {
     }
   }
 
-  return { dims, volume, observedSupport, truth, healthySeed, lesionSeed, region };
+  return { dims, volume, observedSupport, truth, healthySeed, lesionSeed };
 }
 
 function heterogeneousAnatomicalTumorPhantom() {
@@ -162,16 +157,6 @@ function heterogeneousAnatomicalTumorPhantom() {
   }
 
   return { ...phantom, lesionSeed };
-}
-
-function quality(truth: Uint8Array, indices: Uint32Array) {
-  const expected = truth.reduce((sum, value) => sum + value, 0);
-  const intersection = indices.reduce((sum, index) => sum + truth[index]!, 0);
-  return {
-    dice: (2 * intersection) / (expected + indices.length),
-    precision: intersection / indices.length,
-    recall: intersection / expected,
-  };
 }
 
 describe('independent explicitly seeded tumor-shape phantoms', () => {

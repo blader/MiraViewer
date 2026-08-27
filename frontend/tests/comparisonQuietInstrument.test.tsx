@@ -47,15 +47,7 @@ vi.mock('../src/components/DragRectActionOverlay', () => ({
   }: {
     children: ReactNode;
     imageSize?: { width: number; height: number };
-    actions?: Array<{
-      key: string;
-      title?: string;
-      disabled?: boolean;
-      onConfirm: (masks: {
-        base: { x: number; y: number; width: number; height: number };
-        screen: { x: number; y: number; width: number; height: number };
-      }) => void;
-    }>;
+    actions?: Array<{ key: string; disabled?: boolean }>;
   }) => (
     <div
       data-testid="diagnostic-drag-overlay"
@@ -365,30 +357,36 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(props.updatePanelSetting).toHaveBeenCalledWith(selectedDate, { zoom: 1.01 });
   });
 
-  it('uses displayed derived-plane dimensions and prevents native segmentation on resliced grid images', () => {
-    const result = alignedResult(selectedSeries, selectedDate);
-    result.derivedFrame = {
-      ...result.derivedFrame!,
-      rows: 96,
-      columns: 384,
-      pixels: new Float32Array(96 * 384),
-    };
-    act(() => setDerivedAlignmentFrame(result));
-    render(<GridCell {...gridCellProps()} />);
-    const overlay = screen.getByTestId('diagnostic-drag-overlay');
+  it.each(['grid', 'overlay'] as const)(
+    'uses displayed derived-plane dimensions and prevents native segmentation on resliced %s images',
+    (mode) => {
+      const result = alignedResult(selectedSeries, selectedDate);
+      result.derivedFrame = {
+        ...result.derivedFrame!,
+        rows: 96,
+        columns: 384,
+        pixels: new Float32Array(96 * 384),
+      };
+      act(() => setDerivedAlignmentFrame(result));
+      render(mode === 'grid' ? <GridCell {...gridCellProps()} /> : <OverlayView {...overlayProps()} />);
+      const overlay = screen.getByTestId('diagnostic-drag-overlay');
 
-    expect(overlay).toHaveAttribute('data-image-width', '384');
-    expect(overlay).toHaveAttribute('data-image-height', '96');
-    expect(overlay).toHaveAttribute('data-segment-disabled', 'true');
-    expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
-  });
+      expect(overlay).toHaveAttribute('data-image-width', '384');
+      expect(overlay).toHaveAttribute('data-image-height', '96');
+      expect(overlay).toHaveAttribute('data-segment-disabled', 'true');
+      expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
+    },
+  );
 
-  it('reserves grid selections for segmentation, without separate alignment actions', () => {
-    render(<GridCell {...gridCellProps()} />);
-    const overlay = screen.getByTestId('diagnostic-drag-overlay');
-    expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
-    expect(overlay).toHaveAttribute('data-segment-disabled', 'false');
-  });
+  it.each(['grid', 'overlay'] as const)(
+    'reserves %s selections for segmentation, without separate alignment actions',
+    (mode) => {
+      render(mode === 'grid' ? <GridCell {...gridCellProps()} /> : <OverlayView {...overlayProps()} />);
+      const overlay = screen.getByTestId('diagnostic-drag-overlay');
+      expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
+      expect(overlay).toHaveAttribute('data-segment-disabled', 'false');
+    },
+  );
 
   it('keeps both overlay image layers mounted while switching the active examination', () => {
     const props = overlayProps();
@@ -439,31 +437,6 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(container.querySelector('[aria-label="Increase Zoom"]')?.closest('[inert]')).toBeNull();
     expect(container.querySelector('[aria-label="Increase Slice offset"]')?.closest('[inert]')).toBeNull();
     expect(screen.getByRole('button', { name: 'Adjust image' })).toBeEnabled();
-  });
-
-  it('uses displayed derived-plane dimensions and prevents native segmentation on resliced overlay images', () => {
-    const result = alignedResult(selectedSeries, selectedDate);
-    result.derivedFrame = {
-      ...result.derivedFrame!,
-      rows: 96,
-      columns: 384,
-      pixels: new Float32Array(96 * 384),
-    };
-    act(() => setDerivedAlignmentFrame(result));
-    render(<OverlayView {...overlayProps()} />);
-    const overlay = screen.getByTestId('diagnostic-drag-overlay');
-
-    expect(overlay).toHaveAttribute('data-image-width', '384');
-    expect(overlay).toHaveAttribute('data-image-height', '96');
-    expect(overlay).toHaveAttribute('data-segment-disabled', 'true');
-    expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
-  });
-
-  it('reserves overlay selections for segmentation, without separate alignment actions', () => {
-    render(<OverlayView {...overlayProps()} />);
-    const overlay = screen.getByTestId('diagnostic-drag-overlay');
-    expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
-    expect(overlay).toHaveAttribute('data-segment-disabled', 'false');
   });
 
   it('reports only the actual selected slice and exposes its precise accessible value', () => {

@@ -64,7 +64,6 @@ function SvrVolume3DViewer({
 function createViewportRecorder(viewport: { width: number; height: number }, occupancyUploadError = false) {
   const uniform1f = vi.fn<(location: unknown, value: number) => void>();
   const uniform1i = vi.fn<(location: unknown, value: number) => void>();
-  const uniform3f = vi.fn<(location: unknown, x: number, y: number, z: number) => void>();
   const texImage3D = vi.fn();
   const texSubImage3D = vi.fn();
   const getError = vi.fn(() => (occupancyUploadError && getError.mock.calls.length === 3 ? 1285 : 0));
@@ -83,7 +82,6 @@ function createViewportRecorder(viewport: { width: number; height: number }, occ
     isContextLost: () => false,
     uniform1f,
     uniform1i,
-    uniform3f,
     texImage3D,
     texSubImage3D,
   };
@@ -110,11 +108,6 @@ function createViewportRecorder(viewport: { width: number; height: number }, occ
     texSubImage3D,
     uniform1f,
     latestInteger: (name: string) => uniform1i.mock.calls.filter(([location]) => location === name).at(-1)?.[1],
-    latestVector: (name: string) =>
-      uniform3f.mock.calls
-        .filter(([location]) => location === name)
-        .at(-1)
-        ?.slice(1),
     latestZoom: () => uniform1f.mock.calls.filter(([location]) => location === 'u_zoom').at(-1)?.[1],
   };
 }
@@ -145,17 +138,7 @@ function paint(x: number, y: number, kind: 'Add tissue' | 'Remove tissue' = 'Add
     target: { value: '0.5' },
   });
   const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
-  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
-    x: 0,
-    y: 0,
-    left: 0,
-    top: 0,
-    width: 400,
-    height: 320,
-    right: 400,
-    bottom: 320,
-    toJSON: () => ({}),
-  });
+  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
   const point = {
     pointerId: 1,
     button: 0,
@@ -215,12 +198,7 @@ afterEach(() => {
 
 describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it.each([12, 180])('accepts an editable restored selection on a %i-cubed reconstruction', async (size) => {
-    const volume: SvrVolume = {
-      ...syntheticVolume([1, 1, 1]),
-      dims: [size, size, size],
-      data: new Float32Array(size ** 3).fill(0.5),
-      observedSupport: new Uint8Array(size ** 3).fill(1),
-    };
+    const volume = editingVolume(size);
     const labels = new Uint8Array(volume.data.length);
     labels[30] = 1;
     vi.mocked(getVolumeSegmentation).mockResolvedValueOnce({
@@ -542,17 +520,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     render(<SvrVolume3DViewer volume={editingVolume()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Add tissue' }));
     const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
-    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
-      x: 0,
-      y: 0,
-      left: 0,
-      top: 0,
-      width: 400,
-      height: 320,
-      right: 400,
-      bottom: 320,
-      toJSON: () => ({}),
-    });
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
     const point = { pointerId: 1, button: 0, isPrimary: true, clientX: 200, clientY: 160 };
     fireEvent.pointerDown(canvas, point);
     if (kind === 'slice')

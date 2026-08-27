@@ -516,27 +516,24 @@ function SelectionBrushControls({
   return (
     <>
       <div className="svr-selection-tool-group" role="group" aria-label="Selection tools">
-        <button type="button" aria-pressed={tool === 'navigate'} onClick={() => onToolChange('navigate')}>
-          <Crosshair size={15} aria-hidden="true" /> Navigate
-        </button>
-        <button
-          type="button"
-          data-mark="include"
-          disabled={disabled}
-          aria-pressed={tool === 'include'}
-          onClick={() => onToolChange('include')}
-        >
-          <Plus size={15} aria-hidden="true" /> Add tissue
-        </button>
-        <button
-          type="button"
-          data-mark="exclude"
-          disabled={disabled}
-          aria-pressed={tool === 'exclude'}
-          onClick={() => onToolChange('exclude')}
-        >
-          <Minus size={15} aria-hidden="true" /> Remove tissue
-        </button>
+        {(
+          [
+            ['navigate', 'Navigate', Crosshair],
+            ['include', 'Add tissue', Plus],
+            ['exclude', 'Remove tissue', Minus],
+          ] as const
+        ).map(([mode, label, Icon]) => (
+          <button
+            key={mode}
+            type="button"
+            data-mark={mode === 'navigate' ? undefined : mode}
+            disabled={mode !== 'navigate' && disabled}
+            aria-pressed={tool === mode}
+            onClick={() => onToolChange(mode)}
+          >
+            <Icon size={15} aria-hidden="true" /> {label}
+          </button>
+        ))}
       </div>
       <label className="svr-selection-brush">
         Brush{' '}

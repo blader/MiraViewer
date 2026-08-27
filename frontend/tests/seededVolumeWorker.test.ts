@@ -46,19 +46,21 @@ function result(indices: number[]) {
   };
 }
 
+let runner: SeededVolumeWorker;
 beforeEach(() => {
   MockWorker.instances = [];
   vi.stubGlobal('Worker', MockWorker);
+  runner = new SeededVolumeWorker();
 });
 
 afterEach(() => {
+  runner.dispose();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe('SeededVolumeWorker', () => {
   it('initializes a volume once and reuses its worker for explicit seed updates', async () => {
-    const runner = new SeededVolumeWorker();
     const first = runner.run(baseOptions);
     const worker = MockWorker.instances[0]!;
 
@@ -79,7 +81,6 @@ describe('SeededVolumeWorker', () => {
   });
 
   it('sends acquired support with the volume and replaces the worker when support ownership changes', async () => {
-    const runner = new SeededVolumeWorker();
     const firstSupport = new Uint8Array([1, 0, 1, 1]);
     const first = runner.run({ ...baseOptions, observedSupport: firstSupport });
     const firstWorker = MockWorker.instances[0]!;
@@ -96,11 +97,9 @@ describe('SeededVolumeWorker', () => {
     expect(replacement.messages[0]).toMatchObject({ observedSupport: secondSupport });
     replacement.respond({ type: 'done', id: 2, result: result([0, 1]) });
     await expect(second).resolves.toMatchObject({ count: 2 });
-    runner.dispose();
   });
 
   it('cancels stale runs and ignores their late results while forwarding current progress', async () => {
-    const runner = new SeededVolumeWorker();
     const signal = new AbortController();
     const first = runner.run(baseOptions, { signal: signal.signal });
     const worker = MockWorker.instances[0]!;
@@ -117,11 +116,9 @@ describe('SeededVolumeWorker', () => {
 
     worker.respond({ type: 'done', id: 2, result: result([0]) });
     await expect(second).resolves.toMatchObject({ count: 1 });
-    runner.dispose();
   });
 
   it('terminates and rejects outstanding work when a reconstructed volume is replaced', async () => {
-    const runner = new SeededVolumeWorker();
     const first = runner.run(baseOptions);
     const oldWorker = MockWorker.instances[0]!;
     const replacement = new Float32Array([0.4, 0.3, 0.2, 0.1]);
@@ -134,17 +131,14 @@ describe('SeededVolumeWorker', () => {
     const newWorker = MockWorker.instances[1]!;
     newWorker.respond({ type: 'done', id: 2, result: result([3]) });
     await expect(second).resolves.toMatchObject({ count: 1 });
-    runner.dispose();
   });
 
   it('fails closed when workers are unavailable instead of blocking the UI thread', async () => {
     vi.stubGlobal('Worker', undefined);
-    const runner = new SeededVolumeWorker();
     await expect(runner.run(baseOptions)).rejects.toThrow('requires browser worker support');
   });
 
   it('reinitializes for physical geometry changes even when the source buffer is unchanged', async () => {
-    const runner = new SeededVolumeWorker();
     const first = runner.run(baseOptions);
     MockWorker.instances[0]!.respond({ type: 'done', id: 1, result: result([0]) });
     await first;
@@ -154,11 +148,9 @@ describe('SeededVolumeWorker', () => {
     expect(current.messages[0]).toMatchObject({ voxelSizeMm: [1, 1, 3] });
     current.respond({ type: 'done', id: 2, result: result([0]) });
     await next;
-    runner.dispose();
   });
 
   it('ignores queued errors from an old worker after a replacement has started', async () => {
-    const runner = new SeededVolumeWorker();
     const first = runner.run(baseOptions);
     const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
     const old = MockWorker.instances[0]!;
@@ -170,12 +162,10 @@ describe('SeededVolumeWorker', () => {
     expect(current.terminate).not.toHaveBeenCalled();
     current.respond({ type: 'done', id: 2, result: result([1]) });
     await expect(second).resolves.toMatchObject({ indices: Uint32Array.of(1) });
-    runner.dispose();
   });
 
   it('bounds a hung worker and allows retry with a fresh owned source', async () => {
     vi.useFakeTimers();
-    const runner = new SeededVolumeWorker();
     const first = runner.run(baseOptions);
     const rejected = expect(first).rejects.toThrow(/took too long/);
     await vi.advanceTimersByTimeAsync(30000);
@@ -189,7 +179,6 @@ describe('SeededVolumeWorker', () => {
   });
 
   it('settles cancellation even if the worker can no longer receive messages', async () => {
-    const runner = new SeededVolumeWorker();
     const signal = new AbortController();
     const pending = runner.run(baseOptions, { signal: signal.signal });
     const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
@@ -200,11 +189,9 @@ describe('SeededVolumeWorker', () => {
     signal.abort();
     await rejected;
     expect(worker.terminate).toHaveBeenCalledOnce();
-    runner.dispose();
   });
 
   it.each(['onerror', 'onmessageerror'] as const)('rejects and releases the current worker on %s', async (event) => {
-    const runner = new SeededVolumeWorker();
     const pending = runner.run(baseOptions);
     const rejected = expect(pending).rejects.toThrow(/failed|unreadable/);
     const worker = MockWorker.instances[0]!;
@@ -216,7 +203,7 @@ describe('SeededVolumeWorker', () => {
   it('does not allocate a worker for an already canceled request', async () => {
     const signal = new AbortController();
     signal.abort();
-    await expect(new SeededVolumeWorker().run(baseOptions, { signal: signal.signal })).rejects.toMatchObject({
+    await expect(runner.run(baseOptions, { signal: signal.signal })).rejects.toMatchObject({
       name: 'AbortError',
     });
     expect(MockWorker.instances).toHaveLength(0);

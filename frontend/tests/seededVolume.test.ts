@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { segmentSeededVolume, type SeededVolumeInput } from '../src/utils/segmentation/seededVolume';
+import { segmentationQuality } from './helpers/segmentationQuality';
 
 function anatomy(polarity = 1, spacing: [number, number, number] = [1, 1, 1], heldOut = false) {
   const dims: [number, number, number] = [41, 37, 33];
@@ -43,17 +44,6 @@ function anatomy(polarity = 1, spacing: [number, number, number] = [1, 1, 1], he
   return { input, truth };
 }
 
-function overlap(indices: Uint32Array, truth: Uint8Array) {
-  let intersection = 0;
-  for (const index of indices) intersection += truth[index]!;
-  const total = truth.reduce((sum, value) => sum + value, 0);
-  return {
-    dice: (2 * intersection) / (indices.length + total),
-    precision: intersection / indices.length,
-    recall: intersection / total,
-  };
-}
-
 describe('explicitly seeded physical-volume segmentation', () => {
   it.each([1, -1])(
     'separates heterogeneous tissue with polarity %i without guessing an intensity class',
@@ -61,7 +51,7 @@ describe('explicitly seeded physical-volume segmentation', () => {
       const { input, truth } = anatomy(polarity);
       const original = input.volume.slice();
       const result = await segmentSeededVolume(input);
-      const metrics = overlap(result.indices, truth);
+      const metrics = segmentationQuality(truth, result.indices);
       console.info('[seeded-selection-phantom]', { polarity, ...metrics, domainVoxels: result.domainVoxels });
       expect(metrics.dice).toBeGreaterThan(0.94);
       expect(metrics.precision).toBeGreaterThan(0.97);
@@ -80,7 +70,7 @@ describe('explicitly seeded physical-volume segmentation', () => {
     async (...spacing) => {
       const { input, truth } = anatomy(1, spacing as [number, number, number], true);
       const result = await segmentSeededVolume(input);
-      const metrics = overlap(result.indices, truth);
+      const metrics = segmentationQuality(truth, result.indices);
       console.info('[seeded-selection-holdout]', { spacing, ...metrics });
       expect(metrics.dice).toBeGreaterThan(0.9);
       expect(metrics.precision).toBeGreaterThan(0.94);

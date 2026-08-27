@@ -401,10 +401,7 @@
   }
 }
 @media (pointer: coarse) {
-  .svr-selection-toolbar button {
-    min-height: 44px;
-    min-width: 44px;
-  }
+  .svr-selection-toolbar button,
   .svr-selection-pane-actions button {
     min-height: 44px;
     min-width: 44px;

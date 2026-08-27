@@ -15,15 +15,7 @@ type Options = Pick<
 };
 
 /** Bind background computation, live-view application, and explicit presentation overrides. */
-export function useComparisonAlignment({
-  panel,
-  data,
-  sequenceId,
-  columns,
-  viewportSize,
-  outputMode,
-  enabled,
-}: Options) {
+export function useComparisonAlignment({ panel, data, sequenceId, columns, ...view }: Options) {
   const engine = useAutoAlign();
   const { abort, clearRegistrationCache } = engine;
   const {
@@ -38,12 +30,10 @@ export function useComparisonAlignment({
     clearManualAdjustments,
   } = panel;
   const visible = useVisibleAlignment({
+    ...view,
     data,
     sequenceId,
     columns,
-    viewportSize,
-    outputMode,
-    enabled,
     panelSettings,
     progress,
     settingsReady,

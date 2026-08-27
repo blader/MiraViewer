@@ -191,6 +191,8 @@ function createSupportTextureGl(error = 0) {
 }
 
 describe('svr/acquired-support texture', () => {
+  const march = RAYMARCH_FRAGMENT_SHADER.slice(RAYMARCH_FRAGMENT_SHADER.indexOf('for (int i = 0; i < MAX_STEPS; i++)'));
+
   it('uploads authoritative raw 0/1 evidence as an independent nearest-filtered R8 texture', () => {
     const { gl, texture } = createSupportTextureGl();
     const support = new Uint8Array([1, 0, 1, 0]);
@@ -256,9 +258,6 @@ describe('svr/acquired-support texture', () => {
   });
 
   it('skips unsupported empty space before fetching support while still rejecting it before anatomical sampling', () => {
-    const march = RAYMARCH_FRAGMENT_SHADER.slice(
-      RAYMARCH_FRAGMENT_SHADER.indexOf('for (int i = 0; i < MAX_STEPS; i++)'),
-    );
     const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
     const occupancyLookup = march.indexOf('texelFetch(u_occ, cell, 0)');
     const intensityLookup = march.indexOf('texture(u_vol, tc).r');
@@ -271,9 +270,6 @@ describe('svr/acquired-support texture', () => {
   });
 
   it('isolates acquired lesion labels before paying for anatomy and gradient sampling', () => {
-    const march = RAYMARCH_FRAGMENT_SHADER.slice(
-      RAYMARCH_FRAGMENT_SHADER.indexOf('for (int i = 0; i < MAX_STEPS; i++)'),
-    );
     const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
     const lesionLookup = march.indexOf('labelCoverage = lesionCoverage(tc, lid)');
     const lesionGate = march.indexOf('labelCoverage <= 0.08');

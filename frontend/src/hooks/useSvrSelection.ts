@@ -128,7 +128,7 @@ export function useSvrSelection(
 
   const stroke = useCallback(
     (indices: Uint32Array, kind: 'include' | 'exclude') => {
-      const supported = Uint32Array.from(indices).filter(
+      const supported = indices.filter(
         (index) =>
           index < volume.data.length &&
           Number.isFinite(volume.data[index]) &&

@@ -118,11 +118,7 @@ export class SeededVolumeWorker {
       this.worker?.postMessage({ type: 'cancel', id: pending.id } satisfies SeededWorkerRequest);
     } catch {
       // Cancellation must still settle if the worker has already become unavailable.
-      this.worker?.terminate();
-      this.worker = null;
-      this.source = null;
-      this.support = undefined;
-      this.geometry = '';
+      this.dispose();
     }
     pending.reject(new DOMException('Segmentation cancelled.', 'AbortError'));
   }

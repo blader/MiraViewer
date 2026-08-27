@@ -95,16 +95,9 @@ describe('svr/longitudinalFrames', () => {
       };
     });
     try {
-      const first = await prepareLongitudinalReferenceInput(reference, 14, {
-        selectInformativeReference: true,
-        maxSlices: 5,
-        maxDimension: 64,
-      });
-      const second = await prepareLongitudinalReferenceInput(reference, 86, {
-        selectInformativeReference: true,
-        maxSlices: 5,
-        maxDimension: 64,
-      });
+      const options = { selectInformativeReference: true, maxSlices: 5, maxDimension: 64 };
+      const first = await prepareLongitudinalReferenceInput(reference, 14, options);
+      const second = await prepareLongitudinalReferenceInput(reference, 86, options);
       expect(first.referenceSourceIndex).toBe(50);
       expect(second.referenceSourceIndex).toBe(50);
       expect(first.outputGrid?.referenceSopInstanceUid).toBe('reference-50');

@@ -80,7 +80,7 @@ Abandon an algorithm variant if it violates a hard mark/support/ownership invari
 
 The default workflow is **Add tissue / Remove tissue → Grow from marks → review and correct → Accept selection**. Growth is explicit; a brush stroke does not silently launch a new segmentation or overwrite an accepted mask. The application calls the result a tissue selection, not an automatically diagnosed tumor.
 
-`seededVolume.ts` implements two multi-source Dijkstra passes over a bounded, physically spaced voxel graph. Foreground and background marks are hard constraints. The neighbor cost is:
+`seededVolume.ts` implements a two-class multi-source Dijkstra traversal over a bounded, physically spaced voxel graph. Foreground and background marks are hard constraints. The neighbor cost is:
 
 ```text
 0.0025 × physical step + normalized intensity difference² / physical step

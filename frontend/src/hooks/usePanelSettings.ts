@@ -245,8 +245,6 @@ export function usePanelSettings(
 
           return next;
         });
-        setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
-        if (scopeChanged) setManuallyAdjustedDates(new Set());
         setPersistenceError(null);
 
         // Restore slice position only from settings belonging to the current owner.
@@ -273,9 +271,9 @@ export function usePanelSettings(
           return next;
         });
         if (scopeChanged) setProgress(0);
-        setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
-        if (scopeChanged) setManuallyAdjustedDates(new Set());
       }
+      setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
+      if (scopeChanged) setManuallyAdjustedDates(new Set());
     })();
     return () => {
       cancelled = true;
