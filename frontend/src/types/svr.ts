@@ -72,7 +72,7 @@ export type SvrParams = {
   robustDelta?: number;
 
   /**
-   * Light 3D Laplacian smoothing between iterations.
+   * Light edge-preserving 3D regularization between iterations.
    * 0 disables regularization.
    */
   laplacianWeight?: number;
@@ -100,7 +100,7 @@ export const DEFAULT_SVR_PARAMS: SvrParams = {
   robustLoss: 'huber',
   robustDelta: 0.1,
   laplacianWeight: 0.02,
-  multiResolution: true,
+  multiResolution: false,
   multiResolutionFactor: 2,
   multiResolutionCoarseIterations: 1,
 
@@ -111,6 +111,8 @@ export const DEFAULT_SVR_PARAMS: SvrParams = {
 
 export type SvrVolume = {
   data: Float32Array;
+  /** Suggested display-only window in the preserved affine [0,1] intensity domain. */
+  displayWindow?: [number, number];
   /** Acquired-observation support in the same voxel order as `data`; zero means no physical evidence. */
   observedSupport?: Uint8Array;
   /** Number of acquired-supported voxels, counted when `observedSupport` is produced. */
@@ -152,10 +154,18 @@ export type SvrLabelVolume = {
   /** Must exactly match `SvrVolume.dims`. */
   dims: [number, number, number];
   meta: SvrLabelMeta[];
+  /** Explicit user review, not algorithmic confidence or a clinical diagnosis. Missing legacy state is draft. */
+  reviewState?: 'draft' | 'reviewed';
+  /** Explicit editing constraints, retained so saved drafts can be grown and corrected again. */
+  seeds?: { foreground: Uint32Array; background: Uint32Array };
 };
 
 export type SvrResult = {
   volume: SvrVolume;
+  /** Settings that produced this accepted reconstruction, independent of pending UI changes. */
+  parameters?: SvrParams;
+  /** A transferred draft published atomically with a finer regional reconstruction. Saved edits take precedence. */
+  initialSelection?: SvrLabelVolume;
 };
 
 export type SvrSelectedSeries = {

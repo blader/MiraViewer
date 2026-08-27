@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
 import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
-import type { SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries } from '../types/svr';
+import type { SvrLabelVolume, SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries, SvrVolume } from '../types/svr';
 import { formatPatientName, formatSequenceLabel } from '../utils/clinicalData';
 import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
@@ -24,6 +24,8 @@ import {
 import { quantileSorted } from '../utils/svr/svrUtils';
 import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
+import { SvrImagingContext } from './svrImagingContext';
+import { regionalRefinementParameters, selectionFocusRoi } from '../utils/svr/refineRegion';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
@@ -616,6 +618,73 @@ function estimateReconstructionGrid(
   };
 }
 
+function planReconstruction(
+  manifests: SeriesFrameManifest[],
+  params: SvrParams,
+  roi: SvrRoi | null,
+  retainedVolume?: SvrVolume,
+) {
+  const retainedVoxelCount = retainedVolume?.data.length ?? 0;
+  // Recomputing deliberately preserves the prior Float32 result and its
+  // support evidence while both independent 3D GPU textures stay visible.
+  const retainedBytes = retainedVolume
+    ? retainedVolume.data.byteLength +
+      (retainedVolume.observedSupport?.byteLength ?? 0) +
+      retainedVoxelCount * (Uint16Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
+    : 0;
+
+  const evaluate = (targetVoxelSizeMm: number) => {
+    const effectiveParams = { ...params, targetVoxelSizeMm };
+    const { sourceBytes, decodedSourceCacheBytes } = estimateSourceMemory(manifests, effectiveParams, roi);
+    const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(manifests, effectiveParams, roi);
+
+    return {
+      effectiveParams,
+      effectiveVoxelSizeMm,
+      sourceBytes,
+      memoryPlan: estimateSvrPeakMemoryBytes({
+        voxelCount,
+        sourceBytes,
+        iterations: effectiveParams.iterations,
+        retainedBytes: retainedBytes + decodedSourceCacheBytes,
+        // Reserve independently owned CPU/GPU labels for both the incoming
+        // result and any already-annotated retained reconstruction.
+        labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
+        registrationBytes:
+          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' ? estimateSvrRegistrationBytes(voxelCount) : 0,
+      }),
+    };
+  };
+
+  const requested = evaluate(params.targetVoxelSizeMm);
+  if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
+
+  let lower = Math.floor(params.targetVoxelSizeMm * 100);
+  let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
+  let nearestSafe = evaluate(upper / 100);
+
+  while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
+    lower = upper;
+    upper = Math.min(1000, Math.ceil(upper * 1.5));
+    nearestSafe = evaluate(upper / 100);
+  }
+
+  if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
+
+  while (upper - lower > 1) {
+    const midpoint = Math.floor((lower + upper) / 2);
+    const candidate = evaluate(midpoint / 100);
+    if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
+      lower = midpoint;
+    } else {
+      upper = midpoint;
+      nearestSafe = candidate;
+    }
+  }
+
+  return nearestSafe;
+}
+
 export type Svr3DViewProps = {
   data: ComparisonData;
   defaultDateIso?: string | null;
@@ -645,11 +714,6 @@ function useSvrReconstructionWorkspace({
     seriesRegistrationMode: 'roi-rigid',
   }));
   const [generationCollapsed, setGenerationCollapsed] = useState(false);
-
-  const [sliceInspectorPortalTarget, setSliceInspectorPortalTarget] = useState<Element | null>(null);
-  const sliceInspectorPortalRef = useCallback((el: HTMLElement | null) => {
-    setSliceInspectorPortalTarget(el);
-  }, []);
 
   const { status, isRunning, progress, result, resultIdentity, error, run, cancel, clear } = useSvrReconstruction();
 
@@ -1062,80 +1126,13 @@ function useSvrReconstructionWorkspace({
 
   const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
-  const plannedReconstruction = useMemo(() => {
-    if (!currentReadiness?.manifests.length) return null;
-
-    const retainedVolume = acceptedResult?.volume;
-    const retainedVoxelCount = retainedVolume?.data.length ?? 0;
-    // Recomputing deliberately preserves the prior Float32 result and its
-    // support evidence while both independent 3D GPU textures stay visible.
-    const retainedBytes = retainedVolume
-      ? retainedVolume.data.byteLength +
-        (retainedVolume.observedSupport?.byteLength ?? 0) +
-        retainedVoxelCount * (Uint16Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
-      : 0;
-
-    const evaluate = (targetVoxelSizeMm: number) => {
-      const effectiveParams = { ...params, targetVoxelSizeMm };
-      const { sourceBytes, decodedSourceCacheBytes } = estimateSourceMemory(
-        currentReadiness.manifests,
-        effectiveParams,
-        roiWorld,
-      );
-      const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(
-        currentReadiness.manifests,
-        effectiveParams,
-        roiWorld,
-      );
-
-      return {
-        effectiveParams,
-        effectiveVoxelSizeMm,
-        sourceBytes,
-        memoryPlan: estimateSvrPeakMemoryBytes({
-          voxelCount,
-          sourceBytes,
-          iterations: effectiveParams.iterations,
-          retainedBytes: retainedBytes + decodedSourceCacheBytes,
-          // Reserve independently owned CPU/GPU labels for both the incoming
-          // result and any already-annotated retained reconstruction.
-          labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
-          registrationBytes:
-            roiWorld && effectiveParams.seriesRegistrationMode === 'roi-rigid'
-              ? estimateSvrRegistrationBytes(voxelCount)
-              : 0,
-        }),
-      };
-    };
-
-    const requested = evaluate(params.targetVoxelSizeMm);
-    if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
-
-    let lower = Math.floor(params.targetVoxelSizeMm * 100);
-    let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
-    let nearestSafe = evaluate(upper / 100);
-
-    while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
-      lower = upper;
-      upper = Math.min(1000, Math.ceil(upper * 1.5));
-      nearestSafe = evaluate(upper / 100);
-    }
-
-    if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
-
-    while (upper - lower > 1) {
-      const midpoint = Math.floor((lower + upper) / 2);
-      const candidate = evaluate(midpoint / 100);
-      if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
-        lower = midpoint;
-      } else {
-        upper = midpoint;
-        nearestSafe = candidate;
-      }
-    }
-
-    return nearestSafe;
-  }, [acceptedResult, currentReadiness, params, roiWorld]);
+  const plannedReconstruction = useMemo(
+    () =>
+      currentReadiness?.manifests.length
+        ? planReconstruction(currentReadiness.manifests, params, roiWorld, acceptedResult?.volume)
+        : null,
+    [acceptedResult, currentReadiness, params, roiWorld],
+  );
   const memoryPlan = plannedReconstruction?.memoryPlan ?? null;
   const sourceMemoryBytes = plannedReconstruction?.sourceBytes ?? 0;
   const effectiveVoxelSizeMm = plannedReconstruction?.effectiveVoxelSizeMm ?? params.targetVoxelSizeMm;
@@ -1179,8 +1176,44 @@ function useSvrReconstructionWorkspace({
   const startReconstruction = useCallback(() => {
     if (!canRun || !workspaceIdentity) return;
     const paramsToRun: SvrParams = { ...(plannedReconstruction?.effectiveParams ?? params), roi: roiWorld ?? null };
-    void run(selectedSeries, paramsToRun, workspaceIdentity);
+    void run(selectedSeries, paramsToRun, workspaceIdentity).then((outcome) => {
+      if (outcome.result) setGenerationCollapsed(true);
+    });
   }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
+
+  const refineRegion = useCallback(
+    (labels: SvrLabelVolume) => {
+      if (!canRun || !workspaceIdentity || !acceptedResult || !currentReadiness) return;
+      const volume = acceptedResult.volume;
+      const requested = regionalRefinementParameters(
+        acceptedResult.parameters ?? params,
+        selectionFocusRoi(volume, labels, effectiveRoiSeriesUid ?? undefined),
+      );
+      const roi = requested.roi!;
+      const planned = planReconstruction(currentReadiness.manifests, requested, roi, volume);
+      setRoiWorld(roi);
+      setRoiRect(null);
+      setParams(requested);
+      setGenerationCollapsed(false);
+      void run(selectedSeries, { ...planned.effectiveParams, roi }, workspaceIdentity, { volume, labels }).then(
+        (outcome) => {
+          if (outcome.result) setGenerationCollapsed(true);
+        },
+      );
+    },
+    [
+      acceptedResult,
+      canRun,
+      currentReadiness,
+      effectiveRoiSeriesUid,
+      params,
+      run,
+      selectedSeries,
+      setRoiRect,
+      setRoiWorld,
+      workspaceIdentity,
+    ],
+  );
 
   return {
     acceptedResult,
@@ -1225,12 +1258,11 @@ function useSvrReconstructionWorkspace({
     setSelectedSequenceKey,
     setShowAcquiredStack,
     showAcquiredStack,
-    sliceInspectorPortalRef,
-    sliceInspectorPortalTarget,
     sourceFrameCount,
     sourceMemoryMiB,
     sourceReadinessMessage,
     startReconstruction,
+    refineRegion,
     status,
     stepRoiSlice,
     automaticallyAdjustedVoxelSpacing,
@@ -1644,7 +1676,6 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
     setRoiSeriesUid,
     setRoiWorld,
     setSelectedSequenceKey,
-    sliceInspectorPortalRef,
     sourceReadinessMessage,
     status,
   } = workspace;
@@ -1745,11 +1776,6 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
           Reconstruction canceled. Verified source images remain available.
         </div>
       ) : null}
-
-      <div
-        ref={sliceInspectorPortalRef}
-        className="svr-slice-inspector-mount border-t border-[var(--border-color)] pt-4"
-      />
     </>
   );
 }
@@ -1781,13 +1807,22 @@ export function Svr3DView(props: Svr3DViewProps) {
     setRoiWorld,
     setShowAcquiredStack,
     showAcquiredStack,
-    sliceInspectorPortalTarget,
     sourceFrameCount,
     sourceReadinessMessage,
     stepRoiSlice,
     volumeIdentity,
     workspaceIdentity,
   }: SvrReconstructionWorkspace = workspace;
+
+  const imaging = useMemo(
+    () => ({
+      volume: acceptedResult?.volume ?? null,
+      initialSelection: acceptedResult?.initialSelection,
+      busy: isRunning,
+      refineRegion: workspace.refineRegion,
+    }),
+    [acceptedResult, isRunning, workspace.refineRegion],
+  );
 
   return (
     <section
@@ -1858,12 +1893,12 @@ export function Svr3DView(props: Svr3DViewProps) {
 
         <div className="relative min-h-0 overflow-hidden bg-[var(--bg-primary)]">
           {acceptedResult ? (
-            <SvrVolume3DViewer
-              key={workspaceIdentity ?? 'unselected-reconstruction'}
-              volume={acceptedResult.volume}
-              volumeIdentity={volumeIdentity}
-              sliceInspectorPortalTarget={generationCollapsed ? undefined : sliceInspectorPortalTarget}
-            />
+            <SvrImagingContext.Provider value={imaging}>
+              <SvrVolume3DViewer
+                key={workspaceIdentity ?? 'unselected-reconstruction'}
+                volumeIdentity={volumeIdentity}
+              />
+            </SvrImagingContext.Provider>
           ) : (
             <div className="flex h-full min-h-0 items-center justify-center bg-[var(--bg-primary)] px-6 py-10">
               <div className="w-full max-w-lg text-center">

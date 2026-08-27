@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../types/svr';
+import type { SvrLabelVolume, SvrParams, SvrProgress, SvrResult, SvrSelectedSeries, SvrVolume } from '../types/svr';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
+import { resampleSelectionForRefinement } from '../utils/svr/refineRegion';
 
 export type UseSvrReconstructionState = {
   status: 'idle' | 'running' | 'canceling' | 'ready' | 'canceled' | 'failed';
@@ -67,6 +68,7 @@ export function useSvrReconstruction() {
       selectedSeries: SvrSelectedSeries[],
       params?: Partial<SvrParams>,
       identity?: string,
+      selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume },
     ): Promise<SvrRunOutcome> => {
       abortRef.current?.abort();
 
@@ -95,7 +97,7 @@ export function useSvrReconstruction() {
       const started = performance.now();
 
       try {
-        const result = await reconstructVolumeMultiPlane({
+        const reconstruction = await reconstructVolumeMultiPlane({
           selectedSeries,
           svrParams,
           signal: controller.signal,
@@ -127,6 +129,19 @@ export function useSvrReconstruction() {
             });
           },
         });
+
+        const result =
+          selectionToRefine && !controller.signal.aborted && runIdRef.current === runId
+            ? {
+                ...reconstruction,
+                initialSelection: await resampleSelectionForRefinement(
+                  selectionToRefine.volume,
+                  selectionToRefine.labels,
+                  reconstruction.volume,
+                  controller.signal,
+                ),
+              }
+            : reconstruction;
 
         if (runIdRef.current !== runId || controller.signal.aborted) {
           return {

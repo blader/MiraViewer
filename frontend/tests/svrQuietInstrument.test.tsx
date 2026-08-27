@@ -163,7 +163,7 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
   });
 
-  it('uses one evidence owner and preserves the physical inspector while switching contextual rails', async () => {
+  it('keeps the linked physical workbench independent of the source and appearance rails', async () => {
     mocks.hook.status = 'ready';
     mocks.hook.resultIdentity = acceptedIdentity();
     mocks.hook.result = {
@@ -179,24 +179,28 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     };
 
     const { container } = render(<Svr3DView data={comparisonData()} />);
-    await waitFor(() => {
-      const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
-      expect(within(sourceRail).getByRole('combobox', { name: /plane/i })).toBeInTheDocument();
-    });
+    await waitFor(() =>
+      expect(screen.getByRole('application', { name: /axial reconstructed slice/i })).toBeInTheDocument(),
+    );
+    const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
+      screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
+    );
 
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
     expect(screen.queryByText('3D Controls')).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('No acquired support');
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
 
     fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
 
     expect(
       screen.queryByRole('complementary', { name: /reconstruction sources and quality/i }),
     ).not.toBeInTheDocument();
-    expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'true');
+    expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
+    for (const canvas of planes) expect(canvas).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D control panels' }));
     expect(screen.getByText('3D Controls')).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: /plane/i })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('No acquired support');
+    for (const canvas of planes) expect(canvas).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
   });
 
   it('marks a real selected focus boundary without tinting acquired image pixels', () => {

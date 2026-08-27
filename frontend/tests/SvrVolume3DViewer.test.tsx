@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SvrVolume3DViewer } from '../src/components/SvrVolume3DViewer';
-import type { SvrVolume } from '../src/types/svr';
-import { getVolumeSegmentation } from '../src/utils/localApi';
-import { RegionGrow3DWorkerController } from '../src/utils/segmentation/regionGrow3DWorker';
+import { SvrVolume3DViewer as ContextViewer, type SvrVolume3DViewerProps } from '../src/components/SvrVolume3DViewer';
+import { SvrImagingContext } from '../src/components/svrImagingContext';
+import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
+import { getVolumeSegmentation, saveVolumeSegmentation } from '../src/utils/localApi';
+import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
+import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SVR3D_CAMERA_Z, SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
 
 vi.mock('../src/hooks/useOnnxTumorSession', () => ({
@@ -38,11 +40,33 @@ const observedVolume: SvrVolume = {
   boundsMm: { min: [0, 0, 0], max: [2, 2, 3] },
 };
 
+function SvrVolume3DViewer({
+  volume,
+  labels,
+  initialSelection,
+  busy,
+  refineRegion,
+  ...props
+}: SvrVolume3DViewerProps & {
+  volume: SvrVolume | null;
+  labels?: SvrLabelVolume | null;
+  initialSelection?: SvrLabelVolume;
+  busy?: boolean;
+  refineRegion?: (labels: SvrLabelVolume) => void;
+}) {
+  return (
+    <SvrImagingContext.Provider value={{ volume, labels, initialSelection, busy, refineRegion }}>
+      <ContextViewer {...props} />
+    </SvrImagingContext.Provider>
+  );
+}
+
 function createViewportRecorder(viewport: { width: number; height: number }, occupancyUploadError = false) {
   const uniform1f = vi.fn<(location: unknown, value: number) => void>();
   const uniform1i = vi.fn<(location: unknown, value: number) => void>();
   const uniform3f = vi.fn<(location: unknown, x: number, y: number, z: number) => void>();
   const texImage3D = vi.fn();
+  const texSubImage3D = vi.fn();
   const getError = vi.fn(() => (occupancyUploadError && getError.mock.calls.length === 3 ? 1285 : 0));
   const methods = {
     NO_ERROR: 0,
@@ -61,6 +85,7 @@ function createViewportRecorder(viewport: { width: number; height: number }, occ
     uniform1i,
     uniform3f,
     texImage3D,
+    texSubImage3D,
   };
   const gl = new Proxy(methods, {
     get(target, property: string) {
@@ -82,6 +107,7 @@ function createViewportRecorder(viewport: { width: number; height: number }, occ
   return {
     getError,
     texImage3D,
+    texSubImage3D,
     uniform1f,
     latestInteger: (name: string) => uniform1i.mock.calls.filter(([location]) => location === name).at(-1)?.[1],
     latestVector: (name: string) =>
@@ -103,46 +129,122 @@ function syntheticVolume(boxScale: readonly [number, number, number]): SvrVolume
   };
 }
 
-function mockSingleSeedGrowth(volume: SvrVolume) {
-  return vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-    indices: new Uint32Array([seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x]),
-    count: 1,
-    seedValue: 0.5,
-    hitMaxVoxels: false,
-  }));
-}
+const identity = { patientKey: 'patient', studyUid: 'study', seriesUids: ['source'] };
 
-function drawInspectorTumorRegion(start = 20, end = 80): void {
-  const canvas = screen.getByRole('img', { name: /axial reconstructed slice/i }) as HTMLCanvasElement;
+function editingVolume(size = 12): SvrVolume {
+  return {
+    ...syntheticVolume([1, 1, 1]),
+    dims: [size, size, size],
+    data: new Float32Array(size ** 3).fill(0.5),
+    observedSupport: new Uint8Array(size ** 3).fill(1),
+  };
+}
+function paint(x: number, y: number, kind: 'Add tissue' | 'Remove tissue' = 'Add tissue', cancel = false) {
+  fireEvent.click(screen.getByRole('button', { name: kind }));
+  fireEvent.change(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' }), {
+    target: { value: '0.5' },
+  });
+  const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
   vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
     x: 0,
     y: 0,
-    top: 0,
     left: 0,
-    bottom: 100,
-    right: 100,
-    width: 100,
-    height: 100,
+    top: 0,
+    width: 400,
+    height: 320,
+    right: 400,
+    bottom: 320,
     toJSON: () => ({}),
-  } as DOMRect);
-  Object.defineProperty(canvas, 'setPointerCapture', { configurable: true, value: vi.fn() });
-
-  fireEvent.pointerDown(canvas, { pointerId: 1, button: 0, isPrimary: true, clientX: start, clientY: start });
-  fireEvent.pointerMove(canvas, { pointerId: 1, isPrimary: true, clientX: end, clientY: end });
-  fireEvent.pointerUp(canvas, { pointerId: 1, button: 0, isPrimary: true, clientX: end, clientY: end });
+  });
+  const point = {
+    pointerId: 1,
+    button: 0,
+    isPrimary: true,
+    clientX: 40 + ((x + 0.5) * 320) / 12,
+    clientY: ((y + 0.5) * 320) / 12,
+  };
+  fireEvent.pointerDown(canvas, point);
+  if (cancel) fireEvent.pointerCancel(canvas, point);
+  else fireEvent.pointerUp(canvas, point);
 }
-
+function recordSlices() {
+  const contexts = new Map<
+    HTMLCanvasElement,
+    {
+      createImageData: (width: number, height: number) => ImageData;
+      putImageData: ReturnType<typeof vi.fn>;
+      drawImage: ReturnType<typeof vi.fn>;
+    }
+  >();
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(function (this: HTMLCanvasElement, id: string) {
+    if (id !== '2d') return null;
+    if (!contexts.has(this))
+      contexts.set(
+        this,
+        new Proxy(
+          {
+            createImageData: (width: number, height: number) =>
+              ({ width, height, data: new Uint8ClampedArray(width * height * 4) }) as ImageData,
+            putImageData: vi.fn(),
+            drawImage: vi.fn(),
+          },
+          { get: (target, key) => (key in target ? target[key as keyof typeof target] : () => undefined) },
+        ),
+      );
+    return contexts.get(this);
+  } as typeof HTMLCanvasElement.prototype.getContext);
+  return (plane: string) => {
+    const canvas = screen.getByRole('application', {
+      name: new RegExp(plane + ' reconstructed slice', 'i'),
+    }) as HTMLCanvasElement;
+    const draw = contexts.get(canvas)?.drawImage.mock.lastCall;
+    const image = contexts.get(draw?.[0])?.putImageData.mock.lastCall?.[0] as ImageData;
+    return { canvas, image, width: draw?.[3] as number, height: draw?.[4] as number };
+  };
+}
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getVolumeSegmentation).mockReset().mockResolvedValue(null);
+  vi.mocked(saveVolumeSegmentation).mockReset().mockResolvedValue(undefined);
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
 });
-
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
 describe('SvrVolume3DViewer evidence-aware interaction', () => {
+  it.each([12, 180])('accepts an editable restored selection on a %i-cubed reconstruction', async (size) => {
+    const volume: SvrVolume = {
+      ...syntheticVolume([1, 1, 1]),
+      dims: [size, size, size],
+      data: new Float32Array(size ** 3).fill(0.5),
+      observedSupport: new Uint8Array(size ** 3).fill(1),
+    };
+    const labels = new Uint8Array(volume.data.length);
+    labels[30] = 1;
+    vi.mocked(getVolumeSegmentation).mockResolvedValueOnce({
+      volumeKey: 'test',
+      dims: volume.dims,
+      labels,
+      reviewState: 'draft',
+      seeds: { foreground: new Uint32Array([30]), background: new Uint32Array([32]) },
+      classMetadata: [{ id: 1, name: 'Selected tissue', color: [103, 207, 193] }],
+      updatedAt: 0,
+    });
+    render(
+      <SvrVolume3DViewer
+        volume={volume}
+        volumeIdentity={{ studyUid: 'synthetic', seriesUids: ['synthetic-source'] }}
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept selection' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Accept selection' }));
+    await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels).toBe(labels);
+  });
+
   it('fits the physical reconstruction box to landscape and portrait viewports without clipping', async () => {
     const viewport = { width: 1472, height: 972 };
     const recorder = createViewportRecorder(viewport);
@@ -244,35 +346,39 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it('explains tumor isolation and keeps label-dependent views unavailable until observed tumor exists', async () => {
     render(<SvrVolume3DViewer volume={observedVolume} />);
 
-    const controls = screen.getByRole('group', { name: /tumor visualization/i });
+    const controls = screen.getByRole('group', { name: /region visualization/i });
     expect(within(controls).getByRole('button', { name: 'Anatomy' })).toHaveAttribute('aria-pressed', 'true');
     expect(within(controls).getByRole('button', { name: 'Overlay' })).toBeDisabled();
-    expect(within(controls).getByRole('button', { name: 'Tumor only' })).toBeDisabled();
-    expect(screen.getByText(/drag a box around the tumor to segment it in 3d/i)).toBeInTheDocument();
+    expect(within(controls).getByRole('button', { name: 'Selection only' })).toBeDisabled();
+    expect(screen.getByText(/not automatic tumor detection/i)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2 is not available/i));
   });
 
   it('isolates supported tumor or restores anatomy without reallocating the accepted label texture', async () => {
     const recorder = createViewportRecorder({ width: 1440, height: 900 });
+    const acceptedLabels = new Uint8Array([1, 0, 1, 0]);
     render(
       <SvrVolume3DViewer
         volume={observedVolume}
         labels={{
-          data: new Uint8Array([1, 0, 1, 0]),
+          data: acceptedLabels,
           dims: observedVolume.dims,
           meta: [{ id: 1, name: 'Observed tumor', color: [192, 156, 106] }],
         }}
       />,
     );
 
+    // The visibility uniform can be submitted before the passive upload effect.
+    // Begin the no-reallocation assertion only once the actual accepted bytes are resident.
+    await waitFor(() => expect(recorder.texImage3D.mock.calls.some((call) => call[9] === acceptedLabels)).toBe(true));
     await waitFor(() => expect(recorder.latestInteger('u_labelsEnabled')).toBe(1));
-    const controls = screen.getByRole('group', { name: /tumor visualization/i });
+    const controls = screen.getByRole('group', { name: /region visualization/i });
     expect(within(controls).getByRole('button', { name: 'Overlay' })).toHaveAttribute('aria-pressed', 'true');
     const initialTextureAllocations = recorder.texImage3D.mock.calls.length;
 
-    fireEvent.click(within(controls).getByRole('button', { name: 'Tumor only' }));
+    fireEvent.click(within(controls).getByRole('button', { name: 'Selection only' }));
     await waitFor(() => expect(recorder.latestInteger('u_tumorOnly')).toBe(1));
-    expect(within(controls).getByRole('button', { name: 'Tumor only' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(controls).getByRole('button', { name: 'Selection only' })).toHaveAttribute('aria-pressed', 'true');
 
     fireEvent.click(within(controls).getByRole('button', { name: 'Anatomy' }));
     await waitFor(() => expect(recorder.latestInteger('u_labelsEnabled')).toBe(0));
@@ -282,236 +388,6 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     await waitFor(() => expect(recorder.latestInteger('u_labelsEnabled')).toBe(1));
     expect(recorder.latestInteger('u_tumorOnly')).toBe(0);
     expect(recorder.texImage3D).toHaveBeenCalledTimes(initialTextureAllocations);
-  });
-
-  it('keeps tumor visualization controls reachable inside the actual portaled source inspector', async () => {
-    const portal = document.createElement('div');
-    document.body.appendChild(portal);
-
-    try {
-      render(<SvrVolume3DViewer volume={observedVolume} sliceInspectorPortalTarget={portal} />);
-      const controls = within(portal).getByRole('group', { name: /tumor visualization/i });
-      expect(within(controls).getByRole('button', { name: 'Anatomy' })).toHaveAttribute('aria-pressed', 'true');
-      expect(within(portal).getByText(/drag a box around the tumor/i)).toBeInTheDocument();
-      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2 is not available/i));
-    } finally {
-      portal.remove();
-    }
-  });
-
-  it('automatically isolates newly segmented acquired tumor and exposes a truthful sensitivity control', async () => {
-    const volume = syntheticVolume([1, 1, 1]);
-    const run = mockSingleSeedGrowth(volume);
-    render(<SvrVolume3DViewer volume={volume} />);
-
-    drawInspectorTumorRegion();
-
-    await waitFor(() => {
-      expect(run).toHaveBeenCalledOnce();
-      expect(screen.getByRole('button', { name: 'Tumor only' })).toHaveAttribute('aria-pressed', 'true');
-    });
-    expect(screen.getByRole('slider', { name: /tumor sensitivity/i })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Anatomy' })).toBeEnabled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Anatomy' }));
-    fireEvent.change(screen.getByRole('slider', { name: /tumor sensitivity/i }), { target: { value: '0.16' } });
-    await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole('button', { name: 'Anatomy' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Tumor only' })).toHaveAttribute('aria-pressed', 'false');
-  });
-
-  it.each([0.86, 0.2])(
-    'automatically anchors to a coherent supported off-center lesion of either contrast polarity (%s)',
-    async (lesionIntensity) => {
-      const dims = [21, 21, 9] as const;
-      const volume: SvrVolume = {
-        ...syntheticVolume([1, 1, 1]),
-        dims,
-        data: new Float32Array(dims[0] * dims[1] * dims[2]).fill(0.575),
-        observedSupport: new Uint8Array(dims[0] * dims[1] * dims[2]).fill(1),
-      };
-      const slice = 4;
-      const at = (x: number, y: number, z = slice) => z * dims[0] * dims[1] + y * dims[0] + x;
-      for (let z = slice - 1; z <= slice + 1; z++) {
-        for (let y = 12; y <= 14; y++) {
-          for (let x = 13; x <= 15; x++) volume.data[at(x, y, z)] = lesionIntensity;
-        }
-      }
-      volume.data[at(5, 5)] = 1;
-      for (let y = 14; y <= 16; y++) {
-        for (let x = 6; x <= 8; x++) {
-          volume.data[at(x, y)] = 1;
-          volume.observedSupport![at(x, y)] = 0;
-        }
-      }
-
-      const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-        indices: new Uint32Array([at(seed.x, seed.y)]),
-        count: 1,
-        seedValue: lesionIntensity,
-        hitMaxVoxels: false,
-      }));
-      render(<SvrVolume3DViewer volume={volume} />);
-
-      drawInspectorTumorRegion();
-
-      await waitFor(() => expect(run).toHaveBeenCalledOnce());
-      const selectedSeed = run.mock.calls[0]![0].seed;
-      expect(selectedSeed).toEqual({ x: 14, y: 13, z: slice });
-      expect(volume.observedSupport![at(selectedSeed.x, selectedSeed.y)]).toBe(1);
-
-      fireEvent.change(screen.getByRole('slider', { name: /tumor sensitivity/i }), { target: { value: '0.16' } });
-      await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
-      expect(run.mock.calls[1]![0].seed).toEqual(selectedSeed);
-    },
-  );
-
-  it('anchors to the user-local coherent anomaly instead of distant bilateral anatomical cavities', async () => {
-    const dims = [41, 41, 9] as const;
-    const slice = 4;
-    const at = (x: number, y: number, z = slice) => z * dims[0] * dims[1] + y * dims[0] + x;
-    const volume: SvrVolume = {
-      ...syntheticVolume([1, 1, 1]),
-      dims,
-      data: Float32Array.from({ length: dims[0] * dims[1] * dims[2] }, (_, index) => {
-        const x = index % dims[0];
-        const y = Math.floor(index / dims[0]) % dims[1];
-        return 0.56 + x * 0.005 + y * 0.001;
-      }),
-      observedSupport: new Uint8Array(dims[0] * dims[1] * dims[2]).fill(1),
-    };
-    for (let z = slice - 2; z <= slice + 2; z++) {
-      for (let y = 27; y <= 32; y++) {
-        for (const x of [8, 9, 10, 11, 12, 28, 29, 30, 31, 32]) volume.data[at(x, y, z)] = 0.15;
-      }
-    }
-    for (let z = slice - 1; z <= slice + 1; z++) {
-      for (let y = 16; y <= 18; y++) {
-        for (let x = 19; x <= 21; x++) volume.data[at(x, y, z)] = 0.388;
-      }
-    }
-
-    const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockImplementation(async ({ seed }) => ({
-      indices: new Uint32Array([at(seed.x, seed.y, seed.z)]),
-      count: 1,
-      seedValue: volume.data[at(seed.x, seed.y, seed.z)]!,
-      hitMaxVoxels: false,
-    }));
-    render(<SvrVolume3DViewer volume={volume} />);
-
-    drawInspectorTumorRegion();
-
-    await waitFor(() => expect(run).toHaveBeenCalledOnce());
-    expect(run.mock.calls[0]![0].seed).toEqual({ x: 20, y: 17, z: slice });
-  });
-
-  it('refuses an indistinguishable selected region without isolating or publishing a box-shaped mask', async () => {
-    vi.spyOn(RegionGrow3DWorkerController.prototype, 'run').mockResolvedValue({
-      indices: new Uint32Array(),
-      count: 0,
-      seedValue: 0.5,
-      hitMaxVoxels: false,
-    });
-    render(<SvrVolume3DViewer volume={syntheticVolume([1, 1, 1])} />);
-
-    drawInspectorTumorRegion();
-
-    await waitFor(() =>
-      expect(
-        screen.getAllByRole('alert').some((alert) => /no distinct tumor-like tissue/i.test(alert.textContent ?? '')),
-      ).toBe(true),
-    );
-    expect(screen.getByRole('button', { name: 'Tumor only' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Anatomy' })).toHaveAttribute('aria-pressed', 'true');
-  });
-
-  it('frames the physical tumor center within its entire supported grow domain and restores the prior anatomy zoom', async () => {
-    const volume = syntheticVolume([1, 1, 1]);
-    const recorder = createViewportRecorder({ width: 1440, height: 900 });
-    const run = mockSingleSeedGrowth(volume);
-    render(<SvrVolume3DViewer volume={volume} />);
-    await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
-
-    const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
-    fireEvent.keyDown(viewer, { key: '+' });
-    await waitFor(() => expect(recorder.latestZoom()).toBeGreaterThan(0));
-    const anatomicalZoom = recorder.latestZoom()!;
-
-    drawInspectorTumorRegion(10, 40);
-
-    await waitFor(() => {
-      expect(run).toHaveBeenCalledOnce();
-      expect(recorder.latestInteger('u_focusEnabled')).toBe(1);
-      expect(recorder.latestZoom()).toBeGreaterThanOrEqual(anatomicalZoom * 1.99);
-    });
-    const initialFocusedZoom = recorder.latestZoom()!;
-    fireEvent.keyDown(viewer, { key: '+' });
-    await waitFor(() => expect(recorder.latestZoom()).toBeGreaterThan(initialFocusedZoom * 1.14));
-
-    const { min, max } = run.mock.calls[0]![0].roi;
-    const expectedCenter = (['x', 'y', 'z'] as const).map(
-      (axis, index) => (min[axis] + max[axis] + 1) / (2 * volume.dims[index]) - 0.5,
-    );
-    expect(recorder.latestVector('u_focusCenter')).toEqual(expectedCenter);
-    expect(recorder.latestVector('u_focusMin')).toEqual([-0.5, -0.5, -0.5]);
-    expect(recorder.latestVector('u_focusMax')).toEqual([0.5, 0.5, 0.5]);
-
-    const focusedTextureAllocations = recorder.texImage3D.mock.calls.length;
-    fireEvent.click(screen.getByRole('button', { name: 'Anatomy' }));
-
-    await waitFor(() => {
-      expect(recorder.latestInteger('u_focusEnabled')).toBe(0);
-      expect(recorder.latestZoom()).toBeCloseTo(anatomicalZoom);
-    });
-    expect(recorder.latestVector('u_focusCenter')).toEqual([0, 0, 0]);
-    expect(recorder.texImage3D).toHaveBeenCalledTimes(focusedTextureAllocations);
-  });
-
-  it('recovers the nearest physically supported seed when the drawn tumor center is unsupported', async () => {
-    const volume = syntheticVolume([1, 1, 1]);
-    volume.observedSupport![21] = 0;
-    const run = mockSingleSeedGrowth(volume);
-    render(<SvrVolume3DViewer volume={volume} />);
-
-    drawInspectorTumorRegion();
-
-    await waitFor(() => expect(run).toHaveBeenCalledOnce());
-    const seed = run.mock.calls[0]![0].seed;
-    const index = seed.z * volume.dims[0] * volume.dims[1] + seed.y * volume.dims[0] + seed.x;
-    expect(index).not.toBe(21);
-    expect(volume.observedSupport![index]).toBe(1);
-    expect(screen.getByRole('button', { name: 'Tumor only' })).toHaveAttribute('aria-pressed', 'true');
-  });
-
-  it('never starts segmentation when the selected tumor region has no acquired MRI support', async () => {
-    const volume = { ...syntheticVolume([1, 1, 1]), observedSupport: new Uint8Array(64) };
-    const run = vi.spyOn(RegionGrow3DWorkerController.prototype, 'run');
-    render(<SvrVolume3DViewer volume={volume} />);
-
-    drawInspectorTumorRegion();
-
-    await waitFor(() =>
-      expect(
-        screen.getAllByRole('alert').some((alert) => /contains no acquired mri support/i.test(alert.textContent ?? '')),
-      ).toBe(true),
-    );
-    expect(run).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Tumor only' })).toBeDisabled();
-  });
-
-  it('exposes an accessible keyboard-operable viewer and truthful acquired-support coverage', async () => {
-    render(<SvrVolume3DViewer volume={observedVolume} />);
-
-    const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
-    expect(viewer).toHaveAttribute('tabindex', '0');
-    expect(screen.getByText(/acquired support: 2 of 4 voxels/i)).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: /axial reconstructed slice/i })).toHaveAttribute('tabindex', '0');
-    expect(screen.getByRole('button', { name: /segmentation/i })).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByText(/verified onnx model/i)).not.toBeInTheDocument();
-
-    fireEvent.keyDown(viewer, { key: '2' });
-    await waitFor(() => expect(screen.getByRole('combobox', { name: /plane/i })).toHaveValue('coronal'));
-    expect(screen.getByRole('img', { name: /coronal reconstructed slice/i })).toBeInTheDocument();
   });
 
   it('announces graphics-context loss and waits for safe restoration', async () => {
@@ -529,148 +405,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
 
     await waitFor(() => expect(recorder.getError).toHaveBeenCalledTimes(3));
     expect(screen.getByRole('alert')).toHaveTextContent(/gpu.*empty-space acceleration/i);
-    expect(screen.getByRole('img', { name: /axial reconstructed slice/i })).toBeInTheDocument();
+    expect(screen.getByRole('application', { name: /axial reconstructed slice/i })).toBeInTheDocument();
     expect(screen.getByText(/acquired support: 2 of 4 voxels/i)).toBeInTheDocument();
-  });
-
-  it('discloses unsupported inspection coordinates in accepted patient millimeters and follows orthogonal slices', async () => {
-    render(<SvrVolume3DViewer volume={{ ...observedVolume, originMm: [10, -4, 20], voxelSizeMm: [0.5, 2, 3] }} />);
-
-    expect(screen.getByRole('status')).toHaveTextContent('No acquired support');
-    expect(screen.getByRole('status')).toHaveTextContent('Patient position: (10.50, -2.00, 20.00) mm');
-
-    const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
-    fireEvent.keyDown(viewer, { key: '3' });
-
-    await waitFor(() => {
-      expect(screen.getByRole('status')).toHaveTextContent('Acquired support');
-      expect(screen.getByRole('status')).toHaveTextContent('Patient position: (10.00, -2.00, 20.00) mm');
-    });
-  });
-
-  it('keeps anisotropic geometry, source pixels, and unsupported anatomy consistent in every inspection plane', async () => {
-    const volume: SvrVolume = {
-      ...observedVolume,
-      data: Float32Array.from({ length: 24 }, (_, index) => (index + 1) / 25),
-      observedSupport: Uint8Array.from({ length: 24 }, (_, index) => (index === 8 ? 0 : 1)),
-      dims: [2, 3, 4],
-      voxelSizeMm: [0.5, 2, 3],
-      originMm: [10, -4, 20],
-    };
-    const context = {
-      createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
-      putImageData: vi.fn(),
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(((id: string) =>
-      id === '2d' ? context : null) as typeof HTMLCanvasElement.prototype.getContext);
-    render(<SvrVolume3DViewer volume={volume} />);
-
-    for (const [plane, maxSlice, aspectRatio, position, firstPixel, unsupportedPixel, unsupportedColor] of [
-      ['axial', 3, '1 / 6', '(10.50, -2.00, 23.00)', 71, 2, [108, 71, 27]],
-      ['coronal', 2, '1 / 12', '(10.50, -2.00, 26.00)', 31, 2, [108, 71, 27]],
-      ['sagittal', 1, '6 / 12', '(10.00, -2.00, 26.00)', 10, 4, [46, 34, 20]],
-    ] as const) {
-      fireEvent.change(screen.getByRole('combobox', { name: /plane/i }), { target: { value: plane } });
-      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(position));
-      expect(screen.getByRole('slider', { name: /slice/i })).toHaveAttribute('max', String(maxSlice));
-      expect(screen.getByRole('img', { name: new RegExp(plane) })).toHaveStyle({ aspectRatio });
-
-      const image = context.putImageData.mock.lastCall?.[0] as ImageData;
-      expect(Array.from(image.data.slice(0, 4))).toEqual([firstPixel, firstPixel, firstPixel, 255]);
-      const unsupported = image.data.slice(unsupportedPixel * 4, unsupportedPixel * 4 + 4);
-      expect(Array.from(unsupported)).toEqual([...unsupportedColor, 255]);
-    }
-  });
-
-  it('repaints each newly mounted slice canvas when its inspector moves between portal and inline controls', async () => {
-    const portal = document.createElement('div');
-    document.body.appendChild(portal);
-    const contexts = new Map<HTMLCanvasElement, { putImageData: ReturnType<typeof vi.fn> }>();
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(function (
-      this: HTMLCanvasElement,
-      contextId: string,
-    ) {
-      if (contextId !== '2d') return null;
-      const context = {
-        createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
-        putImageData: vi.fn(),
-      };
-      contexts.set(this, context);
-      return context as unknown as CanvasRenderingContext2D;
-    } as typeof HTMLCanvasElement.prototype.getContext);
-
-    try {
-      const view = render(<SvrVolume3DViewer volume={observedVolume} sliceInspectorPortalTarget={portal} />);
-      const firstPortalCanvas = portal.querySelector<HTMLCanvasElement>('canvas[role="img"]');
-      expect(firstPortalCanvas).not.toBeNull();
-      expect(contexts.get(firstPortalCanvas!)?.putImageData).toHaveBeenCalledOnce();
-
-      view.rerender(<SvrVolume3DViewer volume={observedVolume} />);
-      const inlineCanvas = screen.getByRole('img', { name: /axial reconstructed slice/i }) as HTMLCanvasElement;
-      expect(inlineCanvas).not.toBe(firstPortalCanvas);
-      expect(contexts.get(inlineCanvas)?.putImageData).toHaveBeenCalledOnce();
-
-      fireEvent.click(screen.getByRole('button', { name: /hide 3d control panels/i }));
-      expect(screen.queryByRole('img', { name: /axial reconstructed slice/i })).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: /show 3d control panels/i }));
-
-      const reopenedInlineCanvas = screen.getByRole('img', {
-        name: /axial reconstructed slice/i,
-      }) as HTMLCanvasElement;
-      expect(reopenedInlineCanvas).not.toBe(inlineCanvas);
-      expect(contexts.get(reopenedInlineCanvas)?.putImageData).toHaveBeenCalledOnce();
-
-      view.rerender(<SvrVolume3DViewer volume={observedVolume} sliceInspectorPortalTarget={portal} />);
-      const restoredPortalCanvas = portal.querySelector<HTMLCanvasElement>('canvas[role="img"]');
-      expect(restoredPortalCanvas).not.toBeNull();
-      expect(restoredPortalCanvas).not.toBe(reopenedInlineCanvas);
-      expect(contexts.get(restoredPortalCanvas!)?.putImageData).toHaveBeenCalledOnce();
-      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2 is not available/i));
-    } finally {
-      portal.remove();
-    }
-  });
-
-  it('preserves acquired intensity and footprint support when large inspection planes are downsampled', () => {
-    const observedSupport = Uint8Array.from({ length: 1024 }, (_, index) => (index % 2 === 0 ? 1 : 0));
-    observedSupport[2] = 0;
-    const context = {
-      createImageData: (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) }),
-      putImageData: vi.fn(),
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(((id: string) =>
-      id === '2d' ? context : null) as typeof HTMLCanvasElement.prototype.getContext);
-
-    render(
-      <SvrVolume3DViewer
-        volume={{
-          ...observedVolume,
-          data: new Float32Array(1024).fill(1),
-          observedSupport,
-          dims: [1024, 1, 1],
-          voxelSizeMm: [1, 1, 1],
-          boundsMm: { min: [0, 0, 0], max: [1024, 1, 1] },
-        }}
-      />,
-    );
-
-    const image = context.putImageData.mock.lastCall?.[0] as ImageData;
-    expect(Array.from(image.data.slice(0, 4))).toEqual([255, 255, 255, 255]);
-    expect(Array.from(image.data.slice(4, 8))).toEqual([108, 71, 27, 255]);
-    expect(Array.from(image.data.slice(256 * 4, 256 * 4 + 4))).toEqual([255, 255, 255, 255]);
-  });
-
-  it('preserves observed zero-valued anatomy and applies larger coarse-pointer control targets', async () => {
-    render(<SvrVolume3DViewer volume={{ ...observedVolume, observedSupport: new Uint8Array([1, 0, 1, 1]) }} />);
-
-    expect(screen.getByRole('status')).toHaveTextContent('Acquired support');
-    expect(screen.getByRole('status')).not.toHaveTextContent('No acquired support');
-
-    const toggle = screen.getByRole('button', { name: /hide 3d control panels/i });
-    const layout = toggle.closest('.svr-volume-layout');
-    expect(layout?.className).toContain('[@media(pointer:coarse)]:[&_button]:min-h-11');
-    expect(layout?.className).toContain('[@media(pointer:coarse)]:[&_button]:min-w-11');
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2 is not available/i));
   });
 
   it('discloses measured directional source resolution and slice-profile provenance without clinical confidence', async () => {
@@ -731,46 +467,360 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(legacyKey).toMatchObject({ patient: identity.patientKey, study: identity.studyUid, series: ['series-1'] });
   });
 
-  it('never includes unsupported external lesion labels in displayed volume measurements', async () => {
+  it('keeps all three linked editing planes available when 3D controls are opened and closed', async () => {
+    render(<SvrVolume3DViewer volume={editingVolume()} />);
+    const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
+      screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D control panels' }));
+    expect(screen.getByText('Optional verified ONNX model')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide 3D control panels' }));
+    for (const canvas of planes) expect(canvas).toBeInTheDocument();
+    fireEvent.keyDown(planes[0]!, { key: '2' });
+    expect(planes[1]).toHaveFocus();
+    fireEvent.keyDown(planes[1]!, { key: 'ArrowUp' });
+    expect(screen.getByRole('spinbutton', { name: 'Axial slice' })).toHaveValue(8);
+  });
+
+  it('paints exact user marks, grows only on request, and restores mask plus marks through undo and redo', async () => {
+    const volume = editingVolume();
+    const at = (x: number, y: number) => (6 * 12 + y) * 12 + x;
+    const grown = [at(5, 6), at(6, 6), at(5, 7)];
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
+      indices: Uint32Array.from(grown),
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+      boundaryCount: 0,
+      domainVoxels: 1728,
+    });
+    const recorder = createViewportRecorder({ width: 400, height: 320 });
+    render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add tissue' })).toBeEnabled());
+    paint(5, 6);
+    expect(run).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Grow from marks' })).toBeDisabled();
+    paint(9, 6, 'Remove tissue');
+    expect(screen.getByRole('button', { name: 'Grow from marks' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Grow from marks' }));
+    await waitFor(() => expect(run).toHaveBeenCalledOnce());
+    expect([...run.mock.calls[0]![0].foreground]).toEqual([at(5, 6)]);
+    expect([...run.mock.calls[0]![0].background]).toEqual([at(9, 6)]);
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(1));
+    expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
+    paint(6, 6, 'Remove tissue');
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(0));
+    expect(run).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(1));
+    expect([...vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds!.background]).toEqual([at(9, 6)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Redo selection edit' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(0));
+    fireEvent.click(screen.getByRole('button', { name: 'Accept selection' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
+    expect(recorder.texSubImage3D.mock.calls.some((args) => args.slice(5, 8).every((value) => value === 1))).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels.some(Boolean)).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
+  });
+
+  it('does not commit canceled pointer strokes or paint unsupported anatomy', async () => {
+    const volume = editingVolume();
+    volume.observedSupport!.fill(0);
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    render(<SvrVolume3DViewer volume={volume} />);
+    paint(5, 6);
+    expect(screen.getByRole('button', { name: 'Accept selection' })).toBeDisabled();
+    expect(run).not.toHaveBeenCalled();
+    cleanup();
+    render(<SvrVolume3DViewer volume={editingVolume()} />);
+    paint(5, 6, 'Add tissue', true);
+    expect(screen.getByRole('button', { name: 'Accept selection' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeDisabled();
+  });
+
+  it.each(['slice', 'tool', 'escape'] as const)('discards an unfinished stroke after a %s change', (kind) => {
+    render(<SvrVolume3DViewer volume={editingVolume()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add tissue' }));
+    const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 320,
+      right: 400,
+      bottom: 320,
+      toJSON: () => ({}),
+    });
+    const point = { pointerId: 1, button: 0, isPrimary: true, clientX: 200, clientY: 160 };
+    fireEvent.pointerDown(canvas, point);
+    if (kind === 'slice')
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Axial slice' }), { target: { value: '8' } });
+    else if (kind === 'tool') fireEvent.click(screen.getByRole('button', { name: 'Remove tissue' }));
+    else fireEvent.keyDown(canvas, { key: 'Escape' });
+    fireEvent.pointerUp(canvas, point);
+    expect(screen.getByRole('button', { name: 'Accept selection' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeDisabled();
+  });
+
+  it('keeps navigation available during reconstruction while preserving the frozen selection', () => {
+    render(<SvrVolume3DViewer volume={editingVolume()} busy />);
+    expect(screen.getByRole('button', { name: 'Add tissue' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Navigate' })).toBeEnabled();
+    expect(screen.getByText(/your current selection is preserved/i)).toBeInTheDocument();
+  });
+
+  it('reports exact patient-space crosshair coordinates without treating observed zero as missing data', () => {
+    const volume = {
+      ...observedVolume,
+      originMm: [10, -4, 20] as [number, number, number],
+      voxelSizeMm: [0.5, 2, 3] as [number, number, number],
+    };
+    const view = render(<SvrVolume3DViewer volume={volume} />);
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent(
+      'No acquired support · Patient position: (10.50, -2.00, 20.00) mm',
+    );
+    fireEvent.keyDown(screen.getByRole('application', { name: /axial reconstructed slice/i }), { key: 'ArrowLeft' });
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent(
+      'Acquired support · Patient position: (10.00, -2.00, 20.00) mm',
+    );
+    view.rerender(<SvrVolume3DViewer volume={{ ...volume, observedSupport: Uint8Array.of(1, 0, 1, 1) }} />);
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent(
+      'Acquired support · Patient position: (10.50, -2.00, 20.00) mm',
+    );
+  });
+
+  it('never uploads a previous source buffer under a replacement volume even if dimensions match', async () => {
+    const recorder = createViewportRecorder({ width: 400, height: 320 });
+    const original = editingVolume(4);
+    const view = render(<SvrVolume3DViewer volume={original} />);
+    await waitFor(() =>
+      expect(recorder.texImage3D.mock.calls.some((args) => args[9] instanceof Uint16Array)).toBe(true),
+    );
+    const oldBits = (
+      recorder.texImage3D.mock.calls.find((args) => args[9] instanceof Uint16Array)![9] as Uint16Array
+    )[0];
+    recorder.texImage3D.mockClear();
+    view.rerender(<SvrVolume3DViewer volume={{ ...original, data: new Float32Array(64).fill(0.9) }} />);
+    await waitFor(() =>
+      expect(recorder.texImage3D.mock.calls.some((args) => args[9] instanceof Uint16Array)).toBe(true),
+    );
+    for (const args of recorder.texImage3D.mock.calls)
+      if (args[9] instanceof Uint16Array) expect(args[9][0]).not.toBe(oldBits);
+  });
+
+  it('keeps physical aspect, radiological orientation, and unmodified source samples in all planes', () => {
+    const volume: SvrVolume = {
+      ...observedVolume,
+      data: Float32Array.from({ length: 24 }, (_, index) => (index + 1) / 25),
+      observedSupport: Uint8Array.from({ length: 24 }, (_, index) => (index === 14 ? 0 : 1)),
+      dims: [2, 3, 4],
+      voxelSizeMm: [0.5, 2, 3],
+      originMm: [10, -4, 20],
+    };
+    const source = volume.data.slice();
+    const read = recordSlices();
+    render(<SvrVolume3DViewer volume={volume} />);
+    for (const [plane, width, height, first, aspect] of [
+      ['axial', 2, 3, 133, 1 / 6],
+      ['coronal', 2, 4, 214, 1 / 12],
+      ['sagittal', 3, 4, 204, 6 / 12],
+    ] as const) {
+      const { image, width: renderWidth, height: renderHeight } = read(plane);
+      expect([image.width, image.height]).toEqual([width, height]);
+      expect([...image.data.slice(0, 4)]).toEqual([first, first, first, 255]);
+      expect(renderWidth / renderHeight).toBeCloseTo(aspect);
+    }
+    expect([...read('axial').image.data.slice(8, 12)]).toEqual([0, 0, 0, 255]);
+    expect(volume.data).toEqual(source);
+  });
+
+  it('does not erase native slice texture by reducing a large plane to a fixed-size inspector', () => {
+    const read = recordSlices();
+    const volume = {
+      ...observedVolume,
+      dims: [1024, 1, 1] as [number, number, number],
+      data: Float32Array.from({ length: 1024 }, (_, i) => (i % 2 ? 0.25 : 0.75)),
+      observedSupport: new Uint8Array(1024).fill(1),
+      voxelSizeMm: [1, 1, 1] as [number, number, number],
+    };
+    render(<SvrVolume3DViewer volume={volume} />);
+    const { image } = read('axial');
+    expect(image.width).toBe(1024);
+    expect(image.data[0]).toBe(191);
+    expect(image.data[4]).toBe(64);
+    expect(image.data[1022 * 4]).toBe(191);
+  });
+
+  it('shares display window with the GPU and links the exact cutaway to the axial crosshair without changing MRI data', async () => {
+    const volume = editingVolume();
+    const source = volume.data.slice();
+    const recorder = createViewportRecorder({ width: 400, height: 320 });
+    render(<SvrVolume3DViewer volume={volume} />);
+    await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
+    fireEvent.change(screen.getByRole('slider', { name: 'MRI window width' }), { target: { value: '0.5' } });
+    await waitFor(() =>
+      expect(recorder.uniform1f.mock.calls.filter(([key]) => key === 'u_windowWidth').at(-1)?.[1]).toBe(0.5),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '3D cutaway' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Axial slice' }), { target: { value: '4' } });
+    await waitFor(() => expect(recorder.latestInteger('u_clipEnabled')).toBe(1));
+    expect(recorder.uniform1f.mock.calls.filter(([key]) => key === 'u_clipZ').at(-1)?.[1]).toBeCloseTo(3.5 / 12);
+    expect(volume.data).toEqual(source);
+  });
+
+  it('keeps editing locked on restore failure and retries without overwriting the saved selection', async () => {
+    const volume = editingVolume();
+    const labels = new Uint8Array(volume.data.length);
+    labels[30] = 1;
+    vi.mocked(getVolumeSegmentation).mockRejectedValueOnce(new Error('storage unavailable')).mockResolvedValueOnce({
+      volumeKey: 'saved',
+      dims: volume.dims,
+      labels,
+      updatedAt: 0,
+      reviewState: 'reviewed',
+      classMetadata: SELECTION_LABEL_META,
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry loading' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Add tissue' })).toBeDisabled();
+    expect(saveVolumeSegmentation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading' }));
+    await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels).toBe(labels);
+  });
+
+  it('preserves edits through a failed save and retries the same selection', async () => {
+    vi.mocked(saveVolumeSegmentation).mockRejectedValueOnce(new Error('quota'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add tissue' })).toBeEnabled());
+    paint(5, 6);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry saving' })).toBeInTheDocument());
+    const unsaved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry saving' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument());
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(unsaved);
+  });
+
+  it('hydrates a new same-key volume before any write and ignores late hydration from another volume', async () => {
+    const first = editingVolume(),
+      second = editingVolume();
+    let resolveFirst: (value: Awaited<ReturnType<typeof getVolumeSegmentation>>) => void = () => {};
+    const labels = new Uint8Array(second.data.length);
+    labels[32] = 1;
+    vi.mocked(getVolumeSegmentation)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        volumeKey: 'saved',
+        dims: second.dims,
+        labels,
+        updatedAt: 0,
+        reviewState: 'draft',
+        classMetadata: SELECTION_LABEL_META,
+      });
+    const view = render(<SvrVolume3DViewer volume={first} volumeIdentity={identity} />);
+    await waitFor(() => expect(getVolumeSegmentation).toHaveBeenCalledOnce());
+    view.rerender(<SvrVolume3DViewer volume={second} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept selection' })).toBeEnabled());
+    await act(async () =>
+      resolveFirst({ volumeKey: 'old', dims: first.dims, labels: new Uint8Array(first.data.length), updatedAt: 0 }),
+    );
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(labels);
+  });
+
+  it('finishes a submitted save after navigation without silently dropping the last edit', async () => {
+    let finish: () => void = () => {};
+    vi.mocked(saveVolumeSegmentation).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add tissue' })).toBeEnabled());
+    paint(5, 6);
+    await waitFor(() => expect(saveVolumeSegmentation).toHaveBeenCalledOnce());
+    const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
+    view.unmount();
+    await act(async () => finish());
+    expect(saved.labels[(6 * 12 + 6) * 12 + 5]).toBe(1);
+  });
+
+  it('keeps transferred annotations as editable drafts and lets saved edits take precedence', async () => {
+    const volume = editingVolume();
+    const data = new Uint8Array(volume.data.length);
+    data[31] = 1;
+    const initialSelection: SvrLabelVolume = {
+      data,
+      dims: volume.dims,
+      meta: SELECTION_LABEL_META,
+      reviewState: 'draft',
+      seeds: { foreground: Uint32Array.of(31), background: Uint32Array.of(33) },
+    };
+    const view = render(
+      <SvrVolume3DViewer volume={volume} initialSelection={initialSelection} volumeIdentity={identity} />,
+    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Grow from marks' })).toBeEnabled());
+    expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
+    view.unmount();
+    const saved = data.slice();
+    saved[31] = 0;
+    saved[36] = 1;
+    vi.mocked(getVolumeSegmentation).mockResolvedValueOnce({
+      volumeKey: 'saved',
+      dims: volume.dims,
+      labels: saved,
+      updatedAt: 0,
+      reviewState: 'reviewed',
+      classMetadata: SELECTION_LABEL_META,
+    });
+    render(<SvrVolume3DViewer volume={volume} initialSelection={initialSelection} volumeIdentity={identity} />);
+    await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(saved);
+  });
+
+  it('keeps external labels read-only, sanitizes missing support, and withholds a stale reviewed volume', async () => {
     render(
       <SvrVolume3DViewer
         volume={observedVolume}
         labels={{
-          data: new Uint8Array([1, 1, 1, 1]),
-          dims: [2, 2, 1],
-          meta: [{ id: 1, name: 'Observed lesion', color: [255, 64, 64] }],
+          data: Uint8Array.of(1, 1, 1, 1),
+          dims: observedVolume.dims,
+          meta: SELECTION_LABEL_META,
+          reviewState: 'reviewed',
         }}
       />,
     );
-
-    fireEvent.click(screen.getByRole('button', { name: /segmentation/i }));
-    await waitFor(() => expect(screen.getByText(/total labeled:/i)).toHaveTextContent('2 vox'));
-    expect(screen.getByText(/observed lesion/i).parentElement).toHaveTextContent('2 vox');
-    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent('2 labeled boundary voxels');
+    expect(screen.getByRole('button', { name: 'Add tissue' })).toBeDisabled();
+    expect(screen.getByText(/Draft · review/)).toBeInTheDocument();
+    expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D control panels' }));
+    expect(screen.getByText(/review and accept the selection/i)).toBeInTheDocument();
+    expect(screen.queryByText(/total labeled:/i)).not.toBeInTheDocument();
   });
 
-  it('warns when an otherwise supported lesion reaches the reconstruction boundary', async () => {
+  it('reports only reviewed observed tissue and warns when it touches the volume boundary', () => {
     render(
       <SvrVolume3DViewer
-        volume={{
-          ...observedVolume,
-          data: new Float32Array(27).fill(0.5),
-          observedSupport: new Uint8Array(27).fill(1),
-          dims: [3, 3, 3],
-          voxelSizeMm: [1, 1, 1],
-          boundsMm: { min: [0, 0, 0], max: [3, 3, 3] },
-        }}
+        volume={observedVolume}
         labels={{
-          data: Uint8Array.from({ length: 27 }, (_, index) => (index === 13 || index === 14 ? 1 : 0)),
-          dims: [3, 3, 3],
-          meta: [{ id: 1, name: 'Boundary lesion', color: [255, 64, 64] }],
+          data: Uint8Array.of(1, 0, 1, 0),
+          dims: observedVolume.dims,
+          meta: SELECTION_LABEL_META,
+          reviewState: 'reviewed',
         }}
       />,
     );
-
-    fireEvent.click(screen.getByRole('button', { name: /segmentation/i }));
-    await waitFor(() => expect(screen.getByText(/total labeled:/i)).toHaveTextContent('2 vox'));
-    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent('1 labeled boundary voxel');
-    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent(/reconstruction boundary/i);
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D control panels' }));
+    expect(screen.getByText(/total labeled:/i)).toHaveTextContent('2 vox');
+    expect(screen.getByText(/incomplete acquired coverage/i)).toHaveTextContent('2 labeled boundary voxels');
   });
 });

@@ -2,8 +2,8 @@
  * SVR compute core — the pure compute phase of multi-plane reconstruction.
  *
  * This module contains everything that happens between "slices are decoded"
- * and "the fused volume exists": intensity normalization, optional debug
- * histogram matching, output-grid selection (+ memory preflight), coarse and
+ * and "the fused volume exists": intensity normalization, output-grid selection
+ * (+ memory preflight), coarse and
  * ROI-rigid inter-series alignment, ROI slice cropping, and the actual
  * reconstruction solve.
  *
@@ -33,7 +33,7 @@ import type { Vec3 } from './vec3';
 import { dot, v3 } from './vec3';
 import { boundsCornersMm, cropSliceToRoiInPlace } from './sliceRoiCrop';
 import { debugSvrLog } from '../debugSvr';
-import { clamp01 } from '../math';
+import { normalizeSvrIntensities } from './intensityNormalization';
 import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes, SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
 import {
   applyRigidToSeriesSlices,
@@ -50,6 +50,7 @@ import { assertNotAborted, formatMiB, quantileSorted, yieldToMain } from './svrU
 /** Compute-phase output. The caller (main thread) turns this into an SvrResult. */
 export type SvrComputeResult = {
   volume: Float32Array;
+  displayWindow: [number, number];
   /** Canonical acquired-observation domain, transferred alongside the intensity volume. */
   observedSupport: Uint8Array;
   supportedVoxelCount: number;
@@ -76,7 +77,6 @@ export type SvrComputeResult = {
 export type SvrComputePayload = {
   allSlices: LoadedSlice[];
   intensitySamples: number[];
-  intensitySamplesBySeries: Map<string, number[]>;
   svrParams: SvrParams;
   debug: boolean;
   /** Decoded-frame cache retained on the main thread while this worker owns its source copies. */
@@ -227,6 +227,7 @@ function fingerprintReconstruction(params: {
     update(vector.z);
   };
 
+  update('texture-preserving-svr-v2');
   update(params.slices.length);
   for (const slice of params.slices) {
     update(slice.seriesUid);
@@ -629,7 +630,7 @@ function chooseOutputGrid(params: { bounds: { min: Vec3; max: Vec3 }; voxelSizeM
 export async function computeSvrFromLoadedSlices(
   params: SvrComputePayload & { signal?: AbortSignal; onProgress?: (p: SvrProgress) => void },
 ): Promise<SvrComputeResult> {
-  const { allSlices, intensitySamples, intensitySamplesBySeries, svrParams, signal, onProgress, debug } = params;
+  const { allSlices, intensitySamples, svrParams, signal, onProgress, debug } = params;
 
   assertNotAborted(signal);
   if (allSlices.length === 0) throw new Error('SVR requires at least one physically located source slice');
@@ -654,129 +655,15 @@ export async function computeSvrFromLoadedSlices(
     acceptedFrameOfReferenceUid = frameOfReferenceUid;
   }
 
-  // Normalize all slices to [0,1] using a robust global percentile window.
-  //
-  // Why:
-  // - per-series min/max is unstable (outliers/background dominate)
-  // - cross-series fusion and ROI rigid alignment benefit from a shared intensity domain
-  const finite = intensitySamples.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-
-  const getHistogramMatchingEnabled = (debug?: boolean): boolean => {
-    if (!debug) return false;
-    try {
-      // Worker contexts have no `localStorage` (ReferenceError) — catch keeps the default (off).
-      return localStorage.getItem('miraviewer:svr-histmatch') === '1';
-    } catch {
-      return false;
-    }
-  };
-
-  const histMatchEnabled = getHistogramMatchingEnabled(debug);
-
-  // If enabled, we do a simple piecewise-linear quantile mapping per series
-  // (approximate histogram matching) before global percentile normalization.
-  const HM_Q = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99] as const;
-
-  const refQs = HM_Q.map((q) => quantileSorted(finite, q));
-
-  if (histMatchEnabled && finite.length > 0) {
-    const perSeriesMap = new Map<string, { srcQs: number[]; dstQs: number[] }>();
-
-    for (const [uid, samples] of intensitySamplesBySeries) {
-      const sSorted = samples.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-      if (sSorted.length < 16) continue;
-
-      const srcQs = HM_Q.map((q) => quantileSorted(sSorted, q));
-
-      // Skip degenerate distributions.
-      const lo = srcQs[0] ?? 0;
-      const hi = srcQs[srcQs.length - 1] ?? lo;
-      if (!(hi > lo + 1e-12)) continue;
-
-      perSeriesMap.set(uid, { srcQs, dstQs: [...refQs] });
-    }
-
-    const mapValue = (v: number, m: { srcQs: number[]; dstQs: number[] }): number => {
-      const src = m.srcQs;
-      const dst = m.dstQs;
-      const n = Math.min(src.length, dst.length);
-      if (n < 2) return v;
-
-      if (v <= (src[0] ?? v)) return dst[0] ?? v;
-      if (v >= (src[n - 1] ?? v)) return dst[n - 1] ?? v;
-
-      // Small n (9), so linear scan is fine.
-      let i = 0;
-      while (i < n - 1 && v > (src[i + 1] ?? Number.POSITIVE_INFINITY)) i++;
-
-      const x0 = src[i] ?? v;
-      const x1 = src[i + 1] ?? x0;
-      const y0 = dst[i] ?? v;
-      const y1 = dst[i + 1] ?? y0;
-
-      const den = x1 - x0;
-      if (!(den > 1e-12)) return y0;
-
-      const t = (v - x0) / den;
-      return y0 + (y1 - y0) * t;
-    };
-
-    let matchedSeries = 0;
-
-    for (const s of allSlices) {
-      const m = perSeriesMap.get(s.seriesUid);
-      if (!m) continue;
-
-      for (let i = 0; i < s.pixels.length; i++) {
-        if (!s.valid || s.valid[i]) s.pixels[i] = mapValue(s.pixels[i] ?? 0, m);
-      }
-    }
-
-    matchedSeries = perSeriesMap.size;
-
-    console.info('[svr] Histogram matching', {
-      enabled: true,
-      seriesMatched: matchedSeries,
-      quantiles: HM_Q,
-    });
-  }
-
-  let winLo = 0;
-  let winHi = 1;
-
-  if (finite.length > 0) {
-    winLo = refQs[0] ?? quantileSorted(finite, 0.01);
-    winHi = refQs[refQs.length - 1] ?? quantileSorted(finite, 0.99);
-
-    // Fallback if the distribution is degenerate.
-    if (!(winHi > winLo + 1e-12)) {
-      winLo = finite[0] ?? 0;
-      winHi = finite[finite.length - 1] ?? winLo;
-    }
-  }
-
-  const invWinRange = winHi > winLo + 1e-12 ? 1 / (winHi - winLo) : 0;
+  // One affine domain preserves all acquired intensity differences. Percentile
+  // windows control display only; worker and inline execution use the same path.
+  const { displayWindow, robustRangeScale } = normalizeSvrIntensities(allSlices, intensitySamples);
 
   console.info('[svr] Intensity normalization', {
-    method: histMatchEnabled ? 'histmatch+global-percentile' : 'global-percentile',
-    pLow: 1,
-    pHigh: 99,
-    window: { lo: Number(winLo.toFixed(4)), hi: Number(winHi.toFixed(4)) },
-    samples: finite.length,
+    method: 'affine-source-range',
+    displayWindow,
+    samples: intensitySamples.length,
   });
-
-  for (const s of allSlices) {
-    for (let i = 0; i < s.pixels.length; i++) {
-      if (s.valid && !s.valid[i]) {
-        s.pixels[i] = 0;
-        continue;
-      }
-      const v = s.pixels[i] ?? 0;
-      const n = invWinRange > 0 ? (v - winLo) * invWinRange : 0;
-      s.pixels[i] = clamp01(n);
-    }
-  }
-
   // 2) Optional coarse inter-series alignment.
   //
   // Bounding-box centers are not anatomical landmarks: a valid partial-FOV
@@ -1050,8 +937,9 @@ export async function computeSvrFromLoadedSlices(
     clampOutput: svrParams.clampOutput,
     psfMode: svrParams.psfMode ?? 'gaussian',
     robustLoss: svrParams.robustLoss ?? 'huber',
-    robustDelta: typeof svrParams.robustDelta === 'number' ? svrParams.robustDelta : 0.1,
+    robustDelta: (typeof svrParams.robustDelta === 'number' ? svrParams.robustDelta : 0.1) * robustRangeScale,
     laplacianWeight: typeof svrParams.laplacianWeight === 'number' ? svrParams.laplacianWeight : 0,
+    regularizationEdgeScale: 0.04 * robustRangeScale,
   };
 
   debugSvrLog(
@@ -1196,6 +1084,7 @@ export async function computeSvrFromLoadedSlices(
 
   return {
     volume,
+    displayWindow,
     observedSupport,
     supportedVoxelCount,
     ...acquisitionEvidence,

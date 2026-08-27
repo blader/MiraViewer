@@ -131,6 +131,7 @@ function reconstruct(selectedSeries: SvrSelectedSeries[], onProgress?: (progress
 function syntheticComputeResult(reconstructionFingerprint: string, intensity = 1): computeCore.SvrComputeResult {
   return {
     volume: new Float32Array([intensity]),
+    displayWindow: [0, 1],
     observedSupport: new Uint8Array([1]),
     supportedVoxelCount: 1,
     acquiredOrientationCount: 2,
@@ -176,6 +177,14 @@ describe('SVR canonical source admission and acquired support', () => {
 
     await expect(reconstruct([axial, coronal])).rejects.toThrow(/same patient/i);
     expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+  });
+
+  it('retains the accepted reconstruction parameters for subsequent source-backed refinement', async () => {
+    const axial = await seedSeries({ seriesUid: 'settings-axial' });
+    const coronal = await seedSeries({ seriesUid: 'settings-coronal', orientation: 'coronal' });
+    const result = await reconstruct([axial, coronal]);
+    expect(result.parameters).toEqual(params);
+    expect(result.volume.data.length).toBeGreaterThan(0);
   });
 
   it('rejects source series from separate examinations of the same patient', async () => {

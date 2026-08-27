@@ -11,6 +11,9 @@ export default defineConfig({
           'src/utils/svr/glRaymarch.ts',
           'src/utils/svr/reconstructionCore.ts',
           'src/utils/svr/renderLod.ts',
+          // Patient-space annotation transfer yields between bounded chunks;
+          // parallelizing it would duplicate buffers and break cancellation.
+          'src/utils/svr/refineRegion.ts',
           'src/utils/svr/rigidRegistration.ts',
           'src/utils/svr/svrComputeCore.ts',
           // DICOM decoding, ZIP integrity checks, restore transactions, and model writes
@@ -31,7 +34,7 @@ export default defineConfig({
       {
         // The GPU diagnostic canvas intentionally owns keyboard navigation as an
         // accessible application; role="application" is covered by viewer regressions.
-        files: ['src/components/SvrVolume3DViewer.tsx'],
+        files: ['src/components/SvrVolume3DViewer.tsx', 'src/components/SvrSegmentationEditor.tsx'],
         rules: ['react-doctor/no-interactive-element-to-noninteractive-role'],
       },
       {

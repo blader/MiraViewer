@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
 import type { SvrResult } from '../src/types/svr';
+import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
+import { useSvrImaging } from '../src/components/svrImagingContext';
 
 const mocks = vi.hoisted(() => ({
   cacheInfo: vi.fn(),
@@ -35,11 +37,30 @@ vi.mock('../src/hooks/useSvrReconstruction', () => ({
 }));
 
 vi.mock('../src/components/SvrVolume3DViewer', () => ({
-  SvrVolume3DViewer: ({ volumeIdentity }: { volumeIdentity: { patientKey?: string; studyUid?: string } | null }) => (
-    <div data-testid="accepted-svr-volume">
-      {volumeIdentity?.patientKey} / {volumeIdentity?.studyUid}
-    </div>
-  ),
+  SvrVolume3DViewer: function MockSvrViewer({
+    volumeIdentity,
+  }: {
+    volumeIdentity: { patientKey?: string; studyUid?: string } | null;
+  }) {
+    const imaging = useSvrImaging();
+    return (
+      <div data-testid="accepted-svr-volume">
+        {volumeIdentity?.patientKey} / {volumeIdentity?.studyUid}
+        <button
+          onClick={() => {
+            if (imaging.volume)
+              imaging.refineRegion?.({
+                data: new Uint8Array(imaging.volume.data.length).fill(1),
+                dims: imaging.volume.dims,
+                meta: [{ id: 1, name: 'Test selection', color: [0, 1, 1] }],
+              });
+          }}
+        >
+          Refine test region
+        </button>
+      </div>
+    );
+  },
 }));
 
 vi.mock('cornerstone-core', () => ({
@@ -154,6 +175,7 @@ function acceptedResult(): SvrResult {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
   mocks.sortedSopUids.mockResolvedValue([]);
@@ -171,6 +193,41 @@ afterEach(() => {
 });
 
 describe('SVR reconstruction workspace', () => {
+  it('refines accepted source settings and registration instead of the controls for the next run', async () => {
+    const comparisonData = data('patient-a');
+    const previous = acceptedResult();
+    previous.parameters = {
+      ...DEFAULT_SVR_PARAMS,
+      iterations: 7,
+      stepSize: 0.31,
+      seriesRegistrationMode: 'roi-rigid',
+      roi: {
+        mode: 'cube',
+        sourcePlane: 'coronal',
+        sourceSeriesUid: 'coronal-patient-a',
+        boundsMm: { min: [-1, -1, -1], max: [1, 1, 1] },
+      },
+    };
+    mocks.hook.result = previous;
+    mocks.hook.resultIdentity = identity(comparisonData);
+    mocks.hook.status = 'ready';
+    render(<Svr3DView data={comparisonData} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Refine test region' }));
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    const [sources, settings, resultIdentity, transfer] = mocks.run.mock.calls[0]!;
+    expect(sources).toHaveLength(2);
+    expect(settings).toMatchObject({
+      iterations: 7,
+      stepSize: 0.31,
+      seriesRegistrationMode: 'roi-rigid',
+      roi: { sourceSeriesUid: 'coronal-patient-a' },
+    });
+    expect(resultIdentity).toBe(identity(comparisonData));
+    expect(transfer.volume).toBe(previous.volume);
+    expect(transfer.labels.data[0]).toBe(1);
+  });
+
   it('explains one-orientation ineligibility without exposing premature 3D or segmentation controls', async () => {
     render(<Svr3DView data={data('patient-a', 1)} />);
 

@@ -68,6 +68,54 @@ describe('useSvrReconstruction', () => {
     expect(result.current.resultIdentity).toBe('patient-a|study-a|revision-2');
   });
 
+  it('publishes transferred annotations atomically with their finer volume and never carries reviewed status forward', async () => {
+    const previous = volume(0.4),
+      next = volume(0.8);
+    mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(next);
+    const states: ReturnType<typeof useSvrReconstruction>[] = [];
+    const { result } = renderHook(() => {
+      const state = useSvrReconstruction();
+      states.push(state);
+      return state;
+    });
+    const labels = {
+      data: Uint8Array.of(1),
+      dims: previous.volume.dims,
+      meta: [{ id: 1, name: 'Selected tissue', color: [103, 207, 193] as [number, number, number] }],
+      reviewState: 'reviewed' as const,
+      seeds: { foreground: Uint32Array.of(0), background: new Uint32Array() },
+    };
+    await act(async () => {
+      await result.current.run(selectedSeries, undefined, 'patient-a', { volume: previous.volume, labels });
+    });
+    const accepted = states.filter((state) => state.status === 'ready');
+    expect(accepted.length).toBeGreaterThan(0);
+    for (const state of accepted) {
+      expect(state.result?.volume).toBe(next.volume);
+      expect(state.result?.initialSelection?.reviewState).toBe('draft');
+      expect(state.result?.initialSelection?.data[0]).toBe(1);
+    }
+    expect(labels.reviewState).toBe('reviewed');
+  });
+
+  it('retains the previous result if an annotation cannot be transferred safely', async () => {
+    const previous = volume(0.4);
+    mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(previous).mockResolvedValueOnce(volume(0.8));
+    const { result } = renderHook(() => useSvrReconstruction());
+    await act(async () => {
+      await result.current.run(selectedSeries, undefined, 'patient-a');
+    });
+    await act(async () => {
+      await result.current.run(selectedSeries, undefined, 'patient-a', {
+        volume: previous.volume,
+        labels: { data: Uint8Array.of(1, 1), dims: [2, 1, 1], meta: [] },
+      });
+    });
+    expect(result.current.status).toBe('failed');
+    expect(result.current.result).toBe(previous);
+    expect(result.current.error).toMatch(/geometry/);
+  });
+
   it('does not allow progress to move backward across reconstruction phases', async () => {
     let resolveRun: ((result: SvrResult) => void) | undefined;
     let timestamp = 0;

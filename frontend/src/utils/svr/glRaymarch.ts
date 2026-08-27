@@ -398,6 +398,10 @@ uniform usampler3D u_labels;
 uniform sampler2D u_palette;
 uniform int u_labelsEnabled;
 uniform int u_tumorOnly;
+uniform float u_windowLow;
+uniform float u_windowWidth;
+uniform int u_clipEnabled;
+uniform float u_clipZ;
 uniform int u_focusEnabled;
 uniform vec3 u_focusCenter;
 uniform vec3 u_focusMin;
@@ -432,6 +436,10 @@ const float FOCAL_Z = ${SVR3D_FOCAL_Z};
 
 float saturate(float x) {
   return clamp(x, 0.0, 1.0);
+}
+
+float windowed(float intensity) {
+  return saturate((intensity - u_windowLow) / max(1e-6, u_windowWidth));
 }
 
 void addLesionSample(
@@ -476,6 +484,24 @@ float lesionCoverage(vec3 tc, out uint label) {
   return coverage;
 }
 
+// A cut surface is an MRI section, not a shaded or accumulated density sample.
+// Sample the exact crosshair plane with the same window as the orthogonal views.
+// Categorical support and labels stay categorical: neither can be interpolated
+// into evidence outside the acquired or selected region.
+vec4 cutSurface(vec3 position) {
+  vec3 tc = position / u_box + 0.5;
+  if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) return vec4(0.0);
+  uint label = 0u;
+  if (u_labelsEnabled != 0 || u_tumorOnly != 0) label = texture(u_labels, tc).r;
+  if (u_tumorOnly != 0 && label == 0u) return vec4(0.0);
+  float value = windowed(texture(u_vol, tc).r);
+  vec3 color = vec3(value);
+  if (u_labelsEnabled != 0 && label != 0u) {
+    color = mix(color, texelFetch(u_palette, ivec2(int(label), 0), 0).rgb * value, 0.08);
+  }
+  return vec4(color, 1.0);
+}
+
 bool intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1) {
   vec3 invD = 1.0 / rd;
   vec3 tbot = (bmin - ro) * invD;
@@ -513,11 +539,21 @@ void main() {
     bmax = min(bmax, u_focusMax);
   }
 
+  float cutZ = (u_clipZ - 0.5) * u_box.z;
+  if (u_clipEnabled != 0) bmax.z = min(bmax.z, cutZ);
+
   float t0;
   float t1;
-  if (!intersectBox(ro, rd, bmin, bmax, t0, t1)) {
+  if (bmax.z < bmin.z || !intersectBox(ro, rd, bmin, bmax, t0, t1)) {
     outColor = vec4(0.0, 0.0, 0.0, 1.0);
     return;
+  }
+
+  // When looking into the cut, preserve its acquired grayscale exactly. Fog
+  // integration behind it otherwise washes out texture even at high resolution.
+  if (u_clipEnabled != 0 && rd.z < -1e-6 && abs((ro + rd * t0).z - cutZ) < 1e-5) {
+    vec4 section = cutSurface(ro + rd * t0);
+    if (section.a > 0.0) { outColor = section; return; }
   }
 
   // Raymarch (front-to-back compositing)
@@ -569,7 +605,7 @@ void main() {
       ivec3 vox = ivec3(clamp(tc, 0.0, 1.0) / u_texel);
       ivec3 cell = clamp(vox / u_occBlock, ivec3(0), u_occMaxCell);
       float occMax = texelFetch(u_occ, cell, 0).r;
-      if (thr > 0.0 && occMax < thr) {
+      if (u_labelsEnabled == 0 && thr > 0.0 && occMax < u_windowLow + thr * u_windowWidth) {
         // Distance (in ray-parameter units) to this cell's exit, via per-axis positive
         // distances — formulated to avoid div-by-zero/NaN for axis-aligned rays. The eps
         // in aRdTc only shrinks the leap, never overshoots.
@@ -608,21 +644,21 @@ void main() {
       }
     }
 
-    float v = saturate(texture(u_vol, tc).r);
+    float v = windowed(texture(u_vol, tc).r);
 
     if (v >= thr || (u_labelsEnabled != 0 && lid != 0u)) {
       float val = u_tumorOnly != 0
-        ? max(v, 0.48)
+        ? max(v, 0.18)
         : saturate((v - thr) / max(1e-6, 1.0 - thr));
 
       // Gradient in object/texture space (central differences).
       vec3 d = u_texel;
-      float vx1 = saturate(texture(u_vol, clamp(tc + vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
-      float vx0 = saturate(texture(u_vol, clamp(tc - vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
-      float vy1 = saturate(texture(u_vol, clamp(tc + vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
-      float vy0 = saturate(texture(u_vol, clamp(tc - vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
-      float vz1 = saturate(texture(u_vol, clamp(tc + vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
-      float vz0 = saturate(texture(u_vol, clamp(tc - vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
+      float vx1 = windowed(texture(u_vol, clamp(tc + vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
+      float vx0 = windowed(texture(u_vol, clamp(tc - vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
+      float vy1 = windowed(texture(u_vol, clamp(tc + vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
+      float vy0 = windowed(texture(u_vol, clamp(tc - vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
+      float vz1 = windowed(texture(u_vol, clamp(tc + vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
+      float vz0 = windowed(texture(u_vol, clamp(tc - vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
 
       vec3 grad = vec3(vx1 - vx0, vy1 - vy0, vz1 - vz0);
       float gmag = length(grad);
@@ -660,24 +696,18 @@ void main() {
       if (u_labelsEnabled != 0 && lid != 0u) {
         vec3 labelRgb = texelFetch(u_palette, ivec2(int(lid), 0), 0).rgb;
         if (u_tumorOnly != 0) {
-          // Categorical gradients jump at every voxel boundary. Blend the
-          // continuous acquired-intensity normal with the lesion-centered
-          // physical position instead, preserving depth without tiled facets.
-          vec3 radial = normalize(pos - u_focusCenter + vec3(0.0, 0.0, 0.08));
-          vec3 surfaceNormal = normalize(mix(radial, nrm, 0.16));
-          vec3 keyLight = normalize(vDir + vec3(0.38, 0.52, 0.22));
-          float diffuse = 0.50 + 0.50 * abs(dot(surfaceNormal, keyLight));
-          float rim = 0.08 * pow(1.0 - abs(dot(surfaceNormal, vDir)), 2.0);
-          sampleColor = labelRgb * (diffuse * (0.90 + 0.10 * v) + rim);
+          // The mask gates anatomy; it must not replace MRI texture with a synthetic surface.
+          float tissue = v * (0.65 + 0.35 * diff);
+          sampleColor = mix(vec3(tissue), labelRgb * tissue, 0.10);
         } else {
-          float mixK = clamp(u_labelMix * smoothstep(0.35, 0.9, labelCoverage), 0.0, 0.62);
-          sampleColor = mix(sampleColor, labelRgb, mixK);
+          float mixK = clamp(u_labelMix * smoothstep(0.35, 0.9, labelCoverage), 0.0, 0.22);
+          sampleColor = mix(sampleColor, labelRgb * v, mixK);
           // A separate categorical channel survives foreground tissue. Its
           // final composition shows the selected lesion in anatomical context
           // without making normal MRI opacity authoritative for annotations.
           float boundary = smoothstep(0.35, 0.9, labelCoverage);
           float lesionStep = 1.0 - exp(-u_opacity * max(0.48, val) * dt * 12.0 * boundary);
-          lesionAccum += (1.0 - lesionAlpha) * labelRgb * lesionStep;
+          lesionAccum += (1.0 - lesionAlpha) * mix(vec3(v), labelRgb * v, 0.35) * lesionStep;
           lesionAlpha += (1.0 - lesionAlpha) * lesionStep;
         }
       }
@@ -694,6 +724,13 @@ void main() {
   if (u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
     vec3 visibleLesion = lesionAccum / max(lesionAlpha, 1e-6);
     accum = mix(accum, visibleLesion, clamp(lesionAlpha * 1.15, 0.0, 0.58));
+  }
+
+  // The same plane remains visible through transparent tissue from the reverse
+  // side, in the correct depth order rather than drawn over nearer anatomy.
+  if (u_clipEnabled != 0 && rd.z > 1e-6 && abs((ro + rd * t1).z - cutZ) < 1e-5) {
+    vec4 section = cutSurface(ro + rd * t1);
+    accum += (1.0 - aAccum) * section.rgb * section.a;
   }
 
   outColor = vec4(clamp(accum, 0.0, 1.0), 1.0);

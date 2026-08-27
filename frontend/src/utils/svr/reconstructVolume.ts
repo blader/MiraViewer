@@ -575,7 +575,6 @@ export async function reconstructVolumeMultiPlane(params: {
 
   // Intensity normalization samples (global across all selected series).
   const intensitySamples: number[] = [];
-  const intensitySamplesBySeries = new Map<string, number[]>();
 
   const decodeTotal = admittedSeries.reduce((acc, { manifest }) => acc + manifest.frames.length, 0);
   let decodeBase = 0;
@@ -656,15 +655,6 @@ export async function reconstructVolumeMultiPlane(params: {
       intensitySamples.push(v);
     }
 
-    if (seriesSamples.length > 0) {
-      const prev = intensitySamplesBySeries.get(series.seriesUid);
-      if (prev) {
-        prev.push(...seriesSamples);
-      } else {
-        intensitySamplesBySeries.set(series.seriesUid, [...seriesSamples]);
-      }
-    }
-
     await yieldToMain();
   }
 
@@ -719,7 +709,6 @@ export async function reconstructVolumeMultiPlane(params: {
     payload: {
       allSlices,
       intensitySamples,
-      intensitySamplesBySeries,
       svrParams,
       residentCacheBytes,
       debug,
@@ -746,6 +735,7 @@ export async function reconstructVolumeMultiPlane(params: {
   });
 
   return {
+    parameters: svrParams,
     volume: {
       data: volume,
       ...acquisitionEvidence,

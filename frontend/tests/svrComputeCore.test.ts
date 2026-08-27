@@ -221,7 +221,6 @@ function computeSyntheticSvr(
   return computeSvrFromLoadedSlices({
     allSlices,
     intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-    intensitySamplesBySeries: new Map(),
     svrParams,
     debug: false,
     ...options,
@@ -472,7 +471,6 @@ describe('svr/computeCore', () => {
     const result = await computeSvrFromLoadedSlices({
       allSlices,
       intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-      intensitySamplesBySeries: new Map(),
       svrParams: SVR_PARAMS,
       debug: false,
     });
@@ -506,6 +504,7 @@ describe('svr/computeCore', () => {
       robustLoss: 'huber',
       robustDelta: 0.1,
       laplacianWeight: 0.02,
+      regularizationEdgeScale: 0.04,
     };
     const reference = await reconstructVolumeFromSlices({ slices: referenceSlices, grid, options });
 
@@ -704,7 +703,8 @@ describe('svr/computeCore', () => {
         continue;
       }
       supportedVoxels++;
-      maximumSupportedError = Math.max(maximumSupportedError, Math.abs(result.volume[index]! - 0.75));
+      // The preserved affine source range is [0, 0.75], so a constant observation is normalized to 1.
+      maximumSupportedError = Math.max(maximumSupportedError, Math.abs(result.volume[index]! - 1));
     }
     expect(supportedVoxels).toBeGreaterThan(0);
     expect(maximumSupportedError).toBeLessThan(1e-5);
@@ -769,7 +769,6 @@ describe('svr/computeCore', () => {
       computeSvrFromLoadedSlices({
         allSlices: makeAllSlices(),
         intensitySamples: [...IDENTITY_WINDOW_SAMPLES],
-        intensitySamplesBySeries: new Map(),
         svrParams: SVR_PARAMS,
         signal: controller.signal,
         debug: false,

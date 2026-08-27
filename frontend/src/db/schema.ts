@@ -268,6 +268,8 @@ export interface VolumeSegmentationRow {
   labels: Uint8Array;
   classMetadata?: unknown;
   modelKey?: string;
+  reviewState?: 'draft' | 'reviewed';
+  seeds?: { foreground: Uint32Array; background: Uint32Array };
   datasetRevision?: number;
   updatedAt: number;
 }
