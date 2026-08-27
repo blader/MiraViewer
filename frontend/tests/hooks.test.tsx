@@ -403,7 +403,7 @@ describe('usePanelSettings', () => {
     unmount();
   });
 
-  it('blocks undo and redo from moving the reference while alignment owns viewer interaction', async () => {
+  it('blocks undo and redo from moving the reference while a dialog owns viewer interaction', async () => {
     const date = '2035-01-10T12:00:00';
     const { result, rerender, unmount } = renderHook(
       ({ blocked }) => usePanelSettings('synthetic-sequence', date, null, blocked),

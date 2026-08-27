@@ -228,14 +228,8 @@ export function usePanelSettings(
         if (cancelled) return;
 
         setPanelSettings((prev) => {
-          const next = new Map<string, PanelSettings>();
-
           // Keep existing settings only when the same patient and sequence still own them.
-          if (!scopeChanged) {
-            for (const [date, settings] of prev) {
-              next.set(date, settings);
-            }
-          }
+          const next = new Map<string, PanelSettings>(scopeChanged ? [] : prev);
 
           // Hydrate all stored settings (not just enabled dates) so toggling dates later preserves saved values.
           for (const [date, s] of Object.entries(stored)) {

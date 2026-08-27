@@ -7,7 +7,6 @@ import { ExportModal } from './ExportModal';
 import { ClearDataModal } from './ClearDataModal';
 import { SliceLoopNavigator } from './comparison/SliceLoopNavigator';
 import { GridView } from './comparison/GridView';
-import type { GridViewProps } from './comparison/GridView';
 import { OverlayView } from './comparison/OverlayView';
 import { ComparisonFiltersSidebar } from './comparison/ComparisonFiltersSidebar';
 import { ComparisonDatesSidebar } from './comparison/ComparisonDatesSidebar';
@@ -29,7 +28,7 @@ type ComparisonStageProps = {
   hasData: boolean;
   navigation: ReturnType<typeof useComparisonWorkspaceNavigation>;
   panel: Pick<ReturnType<typeof usePanelSettings>, 'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting'>;
-  alignment: Pick<GridViewProps, 'isAligning' | 'alignmentProgress' | 'abortAlignment' | 'onUseAcquired'>;
+  onUseAcquired: (date: string) => void;
   onOpenUpload: () => void;
   onOpenExaminations: () => void;
 };
@@ -40,7 +39,7 @@ function ComparisonStage({
   hasData,
   navigation,
   panel,
-  alignment,
+  onUseAcquired,
   onOpenUpload,
   onOpenExaminations,
 }: ComparisonStageProps) {
@@ -80,9 +79,9 @@ function ComparisonStage({
           </div>
         </div>
       ) : navigation.viewMode === 'grid' ? (
-        <GridView comboId={selectedSeqId} {...navigation} {...panel} {...alignment} />
+        <GridView comboId={selectedSeqId} {...navigation} {...panel} onUseAcquired={onUseAcquired} />
       ) : navigation.viewMode === 'overlay' ? (
-        <OverlayView comboId={selectedSeqId} {...navigation} {...panel} {...alignment} />
+        <OverlayView comboId={selectedSeqId} {...navigation} {...panel} onUseAcquired={onUseAcquired} />
       ) : (
         <Suspense
           fallback={
@@ -133,7 +132,7 @@ export function ComparisonMatrix() {
     setHeaderMenuOpen,
     headerMenuRef,
     interactionBlocked,
-  } = useComparisonInstrumentUi(false);
+  } = useComparisonInstrumentUi();
 
   const panel = usePanelSettings(
     selectedSeqId,
@@ -241,7 +240,6 @@ export function ComparisonMatrix() {
       )}
 
       <ComparisonInstrumentHeader
-        backgroundAlignment
         alignmentControls={
           workspaceNavigation.columns.length > 1 && viewMode !== 'svr3d' ? (
             <AutomaticAlignmentStatus
@@ -326,7 +324,6 @@ export function ComparisonMatrix() {
               onSelectSequence={selectSequence}
               alignmentOutputMode={alignmentOutputMode}
               onAlignmentOutputModeChange={(mode) => setUiState({ ...uiState, alignmentOutputMode: mode })}
-              alignmentInProgress={false}
             />
           ) : null}
 
@@ -336,7 +333,7 @@ export function ComparisonMatrix() {
             hasData={Boolean(hasData)}
             navigation={workspaceNavigation}
             panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
-            alignment={{ isAligning: false, alignmentProgress: null, abortAlignment, onUseAcquired: useAcquiredImage }}
+            onUseAcquired={useAcquiredImage}
             onOpenUpload={() => setActiveDialog('upload')}
             onOpenExaminations={() => setRightSidebarOpen(true)}
           />
@@ -351,7 +348,6 @@ export function ComparisonMatrix() {
               onSelectAllDates={selectAllDates}
               onSelectNoDates={selectNoDates}
               onToggleDate={toggleDate}
-              alignmentInProgress={false}
             />
           ) : null}
         </div>

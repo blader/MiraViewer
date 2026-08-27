@@ -18,7 +18,6 @@ type ComparisonFiltersSidebarProps = {
 
   alignmentOutputMode: OutputGridMode;
   onAlignmentOutputModeChange: (mode: OutputGridMode) => void;
-  alignmentInProgress?: boolean;
 };
 
 export function ComparisonFiltersSidebar({
@@ -33,7 +32,6 @@ export function ComparisonFiltersSidebar({
   onSelectSequence,
   alignmentOutputMode,
   onAlignmentOutputModeChange,
-  alignmentInProgress = false,
 }: ComparisonFiltersSidebarProps) {
   return (
     <aside
@@ -54,7 +52,6 @@ export function ComparisonFiltersSidebar({
             className="instrument-icon-button"
             aria-label="Close scan filters"
             onClick={onToggleOpen}
-            disabled={alignmentInProgress}
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -68,7 +65,6 @@ export function ComparisonFiltersSidebar({
               <button
                 key={p}
                 type="button"
-                disabled={alignmentInProgress}
                 aria-pressed={selectedPlane === p}
                 onClick={() => onSelectPlane(p)}
                 className={`min-h-10 w-full truncate border-l-2 px-3 text-left text-[13px] transition-colors ${
@@ -96,7 +92,6 @@ export function ComparisonFiltersSidebar({
                 <button
                   key={seq.id}
                   type="button"
-                  disabled={alignmentInProgress}
                   aria-pressed={isSelected}
                   onClick={() => onSelectSequence(seq.id)}
                   className={`min-h-10 w-full cursor-pointer truncate border-l-2 px-3 text-left text-[13px] transition-colors ${
@@ -128,7 +123,6 @@ export function ComparisonFiltersSidebar({
             id="alignment-output-resolution"
             aria-label="Alignment output resolution"
             value={alignmentOutputMode}
-            disabled={alignmentInProgress}
             onChange={(event) => onAlignmentOutputModeChange(event.target.value as OutputGridMode)}
             className="min-h-10 w-full rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-2 text-xs text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
           >

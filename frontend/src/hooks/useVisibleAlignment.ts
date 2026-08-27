@@ -134,6 +134,5 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     activeRequestKey: active ? requestKey : null,
     realign,
     targetCount: targetDates.length,
-    referenceDate: first?.date,
   };
 }

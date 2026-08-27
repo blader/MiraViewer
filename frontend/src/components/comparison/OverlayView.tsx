@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { AlignmentProgress, PanelSettings, SeriesRef } from '../../types/api';
+import type { PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
@@ -13,7 +13,7 @@ import {
   TumorSavedSegmentationOverlay,
   TumorSegmentationOverlay,
 } from './LazyStudyOverlays';
-import { AlignmentProgressCard, StudySelectionSurface } from './GridCell';
+import { StudySelectionSurface } from './GridCell';
 
 export type OverlayViewProps = {
   comboId: string;
@@ -25,7 +25,6 @@ export type OverlayViewProps = {
   overlayDisplayedDate: string | undefined;
   overlayDisplayedSettings: PanelSettings;
   overlayDisplayedSliceIndex: number;
-  overlayDisplayedEffectiveSliceIndex: number;
 
   overlaySelectedRef: SeriesRef | undefined;
   overlaySelectedDate: string | undefined;
@@ -40,9 +39,6 @@ export type OverlayViewProps = {
   isOverlayComparing: boolean;
   hasOverlayCompareTarget: boolean;
 
-  isAligning: boolean;
-  alignmentProgress: AlignmentProgress | null;
-  abortAlignment: () => void;
   onUseAcquired?: (date: string) => void;
 
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
@@ -149,7 +145,7 @@ function OverlaySelectedLayer({
   study,
   annotation,
   viewerRef,
-  presentation,
+  isComparing,
   setProgress,
   updatePanelSetting,
 }: {
@@ -157,12 +153,11 @@ function OverlaySelectedLayer({
   study: OverlaySelectedStudy;
   annotation: OverlayAnnotationState;
   viewerRef: React.RefObject<DicomViewerHandle | null>;
-  presentation: Pick<OverlayComparePresentation, 'isComparing' | 'isAligning'>;
+  isComparing: boolean;
   setProgress: (progress: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
 }) {
   const { date, series, settings, sliceIndex, effectiveSliceIndex, imageSize, nativeAnnotationsAvailable } = study;
-  const { isComparing, isAligning } = presentation;
 
   return (
     <>
@@ -170,7 +165,6 @@ function OverlaySelectedLayer({
         ref={viewerRef}
         studyId={series.study_id}
         seriesUid={series.series_uid}
-        interactionBlocked={isAligning}
         instanceIndex={sliceIndex}
         instanceCount={series.instance_count}
         {...settings}
@@ -203,7 +197,6 @@ function OverlaySelectedLayer({
 
 type OverlayComparePresentation = {
   isComparing: boolean;
-  isAligning: boolean;
   showSavedTumor: boolean;
   tumorToolOpen: boolean;
 };
@@ -218,14 +211,14 @@ function OverlayComparisonLayer({
   setProgress: (progress: number) => void;
 }) {
   const { series, settings, sliceIndex, effectiveSliceIndex, imageSize, nativeAnnotationsAvailable } = study;
-  const { isComparing, isAligning, showSavedTumor, tumorToolOpen } = presentation;
+  const { isComparing, showSavedTumor, tumorToolOpen } = presentation;
 
   return (
     <div className={`absolute inset-0 ${isComparing ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
       <DicomViewer
         studyId={series.study_id}
         seriesUid={series.series_uid}
-        interactionBlocked={isAligning || isComparing}
+        interactionBlocked={isComparing}
         instanceIndex={sliceIndex}
         instanceCount={series.instance_count}
         {...settings}
@@ -259,7 +252,7 @@ function OverlayStudyFooter({
   onUpdate,
   onUseAcquired,
 }: {
-  presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean };
+  presentation: { isComparing: boolean; isAligned: boolean };
   instanceIndex: number;
   instanceCount: number;
   settings: PanelSettings;
@@ -280,7 +273,7 @@ function OverlayStudyFooter({
         </span>
       )}
       <div
-        inert={presentation.isComparing || presentation.isAligning}
+        inert={presentation.isComparing}
         className={presentation.isComparing ? 'pointer-events-none opacity-40' : ''}
       >
         <StepControl
@@ -310,7 +303,7 @@ function OverlayStudyHeader({
   settings: PanelSettings;
   instanceIndex: number;
   instanceCount: number;
-  presentation: { isComparing: boolean; isAligning: boolean; isAligned: boolean; nativeAnnotationsAvailable: boolean };
+  presentation: { isComparing: boolean; isAligned: boolean; nativeAnnotationsAvailable: boolean };
   annotation: {
     showSavedTumor: boolean;
     tumorToolOpen: boolean;
@@ -328,7 +321,7 @@ function OverlayStudyHeader({
         {presentation.isAligned ? <VerifiedAlignmentBadge /> : null}
       </div>
 
-      <StudyTools disabled={presentation.isComparing || presentation.isAligning} examinationLabel={formatDate(date)}>
+      <StudyTools disabled={presentation.isComparing} examinationLabel={formatDate(date)}>
         <StudyAnnotationControls {...annotation} nativeAnnotationsAvailable={presentation.nativeAnnotationsAvailable} />
 
         <ImageControls
@@ -361,9 +354,6 @@ export function OverlayView({
   overlayCompareSliceIndex,
   isOverlayComparing,
   hasOverlayCompareTarget,
-  isAligning,
-  alignmentProgress,
-  abortAlignment,
   onUseAcquired,
   updatePanelSetting,
   setProgress,
@@ -373,7 +363,6 @@ export function OverlayView({
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
-  const overlayCellRef = useRef<HTMLDivElement | null>(null);
   const selectedImageSize = useMemo(
     () => ({ w: overlaySelectedRef?.columns ?? 512, h: overlaySelectedRef?.rows ?? 512 }),
     [overlaySelectedRef?.columns, overlaySelectedRef?.rows],
@@ -445,7 +434,6 @@ export function OverlayView({
             instanceCount={overlayDisplayedRef.instance_count}
             presentation={{
               isComparing: isOverlayComparing,
-              isAligning,
               isAligned: Boolean(displayedDerivedFrame),
               nativeAnnotationsAvailable,
             }}
@@ -460,18 +448,13 @@ export function OverlayView({
             onUpdate={(update) => updatePanelSetting(overlayDisplayedDate, update)}
           />
 
-          <div
-            ref={overlayCellRef}
-            data-diagnostic-surface="true"
-            className="relative min-h-0 flex-1 bg-[var(--bg-primary)]"
-          >
+          <div data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
             <StudySelectionSurface
               reference={{
                 settings: overlayDisplayedSettings,
                 imageSize: displayedImageSize,
               }}
               presentation={{
-                isAligning,
                 isComparing: isOverlayComparing,
                 groundTruthOpen: gtPolygonToolOpen,
                 nativeAnnotationsAvailable,
@@ -525,7 +508,7 @@ export function OverlayView({
                       closeGroundTruth: () => setGtPolygonToolOpen(false),
                     }}
                     viewerRef={tumorViewerRef}
-                    presentation={{ isComparing: isOverlayComparing, isAligning }}
+                    isComparing={isOverlayComparing}
                     setProgress={setProgress}
                     updatePanelSetting={updatePanelSetting}
                   />
@@ -544,18 +527,11 @@ export function OverlayView({
                   }}
                   presentation={{
                     isComparing: isOverlayComparing,
-                    isAligning,
                     showSavedTumor,
                     tumorToolOpen,
                   }}
                   setProgress={setProgress}
                 />
-              ) : null}
-
-              {isAligning && alignmentProgress ? (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                  <AlignmentProgressCard progress={alignmentProgress} onAbort={abortAlignment} />
-                </div>
               ) : null}
             </StudySelectionSurface>
           </div>
@@ -564,7 +540,6 @@ export function OverlayView({
             onUseAcquired={onUseAcquired ? () => onUseAcquired(overlayDisplayedDate) : undefined}
             presentation={{
               isComparing: isOverlayComparing,
-              isAligning,
               isAligned: Boolean(displayedDerivedFrame),
             }}
             instanceIndex={overlayDisplayedSliceIndex}

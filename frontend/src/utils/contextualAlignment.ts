@@ -14,7 +14,7 @@ export type AlignmentContextPlane = {
   cols: number;
 };
 
-function validatePlane(plane: AlignmentContextPlane): void {
+function normalizePlane(plane: AlignmentContextPlane, size: number, exclusionRect?: ExclusionMask) {
   if (
     !Number.isSafeInteger(plane.rows) ||
     !Number.isSafeInteger(plane.cols) ||
@@ -25,22 +25,25 @@ function validatePlane(plane: AlignmentContextPlane): void {
   ) {
     throw new Error('Alignment context requires matching image dimensions and acquired support');
   }
+  const scaled = resample2dAreaAverageWithValidity(
+    plane.pixels,
+    plane.valid ?? new Uint8Array(plane.pixels.length).fill(1),
+    plane.rows,
+    plane.cols,
+    size,
+    size,
+  );
+  return {
+    pixels: normalizePerceptualSource(scaled.pixels, size, { exclusionRect, validity: scaled.validity }),
+    validity: scaled.validity,
+  };
 }
 
 /** Select sustained, spatially coherent anatomy, not a bright lesion or the browsing cursor. */
 export function selectInformativeAlignmentPlane(planes: readonly AlignmentContextPlane[]): number | null {
   const size = 64;
   const quality = planes.map((plane) => {
-    validatePlane(plane);
-    const scaled = resample2dAreaAverageWithValidity(
-      plane.pixels,
-      plane.valid ?? new Uint8Array(plane.pixels.length).fill(1),
-      plane.rows,
-      plane.cols,
-      size,
-      size,
-    );
-    const pixels = normalizePerceptualSource(scaled.pixels, size, { validity: scaled.validity });
+    const { pixels, validity } = normalizePlane(plane, size);
     const smooth = new Float32Array(pixels.length);
     let sum = 0,
       squares = 0,
@@ -51,13 +54,13 @@ export function selectInformativeAlignmentPlane(planes: readonly AlignmentContex
     for (let row = 1; row < size - 1; row++) {
       for (let col = 1; col < size - 1; col++) {
         const index = row * size + col;
-        if (scaled.validity[index]! < 0.99) continue;
+        if (validity[index]! < 0.99) continue;
         let local = 0,
           support = 0;
         for (let dy = -1; dy <= 1; dy++)
           for (let dx = -1; dx <= 1; dx++) {
             const neighbor = index + dy * size + dx;
-            if (scaled.validity[neighbor]! < 0.99) continue;
+            if (validity[neighbor]! < 0.99) continue;
             local += pixels[neighbor]!;
             support++;
           }
@@ -83,7 +86,7 @@ export function selectInformativeAlignmentPlane(planes: readonly AlignmentContex
     for (let row = 2; row < size - 2; row++)
       for (let col = 2; col < size - 2; col++) {
         const index = row * size + col;
-        if (scaled.validity[index]! < 0.99) continue;
+        if (validity[index]! < 0.99) continue;
         gradient +=
           (smooth[index + 1]! - smooth[index - 1]!) ** 2 + (smooth[index + size]! - smooth[index - size]!) ** 2;
       }
@@ -96,7 +99,7 @@ export function selectInformativeAlignmentPlane(planes: readonly AlignmentContex
     // A single detailed/noisy outlier between blank frames cannot choose a slab.
     const score = Math.min(
       quality[index]!,
-      [...neighborhood].sort((a, b) => a - b)[Math.floor((neighborhood.length - 1) / 2)]!,
+      neighborhood.sort((a, b) => a - b)[Math.floor((neighborhood.length - 1) / 2)]!,
     );
     if (
       score > best ||
@@ -118,24 +121,8 @@ export function prepareAlignmentContext(
   size = 64,
 ) {
   if (!Number.isSafeInteger(size) || size < 8) throw new Error('Alignment context requires a valid scoring size');
-  const normalize = (plane: AlignmentContextPlane) => {
-    validatePlane(plane);
-    const scaled = resample2dAreaAverageWithValidity(
-      plane.pixels,
-      plane.valid ?? new Uint8Array(plane.pixels.length).fill(1),
-      plane.rows,
-      plane.cols,
-      size,
-      size,
-    );
-    const pixels = normalizePerceptualSource(scaled.pixels, size, {
-      exclusionRect,
-      validity: scaled.validity,
-    });
-    return { pixels, validity: scaled.validity };
-  };
   const references = planes.map((plane) => {
-    const normalized = normalize(plane);
+    const normalized = normalizePlane(plane, size, exclusionRect);
     return preparePerceptualReference(normalized.pixels, size, {
       scales: [size],
       exclusionRect,
@@ -145,12 +132,11 @@ export function prepareAlignmentContext(
   const scratch = createPerceptualScoringScratch();
 
   return {
-    planeCount: references.length,
     score(candidateAt: (index: number) => AlignmentContextPlane, minimumCoverage = 0.55) {
       let score = 0;
       let coverage = 1;
       for (let index = 0; index < references.length; index++) {
-        const normalized = normalize(candidateAt(index));
+        const normalized = normalizePlane(candidateAt(index), size, exclusionRect);
         // The scorer expects intensity premultiplied by fractional acquired support.
         for (let pixel = 0; pixel < normalized.pixels.length; pixel++) {
           normalized.pixels[pixel] *= normalized.validity[pixel]!;

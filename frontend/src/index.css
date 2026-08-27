@@ -290,13 +290,6 @@ textarea {
   font-size: 12px;
 }
 
-.instrument-workflow-hint {
-  align-self: center;
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
 .instrument-context-summary,
 .instrument-context-playback,
 .instrument-study-filmstrip {
@@ -747,10 +740,6 @@ textarea {
 @media (max-width: 1439px) {
   .comparison-drawer-dismiss[data-dates-open='true'] {
     display: block;
-  }
-
-  .instrument-workflow-hint {
-    display: none;
   }
 
   .comparison-sidebar[data-open='true'][data-side='right'] {
@@ -1605,14 +1594,6 @@ input[type='range'].tumor-vert-slider::-moz-range-thumb {
   .intake-content {
     gap: 0.75rem;
     padding: 1rem;
-  }
-
-  .intake-source-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .intake-backup-button {
-    grid-column: 1 / -1;
   }
 
   .intake-drop-target {

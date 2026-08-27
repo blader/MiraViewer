@@ -1177,60 +1177,44 @@ function refineAnatomicalSlabPose(
   const indices = [
     ...new Set([-4, -2, 0, 2, 4].map((offset) => Math.max(0, Math.min(slices.length - 1, index + offset)))),
   ];
-  const references = prepareScoringSlices(
-    indices.map((position) => slices[position]!),
-    64,
-  );
   const targets = prepareScoringSlices(options.targetSlices, 64);
-  const context = prepareAlignmentContext(
-    references.map((slice) => ({
-      pixels: slice.pixels,
-      valid: slice.valid,
-      rows: slice.dsRows,
-      cols: slice.dsCols,
-    })),
+  const prepareScore = (
+    selected: readonly SvrReconstructionSlice[],
+    exclusionRect?: Parameters<typeof prepareAlignmentContext>[1],
+  ) => {
+    const references = prepareScoringSlices(selected, 64);
+    const context = prepareAlignmentContext(
+      references.map((slice) => ({
+        pixels: slice.pixels,
+        valid: slice.valid,
+        rows: slice.dsRows,
+        cols: slice.dsCols,
+      })),
+      exclusionRect,
+    );
+    return (rigid: RigidParams) => {
+      assertNotAborted(options.signal);
+      return context.score(
+        (position) =>
+          resliceStackToReferencePlane({
+            referenceSlice: references[position]!,
+            targetSlices: targets,
+            targetToReference: rigid,
+            centerMm: options.centerMm,
+            signal: options.signal,
+          }),
+        Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55)),
+      );
+    };
+  };
+  const evaluate = prepareScore(
+    indices.map((position) => slices[position]!),
     exclusionMaskBounds(options.referenceExclusionMask, reference.dsRows, reference.dsCols),
   );
   const trainingIndices = new Set(indices);
-  const heldOutReferences = prepareScoringSlices(
-    slices.filter((_slice, position) => !trainingIndices.has(position)),
-    64,
-  );
-  if (!heldOutReferences.length) return initial;
-  const heldOut = prepareAlignmentContext(
-    heldOutReferences.map((slice) => ({
-      pixels: slice.pixels,
-      valid: slice.valid,
-      rows: slice.dsRows,
-      cols: slice.dsCols,
-    })),
-  );
-  const validate = (rigid: RigidParams) =>
-    heldOut.score(
-      (position) =>
-        resliceStackToReferencePlane({
-          referenceSlice: heldOutReferences[position]!,
-          targetSlices: targets,
-          targetToReference: rigid,
-          centerMm: options.centerMm,
-          signal: options.signal,
-        }),
-      Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55)),
-    );
-  const evaluate = (rigid: RigidParams) => {
-    assertNotAborted(options.signal);
-    return context.score(
-      (position) =>
-        resliceStackToReferencePlane({
-          referenceSlice: references[position]!,
-          targetSlices: targets,
-          targetToReference: rigid,
-          centerMm: options.centerMm,
-          signal: options.signal,
-        }),
-      Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55)),
-    );
-  };
+  const heldOutSlices = slices.filter((_slice, position) => !trainingIndices.has(position));
+  if (!heldOutSlices.length) return initial;
+  const validate = prepareScore(heldOutSlices);
   let current = { ...initial.rigid };
   let best = evaluate(current);
   const initialScore = best.score;
@@ -1275,7 +1259,7 @@ function refineAnatomicalSlabPose(
         initialScore,
         heldOutScore,
         heldOutInitialScore,
-        planeCount: context.planeCount,
+        planeCount: indices.length,
         evaluations,
       },
     },

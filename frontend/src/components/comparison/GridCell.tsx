@@ -1,6 +1,6 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Loader2, ScanLine } from 'lucide-react';
-import type { AlignmentProgress, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { ScanLine } from 'lucide-react';
+import type { ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
@@ -24,45 +24,10 @@ export type GridCellProps = {
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
 
-  isAligning: boolean;
   onUseAcquired?: (date: string) => void;
 };
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
-
-export function AlignmentProgressCard({ progress, onAbort }: { progress: AlignmentProgress; onAbort: () => void }) {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
-    >
-      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-[var(--text-primary)]">
-          {progress.phase === 'capturing'
-            ? 'Preparing reference…'
-            : progress.currentDate
-              ? `Aligning ${formatDate(progress.currentDate)} (${progress.dateIndex + 1}/${progress.totalDates})`
-              : 'Aligning…'}
-        </div>
-        {progress.phase !== 'capturing' && progress.slicesChecked ? (
-          <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
-            {progress.slicesChecked} slices · Score {progress.bestMiSoFar.toFixed(3)}
-          </div>
-        ) : null}
-      </div>
-      <button
-        type="button"
-        onClick={onAbort}
-        className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-        title="Cancel alignment"
-      >
-        Cancel
-      </button>
-    </div>
-  );
-}
 
 export function StudySelectionSurface({
   reference,
@@ -75,7 +40,6 @@ export function StudySelectionSurface({
     imageSize: { width: number; height: number };
   };
   presentation: {
-    isAligning: boolean;
     isComparing: boolean;
     groundTruthOpen: boolean;
     nativeAnnotationsAvailable: boolean;
@@ -84,14 +48,14 @@ export function StudySelectionSurface({
   children: React.ReactNode;
 }) {
   const { settings, imageSize } = reference;
-  const { isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
+  const { isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
 
   return (
     <DragRectActionOverlay
       className="absolute inset-0 cursor-crosshair"
       imageSize={imageSize}
       geometry={settings}
-      disabled={isAligning || isComparing || groundTruthOpen}
+      disabled={isComparing || groundTruthOpen}
       actions={[
         {
           key: 'segment-tumor',
@@ -100,7 +64,7 @@ export function StudySelectionSurface({
           icon: <ScanLine className="w-4 h-4" />,
           variant: 'secondary',
           minSizeSpace: 'screen',
-          disabled: isAligning || isComparing || !nativeAnnotationsAvailable,
+          disabled: isComparing || !nativeAnnotationsAvailable,
           onConfirm: (masks) => onSegment(masks.screen),
         },
       ]}
@@ -118,7 +82,6 @@ export function GridCell({
   progress,
   setProgress,
   updatePanelSetting,
-  isAligning,
   onUseAcquired,
 }: GridCellProps) {
   const [showSavedTumor, setShowSavedTumor] = useState(false);
@@ -126,7 +89,6 @@ export function GridCell({
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
-  const studyCellRef = useRef<HTMLDivElement | null>(null);
   const nativeImageSize = useMemo(
     () => ({ w: refData?.columns ?? 512, h: refData?.rows ?? 512 }),
     [refData?.columns, refData?.rows],
@@ -165,7 +127,7 @@ export function GridCell({
           {derivedFrame ? <VerifiedAlignmentBadge /> : null}
         </div>
 
-        <StudyTools disabled={isAligning} examinationLabel={formatDate(date)}>
+        <StudyTools examinationLabel={formatDate(date)}>
           <StudyAnnotationControls
             showSavedTumor={showSavedTumor}
             tumorToolOpen={tumorToolOpen}
@@ -186,14 +148,13 @@ export function GridCell({
         </StudyTools>
       </div>
 
-      <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
+      <div data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
         <StudySelectionSurface
           reference={{
             settings,
             imageSize: displayedImageSize,
           }}
           presentation={{
-            isAligning,
             isComparing: false,
             groundTruthOpen: gtPolygonToolOpen,
             nativeAnnotationsAvailable,
@@ -212,7 +173,6 @@ export function GridCell({
             ref={tumorViewerRef}
             studyId={refData.study_id}
             seriesUid={refData.series_uid}
-            interactionBlocked={isAligning}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
             reverseSliceOrder={settings.reverseSliceOrder}
@@ -295,7 +255,7 @@ export function GridCell({
             {derivedFrame ? 'Aligned' : 'Acquired'}
           </span>
         )}
-        <div inert={isAligning}>
+        <div>
           <StepControl
             title="Slice offset"
             value={`${idx + 1}/${refData.instance_count}`}

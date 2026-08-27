@@ -1,5 +1,5 @@
-import { AlignmentProgressCard, GridCell } from './GridCell';
-import type { AlignmentProgress, PanelSettings, SeriesRef } from '../../types/api';
+import { GridCell } from './GridCell';
+import type { PanelSettings, SeriesRef } from '../../types/api';
 import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
 
 export type GridViewProps = {
@@ -12,9 +12,6 @@ export type GridViewProps = {
   progress: number;
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
-  isAligning: boolean;
-  alignmentProgress: AlignmentProgress | null;
-  abortAlignment: () => void;
   onUseAcquired?: (date: string) => void;
 };
 
@@ -27,9 +24,6 @@ export function GridView({
   progress,
   setProgress,
   updatePanelSetting,
-  isAligning,
-  alignmentProgress,
-  abortAlignment,
   onUseAcquired,
 }: GridViewProps) {
   const stackedStudies = gridCols === 1 && columns.length > 1;
@@ -40,12 +34,6 @@ export function GridView({
         stackedStudies ? 'items-start overflow-y-auto overflow-x-hidden py-6' : 'items-center overflow-hidden'
       }`}
     >
-      {isAligning && alignmentProgress && (
-        <div className="absolute left-1/2 top-3 z-20 max-w-[calc(100%-2rem)] -translate-x-1/2">
-          <AlignmentProgressCard progress={alignmentProgress} onAbort={abortAlignment} />
-        </div>
-      )}
-
       <div
         className={`grid max-w-full gap-2 ${stackedStudies ? 'max-h-none' : 'max-h-full'}`}
         style={{
@@ -66,7 +54,6 @@ export function GridView({
               progress={progress}
               setProgress={setProgress}
               updatePanelSetting={updatePanelSetting}
-              isAligning={isAligning}
               onUseAcquired={onUseAcquired}
             />
           );

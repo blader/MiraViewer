@@ -92,8 +92,6 @@ describe('native annotation coordinate-space safety', () => {
         progress={0}
         setProgress={vi.fn()}
         updatePanelSetting={vi.fn()}
-        overlayColumns={[{ date: '2025-01-01T00:00:00.000Z', ref: series }]}
-        isAligning={false}
       />,
     );
 
@@ -122,7 +120,6 @@ describe('native annotation coordinate-space safety', () => {
         overlayDisplayedDate="2025-01-01T00:00:00.000Z"
         overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
         overlayDisplayedSliceIndex={0}
-        overlayDisplayedEffectiveSliceIndex={0}
         overlaySelectedRef={series}
         overlaySelectedDate="2025-01-01T00:00:00.000Z"
         overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
@@ -133,9 +130,6 @@ describe('native annotation coordinate-space safety', () => {
         overlayCompareSliceIndex={0}
         isOverlayComparing={false}
         hasOverlayCompareTarget={false}
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
         updatePanelSetting={vi.fn()}
         setProgress={vi.fn()}
       />,

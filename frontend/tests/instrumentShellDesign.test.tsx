@@ -158,10 +158,10 @@ describe('Quiet Instrument visual system', () => {
   it('keeps every acquisition source visible on compact screens without shrinking 44px touch targets', () => {
     const compactIntake = stylesheet.slice(stylesheet.indexOf('@media (max-width: 560px)'));
 
-    expect(compactIntake).toMatch(
-      /\.intake-source-actions\s*\{\s*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+    expect(stylesheet).toMatch(
+      /\.intake-source-actions\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
     );
-    expect(compactIntake).toMatch(/\.intake-backup-button\s*\{\s*grid-column:\s*1\s*\/\s*-1/);
+    expect(stylesheet).toMatch(/\.intake-backup-button\s*\{\s*grid-column:\s*1\s*\/\s*-1/);
     expect(compactIntake).toMatch(/\.intake-drop-target\s*\{\s*min-height:\s*6\.5rem/);
     expect(stylesheet).toMatch(/\.intake-source-button,\s*\.intake-button\s*\{[^}]*min-height:\s*44px/s);
   });

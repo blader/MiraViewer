@@ -115,11 +115,6 @@ function alignedResult(series: SeriesRef, date: string): AlignmentResult {
 function comparisonProps() {
   return {
     comboId: 'synthetic-sequence',
-    overlayColumns: [
-      { date: selectedDate, ref: selectedSeries },
-      { date: compareDate, ref: compareSeries },
-    ],
-    isAligning: false,
     updatePanelSetting: vi.fn(),
     setProgress: vi.fn(),
   };
@@ -139,25 +134,25 @@ function gridViewProps(columns: Array<{ date: string; ref: SeriesRef }>, gridCol
   return {
     ...comparisonProps(),
     columns,
-    overlayColumns: columns,
     gridCols,
     gridCellSize,
     panelSettings: new Map(),
     progress: 0,
-    alignmentProgress: null,
-    abortAlignment: vi.fn(),
   };
 }
 
 function overlayProps() {
   return {
     ...comparisonProps(),
+    overlayColumns: [
+      { date: selectedDate, ref: selectedSeries },
+      { date: compareDate, ref: compareSeries },
+    ],
     overlayViewerSize: 420,
     overlayDisplayedRef: selectedSeries,
     overlayDisplayedDate: selectedDate,
     overlayDisplayedSettings: DEFAULT_PANEL_SETTINGS,
     overlayDisplayedSliceIndex: 0,
-    overlayDisplayedEffectiveSliceIndex: 0,
     overlaySelectedRef: selectedSeries,
     overlaySelectedDate: selectedDate,
     overlaySelectedSettings: DEFAULT_PANEL_SETTINGS,
@@ -168,8 +163,6 @@ function overlayProps() {
     overlayCompareSliceIndex: 0,
     isOverlayComparing: false,
     hasOverlayCompareTarget: true,
-    alignmentProgress: null,
-    abortAlignment: vi.fn(),
   };
 }
 
@@ -353,21 +346,18 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(container.querySelector('[data-registration-datum="verified"]')).toBeNull();
   });
 
-  it('makes grid examination geometry and slice controls inert while alignment owns their presentation', () => {
-    const props = { ...gridCellProps(), isAligning: false };
-    const { container, rerender } = render(<GridCell {...props} />);
+  it('keeps grid geometry and slice controls interactive when a validated alignment arrives', () => {
+    const props = gridCellProps();
+    const { container } = render(<GridCell {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
     const zoom = container.querySelector<HTMLButtonElement>('[aria-label="Increase Zoom"]');
     const slice = container.querySelector<HTMLButtonElement>('[aria-label="Increase Slice offset"]');
     expect(zoom).not.toBeNull();
     expect(slice).not.toBeNull();
-    rerender(<GridCell {...props} isAligning />);
+    act(() => setDerivedAlignmentFrame(alignedResult(selectedSeries, selectedDate)));
 
-    expect(zoom?.closest('[inert]')).not.toBeNull();
-    expect(slice?.closest('[inert]')).not.toBeNull();
-
-    rerender(<GridCell {...props} isAligning={false} />);
-
+    expect(screen.getByRole('button', { name: 'Increase Zoom' })).toBe(zoom);
+    expect(screen.getByRole('button', { name: 'Increase Slice offset' })).toBe(slice);
     expect(zoom?.closest('[inert]')).toBeNull();
     expect(slice?.closest('[inert]')).toBeNull();
     fireEvent.mouseDown(zoom!);
@@ -441,27 +431,14 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(props.setProgress).not.toHaveBeenCalled();
     expect(container.innerHTML).not.toContain('backdrop-blur');
 
-    rerender(
-      <OverlayView
-        {...props}
-        isAligning
-        alignmentProgress={{
-          phase: 'capturing',
-          currentDate: null,
-          dateIndex: 0,
-          totalDates: 1,
-          slicesChecked: 0,
-          bestMiSoFar: 0,
-        }}
-      />,
-    );
-
     expect(container.querySelector('[aria-label="Increase Zoom"]')?.closest('[inert]')).not.toBeNull();
     expect(container.querySelector('[aria-label="Increase Slice offset"]')?.closest('[inert]')).not.toBeNull();
-    const cancel = screen.getByRole('button', { name: 'Cancel' });
-    expect(cancel.closest('[inert]')).toBeNull();
-    fireEvent.click(cancel);
-    expect(props.abortAlignment).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Adjust image' })).toBeDisabled();
+
+    rerender(<OverlayView {...props} />);
+    expect(container.querySelector('[aria-label="Increase Zoom"]')?.closest('[inert]')).toBeNull();
+    expect(container.querySelector('[aria-label="Increase Slice offset"]')?.closest('[inert]')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Adjust image' })).toBeEnabled();
   });
 
   it('uses displayed derived-plane dimensions and prevents native segmentation on resliced overlay images', () => {

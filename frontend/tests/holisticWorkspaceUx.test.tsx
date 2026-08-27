@@ -45,7 +45,7 @@ describe('image adjustment inspector', () => {
     expect(triggers[0]).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('locks the inspector without changing its layout when alignment or hold-to-compare owns the image', () => {
+  it('locks the inspector without changing its layout during hold-to-compare', () => {
     const { rerender } = render(<ToolsFixture />);
     fireEvent.click(screen.getAllByRole('button', { name: 'Adjust image' })[0]!);
     const inspector = screen.getByRole('complementary', { name: 'Image adjustments' });
@@ -158,7 +158,7 @@ describe('direct slice navigation', () => {
     expect(input).toHaveValue(6);
   });
 
-  it('does not commit a pending edit while alignment blocks navigation, and drops drafts across sequences', () => {
+  it('does not commit a pending edit while a dialog blocks navigation, and drops drafts across sequences', () => {
     const onSelect = vi.fn();
     const { rerender } = render(<SliceFixture onSelect={onSelect} />);
     const input = screen.getByRole('spinbutton', { name: 'Go to slice' });

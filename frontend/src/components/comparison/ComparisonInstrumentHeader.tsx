@@ -45,7 +45,6 @@ type InstrumentNotices = {
 
 export type ComparisonInstrumentHeaderProps = {
   alignmentControls?: ReactNode;
-  backgroundAlignment?: boolean;
   clinical: InstrumentClinicalContext;
   navigation: InstrumentNavigation;
   actions: InstrumentActions;
@@ -58,18 +57,11 @@ export type ComparisonInstrumentHeaderProps = {
   };
 };
 
-function InstrumentModeNavigation({
-  navigation,
-  alignmentInProgress,
-}: {
-  navigation: InstrumentNavigation;
-  alignmentInProgress: boolean;
-}) {
+function InstrumentModeNavigation({ navigation }: { navigation: InstrumentNavigation }) {
   return (
     <nav className="instrument-mode-nav" aria-label="Viewing mode">
       <button
         type="button"
-        disabled={alignmentInProgress}
         onClick={() => navigation.setViewMode('grid')}
         aria-pressed={navigation.viewMode === 'grid'}
         className="instrument-mode-tab"
@@ -79,7 +71,6 @@ function InstrumentModeNavigation({
       </button>
       <button
         type="button"
-        disabled={alignmentInProgress}
         onClick={() => navigation.setViewMode('overlay')}
         aria-pressed={navigation.viewMode === 'overlay'}
         className="instrument-mode-tab"
@@ -89,7 +80,6 @@ function InstrumentModeNavigation({
       </button>
       <button
         type="button"
-        disabled={alignmentInProgress}
         onClick={() => navigation.setViewMode('svr3d')}
         aria-pressed={navigation.viewMode === 'svr3d'}
         className="instrument-mode-tab"
@@ -116,7 +106,6 @@ function InstrumentPatient({
         <span className="instrument-patient-label">Patient</span>
         <select
           aria-label="Selected patient"
-          disabled={actions.isAligning}
           value={clinical.data?.selected_patient_key ?? ''}
           onChange={(event) => {
             actions.abortAlignment();
@@ -163,7 +152,6 @@ function InstrumentApplicationActions({
       {clinical.hasData ? (
         <button
           type="button"
-          disabled={actions.isAligning}
           onClick={() => {
             actions.setHeaderMenuOpen(false);
             actions.openDialog('upload');
@@ -177,7 +165,6 @@ function InstrumentApplicationActions({
       ) : null}
       <button
         type="button"
-        disabled={actions.isAligning}
         onClick={() => {
           actions.setHeaderMenuOpen(false);
           actions.openDialog('help');
@@ -192,7 +179,6 @@ function InstrumentApplicationActions({
       <div className="relative" ref={headerMenuRef}>
         <button
           type="button"
-          disabled={actions.isAligning}
           onClick={() => actions.setHeaderMenuOpen((value) => !value)}
           className="instrument-icon-button"
           title="Menu"
@@ -206,7 +192,6 @@ function InstrumentApplicationActions({
           <div className="instrument-menu">
             <button
               type="button"
-              disabled={actions.isAligning}
               onClick={() => {
                 actions.setHeaderMenuOpen(false);
                 actions.openDialog('upload');
@@ -219,7 +204,6 @@ function InstrumentApplicationActions({
             {clinical.hasData ? (
               <button
                 type="button"
-                disabled={actions.isAligning}
                 onClick={() => {
                   actions.setHeaderMenuOpen(false);
                   actions.openDialog('export');
@@ -233,7 +217,6 @@ function InstrumentApplicationActions({
             {clinical.hasData ? (
               <button
                 type="button"
-                disabled={actions.isAligning}
                 onClick={() => {
                   actions.setHeaderMenuOpen(false);
                   actions.openDialog('clear');
@@ -254,11 +237,9 @@ function InstrumentApplicationActions({
 
 function InstrumentNoticeRail({
   notices,
-  alignmentInProgress,
   unsuccessfulResults,
 }: {
   notices: InstrumentNotices;
-  alignmentInProgress: boolean;
   unsuccessfulResults: AlignmentResult[];
 }) {
   return (
@@ -271,7 +252,7 @@ function InstrumentNoticeRail({
           </button>
         </div>
       ) : null}
-      {notices.alignmentError && !alignmentInProgress ? (
+      {notices.alignmentError ? (
         <div role="alert" className="instrument-notice" data-severity="error">
           <span>
             <span className="font-medium">Alignment failed:</span> {notices.alignmentError}
@@ -303,16 +284,14 @@ function InstrumentNoticeRail({
 function InstrumentContextRail({
   clinical,
   navigation,
-  actions,
   notices,
   noticesVisible,
   unsuccessfulResults,
   alignmentControls,
   panels,
-}: ComparisonInstrumentHeaderProps & {
+}: Omit<ComparisonInstrumentHeaderProps, 'actions'> & {
   noticesVisible: boolean;
   unsuccessfulResults: AlignmentResult[];
-  alignmentControls?: ReactNode;
 }) {
   const showStudyFilmstrip = navigation.viewMode === 'overlay' || navigation.viewMode === 'svr3d';
 
@@ -329,7 +308,6 @@ function InstrumentContextRail({
           aria-label={panels.filtersOpen ? 'Hide scan filters' : 'Show scan filters'}
           aria-expanded={panels.filtersOpen}
           aria-controls="comparison-filters-panel"
-          disabled={actions.isAligning}
           onClick={panels.toggleFilters}
         >
           <PanelLeft className="h-4 w-4" aria-hidden="true" />
@@ -365,7 +343,7 @@ function InstrumentContextRail({
           <button
             type="button"
             onClick={() => navigation.setIsPlaying(!navigation.isPlaying)}
-            disabled={actions.isAligning || navigation.overlayColumns.length < 2}
+            disabled={navigation.overlayColumns.length < 2}
             className="instrument-icon-button disabled:cursor-not-allowed disabled:opacity-50"
             title={navigation.isPlaying ? 'Pause' : 'Play'}
             aria-label={navigation.isPlaying ? 'Pause comparison playback' : 'Start comparison playback'}
@@ -380,7 +358,7 @@ function InstrumentContextRail({
             aria-label="Comparison playback speed"
             value={navigation.playSpeed}
             onChange={(event) => navigation.setPlaySpeed(parseInt(event.target.value, 10))}
-            disabled={actions.isAligning || navigation.overlayColumns.length < 2}
+            disabled={navigation.overlayColumns.length < 2}
             className="disabled:cursor-not-allowed disabled:opacity-50"
           >
             {OVERLAY.PLAY_SPEEDS.map((speed) => (
@@ -398,7 +376,6 @@ function InstrumentContextRail({
             <button
               key={column.date}
               type="button"
-              disabled={actions.isAligning}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 navigation.setOverlayDateIndex(index);
@@ -413,13 +390,7 @@ function InstrumentContextRail({
         </nav>
       ) : null}
 
-      {noticesVisible ? (
-        <InstrumentNoticeRail
-          notices={notices}
-          alignmentInProgress={actions.isAligning}
-          unsuccessfulResults={unsuccessfulResults}
-        />
-      ) : null}
+      {noticesVisible ? <InstrumentNoticeRail notices={notices} unsuccessfulResults={unsuccessfulResults} /> : null}
 
       {navigation.viewMode !== 'svr3d' ? (
         <button
@@ -428,7 +399,6 @@ function InstrumentContextRail({
           aria-label={panels.datesOpen ? 'Hide examination dates' : 'Show examination dates'}
           aria-expanded={panels.datesOpen}
           aria-controls="comparison-dates-panel"
-          disabled={actions.isAligning}
           onClick={panels.toggleDates}
         >
           <CalendarDays className="h-4 w-4" aria-hidden="true" />
@@ -443,21 +413,17 @@ function InstrumentContextRail({
 export function ComparisonInstrumentHeader({
   clinical,
   navigation,
-  actions: operationActions,
+  actions,
   notices,
   panels,
   alignmentControls,
-  backgroundAlignment = false,
 }: ComparisonInstrumentHeaderProps) {
-  const actions = backgroundAlignment ? { ...operationActions, isAligning: false } : operationActions;
   const unsuccessfulResults =
-    !operationActions.isAligning && !notices.alignmentError
+    !actions.isAligning && !notices.alignmentError
       ? notices.alignmentResults.filter((result) => result.outcome && result.outcome !== 'aligned')
       : [];
   const noticesVisible = Boolean(
-    notices.persistenceError ||
-    (notices.alignmentError && !operationActions.isAligning) ||
-    unsuccessfulResults.length > 0,
+    notices.persistenceError || (notices.alignmentError && !actions.isAligning) || unsuccessfulResults.length > 0,
   );
 
   return (
@@ -467,9 +433,7 @@ export function ComparisonInstrumentHeader({
           Mira<span>Viewer</span>
         </h1>
 
-        {clinical.hasData ? (
-          <InstrumentModeNavigation navigation={navigation} alignmentInProgress={actions.isAligning} />
-        ) : null}
+        {clinical.hasData ? <InstrumentModeNavigation navigation={navigation} /> : null}
         <InstrumentPatient clinical={clinical} actions={actions} clearAlignmentState={notices.clearAlignmentState} />
         <InstrumentApplicationActions clinical={clinical} actions={actions} />
       </div>
@@ -478,7 +442,6 @@ export function ComparisonInstrumentHeader({
         <InstrumentContextRail
           clinical={clinical}
           navigation={navigation}
-          actions={actions}
           notices={notices}
           panels={panels}
           noticesVisible={noticesVisible}
