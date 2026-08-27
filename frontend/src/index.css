@@ -504,7 +504,8 @@ textarea {
   color: var(--text-primary);
 }
 
-.comparison-sidebar-heading .instrument-icon-button {
+.comparison-sidebar-heading .instrument-icon-button,
+.study-tools-heading .instrument-icon-button {
   min-width: 32px;
   min-height: 32px;
   margin-right: -6px;
@@ -594,10 +595,6 @@ textarea {
   background: var(--bg-secondary);
 }
 
-.study-inspector[hidden] {
-  display: none;
-}
-
 .study-tools-trigger {
   display: flex;
   flex: 0 0 auto;
@@ -633,12 +630,6 @@ textarea {
   color: var(--text-primary);
   font-size: 15px;
   font-weight: 500;
-}
-
-.study-tools-heading .instrument-icon-button {
-  min-width: 32px;
-  min-height: 32px;
-  margin-right: -6px;
 }
 
 .study-tools-examination {
@@ -885,10 +876,6 @@ textarea {
 
   .instrument-context-button svg {
     display: none;
-  }
-
-  .instrument-notice-rail {
-    min-width: 0;
   }
 
   .instrument-context-summary [data-secondary='true'] {

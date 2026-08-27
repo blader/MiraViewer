@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { Dispatch, ReactNode, SetStateAction } from 'react';
+import type { Dispatch, KeyboardEvent, ReactNode, SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import { SlidersHorizontal, X } from 'lucide-react';
 
@@ -17,7 +17,7 @@ export function StudyToolsWorkspace({ children }: { children: ReactNode }) {
 
   return (
     <StudyToolsContext.Provider value={context}>
-      <div className="study-workspace" data-tools-open={activeId !== null}>
+      <div className="study-workspace">
         {children}
         <aside
           id="study-image-inspector"
@@ -54,6 +54,12 @@ export function StudyTools({
     setActiveId(null);
     buttonRef.current?.focus();
   };
+  const onEscape = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || !open || disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
 
   return (
     <>
@@ -67,27 +73,14 @@ export function StudyTools({
         disabled={disabled}
         title={`Adjust ${examinationLabel}`}
         onClick={() => setActiveId(open ? null : id)}
-        onKeyDown={(event) => {
-          if (event.key !== 'Escape' || !open) return;
-          event.preventDefault();
-          event.stopPropagation();
-          close();
-        }}
+        onKeyDown={onEscape}
       >
         <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
         <span>Adjust</span>
       </button>
       {open && target
         ? createPortal(
-            <div
-              className="study-tools-panel"
-              onKeyDown={(event) => {
-                if (event.key !== 'Escape' || disabled) return;
-                event.preventDefault();
-                event.stopPropagation();
-                close();
-              }}
-            >
+            <div className="study-tools-panel" onKeyDown={onEscape}>
               <div className="study-tools-heading">
                 <h2>Image adjustments</h2>
                 <button
