@@ -28,6 +28,11 @@ const editBytes = (edit: Edit) =>
   (edit.after.seeds?.foreground.byteLength ?? 0) +
   (edit.after.seeds?.background.byteLength ?? 0);
 
+const supportsMark = (volume: SvrVolume, index: number) =>
+  index < volume.data.length &&
+  Number.isFinite(volume.data[index]) &&
+  (!volume.observedSupport || volume.observedSupport[index]);
+
 function marksFrom(labels: SvrLabelVolume | null, volume: SvrVolume) {
   const marks = new Map<number, 1 | 2>();
   for (const [indices, kind] of [
@@ -35,12 +40,7 @@ function marksFrom(labels: SvrLabelVolume | null, volume: SvrVolume) {
     [labels?.seeds?.background, 2],
   ] as const) {
     for (const index of indices ?? []) {
-      if (
-        index < volume.data.length &&
-        Number.isFinite(volume.data[index]) &&
-        (!volume.observedSupport || volume.observedSupport[index])
-      )
-        marks.set(index, kind);
+      if (supportsMark(volume, index)) marks.set(index, kind);
     }
   }
   return marks;
@@ -128,12 +128,7 @@ export function useSvrSelection(
 
   const stroke = useCallback(
     (indices: Uint32Array, kind: 'include' | 'exclude') => {
-      const supported = indices.filter(
-        (index) =>
-          index < volume.data.length &&
-          Number.isFinite(volume.data[index]) &&
-          (!volume.observedSupport || volume.observedSupport[index]),
-      );
+      const supported = indices.filter((index) => supportsMark(volume, index));
       if (!supported.length) {
         setStatus((current) => ({
           ...current,

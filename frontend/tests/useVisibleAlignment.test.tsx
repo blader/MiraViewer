@@ -35,10 +35,12 @@ function options(overrides: Partial<Options> = {}): Options {
     ...overrides,
   };
 }
-const settle = () =>
-  act(async () => {
+const settle = async (props?: Options, calls = 1) => {
+  await act(async () => {
     await vi.advanceTimersByTimeAsync(650);
   });
+  if (props) expect(props.alignAllDates).toHaveBeenCalledTimes(calls);
+};
 
 describe('visible background alignment', () => {
   beforeEach(() => {
@@ -86,8 +88,7 @@ describe('visible background alignment', () => {
         ['new', { ...DEFAULT_PANEL_SETTINGS, progress: 0.5 }],
       ]),
     });
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(1);
+    await settle(props, 1);
     expect(result.current.activeRequestKey).toBe(key);
   });
 
@@ -100,8 +101,7 @@ describe('visible background alignment', () => {
     rerender({ ...props, progress: 0.7 });
     expect(props.abort).toHaveBeenCalled();
     expect(result.current.activeRequestKey).not.toBe(initial);
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(2);
+    await settle(props, 2);
     expect(vi.mocked(props.alignAllDates).mock.lastCall![0].sliceIndex).toBe(70);
     unmount();
     expect(props.abort).toHaveBeenCalledTimes(3);
@@ -130,23 +130,20 @@ describe('visible background alignment', () => {
     });
     const { result, rerender } = renderHook(useVisibleAlignment, { initialProps: props });
     await settle();
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(1);
+    await settle(props, 1);
     act(() => {
       vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
       document.dispatchEvent(new Event('visibilitychange'));
     });
     expect(result.current.activeRequestKey).toBeNull();
     rerender({ ...props, enabled: false });
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(1);
+    await settle(props, 1);
     act(() => {
       vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
       document.dispatchEvent(new Event('visibilitychange'));
     });
     rerender(props);
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(2);
+    await settle(props, 2);
   });
 
   it.each([
@@ -170,7 +167,6 @@ describe('visible background alignment', () => {
     const key = result.current.activeRequestKey;
     act(() => result.current.realign());
     expect(result.current.activeRequestKey).not.toBe(key);
-    await settle();
-    expect(props.alignAllDates).toHaveBeenCalledTimes(2);
+    await settle(props, 2);
   });
 });

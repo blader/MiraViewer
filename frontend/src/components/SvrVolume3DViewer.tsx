@@ -558,9 +558,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       : null;
     saveQueue.current = (saveQueue.current ?? Promise.resolve())
       .catch(() => undefined)
-      .then(() => {
-        return record ? saveVolumeSegmentation(record) : deleteVolumeSegmentation(volumeKey);
-      })
+      .then(() => (record ? saveVolumeSegmentation(record) : deleteVolumeSegmentation(volumeKey)))
       .then(() => {
         if (current) setStorageError(null);
       })

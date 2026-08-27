@@ -1178,10 +1178,7 @@ function refineAnatomicalSlabPose(
     ...new Set([-4, -2, 0, 2, 4].map((offset) => Math.max(0, Math.min(slices.length - 1, index + offset)))),
   ];
   const targets = prepareScoringSlices(options.targetSlices, 64);
-  const prepareScore = (
-    selected: readonly SvrReconstructionSlice[],
-    exclusionRect?: Parameters<typeof prepareAlignmentContext>[1],
-  ) => {
+  const prepareScore = (selected: readonly SvrReconstructionSlice[]) => {
     const references = prepareScoringSlices(selected, 64);
     const context = prepareAlignmentContext(
       references.map((slice) => ({
@@ -1190,7 +1187,6 @@ function refineAnatomicalSlabPose(
         rows: slice.dsRows,
         cols: slice.dsCols,
       })),
-      exclusionRect,
     );
     return (rigid: RigidParams) => {
       assertNotAborted(options.signal);
@@ -1207,10 +1203,7 @@ function refineAnatomicalSlabPose(
       );
     };
   };
-  const evaluate = prepareScore(
-    indices.map((position) => slices[position]!),
-    exclusionMaskBounds(options.referenceExclusionMask, reference.dsRows, reference.dsCols),
-  );
+  const evaluate = prepareScore(indices.map((position) => slices[position]!));
   const trainingIndices = new Set(indices);
   const heldOutSlices = slices.filter((_slice, position) => !trainingIndices.has(position));
   if (!heldOutSlices.length) return initial;
