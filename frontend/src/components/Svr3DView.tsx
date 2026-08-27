@@ -1823,6 +1823,7 @@ export function Svr3DView(props: Svr3DViewProps) {
     }),
     [acceptedResult, isRunning, workspace.refineRegion],
   );
+  const SourcesIcon = generationCollapsed ? ChevronRight : ChevronLeft;
 
   return (
     <section
@@ -1867,11 +1868,7 @@ export function Svr3DView(props: Svr3DViewProps) {
           aria-expanded={!generationCollapsed}
           className="inline-flex min-h-10 items-center gap-2 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
         >
-          {generationCollapsed ? (
-            <ChevronRight className="h-4 w-4" aria-hidden="true" />
-          ) : (
-            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-          )}
+          <SourcesIcon className="h-4 w-4" aria-hidden="true" />
           Sources
         </button>
       </header>
