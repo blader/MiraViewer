@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback } from 'react';
 import type { AlignmentReference, ComparisonData, ExclusionMask } from '../types/api';
-import { Upload } from 'lucide-react';
+import { CalendarDays, Upload } from 'lucide-react';
 import { HelpModal } from './HelpModal';
 import { UploadModal } from './UploadModal';
 import { ExportModal } from './ExportModal';
@@ -12,6 +12,7 @@ import { OverlayView } from './comparison/OverlayView';
 import { ComparisonFiltersSidebar } from './comparison/ComparisonFiltersSidebar';
 import { ComparisonDatesSidebar } from './comparison/ComparisonDatesSidebar';
 import { ComparisonInstrumentHeader } from './comparison/ComparisonInstrumentHeader';
+import { StudyToolsWorkspace } from './comparison/StudyTools';
 import { useComparisonData } from '../hooks/useComparisonData';
 import { useComparisonFilters } from '../hooks/useComparisonFilters';
 import { useComparisonInstrumentUi } from '../hooks/useComparisonInstrumentUi';
@@ -30,6 +31,7 @@ type ComparisonStageProps = {
   panel: Pick<ReturnType<typeof usePanelSettings>, 'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting'>;
   alignment: Pick<GridViewProps, 'isAligning' | 'alignmentProgress' | 'abortAlignment' | 'startAlignAll'>;
   onOpenUpload: () => void;
+  onOpenExaminations: () => void;
 };
 
 function ComparisonStage({
@@ -40,6 +42,7 @@ function ComparisonStage({
   panel,
   alignment,
   onOpenUpload,
+  onOpenExaminations,
 }: ComparisonStageProps) {
   const { setCenterPaneRef } = navigation;
 
@@ -57,7 +60,23 @@ function ComparisonStage({
               <Upload className="h-4 w-4" aria-hidden="true" />
               Import scans
             </button>
-            <p className="instrument-empty-disclosure">Your images stay on this device.</p>
+            <p className="instrument-empty-disclosure">
+              Folders, DICOM files, and ZIP archives. Your images stay on this device.
+            </p>
+          </div>
+        </div>
+      ) : navigation.viewMode !== 'svr3d' && navigation.columns.length === 0 ? (
+        <div className="instrument-empty">
+          <div className="instrument-empty-inner">
+            <p className="instrument-eyebrow">Your scans are still here</p>
+            <h2 className="instrument-empty-heading">Choose examinations to compare.</h2>
+            <p className="instrument-empty-copy">
+              No examinations match the current selection. Choose dates or change the imaging sequence to continue.
+            </p>
+            <button type="button" className="instrument-primary-button" onClick={onOpenExaminations}>
+              <CalendarDays className="h-4 w-4" aria-hidden="true" />
+              Choose examinations
+            </button>
           </div>
         </div>
       ) : navigation.viewMode === 'grid' ? (
@@ -165,7 +184,6 @@ export function ComparisonMatrix() {
     interactionBlocked,
   });
   const {
-    columns,
     overlayColumns,
     viewMode,
     setViewMode,
@@ -175,7 +193,6 @@ export function ComparisonMatrix() {
     setIsPlaying,
     playSpeed,
     setPlaySpeed,
-    overlayDisplayedDate,
     progressRef,
     playbackInstanceCount,
   } = workspaceNavigation;
@@ -248,7 +265,6 @@ export function ComparisonMatrix() {
   }
 
   const selectedSequence = data?.sequences.find((sequence) => sequence.id === selectedSeqId);
-  const activeExaminationDate = overlayDisplayedDate ?? columns.find((column) => column.ref)?.date ?? null;
 
   return (
     <div className="instrument-shell flex flex-col">
@@ -273,7 +289,6 @@ export function ComparisonMatrix() {
           hasData: Boolean(hasData),
           selectedPlane,
           selectedSequence,
-          activeExaminationDate,
           selectPatient,
         }}
         navigation={{
@@ -296,51 +311,72 @@ export function ComparisonMatrix() {
           openDialog: setActiveDialog,
         }}
         notices={{ persistenceError, clearPersistenceError, alignmentError, alignmentResults, clearAlignmentState }}
+        panels={{
+          filtersOpen: sidebarOpen,
+          datesOpen: rightSidebarOpen,
+          toggleFilters: () => setSidebarOpen((value) => !value),
+          toggleDates: () => setRightSidebarOpen((value) => !value),
+        }}
       />
 
       {/* Main area with sidebar */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {hasData && viewMode !== 'svr3d' ? (
-          <ComparisonFiltersSidebar
-            open={sidebarOpen}
-            onToggleOpen={() => setSidebarOpen((v) => !v)}
-            availablePlanes={availablePlanes}
-            selectedPlane={selectedPlane}
-            onSelectPlane={selectPlane}
-            sequencesForPlane={sequencesForPlane}
-            sequencesWithDataForDates={sequencesWithDataForDates}
+      <StudyToolsWorkspace>
+        <div className="comparison-workspace min-h-0 min-w-0 flex-1 flex overflow-hidden relative">
+          {hasData && viewMode !== 'svr3d' && (sidebarOpen || rightSidebarOpen) ? (
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="Close navigation panels"
+              className="comparison-drawer-dismiss"
+              data-filters-open={sidebarOpen}
+              data-dates-open={rightSidebarOpen}
+              disabled={isAligning}
+              onClick={() => setUiState({ ...uiState, sidebarOpen: false, rightSidebarOpen: false })}
+            />
+          ) : null}
+          {hasData && viewMode !== 'svr3d' ? (
+            <ComparisonFiltersSidebar
+              open={sidebarOpen}
+              onToggleOpen={() => setSidebarOpen((v) => !v)}
+              availablePlanes={availablePlanes}
+              selectedPlane={selectedPlane}
+              onSelectPlane={selectPlane}
+              sequencesForPlane={sequencesForPlane}
+              sequencesWithDataForDates={sequencesWithDataForDates}
+              selectedSeqId={selectedSeqId}
+              onSelectSequence={selectSequence}
+              alignmentOutputMode={alignmentOutputMode}
+              onAlignmentOutputModeChange={(mode) => setUiState({ ...uiState, alignmentOutputMode: mode })}
+              alignmentInProgress={isAligning}
+            />
+          ) : null}
+
+          <ComparisonStage
+            data={data}
             selectedSeqId={selectedSeqId}
-            onSelectSequence={selectSequence}
-            alignmentOutputMode={alignmentOutputMode}
-            onAlignmentOutputModeChange={(mode) => setUiState({ ...uiState, alignmentOutputMode: mode })}
-            alignmentInProgress={isAligning}
+            hasData={Boolean(hasData)}
+            navigation={workspaceNavigation}
+            panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
+            alignment={{ isAligning, alignmentProgress, abortAlignment, startAlignAll }}
+            onOpenUpload={() => setActiveDialog('upload')}
+            onOpenExaminations={() => setRightSidebarOpen(true)}
           />
-        ) : null}
 
-        <ComparisonStage
-          data={data}
-          selectedSeqId={selectedSeqId}
-          hasData={Boolean(hasData)}
-          navigation={workspaceNavigation}
-          panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
-          alignment={{ isAligning, alignmentProgress, abortAlignment, startAlignAll }}
-          onOpenUpload={() => setActiveDialog('upload')}
-        />
-
-        {hasData && viewMode !== 'svr3d' ? (
-          <ComparisonDatesSidebar
-            open={rightSidebarOpen}
-            onToggleOpen={() => setRightSidebarOpen((v) => !v)}
-            sortedDates={sortedDates}
-            enabledDates={enabledDates}
-            datesWithDataForSequence={datesWithDataForSequence}
-            onSelectAllDates={selectAllDates}
-            onSelectNoDates={selectNoDates}
-            onToggleDate={toggleDate}
-            alignmentInProgress={isAligning}
-          />
-        ) : null}
-      </div>
+          {hasData && viewMode !== 'svr3d' ? (
+            <ComparisonDatesSidebar
+              open={rightSidebarOpen}
+              onToggleOpen={() => setRightSidebarOpen((v) => !v)}
+              sortedDates={sortedDates}
+              enabledDates={enabledDates}
+              datesWithDataForSequence={datesWithDataForSequence}
+              onSelectAllDates={selectAllDates}
+              onSelectNoDates={selectNoDates}
+              onToggleDate={toggleDate}
+              alignmentInProgress={isAligning}
+            />
+          ) : null}
+        </div>
+      </StudyToolsWorkspace>
 
       {/* Slice navigator with loop + speed controls */}
       {hasData && viewMode !== 'svr3d' ? (

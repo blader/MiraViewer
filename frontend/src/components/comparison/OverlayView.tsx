@@ -3,6 +3,7 @@ import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSetting
 import { formatDate } from '../../utils/format';
 import { getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
 import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
@@ -315,20 +316,13 @@ function OverlayStudyHeader({
   onUpdate: (update: Partial<PanelSettings>) => void;
 }) {
   return (
-    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-      <div className="flex shrink-0 items-center gap-2">
-        <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
-          {formatDate(date)}
-        </span>
+    <div className="study-heading">
+      <div className="study-heading-identity">
+        <span className="study-date">{formatDate(date)}</span>
         {presentation.isAligned ? <VerifiedAlignmentBadge /> : null}
       </div>
 
-      <div
-        inert={presentation.isComparing || presentation.isAligning}
-        className={`ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100 ${
-          presentation.isComparing ? 'pointer-events-none opacity-40' : 'study-controls'
-        }`}
-      >
+      <StudyTools disabled={presentation.isComparing || presentation.isAligning} examinationLabel={formatDate(date)}>
         <StudyAnnotationControls {...annotation} nativeAnnotationsAvailable={presentation.nativeAnnotationsAvailable} />
 
         <ImageControls
@@ -338,7 +332,7 @@ function OverlayStudyHeader({
           onUpdate={onUpdate}
           showSliceControl={false}
         />
-      </div>
+      </StudyTools>
     </div>
   );
 }
@@ -369,7 +363,6 @@ export function OverlayView({
   startAlignAll,
   setProgress,
 }: OverlayViewProps) {
-  const [isOverlayViewerHovered, setIsOverlayViewerHovered] = useState(false);
   const [showSavedTumor, setShowSavedTumor] = useState(false);
   const [tumorToolOpen, setTumorToolOpen] = useState(false);
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
@@ -437,11 +430,8 @@ export function OverlayView({
       ) : overlayDisplayedRef && overlayDisplayedDate ? (
         <div
           className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
-          data-controls-visible={(isOverlayViewerHovered || tumorToolOpen || gtPolygonToolOpen) && !isOverlayComparing}
           data-alignment-state={displayedDerivedFrame ? 'aligned' : 'acquired'}
           style={{ width: overlayViewerSize, height: overlayViewerSize + GRID_CELL_METADATA_HEIGHT }}
-          onMouseEnter={() => setIsOverlayViewerHovered(true)}
-          onMouseLeave={() => setIsOverlayViewerHovered(false)}
         >
           <OverlayStudyHeader
             date={overlayDisplayedDate}

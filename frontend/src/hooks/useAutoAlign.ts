@@ -1964,12 +1964,13 @@ export function useAutoAlign() {
         return results;
       } catch (err) {
         const cancelled = err instanceof AlignmentCancelledError || alignmentAbortController.signal.aborted;
-        const errorMsg = cancelled ? 'Alignment cancelled' : err instanceof Error ? err.message : 'Alignment failed';
+        const errorMsg = err instanceof Error ? err.message : 'Alignment failed';
         setStateForCurrentRun((s) => ({
           ...s,
           isAligning: false,
           progress: null,
-          error: errorMsg,
+          // A requested cancellation keeps completed results; it is not an alignment failure.
+          error: cancelled ? null : errorMsg,
         }));
         if (cancelled) return results;
         throw err;

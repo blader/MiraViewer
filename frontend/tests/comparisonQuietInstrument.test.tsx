@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { act, fireEvent, render as renderWithoutWorkspace, renderHook, screen } from '@testing-library/react';
+import { StudyToolsWorkspace } from '../src/components/comparison/StudyTools';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentResult, SeriesRef } from '../src/types/api';
 import { ComparisonDatesSidebar } from '../src/components/comparison/ComparisonDatesSidebar';
@@ -92,6 +93,9 @@ vi.mock('../src/components/comparison/LazyStudyOverlays', () => ({
 }));
 
 const selectedDate = '2025-01-01T00:00:00.000Z';
+function render(ui: ReactNode) {
+  return renderWithoutWorkspace(ui, { wrapper: StudyToolsWorkspace });
+}
 const compareDate = '2025-02-01T00:00:00.000Z';
 const selectedSeries: SeriesRef = {
   study_id: 'synthetic-selected-study',
@@ -146,7 +150,6 @@ function gridCellProps(startAlignAll = vi.fn(async () => undefined)) {
     refData: selectedSeries,
     settings: DEFAULT_PANEL_SETTINGS,
     progress: 0,
-    isHovered: true,
   };
 }
 
@@ -247,7 +250,7 @@ describe('Quiet Instrument comparison surfaces', () => {
       <GridView {...gridViewProps(examinations, result.current.cols, result.current.cellSize)} />,
     );
 
-    const scrollSurface = container.firstElementChild as HTMLElement;
+    const scrollSurface = container.querySelector('.study-workspace')?.firstElementChild as HTMLElement;
     const imageGrid = container.querySelector<HTMLElement>('[style*="grid-auto-rows"]');
     expect(scrollSurface.className).toContain('overflow-y-auto');
     expect(imageGrid?.style.gridTemplateColumns).toBe('repeat(1, 342px)');
@@ -352,7 +355,7 @@ describe('Quiet Instrument comparison surfaces', () => {
     const cell = container.querySelector('[data-grid-cell-date]');
     expect(cell).toHaveAttribute('data-alignment-state', 'acquired');
     expect(container.querySelector('[data-registration-datum="verified"]')).toBeNull();
-    expect(screen.getByText('Acquired image')).toBeInTheDocument();
+    expect(screen.getByTitle('Acquired image')).toHaveTextContent('Acquired');
 
     act(() => setDerivedAlignmentFrame({ ...alignedResult(selectedSeries, selectedDate), outcome: 'ambiguous' }));
     expect(container.querySelector('[data-registration-datum="verified"]')).toBeNull();
@@ -360,7 +363,7 @@ describe('Quiet Instrument comparison surfaces', () => {
     act(() => setDerivedAlignmentFrame(alignedResult(selectedSeries, selectedDate)));
     const datum = screen.getByLabelText('Verified aligned presentation');
     expect(cell).toHaveAttribute('data-alignment-state', 'aligned');
-    expect(screen.getByText('Aligned presentation')).toBeInTheDocument();
+    expect(screen.getByTitle('Aligned presentation')).toHaveTextContent('Aligned');
     expect(container.querySelector('[data-diagnostic-surface="true"]')?.contains(datum)).toBe(false);
     expect(container.innerHTML).not.toContain('backdrop-blur');
 
@@ -369,10 +372,14 @@ describe('Quiet Instrument comparison surfaces', () => {
   });
 
   it('makes grid examination geometry and slice controls inert while alignment owns their presentation', () => {
-    const props = { ...gridCellProps(), isAligning: true };
+    const props = { ...gridCellProps(), isAligning: false };
     const { container, rerender } = render(<GridCell {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
     const zoom = container.querySelector<HTMLButtonElement>('[aria-label="Increase Zoom"]');
     const slice = container.querySelector<HTMLButtonElement>('[aria-label="Increase Slice offset"]');
+    expect(zoom).not.toBeNull();
+    expect(slice).not.toBeNull();
+    rerender(<GridCell {...props} isAligning />);
 
     expect(zoom?.closest('[inert]')).not.toBeNull();
     expect(slice?.closest('[inert]')).not.toBeNull();
@@ -437,6 +444,7 @@ describe('Quiet Instrument comparison surfaces', () => {
     const props = overlayProps();
 
     const { container, rerender } = render(<OverlayView {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
     const overlayCell = container.querySelector<HTMLElement>('.study-cell');
     expect(overlayCell?.style.width).toBe('420px');
     expect(overlayCell?.style.height).toBe(`${420 + GRID_CELL_METADATA_HEIGHT}px`);
@@ -546,7 +554,7 @@ describe('Quiet Instrument comparison surfaces', () => {
       />,
     );
 
-    expect(screen.getByText('Slice 6 / 11')).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Go to slice' })).toHaveValue(6);
     expect(screen.getByRole('slider', { name: 'Slice position' })).toHaveAttribute('aria-valuetext', 'Slice 6 of 11');
     expect(container.querySelector('[data-registration-datum="slice-position"]')).toBeInTheDocument();
 

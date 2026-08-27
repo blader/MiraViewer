@@ -3581,10 +3581,11 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
                 onClick={() => setControlsCollapsed((v) => !v)}
                 aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
                 aria-expanded={!controlsCollapsed}
-                className="absolute right-3 top-3 z-20 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+                className="absolute right-3 top-3 z-20 inline-flex min-h-11 items-center justify-center gap-2 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
                 title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
               >
                 {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                Controls
               </button>
             ) : null}
 
@@ -3639,57 +3640,71 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
                 </div>
               </div>
             ) : (
-              <div className="absolute bottom-4 left-4 bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
+              <div className="absolute bottom-1 left-4 bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
                 Drag or use arrow keys to rotate · Wheel or +/− to zoom
               </div>
             )}
 
             {volume && renderPlan ? (
-              <div className="absolute left-16 top-4 z-10 max-w-[calc(100%-6rem)] bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
-                <div className="tabular-nums [font-family:var(--font-mono)]">
-                  Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
-                  {' · '}
-                  {actualTextureFormat === 'f16'
-                    ? '16-bit float'
-                    : actualTextureFormat === 'u8'
-                      ? '8-bit'
-                      : 'preparing'}
+              <details className="svr-volume-details">
+                <summary>
+                  <ChevronRight className="h-3 w-3" aria-hidden="true" />
+                  <span>Volume details</span>
+                  {observedSupportSummary ? (
+                    <span className={observedSupportSummary.valid ? 'text-[var(--evidence)]' : 'text-[var(--warning)]'}>
+                      {observedSupportSummary.valid
+                        ? `${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}% support`
+                        : 'Support mismatch'}
+                    </span>
+                  ) : null}
+                </summary>
+                <div className="svr-volume-details-content">
+                  <div className="tabular-nums [font-family:var(--font-mono)]">
+                    Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
+                    {' · '}
+                    {actualTextureFormat === 'f16'
+                      ? '16-bit float'
+                      : actualTextureFormat === 'u8'
+                        ? '8-bit'
+                        : 'preparing'}
+                  </div>
+                  {volume.acquiredOrientationCount !== undefined ? (
+                    <div className="mt-1 text-[var(--text-secondary)]">
+                      {volume.acquiredOrientationCount} source orientation
+                      {volume.acquiredOrientationCount === 1 ? '' : 's'}
+                    </div>
+                  ) : null}
+                  {volume.effectiveResolutionMm ? (
+                    <div className="mt-1 tabular-nums text-[var(--text-secondary)]">
+                      Acquired resolution: {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')}{' '}
+                      mm
+                    </div>
+                  ) : null}
+                  {volume.sliceProfileSource ? (
+                    <div
+                      className={
+                        volume.sliceProfileSource === 'declared'
+                          ? 'mt-1 text-[var(--text-secondary)]'
+                          : 'mt-1 text-[var(--warning)]'
+                      }
+                    >
+                      Slice profile: {volume.sliceProfileSource}
+                      {volume.sliceProfileSource === 'unknown' ? ' (thickness was not declared)' : ''}
+                    </div>
+                  ) : null}
+                  {observedSupportSummary ? (
+                    <div
+                      className={
+                        observedSupportSummary.valid ? 'mt-1 text-[var(--evidence)]' : 'mt-1 text-[var(--warning)]'
+                      }
+                    >
+                      {observedSupportSummary.valid
+                        ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
+                        : 'Acquired support does not match the reconstruction.'}
+                    </div>
+                  ) : null}
                 </div>
-                {volume.acquiredOrientationCount !== undefined ? (
-                  <div className="mt-1 text-[var(--text-secondary)]">
-                    {volume.acquiredOrientationCount} source orientation
-                    {volume.acquiredOrientationCount === 1 ? '' : 's'}
-                  </div>
-                ) : null}
-                {volume.effectiveResolutionMm ? (
-                  <div className="mt-1 tabular-nums text-[var(--text-secondary)]">
-                    Acquired resolution: {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')} mm
-                  </div>
-                ) : null}
-                {volume.sliceProfileSource ? (
-                  <div
-                    className={
-                      volume.sliceProfileSource === 'declared'
-                        ? 'mt-1 text-[var(--text-secondary)]'
-                        : 'mt-1 text-[var(--warning)]'
-                    }
-                  >
-                    Slice profile: {volume.sliceProfileSource}
-                    {volume.sliceProfileSource === 'unknown' ? ' (thickness was not declared)' : ''}
-                  </div>
-                ) : null}
-                {observedSupportSummary ? (
-                  <div
-                    className={
-                      observedSupportSummary.valid ? 'mt-1 text-[var(--evidence)]' : 'mt-1 text-[var(--warning)]'
-                    }
-                  >
-                    {observedSupportSummary.valid
-                      ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
-                      : 'Acquired support does not match the reconstruction.'}
-                  </div>
-                ) : null}
-              </div>
+              </details>
             ) : null}
           </div>
         </div>

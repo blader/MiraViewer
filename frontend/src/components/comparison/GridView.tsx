@@ -1,5 +1,3 @@
-import { useCallback, useState } from 'react';
-import type { FocusEvent, MouseEvent } from 'react';
 import { AlignmentProgressCard, GridCell } from './GridCell';
 import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../../utils/constants';
@@ -36,24 +34,6 @@ export function GridView({
   abortAlignment,
   startAlignAll,
 }: GridViewProps) {
-  const [hoveredGridCellDate, setHoveredGridCellDate] = useState<string | null>(null);
-
-  const updateHoveredCellFromEvent = useCallback((e: MouseEvent<HTMLDivElement> | FocusEvent<HTMLDivElement>) => {
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-
-    const cell = target.closest('[data-grid-cell-date]');
-    const next = cell?.getAttribute('data-grid-cell-date') ?? null;
-    setHoveredGridCellDate((prev) => (prev === next ? prev : next));
-  }, []);
-
-  // We listen to both:
-  // - onMouseOver: fires immediately when entering a cell (no movement required)
-  // - onMouseMove: keeps hover stable when elements are added/removed under the cursor
-  const onMouseMoveGrid = updateHoveredCellFromEvent;
-  const onMouseOverGrid = updateHoveredCellFromEvent;
-
-  const onMouseLeaveGrid = useCallback(() => setHoveredGridCellDate(null), []);
   const stackedStudies = gridCols === 1 && columns.length > 1;
 
   return (
@@ -74,14 +54,9 @@ export function GridView({
           gridTemplateColumns: `repeat(${gridCols}, ${gridCellSize}px)`,
           gridAutoRows: `${gridCellSize + GRID_CELL_METADATA_HEIGHT}px`,
         }}
-        onMouseOver={onMouseOverGrid}
-        onMouseMove={onMouseMoveGrid}
-        onMouseLeave={onMouseLeaveGrid}
-        onFocus={updateHoveredCellFromEvent}
       >
         {columns.map(({ date, ref }) => {
           const settings = panelSettings.get(date) || DEFAULT_PANEL_SETTINGS;
-          const isHovered = hoveredGridCellDate === date;
 
           return (
             <GridCell
@@ -93,7 +68,6 @@ export function GridView({
               progress={progress}
               setProgress={setProgress}
               updatePanelSetting={updatePanelSetting}
-              isHovered={isHovered}
               overlayColumns={overlayColumns}
               isAligning={isAligning}
               startAlignAll={startAlignAll}

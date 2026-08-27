@@ -4,6 +4,7 @@ import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSetting
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
 import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
@@ -22,8 +23,6 @@ export type GridCellProps = {
   progress: number;
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
-
-  isHovered: boolean;
 
   overlayColumns: { date: string; ref?: SeriesRef }[];
   isAligning: boolean;
@@ -168,7 +167,6 @@ export function GridCell({
   progress,
   setProgress,
   updatePanelSetting,
-  isHovered,
   overlayColumns,
   isAligning,
   startAlignAll,
@@ -209,21 +207,15 @@ export function GridCell({
     <div
       data-grid-cell-date={date}
       data-alignment-state={derivedFrame ? 'aligned' : 'acquired'}
-      data-controls-visible={isHovered || tumorToolOpen || gtPolygonToolOpen}
       className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
     >
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
-            {formatDate(date)}
-          </span>
+      <div className="study-heading">
+        <div className="study-heading-identity">
+          <span className="study-date">{formatDate(date)}</span>
           {derivedFrame ? <VerifiedAlignmentBadge /> : null}
         </div>
 
-        <div
-          inert={isAligning}
-          className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100"
-        >
+        <StudyTools disabled={isAligning} examinationLabel={formatDate(date)}>
           <StudyAnnotationControls
             showSavedTumor={showSavedTumor}
             tumorToolOpen={tumorToolOpen}
@@ -241,7 +233,7 @@ export function GridCell({
             onUpdate={(update) => updatePanelSetting(date, update)}
             showSliceControl={false}
           />
-        </div>
+        </StudyTools>
       </div>
 
       <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
@@ -348,15 +340,18 @@ export function GridCell({
         </StudySelectionSurface>
       </div>
 
-      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-        <span className="truncate text-xs text-[var(--text-secondary)]">
-          {derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+      <div className="flex h-12 shrink-0 items-center justify-between gap-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-2">
+        <span
+          className="truncate text-xs text-[var(--text-secondary)]"
+          title={derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+        >
+          {derivedFrame ? 'Aligned' : 'Acquired'}
         </span>
         <div inert={isAligning}>
           <StepControl
             title="Slice offset"
             value={`${idx + 1}/${refData.instance_count}`}
-            valueWidth="w-16"
+            valueWidth="w-14"
             tabular
             accent
             onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}

@@ -142,6 +142,15 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Quiet Instrument reconstruction lightbox', () => {
+  it('keeps cancellation available when the source panel is collapsed during reconstruction', () => {
+    mocks.hook.status = 'running';
+    mocks.hook.isRunning = true;
+    render(<Svr3DView data={comparisonData()} />);
+    fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel reconstruction' }));
+    expect(mocks.cancel).toHaveBeenCalledOnce();
+  });
   it('keeps patient identity, verified sources, a compact evidence rail, and exactly one primary action', async () => {
     render(<Svr3DView data={comparisonData()} />);
 

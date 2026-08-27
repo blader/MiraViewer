@@ -1,7 +1,7 @@
 import type { Dispatch, RefObject, SetStateAction } from 'react';
-import { Download, HelpCircle, MoreVertical, Pause, Play, Trash2, Upload } from 'lucide-react';
+import { CalendarDays, Download, HelpCircle, MoreVertical, PanelLeft, Pause, Play, Trash2, Upload } from 'lucide-react';
 import type { AlignmentResult, ComparisonData, SequenceCombo, SeriesRef } from '../../types/api';
-import { formatSequenceLabel } from '../../utils/clinicalData';
+import { formatPatientName, formatSequenceLabel } from '../../utils/clinicalData';
 import { OVERLAY } from '../../utils/constants';
 import { clearDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
 import { formatDate } from '../../utils/format';
@@ -11,7 +11,6 @@ type InstrumentClinicalContext = {
   hasData: boolean;
   selectedPlane: string | null;
   selectedSequence: SequenceCombo | undefined;
-  activeExaminationDate: string | null;
   selectPatient: (patientKey: string) => void | Promise<void>;
 };
 
@@ -49,6 +48,12 @@ export type ComparisonInstrumentHeaderProps = {
   navigation: InstrumentNavigation;
   actions: InstrumentActions;
   notices: InstrumentNotices;
+  panels: {
+    filtersOpen: boolean;
+    datesOpen: boolean;
+    toggleFilters: () => void;
+    toggleDates: () => void;
+  };
 };
 
 function InstrumentModeNavigation({
@@ -121,7 +126,7 @@ function InstrumentPatient({
         >
           {clinical.data?.patients?.map((patient) => (
             <option key={patient.key} value={patient.key}>
-              {patient.patient_name || patient.patient_id || 'Unknown patient'}
+              {formatPatientName(patient.patient_name) || patient.patient_id || 'Unknown patient'}
             </option>
           ))}
         </select>
@@ -134,7 +139,9 @@ function InstrumentPatient({
     <div className="instrument-patient" aria-label="Selected patient">
       <span className="instrument-patient-label">Patient</span>
       <span className="instrument-patient-value">
-        {clinical.data?.patients?.[0]?.patient_name || clinical.data?.patients?.[0]?.patient_id || 'Unknown patient'}
+        {formatPatientName(clinical.data?.patients?.[0]?.patient_name) ||
+          clinical.data?.patients?.[0]?.patient_id ||
+          'Unknown patient'}
       </span>
     </div>
   );
@@ -298,6 +305,7 @@ function InstrumentContextRail({
   notices,
   noticesVisible,
   unsuccessfulResults,
+  panels,
 }: ComparisonInstrumentHeaderProps & {
   noticesVisible: boolean;
   unsuccessfulResults: AlignmentResult[];
@@ -310,9 +318,25 @@ function InstrumentContextRail({
       aria-label="Selected examination and image context"
       data-notices-visible={noticesVisible || undefined}
     >
+      {navigation.viewMode !== 'svr3d' ? (
+        <button
+          type="button"
+          className="instrument-context-button"
+          aria-label={panels.filtersOpen ? 'Hide scan filters' : 'Show scan filters'}
+          aria-expanded={panels.filtersOpen}
+          aria-controls="comparison-filters-panel"
+          disabled={actions.isAligning}
+          onClick={panels.toggleFilters}
+        >
+          <PanelLeft className="h-4 w-4" aria-hidden="true" />
+          Scans
+        </button>
+      ) : null}
       <div className="instrument-context-summary">
-        <span className="instrument-context-value">{clinical.selectedPlane}</span>
-        {clinical.selectedSequence ? (
+        <span className="instrument-context-value">
+          {navigation.viewMode === 'svr3d' ? 'Examinations' : clinical.selectedPlane}
+        </span>
+        {clinical.selectedSequence && navigation.viewMode !== 'svr3d' ? (
           <>
             <span className="instrument-context-separator" aria-hidden="true">
               ·
@@ -320,15 +344,19 @@ function InstrumentContextRail({
             <span className="instrument-context-value">{formatSequenceLabel(clinical.selectedSequence)}</span>
           </>
         ) : null}
-        {clinical.activeExaminationDate && !showStudyFilmstrip ? (
+        {!showStudyFilmstrip ? (
           <>
             <span className="instrument-context-separator" data-secondary="true" aria-hidden="true">
               ·
             </span>
-            <span data-secondary="true">{formatDate(clinical.activeExaminationDate)}</span>
+            <span data-secondary="true">{navigation.overlayColumns.length} examinations</span>
           </>
         ) : null}
       </div>
+
+      {!showStudyFilmstrip && !noticesVisible && navigation.overlayColumns.length > 1 ? (
+        <span className="instrument-workflow-hint">Draw a region on a reference image to align or segment</span>
+      ) : null}
 
       {navigation.viewMode === 'overlay' && navigation.overlayColumns.length > 0 ? (
         <div className="instrument-context-playback">
@@ -390,6 +418,22 @@ function InstrumentContextRail({
           unsuccessfulResults={unsuccessfulResults}
         />
       ) : null}
+
+      {navigation.viewMode !== 'svr3d' ? (
+        <button
+          type="button"
+          className="instrument-context-button instrument-examinations-toggle"
+          aria-label={panels.datesOpen ? 'Hide examination dates' : 'Show examination dates'}
+          aria-expanded={panels.datesOpen}
+          aria-controls="comparison-dates-panel"
+          disabled={actions.isAligning}
+          onClick={panels.toggleDates}
+        >
+          <CalendarDays className="h-4 w-4" aria-hidden="true" />
+          <span>Examinations</span>
+          <span className="instrument-count">{navigation.overlayColumns.length}</span>
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -399,6 +443,7 @@ export function ComparisonInstrumentHeader({
   navigation,
   actions,
   notices,
+  panels,
 }: ComparisonInstrumentHeaderProps) {
   const unsuccessfulResults =
     !actions.isAligning && !notices.alignmentError
@@ -428,6 +473,7 @@ export function ComparisonInstrumentHeader({
           navigation={navigation}
           actions={actions}
           notices={notices}
+          panels={panels}
           noticesVisible={noticesVisible}
           unsuccessfulResults={unsuccessfulResults}
         />

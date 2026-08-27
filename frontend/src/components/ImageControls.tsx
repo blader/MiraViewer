@@ -1,8 +1,8 @@
 import type { Dispatch, SetStateAction } from 'react';
-import { ArrowDownUp, Pencil, ScanLine } from 'lucide-react';
+import { ArrowDownUp, Pencil, RotateCcw, ScanLine } from 'lucide-react';
 import type { PanelSettings } from '../types/api';
 import { StepControl } from './StepControl';
-import { CONTROL_LIMITS } from '../utils/constants';
+import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import { normalizeRotation } from '../utils/math';
 import { formatRotation } from '../utils/format';
 
@@ -14,10 +14,6 @@ interface ImageControlsProps {
   /** If false, omit the slice selector control (useful when rendering it on a separate row). */
   showSliceControl?: boolean;
 }
-
-const Divider = ({ wide = false }: { wide?: boolean }) => (
-  <div aria-hidden="true" className={`h-4 w-px shrink-0 bg-[var(--border-color)] ${wide ? 'mx-2' : 'mx-1'}`} />
-);
 
 export const VerifiedAlignmentBadge = () => (
   <span
@@ -48,7 +44,7 @@ export function StudyAnnotationControls({
   setGtPolygonToolOpen: Dispatch<SetStateAction<boolean>>;
 }) {
   return (
-    <>
+    <div className="study-annotation-controls">
       <button
         type="button"
         onClick={() => setShowSavedTumor((value) => !value)}
@@ -70,7 +66,7 @@ export function StudyAnnotationControls({
         }
       >
         <ScanLine className="h-3.5 w-3.5" />
-        Tumor
+        Saved tumor
       </button>
 
       <button
@@ -91,14 +87,14 @@ export function StudyAnnotationControls({
         }`}
         title={
           nativeAnnotationsAvailable
-            ? 'Ground truth polygon tool (debug)'
+            ? 'Draw a manual tumor outline'
             : 'Native annotations are unavailable on a derived alignment plane'
         }
       >
         <Pencil className="h-3.5 w-3.5" />
-        GT
+        Outline
       </button>
-    </>
+    </div>
   );
 }
 
@@ -130,24 +126,22 @@ export function ImageControls({
   };
 
   return (
-    <div className="flex shrink-0 items-center">
+    <div className="image-adjustment-controls">
       {showSliceControl && (
-        <>
-          <StepControl
-            title="Slice offset"
-            value={`${instanceIndex + 1}/${instanceCount}`}
-            valueWidth="w-16"
-            tabular
-            accent
-            onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
-            onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
-          />
-
-          <Divider wide />
-        </>
+        <StepControl
+          label="Slice"
+          title="Slice offset"
+          value={`${instanceIndex + 1}/${instanceCount}`}
+          valueWidth="w-16"
+          tabular
+          accent
+          onDecrement={() => onUpdate({ offset: settings.offset - 1 })}
+          onIncrement={() => onUpdate({ offset: settings.offset + 1 })}
+        />
       )}
 
       <StepControl
+        label="Zoom"
         title="Zoom"
         value={`${Math.round(settings.zoom * 100)}%`}
         valueWidth="w-8"
@@ -159,9 +153,8 @@ export function ImageControls({
         }
       />
 
-      <Divider />
-
       <StepControl
+        label="Rotation"
         title="Rotation"
         value={`${formatRotation(settings.rotation)}°`}
         valueWidth="w-12"
@@ -170,10 +163,8 @@ export function ImageControls({
         onIncrement={() => onUpdate({ rotation: normalizeRotation(settings.rotation + CONTROL_LIMITS.ROTATION.STEP) })}
       />
 
-      <Divider />
-
       <StepControl
-        label="B"
+        label="Brightness"
         title="Brightness"
         value={String(settings.brightness)}
         onDecrement={() =>
@@ -188,10 +179,8 @@ export function ImageControls({
         }
       />
 
-      <Divider />
-
       <StepControl
-        label="C"
+        label="Contrast"
         title="Contrast"
         value={String(settings.contrast)}
         onDecrement={() =>
@@ -205,8 +194,6 @@ export function ImageControls({
           })
         }
       />
-
-      <Divider />
 
       <button
         type="button"
@@ -229,7 +216,17 @@ export function ImageControls({
         }
       >
         <ArrowDownUp className="w-3 h-3" />
-        Rev
+        Reverse slice order
+      </button>
+      <button
+        type="button"
+        className="study-reset-tone"
+        onClick={() =>
+          onUpdate({ brightness: DEFAULT_PANEL_SETTINGS.brightness, contrast: DEFAULT_PANEL_SETTINGS.contrast })
+        }
+      >
+        <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+        Reset brightness &amp; contrast
       </button>
     </div>
   );

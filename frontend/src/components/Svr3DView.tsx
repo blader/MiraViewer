@@ -5,7 +5,7 @@ import { getDB } from '../db/db';
 import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
 import type { SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries } from '../types/svr';
-import { formatSequenceLabel } from '../utils/clinicalData';
+import { formatPatientName, formatSequenceLabel } from '../utils/clinicalData';
 import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
@@ -1326,35 +1326,38 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 </div>
               );
             })}
-            <div className="border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
-              <div className="flex items-center justify-between gap-2">
-                <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
-                <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
-              </div>
-              {estimatedPeakMemoryMiB !== null ? (
+            <details className="svr-sampling-details border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
+              <summary>Resolution &amp; device memory</summary>
+              <div className="mt-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
+                  <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
+                </div>
+                {estimatedPeakMemoryMiB !== null ? (
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
+                    <span
+                      className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
+                    >
+                      {Math.ceil(estimatedPeakMemoryMiB)} MiB
+                    </span>
+                  </div>
+                ) : null}
                 <div className="mt-1 flex items-center justify-between gap-2">
-                  <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
-                  <span
-                    className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
-                  >
-                    {Math.ceil(estimatedPeakMemoryMiB)} MiB
-                  </span>
+                  <span>Requested voxel spacing</span>
+                  <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
                 </div>
-              ) : null}
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span>Requested voxel spacing</span>
-                <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
-              </div>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span>{acceptedResult ? 'Next effective spacing' : 'Effective voxel spacing'}</span>
-                <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
-              </div>
-              {automaticallyAdjustedVoxelSpacing ? (
-                <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
-                  Source sampling automatically adjusted to stay within the 512 MiB memory budget.
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span>{acceptedResult ? 'Next effective spacing' : 'Effective voxel spacing'}</span>
+                  <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
                 </div>
-              ) : null}
-            </div>
+                {automaticallyAdjustedVoxelSpacing ? (
+                  <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
+                    Source sampling automatically adjusted to stay within the 512 MiB memory budget.
+                  </div>
+                ) : null}
+              </div>
+            </details>
           </div>
         </div>
       ) : null}
@@ -1496,6 +1499,10 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
         Focus box (optional)
       </summary>
       <div className="mt-2 space-y-2">
+        <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+          Draw a box around an area of interest to reconstruct a smaller volume. This is a crop, not a tumor
+          segmentation.
+        </p>
         <div className="flex items-center gap-2">
           <label htmlFor={roiSeriesSelectId} className="text-xs text-[var(--text-secondary)] w-16">
             Draw on
@@ -1598,18 +1605,31 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
 
         <div className="text-xs text-[var(--text-tertiary)]">
           Drag to draw a box on an input slice. When a box is set,{' '}
-          <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting with a
-          smaller box lets you decrease voxel size for more detail without making the volume huge.
+          <span className="text-[var(--text-secondary)]">Reconstruct focus box</span> will reconstruct only that box.
+          Starting with a smaller box lets you decrease voxel size for more detail without making the volume huge.
         </div>
       </div>
     </details>
   );
 }
 
+function SvrReconstructButton({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  return (
+    <button
+      type="button"
+      disabled={!workspace.canRun}
+      onClick={workspace.startReconstruction}
+      aria-describedby={workspace.sourceReadinessMessage ? 'svr-source-readiness' : undefined}
+      className="svr-reconstruct-button"
+    >
+      {workspace.roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
+    </button>
+  );
+}
+
 function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const {
     acceptedResult,
-    canRun,
     cancel,
     clear,
     currentReadiness,
@@ -1620,14 +1640,12 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
     progress,
     progressMessage,
     roiDragRef,
-    roiWorld,
     setRoiRect,
     setRoiSeriesUid,
     setRoiWorld,
     setSelectedSequenceKey,
     sliceInspectorPortalRef,
     sourceReadinessMessage,
-    startReconstruction,
     status,
   } = workspace;
 
@@ -1651,7 +1669,7 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
         </button>
 
         <div className="flex items-center gap-2">
-          {isRunning ? (
+          {isRunning && acceptedResult ? (
             <button
               type="button"
               onClick={cancel}
@@ -1661,15 +1679,7 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
             </button>
           ) : null}
 
-          <button
-            type="button"
-            disabled={!canRun}
-            onClick={startReconstruction}
-            aria-describedby={sourceReadinessMessage ? 'svr-source-readiness' : undefined}
-            className="min-h-9 rounded-[4px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
-          </button>
+          {acceptedResult ? <SvrReconstructButton workspace={workspace} /> : null}
         </div>
       </div>
 
@@ -1736,7 +1746,10 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
         </div>
       ) : null}
 
-      <div ref={sliceInspectorPortalRef} className="border-t border-[var(--border-color)] pt-4" />
+      <div
+        ref={sliceInspectorPortalRef}
+        className="svr-slice-inspector-mount border-t border-[var(--border-color)] pt-4"
+      />
     </>
   );
 }
@@ -1771,7 +1784,6 @@ export function Svr3DView(props: Svr3DViewProps) {
     sliceInspectorPortalTarget,
     sourceFrameCount,
     sourceReadinessMessage,
-    startReconstruction,
     stepRoiSlice,
     volumeIdentity,
     workspaceIdentity,
@@ -1788,7 +1800,7 @@ export function Svr3DView(props: Svr3DViewProps) {
             RECONSTRUCTION
           </span>
           {displayedPatient ? (
-            <span className="truncate text-xs text-[var(--text-primary)]">{displayedPatient}</span>
+            <span className="truncate text-xs text-[var(--text-primary)]">{formatPatientName(displayedPatient)}</span>
           ) : null}
         </div>
         {displayedDate ? (
@@ -1809,6 +1821,24 @@ export function Svr3DView(props: Svr3DViewProps) {
             </>
           ) : null}
         </div>
+        <button
+          type="button"
+          onClick={() => setGenerationCollapsed((value) => !value)}
+          aria-label={
+            generationCollapsed
+              ? 'Show reconstruction sources and controls'
+              : 'Hide reconstruction sources and controls'
+          }
+          aria-expanded={!generationCollapsed}
+          className="inline-flex min-h-10 items-center gap-2 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+        >
+          {generationCollapsed ? (
+            <ChevronRight className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+          )}
+          Sources
+        </button>
       </header>
       <div
         data-generation-open={!generationCollapsed}
@@ -1820,28 +1850,13 @@ export function Svr3DView(props: Svr3DViewProps) {
             className="space-y-5 overflow-auto border-r border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5"
           >
             <SvrSourceEvidence workspace={workspace} />
-            <SvrAdvancedSettings workspace={workspace} />
-            <SvrFocusBox workspace={workspace} />
             <SvrReconstructionActions workspace={workspace} />
+            <SvrFocusBox workspace={workspace} />
+            <SvrAdvancedSettings workspace={workspace} />
           </aside>
         )}
 
         <div className="relative min-h-0 overflow-hidden bg-[var(--bg-primary)]">
-          <button
-            type="button"
-            onClick={() => setGenerationCollapsed((v) => !v)}
-            aria-label={
-              generationCollapsed
-                ? 'Show reconstruction sources and controls'
-                : 'Hide reconstruction sources and controls'
-            }
-            aria-expanded={!generationCollapsed}
-            className="absolute left-3 top-3 z-30 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-            title={generationCollapsed ? 'Show SVR controls' : 'Hide SVR controls'}
-          >
-            {generationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-          </button>
-
           {acceptedResult ? (
             <SvrVolume3DViewer
               key={workspaceIdentity ?? 'unselected-reconstruction'}
@@ -1865,6 +1880,13 @@ export function Svr3DView(props: Svr3DViewProps) {
                       {progress ? `${percent}% · ` : ''}
                       {sourceFrameCount} acquired slices
                     </p>
+                    <button
+                      type="button"
+                      onClick={workspace.cancel}
+                      className="mt-6 min-h-11 rounded-[4px] border border-[var(--border-color)] px-4 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+                    >
+                      Cancel reconstruction
+                    </button>
                   </>
                 ) : (
                   <>
@@ -1910,14 +1932,14 @@ export function Svr3DView(props: Svr3DViewProps) {
                       >
                         {showAcquiredStack ? 'Hide acquired stack' : 'Inspect acquired stack'}
                       </button>
-                    ) : canRun && generationCollapsed ? (
-                      <button
-                        type="button"
-                        onClick={startReconstruction}
-                        className="mt-6 min-h-10 rounded-[4px] bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
-                      >
-                        Reconstruct volume
-                      </button>
+                    ) : null}
+                    <div className="mt-6">
+                      <SvrReconstructButton workspace={workspace} />
+                    </div>
+                    {canRun ? (
+                      <p className="mt-3 text-xs text-[var(--text-tertiary)]">
+                        After reconstruction, use tumor segmentation to isolate the area of interest.
+                      </p>
                     ) : null}
                     {showAcquiredStack && roiPreviewSliceStable ? (
                       <div className="mx-auto mt-5 max-w-sm text-left">

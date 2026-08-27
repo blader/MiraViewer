@@ -113,12 +113,14 @@ describe('UploadModal', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Import scans' });
     expect(dialog).toHaveClass('rounded-[4px]');
-    expect(screen.getByRole('heading', { name: 'Bring scans into Mira' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Import scans' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading')).toHaveLength(1);
     expect(screen.getByText(/processed locally · never uploaded/i)).toBeInTheDocument();
-    expect(screen.getByText(/your images stay on this device/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/processed locally · never uploaded/i)).toHaveLength(1);
     expect(dialog.querySelector('canvas, img, video')).toBeNull();
     const dropTarget = screen.getByRole('button', { name: /drop local dicom files or an acquisition folder/i });
-    expect(dropTarget).toHaveFocus();
+    expect(dropTarget).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Choose files' })).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Choose files' })).toBeEnabled();
     expect(screen.getByRole('button', { name: /choose backup/i })).toBeEnabled();
     expect(screen.getByLabelText('Select DICOM image files')).not.toHaveAttribute('accept');
