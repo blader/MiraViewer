@@ -6,6 +6,7 @@ import { DEFAULT_SVR_PARAMS, type SvrProgress, type SvrSelectedSeries } from '..
 import { getSeriesFrameManifest, setSelectedPatientKey } from '../src/utils/localApi';
 import * as computeCore from '../src/utils/svr/svrComputeCore';
 import { estimateSvrSourceMemory } from '../src/utils/svr/sourceMemory';
+import { deferred } from './helpers/deferred';
 
 const cornerstone = vi.hoisted(() => ({
   loadAndCacheImage: vi.fn(),
@@ -393,13 +394,8 @@ describe('SVR canonical source admission and acquired support', () => {
       columns: 2,
       getPixelData: vi.fn(() => Int16Array.of(-1, -2, -3, -4)),
     };
-    let resolveLate!: (image: typeof lateImage) => void;
-    cornerstone.loadImage.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveLate = resolve;
-        }),
-    );
+    const delayed = deferred<typeof lateImage>();
+    cornerstone.loadImage.mockImplementationOnce(() => delayed.promise);
     const controller = new AbortController();
     const publish = vi.fn();
     const progress = vi.fn();
@@ -418,7 +414,7 @@ describe('SVR canonical source admission and acquired support', () => {
     expect(retry.volume.data).toEqual(Float32Array.of(1, 2, 3, 4, 1, 2, 3, 4));
     expect(cornerstone.loadImage).toHaveBeenCalledTimes(3);
     expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
-    resolveLate(lateImage);
+    delayed.resolve(lateImage);
     await Promise.resolve();
     await Promise.resolve();
     expect(lateImage.getPixelData).not.toHaveBeenCalled();

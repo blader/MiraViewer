@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DecodedFrame } from '../src/utils/decodedFrame';
 import type { SvrLabelVolume, SvrNativeSource, SvrVolume } from '../src/types/svr';
+import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({ decode: vi.fn(), revision: vi.fn(), patient: vi.fn() }));
 vi.mock('../src/utils/decodedFrame', () => ({ getDecodedFrameBySopInstanceUid: mocks.decode }));
@@ -223,19 +224,14 @@ describe('accepted native-frame cache', () => {
   it('drops displaced in-flight frames and serializes native conversion', async () => {
     const { source, volume } = fixture();
     const cache = new NativeFrameCache(volume);
-    let complete: (value: DecodedFrame) => void = () => {};
-    mocks.decode.mockImplementationOnce(
-      () =>
-        new Promise<DecodedFrame>((resolve) => {
-          complete = resolve;
-        }),
-    );
+    const decoded = deferred<DecodedFrame>();
+    mocks.decode.mockImplementationOnce(() => decoded.promise);
     const previous = cache.load(source, 0);
     await waitFor(() => expect(mocks.decode).toHaveBeenCalledOnce());
     cache.retain(source, 3);
     const current = cache.load(source, 3);
     expect(mocks.decode).toHaveBeenCalledOnce();
-    complete(image());
+    decoded.resolve(image());
     await expect(previous).rejects.toMatchObject({ name: 'AbortError' });
     expect((await current).sopInstanceUid).toBe('frame-3');
     expect(cache.size).toBe(1);
@@ -244,13 +240,8 @@ describe('accepted native-frame cache', () => {
   it('releases a disposed cache without waiting for a stalled decoder and allows a fresh view', async () => {
     const { source, volume } = fixture();
     const cache = new NativeFrameCache(volume);
-    let complete: (value: DecodedFrame) => void = () => {};
-    mocks.decode.mockImplementationOnce(
-      () =>
-        new Promise<DecodedFrame>((resolve) => {
-          complete = resolve;
-        }),
-    );
+    const decoded = deferred<DecodedFrame>();
+    mocks.decode.mockImplementationOnce(() => decoded.promise);
     const pending = cache.load(source, 0);
     const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     await waitFor(() => expect(mocks.decode).toHaveBeenCalledOnce());
@@ -259,7 +250,7 @@ describe('accepted native-frame cache', () => {
     expect(cache.size).toBe(0);
     const replacement = new NativeFrameCache(volume);
     expect((await replacement.load(source, 1)).sopInstanceUid).toBe('frame-1');
-    complete(image());
+    decoded.resolve(image());
     await Promise.resolve();
     await expect(cache.load(source, 1)).rejects.toMatchObject({ name: 'AbortError' });
     expect(cache.size).toBe(0);
@@ -337,13 +328,8 @@ describe('native-plane publication', () => {
 
   it('hides old pixels immediately when source geometry changes and ignores late results', async () => {
     const { volume } = fixture();
-    let complete: (value: DecodedFrame) => void = () => {};
-    mocks.decode.mockImplementationOnce(
-      () =>
-        new Promise<DecodedFrame>((resolve) => {
-          complete = resolve;
-        }),
-    );
+    const decoded = deferred<DecodedFrame>();
+    mocks.decode.mockImplementationOnce(() => decoded.promise);
     const { result, rerender } = renderHook(
       ({ frameIndex }) => useSvrNativePlane({ volume, sourceIndex: 0, frameIndex }),
       { initialProps: { frameIndex: 0 } },
@@ -352,7 +338,7 @@ describe('native-plane publication', () => {
     rerender({ frameIndex: 3 });
     expect(result.current.plane).toBeNull();
     expect(result.current.loading).toBe(true);
-    await act(async () => complete(image()));
+    await act(async () => decoded.resolve(image()));
     await waitFor(() => expect(result.current.plane?.frameIndex).toBe(3));
     expect(result.current.plane?.image.sopInstanceUid).toBe('frame-3');
   });

@@ -8,6 +8,7 @@ import { usePanelSettings } from '../src/hooks/usePanelSettings';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { ComparisonData, SeriesRef } from '../src/types/api';
 import { getPanelSettings, savePanelSettings } from '../src/utils/localApi';
+import { deferred } from './helpers/deferred';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn().mockResolvedValue({}),
@@ -265,14 +266,9 @@ describe('usePanelSettings', () => {
   });
 
   it('finishes owner hydration when visible dates change before the first read completes', async () => {
-    let resolveFirst!: (settings: Record<string, typeof DEFAULT_PANEL_SETTINGS>) => void;
+    const first = deferred<Record<string, typeof DEFAULT_PANEL_SETTINGS>>();
     vi.mocked(getPanelSettings)
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveFirst = resolve;
-          }),
-      )
+      .mockReturnValueOnce(first.promise)
       .mockResolvedValueOnce({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 } });
     const { result, rerender, unmount } = renderHook(({ dates }) => usePanelSettings('seq-loading', dates, 'patient'), {
       initialProps: { dates: '2024-01-01,2024-02-01' },
@@ -281,7 +277,7 @@ describe('usePanelSettings', () => {
     await act(async () => rerender({ dates: '2024-01-01' }));
     expect(result.current.settingsReady).toBe(true);
     expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1.5);
-    await act(async () => resolveFirst({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 4 } }));
+    await act(async () => first.resolve({ '2024-01-01': { ...DEFAULT_PANEL_SETTINGS, zoom: 4 } }));
     expect(result.current.panelSettings.get('2024-01-01')?.zoom).toBe(1.5);
     unmount();
   });

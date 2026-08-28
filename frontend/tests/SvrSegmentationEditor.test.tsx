@@ -7,9 +7,9 @@ import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
 import { paint } from './helpers/selectionInteraction';
+import { deferred } from './helpers/deferred';
 
 type EditorProps = ComponentProps<typeof SvrSegmentationEditor>;
-type SelectionResult = Awaited<ReturnType<SeededVolumeWorker['run']>>;
 const at = (x: number, y: number) => (6 * 12 + y) * 12 + x;
 
 function volume(): SvrVolume {
@@ -236,12 +236,8 @@ describe('Focused SVR tissue-selection workflow', () => {
     { method: 'Escape', full3D: true },
     { method: 'Escape', full3D: false },
   ])('keeps cancellation ahead of navigation through $method (full 3D: $full3D)', async ({ method, full3D }) => {
-    let complete!: (result: SelectionResult) => void;
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockReturnValue(
-      new Promise((resolve) => {
-        complete = resolve;
-      }),
-    );
+    const completion = deferred<Awaited<ReturnType<SeededVolumeWorker['run']>>>();
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockReturnValue(completion.promise);
     const dispose = vi.spyOn(SeededVolumeWorker.prototype, 'dispose');
     const { container, changed, show3D } = setup(draft());
     fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
@@ -264,7 +260,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     else expect(container.querySelector('.svr-selection-grid')).not.toHaveAttribute('data-expanded');
     expect(show3D).toHaveBeenCalledTimes(Number(full3D));
     await act(async () =>
-      complete({
+      completion.resolve({
         indices: Uint32Array.of(at(6, 6)),
         bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
         boundaryCount: 0,
