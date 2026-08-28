@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as modelManifest from '../src/utils/segmentation/onnx/modelManifest';
 import type * as ModelCache from '../src/utils/segmentation/onnx/modelCache';
 import type { SvrVolume } from '../src/types/svr';
+import { deferred } from './helpers/deferred';
 
 const { cache, createSession } = vi.hoisted(() => ({
   cache: new Map<string, Blob>(),
@@ -79,14 +80,6 @@ async function files(
     { type: 'application/json' },
   );
   return [model, manifest];
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
 }
 
 function deferVerification(...models: Blob[]) {
@@ -466,13 +459,8 @@ describe('useOnnxTumorSession verified model ownership', () => {
 
   it.each(['clear-model', 'new-volume'] as const)('discards an old inference result after %s', async (change) => {
     const selected = await files();
-    let finish!: (value: { labels: Uint8Array; logitsDims: number[] }) => void;
-    vi.mocked(runTumorSegmentationOnnx).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
+    const inference = deferred<{ labels: Uint8Array; logitsDims: number[] }>();
+    vi.mocked(runTumorSegmentationOnnx).mockReturnValueOnce(inference.promise);
     const onLabels = vi.fn();
     const { result, rerender } = renderHook(({ volume }) => useOnnxTumorSession(volume, onLabels), {
       initialProps: { volume: syntheticVolume },
@@ -485,7 +473,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
       act(() => result.current.clearModel());
       await waitFor(() => expect(result.current.status.cached).toBe(false));
     } else rerender({ volume: { ...syntheticVolume, data: Float32Array.of(0.2) } });
-    await act(async () => finish({ labels: Uint8Array.of(1), logitsDims: [1, 4, 1, 1, 1] }));
+    await act(async () => inference.resolve({ labels: Uint8Array.of(1), logitsDims: [1, 4, 1, 1, 1] }));
     await waitFor(() => expect(result.current.segRunning).toBe(false));
     expect(onLabels).not.toHaveBeenCalled();
     expect(result.current.status.message).not.toMatch(/Segmentation complete/);

@@ -14,6 +14,7 @@ import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
 import { volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 import type * as SelectionMigration from '../src/utils/svr/selectionMigration';
+import { deferred } from './helpers/deferred';
 import { paint } from './helpers/selectionInteraction';
 import {
   findTransferableSelection,
@@ -230,14 +231,6 @@ function editingVolume(size = 12): SvrVolume {
     data: new Float32Array(size ** 3).fill(0.5),
     observedSupport: new Uint8Array(size ** 3).fill(1),
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
 }
 
 /** The worker is mocked; real UI, source cropping, presentation and persistence stay integrated. */
@@ -1467,25 +1460,18 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it('hydrates a new same-key volume before any write and ignores late hydration from another volume', async () => {
     const first = editingVolume(),
       second = editingVolume();
-    let resolveFirst: (value: Awaited<ReturnType<typeof getVolumeSegmentation>>) => void = () => {};
+    const load = deferred<Awaited<ReturnType<typeof getVolumeSegmentation>>>();
     const labels = new Uint8Array(second.data.length);
     labels[32] = 1;
     const run = vi.spyOn(SeededVolumeWorker.prototype, 'run');
-    vi.mocked(getVolumeSegmentation)
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveFirst = resolve;
-          }),
-      )
-      .mockResolvedValueOnce({
-        volumeKey: 'saved',
-        dims: second.dims,
-        labels,
-        updatedAt: 0,
-        reviewState: 'draft',
-        classMetadata: SELECTION_LABEL_META,
-      });
+    vi.mocked(getVolumeSegmentation).mockReturnValueOnce(load.promise).mockResolvedValueOnce({
+      volumeKey: 'saved',
+      dims: second.dims,
+      labels,
+      updatedAt: 0,
+      reviewState: 'draft',
+      classMetadata: SELECTION_LABEL_META,
+    });
     const view = render(<SvrVolume3DViewer volume={first} volumeIdentity={identity} />);
     openSelectionEditor();
     await waitFor(() => expect(getVolumeSegmentation).toHaveBeenCalledOnce());
@@ -1497,19 +1483,14 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     view.rerender(<SvrVolume3DViewer volume={second} volumeIdentity={identity} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeEnabled());
     await act(async () =>
-      resolveFirst({ volumeKey: 'old', dims: first.dims, labels: new Uint8Array(first.data.length), updatedAt: 0 }),
+      load.resolve({ volumeKey: 'old', dims: first.dims, labels: new Uint8Array(first.data.length), updatedAt: 0 }),
     );
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(labels);
   });
 
   it('finishes a submitted save after navigation without silently dropping the last edit', async () => {
-    let finish: () => void = () => {};
-    vi.mocked(saveVolumeSegmentation).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
+    const save = deferred<void>();
+    vi.mocked(saveVolumeSegmentation).mockReturnValueOnce(save.promise);
     const view = render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
     openSelectionEditor();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
@@ -1517,7 +1498,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     await waitFor(() => expect(saveVolumeSegmentation).toHaveBeenCalledOnce());
     const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
     view.unmount();
-    await act(async () => finish());
+    await act(async () => save.resolve());
     expect(saved.labels[(6 * 12 + 6) * 12 + 5]).toBe(1);
   });
 
