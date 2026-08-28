@@ -359,7 +359,7 @@ describe('native-plane publication', () => {
 });
 
 function textureGl() {
-  const gl = {
+  return {
     NO_ERROR: 0,
     TEXTURE0: 100,
     TEXTURE_2D: 101,
@@ -391,7 +391,6 @@ function textureGl() {
     uniform1f: vi.fn(),
     uniform3f: vi.fn(),
   };
-  return gl;
 }
 
 describe('source-faithful native-plane GL resources', () => {

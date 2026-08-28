@@ -87,6 +87,14 @@ function nativeVolume(): SvrVolume {
   };
 }
 
+function renderVolume(volume = nativeVolume()) {
+  return render(
+    <SvrImagingContext.Provider value={{ volume }}>
+      <SvrVolume3DViewer />
+    </SvrImagingContext.Provider>,
+  );
+}
+
 beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
 });
@@ -98,11 +106,7 @@ afterEach(() => {
 describe('Native MRI workspace controls', () => {
   it('steps actual source planes without snapping to a coarser overview grid', async () => {
     const volume = nativeVolume();
-    render(
-      <SvrImagingContext.Provider value={{ volume }}>
-        <SvrVolume3DViewer />
-      </SvrImagingContext.Provider>,
-    );
+    renderVolume(volume);
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(5);
     expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next original MRI slice' }));
@@ -119,11 +123,7 @@ describe('Native MRI workspace controls', () => {
   it('keeps source contrast independent of overview windowing and never alters MRI values', async () => {
     const volume = nativeVolume();
     const original = volume.data.slice();
-    render(
-      <SvrImagingContext.Provider value={{ volume }}>
-        <SvrVolume3DViewer />
-      </SvrImagingContext.Provider>,
-    );
+    renderVolume(volume);
     fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
     fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
     fireEvent.change(screen.getByRole('slider', { name: 'Original MRI window width' }), { target: { value: '16' } });
@@ -141,11 +141,7 @@ describe('Native MRI workspace controls', () => {
   });
 
   it('labels scanner reformats honestly and withholds selection-only clipping until marks exist', async () => {
-    render(
-      <SvrImagingContext.Provider value={{ volume: nativeVolume() }}>
-        <SvrVolume3DViewer />
-      </SvrImagingContext.Provider>,
-    );
+    renderVolume();
     expect(screen.getByRole('button', { name: 'MRI slice' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByRole('combobox', { name: 'MRI plane source' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
@@ -172,11 +168,7 @@ describe('Native MRI workspace controls', () => {
       delete volume.nativeVoxelSizeMm;
       delete volume.sourceProvenance;
     }
-    render(
-      <SvrImagingContext.Provider value={{ volume }}>
-        <SvrVolume3DViewer />
-      </SvrImagingContext.Provider>,
-    );
+    renderVolume(volume);
     expect(screen.queryByText('Volume details')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
     fireEvent.click(screen.getByText('Volume details'));

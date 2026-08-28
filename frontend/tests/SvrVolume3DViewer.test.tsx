@@ -14,6 +14,7 @@ import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
 import { volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 import type * as SelectionMigration from '../src/utils/svr/selectionMigration';
+import { paint } from './helpers/selectionInteraction';
 import {
   findTransferableSelection,
   transferSavedSelection,
@@ -309,24 +310,6 @@ function nativeViewerFixture() {
   });
   return { volume, plane, pixels };
 }
-function paint(x: number, y: number, kind: 'Mark inside' | 'Mark outside' = 'Mark inside', cancel = false) {
-  fireEvent.click(screen.getByRole('button', { name: kind }));
-  fireEvent.change(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' }), {
-    target: { value: '0.5' },
-  });
-  const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
-  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
-  const point = {
-    pointerId: 1,
-    button: 0,
-    isPrimary: true,
-    clientX: 40 + ((x + 0.5) * 320) / 12,
-    clientY: ((y + 0.5) * 320) / 12,
-  };
-  fireEvent.pointerDown(canvas, point);
-  if (cancel) fireEvent.pointerCancel(canvas, point);
-  else fireEvent.pointerUp(canvas, point);
-}
 function openSelectionEditor() {
   fireEvent.click(screen.getByRole('button', { name: /^(Select tissue|Edit selection|View slices)$/ }));
 }
@@ -394,13 +377,6 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   const migration: SavedSelectionMigration = {
     candidate: {
       record: { volumeKey: 'previous-grid', updatedAt: 1 },
-      geometry: {
-        version: 1,
-        originMm: [0, 0, 0],
-        direction: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-        reconstructionFingerprint: 'previous-native-grid',
-        sourceProvenance: { mode: 'native-3d', primarySeriesUid: 'source', sources: [] },
-      },
     },
     retainedCount: 1,
     unavailableCount: 0,

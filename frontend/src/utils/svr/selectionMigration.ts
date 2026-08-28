@@ -16,7 +16,6 @@ export type SavedSelectionIdentity = {
 export type SavedSelectionCandidate = {
   /** Discovery never retains label buffers in UI state; explicit copy reads them on demand. */
   record: Pick<VolumeSegmentationRow, 'volumeKey' | 'updatedAt'>;
-  geometry: VolumeSegmentationGeometry;
 };
 
 export type SavedSelectionMigration = {
@@ -330,7 +329,6 @@ export async function findTransferableSelection(
       if (!result.candidate || record.updatedAt > result.candidate.record.updatedAt)
         result.candidate = {
           record: { volumeKey: record.volumeKey, updatedAt: record.updatedAt },
-          geometry: record.geometry!,
         };
     } else result.unavailableCount++;
   });

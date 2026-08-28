@@ -6,6 +6,7 @@ import { SvrImagingContext } from '../src/components/svrImagingContext';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
+import { paint } from './helpers/selectionInteraction';
 
 type EditorProps = ComponentProps<typeof SvrSegmentationEditor>;
 type SelectionResult = Awaited<ReturnType<SeededVolumeWorker['run']>>;
@@ -75,24 +76,6 @@ function setup(
     );
   }
   return { ...render(<Workspace />), source, changed, show3D, retryStorage };
-}
-
-function paint(x = 5, y = 6) {
-  fireEvent.click(screen.getByRole('button', { name: 'Mark inside' }));
-  fireEvent.change(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' }), {
-    target: { value: '0.5' },
-  });
-  const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
-  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
-  const point = {
-    pointerId: 1,
-    button: 0,
-    isPrimary: true,
-    clientX: 40 + ((x + 0.5) * 320) / 12,
-    clientY: ((y + 0.5) * 320) / 12,
-  };
-  fireEvent.pointerDown(canvas, point);
-  fireEvent.pointerUp(canvas, point);
 }
 
 beforeEach(() => vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null));

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrVolume } from '../src/types/svr';
 import {
   enhanceVolume2x,
@@ -36,6 +36,11 @@ function phantom(phase = 0.31): SvrVolume {
   };
   volume.boundsMm = physicalVolumeBounds(volume);
   return volume;
+}
+
+function partition(x: number, y: number, z: number) {
+  const block = (Math.floor(z / 16) * 2 + Math.floor(y / 16)) * 2 + Math.floor(x / 16);
+  return block % 5;
 }
 
 function children(
@@ -208,10 +213,6 @@ describe('within-volume learned 2x detail', () => {
   it('really learns from training targets and reports a harmful learned prior instead of disguising it as validated detail', async () => {
     const input = phantom(),
       contaminatedTraining = phantom();
-    const partition = (x: number, y: number, z: number) => {
-      const block = (Math.floor(z / 16) * 2 + Math.floor(y / 16)) * 2 + Math.floor(x / 16);
-      return block % 5;
-    };
     for (let z = 0; z < 32; z++)
       for (let y = 0; y < 32; y++)
         for (let x = 0; x < 32; x++)
@@ -355,10 +356,6 @@ describe('within-volume learned 2x detail', () => {
   it('withheld native targets cannot alter fitting or calibration even when their subvoxel texture changes', async () => {
     const input = phantom(),
       changed = phantom();
-    const partition = (x: number, y: number, z: number) => {
-      const block = (Math.floor(z / 16) * 2 + Math.floor(y / 16)) * 2 + Math.floor(x / 16);
-      return block % 5;
-    };
     for (let z = 0; z < 32; z++)
       for (let y = 0; y < 32; y++)
         for (let x = 0; x < 32; x++)
@@ -467,9 +464,12 @@ function workerResult(input: SvrVolume): SvrEnhancedVolume {
 }
 
 describe('super-resolution worker ownership', () => {
-  it('transfers only dedicated copies and terminates on successful completion', async () => {
+  beforeEach(() => {
     MockWorker.instances = [];
     vi.stubGlobal('Worker', MockWorker);
+  });
+
+  it('transfers only dedicated copies and terminates on successful completion', async () => {
     const input = phantom(),
       before = input.data.slice();
     const pending = runSuperResolution(input);
@@ -487,8 +487,6 @@ describe('super-resolution worker ownership', () => {
   });
 
   it('terminates promptly on cancellation, ignores late completion and permits a retry', async () => {
-    MockWorker.instances = [];
-    vi.stubGlobal('Worker', MockWorker);
     const controller = new AbortController(),
       input = phantom();
     const publish = vi.fn();
@@ -512,8 +510,6 @@ describe('super-resolution worker ownership', () => {
   it.each([null, undefined, {}, { type: 'unexpected' }, { type: 'done' }, { type: 'done', result: null }])(
     'settles and terminates on malformed worker envelope %j',
     async (message) => {
-      MockWorker.instances = [];
-      vi.stubGlobal('Worker', MockWorker);
       vi.useFakeTimers();
       const pending = runSuperResolution(phantom());
       const rejected = expect(pending).rejects.toThrow(/unreadable/);
@@ -534,8 +530,6 @@ describe('super-resolution worker ownership', () => {
     { phase: 'training', current: 1, total: 0, message: 'Zero denominator' },
     { phase: 'training', current: 2, total: 1, message: 'Out of range' },
   ])('rejects invalid progress before calling the UI %j', async (progress) => {
-    MockWorker.instances = [];
-    vi.stubGlobal('Worker', MockWorker);
     vi.useFakeTimers();
     const onProgress = vi.fn(),
       pending = runSuperResolution(phantom(), { onProgress });
@@ -553,8 +547,6 @@ describe('super-resolution worker ownership', () => {
   });
 
   it('turns a throwing progress consumer into one prompt rejection instead of leaking an active worker', async () => {
-    MockWorker.instances = [];
-    vi.stubGlobal('Worker', MockWorker);
     vi.useFakeTimers();
     const pending = runSuperResolution(phantom(), {
       onProgress: () => {
@@ -576,8 +568,6 @@ describe('super-resolution worker ownership', () => {
   it.each(['dimensions', 'support', 'origin', 'stats'] as const)(
     'rejects malformed completed %s before publishing to the viewer',
     async (field) => {
-      MockWorker.instances = [];
-      vi.stubGlobal('Worker', MockWorker);
       vi.useFakeTimers();
       const input = phantom(),
         result = workerResult(input),
@@ -599,8 +589,6 @@ describe('super-resolution worker ownership', () => {
   it.each(['dimensions', 'support', 'type'] as const)(
     'rejects invalid source %s before constructing a worker or copying pixels',
     async (field) => {
-      MockWorker.instances = [];
-      vi.stubGlobal('Worker', MockWorker);
       const input = phantom();
       if (field === 'dimensions') input.dims[0]++;
       if (field === 'support') input.observedSupport = new Uint8Array(input.data.length + 1);
@@ -615,8 +603,6 @@ describe('super-resolution worker ownership', () => {
   );
 
   it('cleans up failed transfers and browser worker faults without touching source data', async () => {
-    MockWorker.instances = [];
-    vi.stubGlobal('Worker', MockWorker);
     vi.useFakeTimers();
     const input = phantom();
     vi.spyOn(MockWorker.prototype, 'postMessage').mockImplementationOnce(() => {
@@ -636,7 +622,6 @@ describe('super-resolution worker ownership', () => {
   it('has a bounded timeout and reports missing worker support without running on the UI thread', async () => {
     vi.stubGlobal('Worker', undefined);
     await expect(runSuperResolution(phantom())).rejects.toThrow(/worker support/);
-    MockWorker.instances = [];
     vi.stubGlobal('Worker', MockWorker);
     vi.useFakeTimers();
     const pending = runSuperResolution(phantom());

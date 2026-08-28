@@ -342,22 +342,6 @@ type RenderBuildState = {
 
 type VolumeVisualizationMode = 'anatomy' | 'overlay' | 'tumor';
 
-function useVolumeSegmentationState(volume: SvrVolume | null) {
-  const [stored, setStored] = useState<{
-    volume: SvrVolume | null;
-    generatedLabels: SvrLabelVolume | null;
-  }>({ volume, generatedLabels: null });
-
-  return {
-    volume,
-    generatedLabels: stored.volume === volume ? stored.generatedLabels : null,
-    setGeneratedLabels: useCallback(
-      (generatedLabels: SvrLabelVolume | null) => setStored({ volume, generatedLabels }),
-      [volume],
-    ),
-  };
-}
-
 function maskUnsupportedLabels(labels: SvrLabelVolume, observedSupport?: Uint8Array): SvrLabelVolume {
   if (!observedSupport || labels.data.length !== observedSupport.length) return labels;
 
@@ -459,8 +443,15 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   );
 
   // Optional externally-provided labels (e.g. from an ML pipeline) can override internal generation.
-  const segmentationState = useVolumeSegmentationState(volume);
-  const { generatedLabels, setGeneratedLabels } = segmentationState;
+  const [storedLabels, setStoredLabels] = useState<{
+    volume: SvrVolume | null;
+    generatedLabels: SvrLabelVolume | null;
+  }>({ volume, generatedLabels: null });
+  const generatedLabels = storedLabels.volume === volume ? storedLabels.generatedLabels : null;
+  const setGeneratedLabels = useCallback(
+    (generatedLabels: SvrLabelVolume | null) => setStoredLabels({ volume, generatedLabels }),
+    [volume],
+  );
   const [hydrated, setHydrated] = useState<{ key: string; volume: SvrVolume } | null>(null);
   const [storageError, setStorageError] = useState<{ key: string; phase: 'load' | 'save' } | null>(null);
   const [storageRetry, setStorageRetry] = useState({ load: 0, save: 0 });
@@ -2226,7 +2217,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   );
 
   return {
-    ...segmentationState,
+    volume,
     enhancement,
     THRESHOLD_MAX,
     actualTextureFormat,
@@ -2322,7 +2313,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     setVisualizationMode,
     threshold,
     visualizationMode: activeVisualizationMode,
-    volDims,
   };
 }
 

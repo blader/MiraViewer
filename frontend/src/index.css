@@ -175,11 +175,6 @@
   width: fit-content;
   cursor: pointer;
 }
-.svr-selection-display-controls summary span {
-  margin-left: 8px;
-  color: var(--text-tertiary);
-  font-size: 11px;
-}
 .svr-selection-display-controls > div {
   display: flex;
   flex-wrap: wrap;
