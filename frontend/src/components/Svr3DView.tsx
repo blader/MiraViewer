@@ -4,7 +4,15 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
 import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
-import type { SvrLabelVolume, SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries, SvrVolume } from '../types/svr';
+import type {
+  SvrLabelVolume,
+  SvrParams,
+  SvrRoi,
+  SvrRoiPlane,
+  SvrSelectedSeries,
+  SvrSourceProvenance,
+  SvrVolume,
+} from '../types/svr';
 import { formatPatientName, formatSequenceLabel } from '../utils/clinicalData';
 import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
@@ -14,8 +22,7 @@ import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../ut
 import type { SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
-import { computeSvrDownsampleSize } from '../utils/svr/downsample';
-import { filterSvrManifestFramesForRoi } from '../utils/svr/sliceRoiCrop';
+import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from '../utils/svr/sourceMemory';
 import {
   estimateSvrPeakMemoryBytes,
   estimateSvrRegistrationBytes,
@@ -26,6 +33,29 @@ import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
 import { SvrImagingContext } from './svrImagingContext';
 import { regionalRefinementParameters, selectionFocusRoi } from '../utils/svr/refineRegion';
+import {
+  classifySvrAcquisitions,
+  hydrateSvrAcquisitionMetadata,
+  nativeReferenceSources,
+  type SvrAcquisitionClassification,
+} from '../utils/svr/acquisitionProvenance';
+import {
+  nativeDecodedCacheBudgetBytes,
+  nativePlaneMemoryBytes,
+  planNativeVolume,
+  retainedSvrVolumeBytes,
+} from '../utils/svr/nativeVolume';
+import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
+import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
+import {
+  assertEnhancementFits,
+  cropEnhancementSource,
+  enhancementContextFits,
+  enhancementSelectionRoi,
+  enhancementWorkingBytes,
+  type EnhancementSourceLoader,
+} from '../utils/svr/superResolutionRegion';
+import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
@@ -411,6 +441,7 @@ type SvrSourceReadiness = {
   identity: string;
   manifests: SeriesFrameManifest[];
   independentOrientationCount: number;
+  acquisition: SvrAcquisitionClassification | null;
   error: string | null;
 };
 
@@ -512,57 +543,6 @@ function countIndependentOrientations(manifests: SeriesFrameManifest[]): number 
   return normals.length;
 }
 
-/** Native Cornerstone-decoded source pixels coexist with the transferred SVR slice copies. */
-function estimateSourceMemory(
-  manifests: SeriesFrameManifest[],
-  params: SvrParams,
-  roi: SvrRoi | null,
-): { sourceBytes: number; decodedSourceCacheBytes: number } {
-  let sourceBytes = 0;
-  let selectedNativeBytes = 0;
-
-  for (const manifest of manifests) {
-    const frame = manifest.frames[0];
-    if (!frame) continue;
-
-    const geometry = getSliceGeometryFromInstance(frame);
-    const sampled = computeSvrDownsampleSize({
-      rows: geometry.rows,
-      cols: geometry.cols,
-      maxSize: params.sliceDownsampleMaxSize,
-      mode: params.sliceDownsampleMode,
-      rowSpacingMm: geometry.rowSpacingMm,
-      colSpacingMm: geometry.colSpacingMm,
-      targetVoxelSizeMm: params.targetVoxelSizeMm,
-    });
-
-    // Float32 intensity and the authoritative byte-per-pixel acquired mask.
-    const admittedFrames = filterSvrManifestFramesForRoi(manifest, roi, params).frames;
-    sourceBytes += sampled.dsRows * sampled.dsCols * admittedFrames.length * 5;
-
-    for (const admittedFrame of admittedFrames) {
-      // Some source modalities promote signed values or modality-scaled pixels
-      // to Float32. Count that worst-case resident representation explicitly.
-      selectedNativeBytes += admittedFrame.rows * admittedFrame.columns * Float32Array.BYTES_PER_ELEMENT;
-    }
-  }
-
-  try {
-    const cache = cornerstone.imageCache?.getCacheInfo?.();
-    const existingBytes = Math.max(0, Number(cache?.cacheSizeInBytes) || 0);
-    const maximumBytes = Number(cache?.maximumSizeInBytes);
-    const projectedBytes = existingBytes + selectedNativeBytes;
-    return {
-      sourceBytes,
-      decodedSourceCacheBytes:
-        Number.isFinite(maximumBytes) && maximumBytes > 0 ? Math.min(maximumBytes, projectedBytes) : projectedBytes,
-    };
-  } catch {
-    // Missing cache telemetry never makes the selected native frames free.
-    return { sourceBytes, decodedSourceCacheBytes: selectedNativeBytes };
-  }
-}
-
 /** Mirror the solver's physical output grid instead of budgeting a fictional max-dimension cube. */
 function estimateReconstructionGrid(
   manifests: SeriesFrameManifest[],
@@ -623,19 +603,49 @@ function planReconstruction(
   params: SvrParams,
   roi: SvrRoi | null,
   retainedVolume?: SvrVolume,
+  nativeManifest?: SeriesFrameManifest | null,
+  acceptedProvenance?: SvrSourceProvenance,
 ) {
-  const retainedVoxelCount = retainedVolume?.data.length ?? 0;
   // Recomputing deliberately preserves the prior Float32 result and its
   // support evidence while both independent 3D GPU textures stay visible.
-  const retainedBytes = retainedVolume
-    ? retainedVolume.data.byteLength +
-      (retainedVolume.observedSupport?.byteLength ?? 0) +
-      retainedVoxelCount * (Uint16Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
-    : 0;
+  const retainedBytes = retainedVolume ? retainedSvrVolumeBytes(retainedVolume) : 0;
+  let cacheInfo: SvrDecodedCacheInfo | undefined;
+  try {
+    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
+  } catch {
+    /* Reserve the default cache if telemetry is unavailable. */
+  }
+  const acceptedSourceTransforms = acceptedProvenance
+    ? Object.fromEntries(acceptedProvenance.sources.map((source) => [source.seriesUid, source.transform]))
+    : undefined;
+
+  if (nativeManifest) {
+    const native = planNativeVolume(
+      nativeManifest,
+      { ...params, roi },
+      {
+        retainedBytes,
+        decodedCacheBytes: nativeDecodedCacheBudgetBytes(cacheInfo),
+        nativePlaneBytes: nativePlaneMemoryBytes(nativeReferenceSources(manifests, nativeManifest)),
+        transform: acceptedProvenance?.sources.find((source) => source.seriesUid === nativeManifest.seriesUid)
+          ?.transform,
+      },
+    );
+    return {
+      effectiveParams: params,
+      effectiveVoxelSizeMm: Math.max(...native.voxelSizeMm),
+      sourceBytes: native.sourceBytes,
+      memoryPlan: native.memoryPlan,
+    };
+  }
 
   const evaluate = (targetVoxelSizeMm: number) => {
     const effectiveParams = { ...params, targetVoxelSizeMm };
-    const { sourceBytes, decodedSourceCacheBytes } = estimateSourceMemory(manifests, effectiveParams, roi);
+    const { sourceBytes, decodedSourceCacheBytes } = estimateSvrSourceMemory(manifests, effectiveParams, {
+      roi,
+      cacheInfo,
+      acceptedSourceTransforms,
+    });
     const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(manifests, effectiveParams, roi);
 
     return {
@@ -646,12 +656,14 @@ function planReconstruction(
         voxelCount,
         sourceBytes,
         iterations: effectiveParams.iterations,
-        retainedBytes: retainedBytes + decodedSourceCacheBytes,
+        retainedBytes: retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests),
         // Reserve independently owned CPU/GPU labels for both the incoming
         // result and any already-annotated retained reconstruction.
-        labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
+        labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
         registrationBytes:
-          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' ? estimateSvrRegistrationBytes(voxelCount) : 0,
+          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
+            ? estimateSvrRegistrationBytes(voxelCount)
+            : 0,
       }),
     };
   };
@@ -879,9 +891,17 @@ function useSvrReconstructionWorkspace({
     }
 
     let current = true;
+    const controller = new AbortController();
     setSourceReadiness(null);
 
     void Promise.all(selectedSeries.map((series) => getSeriesFrameManifest(series.seriesUid)))
+      .then((manifests) =>
+        hydrateSvrAcquisitionMetadata(manifests, {
+          signal: controller.signal,
+          datasetRevision: volumeIdentity?.datasetRevision,
+          selectedPatientKey: volumeIdentity?.patientKey,
+        }),
+      )
       .then((manifests) => {
         if (!current) return;
 
@@ -915,10 +935,13 @@ function useSvrReconstructionWorkspace({
           throw new Error('These acquisitions use incompatible spatial coordinate frames.');
         }
 
+        const acquisition = classifySvrAcquisitions(manifests);
+        if (acquisition.mode === 'conflicting') throw new Error(acquisition.explanation);
         setSourceReadiness({
           identity: workspaceIdentity,
           manifests,
           independentOrientationCount: countIndependentOrientations(manifests),
+          acquisition,
           error: null,
         });
       })
@@ -928,14 +951,16 @@ function useSvrReconstructionWorkspace({
           identity: workspaceIdentity,
           manifests: [],
           independentOrientationCount: 0,
+          acquisition: null,
           error: reason instanceof Error ? reason.message : 'The acquisition could not be verified.',
         });
       });
 
     return () => {
       current = false;
+      controller.abort();
     };
-  }, [selectedSeries, volumeIdentity?.patientKey, workspaceIdentity]);
+  }, [selectedSeries, volumeIdentity?.patientKey, volumeIdentity?.datasetRevision, workspaceIdentity]);
 
   // ROI-first flow: pick a ROI on an input slice, then run SVR restricted to that cube.
   const preferredRoiSeriesUid = useMemo(() => {
@@ -1125,14 +1150,35 @@ function useSvrReconstructionWorkspace({
   }, [roiWorld]);
 
   const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
+  const nativeSource =
+    currentReadiness?.acquisition?.mode === 'independent-2d'
+      ? null
+      : (currentReadiness?.acquisition?.primaryOriginal3d ?? currentReadiness?.manifests[0] ?? null);
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
-  const plannedReconstruction = useMemo(
-    () =>
-      currentReadiness?.manifests.length
-        ? planReconstruction(currentReadiness.manifests, params, roiWorld, acceptedResult?.volume)
-        : null,
-    [acceptedResult, currentReadiness, params, roiWorld],
-  );
+  const planning = useMemo(() => {
+    try {
+      return {
+        result: currentReadiness?.manifests.length
+          ? planReconstruction(
+              nativeSource
+                ? currentReadiness.manifests
+                : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
+              params,
+              roiWorld,
+              acceptedResult?.volume,
+              nativeSource,
+            )
+          : null,
+        error: null,
+      };
+    } catch (reason) {
+      return {
+        result: null,
+        error: reason instanceof Error ? reason.message : 'The volume geometry could not be planned.',
+      };
+    }
+  }, [acceptedResult, currentReadiness, nativeSource, params, roiWorld]);
+  const plannedReconstruction = planning.result;
   const memoryPlan = plannedReconstruction?.memoryPlan ?? null;
   const sourceMemoryBytes = plannedReconstruction?.sourceBytes ?? 0;
   const effectiveVoxelSizeMm = plannedReconstruction?.effectiveVoxelSizeMm ?? params.targetVoxelSizeMm;
@@ -1145,16 +1191,18 @@ function useSvrReconstructionWorkspace({
     ? 'Select an examination and sequence to inspect its acquired source images.'
     : currentReadiness?.error
       ? currentReadiness.error
-      : !currentReadiness
-        ? 'Verifying acquired frames and physical source geometry…'
-        : currentReadiness.independentOrientationCount < 2
-          ? 'A second independent acquisition orientation is required for multiplane reconstruction.'
-          : !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
+      : planning.error
+        ? planning.error
+        : !currentReadiness
+          ? 'Verifying acquired frames and physical source geometry…'
+          : !nativeSource && !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
             ? 'The selected acquisitions have no verified shared contrast or sequence and cannot be fused safely.'
             : exceedsMemoryBudget
-              ? acceptedResult
-                ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
-                : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
+              ? nativeSource
+                ? 'This native-detail region exceeds the 512 MiB processing budget. Draw a smaller focus box or clear the previous volume; original detail will not be silently reduced.'
+                : acceptedResult
+                  ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
+                  : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
               : null;
 
   const canRun =
@@ -1162,12 +1210,16 @@ function useSvrReconstructionWorkspace({
     Boolean(workspaceIdentity) &&
     Boolean(currentReadiness) &&
     !sourceReadinessMessage &&
-    selectedSeries.length >= 2 &&
-    selectedPlaneCount >= 2;
+    selectedSeries.length >= 1;
   const percent = progress ? Math.round((progress.current / Math.max(1, progress.total)) * 100) : 0;
   const progressMessage = progress ? progress.message : '';
   const sourceFrameCount =
-    currentReadiness?.manifests.reduce((count, manifest) => count + manifest.frames.length, 0) ?? 0;
+    nativeSource?.frames.length ??
+    currentReadiness?.acquisition?.eligibleIndependentSources.reduce(
+      (count, manifest) => count + manifest.frames.length,
+      0,
+    ) ??
+    0;
   const sourceMemoryMiB = sourceMemoryBytes / (1024 * 1024);
   const estimatedPeakMemoryMiB = memoryPlan ? memoryPlan.totalBytes / (1024 * 1024) : null;
   const displayedPatient = data.patients?.find((patient) => patient.key === data.selected_patient_key)?.patient_name;
@@ -1190,7 +1242,16 @@ function useSvrReconstructionWorkspace({
         selectionFocusRoi(volume, labels, effectiveRoiSeriesUid ?? undefined),
       );
       const roi = requested.roi!;
-      const planned = planReconstruction(currentReadiness.manifests, requested, roi, volume);
+      const planned = planReconstruction(
+        nativeSource
+          ? currentReadiness.manifests
+          : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
+        requested,
+        roi,
+        volume,
+        nativeSource,
+        volume.sourceProvenance,
+      );
       setRoiWorld(roi);
       setRoiRect(null);
       setParams(requested);
@@ -1205,6 +1266,7 @@ function useSvrReconstructionWorkspace({
       acceptedResult,
       canRun,
       currentReadiness,
+      nativeSource,
       effectiveRoiSeriesUid,
       params,
       run,
@@ -1215,12 +1277,87 @@ function useSvrReconstructionWorkspace({
     ],
   );
 
+  // Enhancement borrows the accepted source pose; it never publishes a new
+  // reconstruction or transfers/replaces the user's authoritative selection.
+  const loadEnhancementSource = useCallback<EnhancementSourceLoader>(
+    async (labels, options) => {
+      if (!acceptedResult || isRunning) throw new Error('Wait for reconstruction to finish before enhancing a region.');
+      const volume = acceptedResult.volume;
+      let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
+      try {
+        decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
+      } catch {
+        // Optional telemetry may be unavailable; retain the conservative cache reservation.
+      }
+      const nativePlaneBytes = nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []);
+      const cropAccepted = () =>
+        cropEnhancementSource(volume, labels, {
+          ...options,
+          retainedBytes: (options.retainedBytes ?? 0) + decodedCacheBytes + nativePlaneBytes,
+        });
+      if (!volume.nativeVoxelSizeMm) return cropAccepted();
+      if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
+        if (hasNativeDetail(volume)) return cropAccepted();
+        throw new Error('The original source is unavailable. Reopen this examination before enhancing it.');
+      }
+      const retainedBytes = retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0);
+      const sourceTransform = volume.sourceProvenance.sources.find(
+        (source) => source.seriesUid === nativeSource.seriesUid,
+      )?.transform;
+      if (!sourceTransform)
+        throw new Error('The accepted original source pose is unavailable. Reopen this examination.');
+      const planning = {
+        retainedBytes,
+        decodedCacheBytes,
+        nativePlaneBytes,
+        transform: sourceTransform,
+      };
+      // Metadata only: derive the complete acquired grid even when the accepted
+      // native volume is a small focus crop. This never allocates source pixels.
+      const extent = planNativeVolume(
+        nativeSource,
+        {
+          roi: { mode: 'box', sourcePlane: 'axial', boundsMm: volume.boundsMm },
+        },
+        planning,
+      );
+      const offsets = extent.sourceAxes.map((axis, outputAxis) =>
+        extent.sourceFlips[outputAxis] === 1
+          ? -extent.cropMin[axis]!
+          : -(extent.sourceDims[axis]! - 1 - extent.cropMax[axis]!),
+      ) as [number, number, number];
+      const sourceGrid = {
+        dims: extent.sourceAxes.map((axis) => extent.sourceDims[axis]!) as [number, number, number],
+        voxelSizeMm: extent.nativeVoxelSizeMm,
+        direction: extent.direction,
+        originMm: volumeVoxelToPatient(extent, offsets),
+      };
+      const roi = await enhancementSelectionRoi(volume, labels, options.signal, sourceGrid);
+      const requested: SvrParams = { ...(acceptedResult.parameters ?? params), roi };
+      const plan = planNativeVolume(nativeSource, requested, planning);
+      if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
+      const count = plan.dims.reduce((product, axis) => product * axis, 1);
+      assertEnhancementFits(count, retainedBytes + decodedCacheBytes + nativePlaneBytes);
+      const result = await reconstructVolumeMultiPlane({
+        selectedSeries,
+        svrParams: requested,
+        acceptedProvenance: volume.sourceProvenance,
+        retainedBytes: retainedBytes + enhancementWorkingBytes(count),
+        signal: options.signal,
+        onProgress: options.onProgress,
+      });
+      return result.volume;
+    },
+    [acceptedResult, isRunning, nativeSource, currentReadiness, params, selectedSeries],
+  );
+
   return {
     acceptedResult,
     canRun,
     cancel,
     clear,
     currentReadiness,
+    nativeSource,
     displayedDate,
     displayedPatient,
     effectiveVoxelSizeMm,
@@ -1263,6 +1400,7 @@ function useSvrReconstructionWorkspace({
     sourceReadinessMessage,
     startReconstruction,
     refineRegion,
+    loadEnhancementSource,
     status,
     stepRoiSlice,
     automaticallyAdjustedVoxelSpacing,
@@ -1288,14 +1426,13 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
     sequenceGroupsForDate,
     setSelectedSequenceKey,
     sourceMemoryMiB,
+    nativeSource,
   } = workspace;
 
   return (
     <>
       <div className="space-y-3">
-        <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">
-          Acquired source sequences
-        </div>
+        <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">MRI sequences</div>
         <div className="max-h-[260px] overflow-auto">
           {sequenceGroupsForDate.length === 0 ? (
             <div className="py-2 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
@@ -1339,18 +1476,30 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
         <div className="border-t border-[var(--border-color)] pt-4">
           <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
             <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
-            Verified acquired evidence
+            Verified source geometry
           </div>
           <div className="mt-3 space-y-2.5 text-xs">
             {currentReadiness.manifests.map((manifest, index) => {
               const frame = manifest.frames[0]!;
               const geometry = getSliceGeometryFromInstance(frame);
               const series = selectedSeries[index];
+              const kind = currentReadiness.acquisition?.sources.find(
+                (source) => source.seriesUid === manifest.seriesUid,
+              )?.kind;
 
               return (
                 <div key={manifest.seriesUid} className="flex flex-col gap-1">
                   <span className="min-w-0 truncate text-[var(--text-primary)]">
                     {series?.plane ?? 'Acquired'} · {manifest.frames.length} slices
+                  </span>
+                  <span className={kind === 'original-3d' ? 'text-[var(--evidence)]' : 'text-[var(--text-tertiary)]'}>
+                    {kind === 'original-3d'
+                      ? 'Original 3D acquisition'
+                      : kind === 'derived'
+                        ? 'Derived view · not fused'
+                        : kind === 'original-2d'
+                          ? 'Original 2D acquisition'
+                          : 'Acquisition provenance unknown'}
                   </span>
                   <span className="shrink-0 tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
                     {geometry.rowSpacingMm.toFixed(2)} × {geometry.colSpacingMm.toFixed(2)} mm
@@ -1375,12 +1524,20 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                     </span>
                   </div>
                 ) : null}
+                {!nativeSource ? (
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span>Requested voxel spacing</span>
+                    <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
+                  </div>
+                ) : null}
                 <div className="mt-1 flex items-center justify-between gap-2">
-                  <span>Requested voxel spacing</span>
-                  <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
-                </div>
-                <div className="mt-1 flex items-center justify-between gap-2">
-                  <span>{acceptedResult ? 'Next effective spacing' : 'Effective voxel spacing'}</span>
+                  <span>
+                    {nativeSource
+                      ? 'Largest stored-grid step'
+                      : acceptedResult
+                        ? 'Next effective spacing'
+                        : 'Effective voxel spacing'}
+                  </span>
                   <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
                 </div>
                 {automaticallyAdjustedVoxelSpacing ? (
@@ -1390,6 +1547,12 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 ) : null}
               </div>
             </details>
+            {currentReadiness.acquisition ? (
+              <p className="leading-relaxed text-[var(--text-secondary)]">{currentReadiness.acquisition.explanation}</p>
+            ) : null}
+            <p className="leading-relaxed text-[var(--text-tertiary)]">
+              Stored sample spacing is not a measurement of acquired resolution.
+            </p>
           </div>
         </div>
       ) : null}
@@ -1399,6 +1562,14 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
 
 function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const { isRunning, params, setParams } = workspace;
+
+  if (workspace.nativeSource)
+    return (
+      <p className="border-t border-[var(--border-color)] pt-3 text-xs leading-relaxed text-[var(--text-tertiary)]">
+        Original MRI values are preserved. The full-volume overview adapts to available memory; a focus region loads at
+        the original stored spacing. No inverse reconstruction or reformat fusion is applied.
+      </p>
+    );
 
   return (
     <details className="border-t border-[var(--border-color)] pt-3">
@@ -1630,7 +1801,9 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
 
           {roiWorld && roiSideMm ? (
             <div className="text-xs text-[var(--text-tertiary)]">
-              Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
+              {roiWorld.mode === 'box'
+                ? `${roiWorld.boundsMm.min.map((lower, axis) => (roiWorld.boundsMm.max[axis]! - lower).toFixed(1)).join(' × ')} mm region`
+                : `Box: ~${roiSideMm.toFixed(1)} mm cube (${roiWorld.sourcePlane})`}
             </div>
           ) : null}
         </div>
@@ -1654,7 +1827,13 @@ function SvrReconstructButton({ workspace }: { workspace: SvrReconstructionWorks
       aria-describedby={workspace.sourceReadinessMessage ? 'svr-source-readiness' : undefined}
       className="svr-reconstruct-button"
     >
-      {workspace.roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
+      {workspace.nativeSource
+        ? workspace.roiWorld
+          ? 'Load native region'
+          : 'Open 3D volume'
+        : workspace.roiWorld
+          ? 'Reconstruct focus box'
+          : 'Reconstruct volume'}
     </button>
   );
 }
@@ -1714,17 +1893,19 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
         </div>
       </div>
 
-      {sourceReadinessMessage && !isRunning ? (
+      {(error || sourceReadinessMessage) && !isRunning ? (
         <div
           id="svr-source-readiness"
-          role={currentReadiness?.error ? 'alert' : 'status'}
+          role={error || currentReadiness?.error ? 'alert' : 'status'}
           className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
-            currentReadiness?.error || exceedsMemoryBudget
-              ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
-              : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
+            error
+              ? 'border-l-[var(--danger)] bg-[var(--bg-tertiary)] text-[var(--danger)]'
+              : currentReadiness?.error || exceedsMemoryBudget
+                ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
+                : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
           }`}
         >
-          {sourceReadinessMessage}
+          {error ?? sourceReadinessMessage}
         </div>
       ) : null}
 
@@ -1747,21 +1928,14 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
         </div>
       ) : null}
 
-      {error ? (
-        <div
-          role="alert"
-          className="border-l-2 border-l-[var(--danger)] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]"
-        >
-          {error}
-        </div>
-      ) : null}
-
       {acceptedResult ? (
         <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
-          <div className="font-medium text-[var(--text-primary)]">Accepted reconstruction</div>
+          <div className="font-medium text-[var(--text-primary)]">
+            {acceptedResult.volume.nativeVoxelSizeMm ? 'Original-source volume' : 'Accepted reconstruction'}
+          </div>
           <div className="mt-1 tabular-nums">
             {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]} voxels ·{' '}
-            {acceptedResult.volume.voxelSizeMm[0].toFixed(2)} mm
+            {volumeSamplingLabel(acceptedResult.volume)}
           </div>
           {acceptedResult.volume.observedSupport ? (
             <div className="mt-1 text-[var(--evidence)]">
@@ -1820,8 +1994,9 @@ export function Svr3DView(props: Svr3DViewProps) {
       initialSelection: acceptedResult?.initialSelection,
       busy: isRunning,
       refineRegion: workspace.refineRegion,
+      loadEnhancementSource: workspace.loadEnhancementSource,
     }),
-    [acceptedResult, isRunning, workspace.refineRegion],
+    [acceptedResult, isRunning, workspace.refineRegion, workspace.loadEnhancementSource],
   );
   const SourcesIcon = generationCollapsed ? ChevronRight : ChevronLeft;
 
@@ -1833,7 +2008,7 @@ export function Svr3DView(props: Svr3DViewProps) {
       <header className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="shrink-0 text-xs font-medium tracking-[0.12em] text-[var(--text-tertiary)]">
-            RECONSTRUCTION
+            3D WORKSPACE
           </span>
           {displayedPatient ? (
             <span className="truncate text-xs text-[var(--text-primary)]">{formatPatientName(displayedPatient)}</span>
@@ -1849,11 +2024,14 @@ export function Svr3DView(props: Svr3DViewProps) {
           {currentReadiness?.manifests.length ? (
             <>
               <span>
-                {currentReadiness.independentOrientationCount}{' '}
-                {currentReadiness.independentOrientationCount === 1 ? 'orientation' : 'orientations'}
+                {workspace.nativeSource
+                  ? currentReadiness.acquisition?.mode === 'native-3d'
+                    ? 'Original 3D acquisition'
+                    : 'Single source stack'
+                  : `${currentReadiness.acquisition?.eligibleIndependentSources.length ?? 0} independent acquisitions`}
               </span>
               <span aria-hidden="true">·</span>
-              <span>{sourceFrameCount} acquired slices</span>
+              <span>{sourceFrameCount} source slices</span>
             </>
           ) : null}
         </div>
@@ -1903,7 +2081,7 @@ export function Svr3DView(props: Svr3DViewProps) {
                   <>
                     <div className="text-xs tracking-[0.14em] text-[var(--signal-metal)]">ACQUIRED EVIDENCE</div>
                     <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      Reconstructing supported anatomy
+                      {workspace.nativeSource ? 'Opening original MRI anatomy' : 'Reconstructing supported anatomy'}
                     </h2>
                     <p aria-live="polite" className="mt-2 text-sm text-[var(--text-secondary)]">
                       {progressMessage || 'Validating acquired MRI source images…'}
@@ -1940,20 +2118,26 @@ export function Svr3DView(props: Svr3DViewProps) {
                     <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
                       {currentReadiness?.error || exceedsMemoryBudget
                         ? 'This acquisition cannot be reconstructed safely'
-                        : selectedSeries.length === 1
-                          ? 'This examination has one acquired orientation'
-                          : canRun
-                            ? 'Ready to reconstruct supported anatomy'
+                        : canRun
+                          ? workspace.nativeSource
+                            ? 'Explore the original MRI in 3D'
+                            : 'Ready to reconstruct supported anatomy'
+                          : selectedSeries.length === 1
+                            ? 'Inspect this MRI acquisition'
                             : 'Verify acquired MRI source images'}
                     </h2>
                     <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[var(--text-secondary)]">
                       {sourceReadinessMessage ??
+                        currentReadiness?.acquisition?.explanation ??
                         'Independent acquired orientations are ready for a physically supported reconstruction.'}
                     </p>
                     {currentReadiness?.manifests.length ? (
                       <p className="mt-3 text-xs tabular-nums text-[var(--text-tertiary)]">
                         {selectedPlaneCount} {selectedPlaneCount === 1 ? 'orientation' : 'orientations'} ·{' '}
-                        {sourceFrameCount} acquired slices · {params.targetVoxelSizeMm.toFixed(2)} mm requested voxels
+                        {sourceFrameCount} source slices
+                        {workspace.nativeSource
+                          ? ' · original data, no reformat fusion'
+                          : ` · ${params.targetVoxelSizeMm.toFixed(2)} mm requested voxels`}
                       </p>
                     ) : null}
                     {selectedPlaneCount === 1 && roiPreviewSliceStable ? (
@@ -1970,7 +2154,7 @@ export function Svr3DView(props: Svr3DViewProps) {
                     </div>
                     {canRun ? (
                       <p className="mt-3 text-xs text-[var(--text-tertiary)]">
-                        After reconstruction, use tumor segmentation to isolate the area of interest.
+                        Mark the tissue you want to isolate, then inspect its original MRI slices in 3D.
                       </p>
                     ) : null}
                     {showAcquiredStack && roiPreviewSliceStable ? (

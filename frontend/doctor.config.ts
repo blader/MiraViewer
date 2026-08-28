@@ -11,15 +11,30 @@ export default defineConfig({
           'src/utils/svr/glRaymarch.ts',
           'src/utils/svr/reconstructionCore.ts',
           'src/utils/svr/renderLod.ts',
+          // Exterior discovery and seeded geodesics are dependent queue traversals.
+          // Their cooperative yields allow cancellation, not independent async work.
+          'src/utils/segmentation/seededVolume.ts',
           // Patient-space annotation transfer yields between bounded chunks;
           // parallelizing it would duplicate buffers and break cancellation.
           'src/utils/svr/refineRegion.ts',
+          'src/utils/svr/annotationTransfer.ts',
+          // Native grids stream one decoded frame at a time within the memory
+          // budget. Model-input conversion yields over one shared output buffer.
+          'src/utils/svr/nativeVolume.ts',
+          // Region copying scans one shared volume in bounded chunks; yields are
+          // for input/cancel responsiveness, not parallelizable network work.
+          'src/utils/svr/superResolutionRegion.ts',
+          'src/utils/segmentation/onnx/volumeInput.ts',
           'src/utils/svr/rigidRegistration.ts',
           'src/utils/svr/svrComputeCore.ts',
           // DICOM decoding, ZIP integrity checks, restore transactions, and model writes
           // are deliberately ordered and bounded to preserve ownership, rollback, and RAM.
           'src/components/UploadModal.tsx',
           'src/services/dicomIngestion.ts',
+          // Header prefixes grow only after an incomplete parse; metadata
+          // hydration commits bounded, generation-checked batches in order.
+          'src/services/dicomAcquisitionMetadata.ts',
+          'src/utils/svr/acquisitionProvenance.ts',
           'src/services/exportBackup.ts',
           'src/utils/segmentation/onnx/modelCache.ts',
           'src/utils/svr/longitudinalFrames.ts',

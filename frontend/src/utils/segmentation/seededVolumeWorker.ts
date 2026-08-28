@@ -27,11 +27,20 @@ export class SeededVolumeWorker {
   private pending: Pending | null = null;
   private sequence = 0;
 
+  /** postMessage clones backing buffers, including any bytes outside a typed-array view. */
+  get residentSourceBytes(): number {
+    if (!this.worker || !this.source) return 0;
+    return (
+      this.source.buffer.byteLength +
+      (this.support && this.support.buffer !== this.source.buffer ? this.support.buffer.byteLength : 0)
+    );
+  }
+
   run(input: SeededVolumeInput, options: { signal?: AbortSignal; onProgress?: Pending['onProgress'] } = {}) {
     if (options.signal?.aborted) return Promise.reject(new DOMException('Segmentation cancelled.', 'AbortError'));
     if (typeof Worker === 'undefined')
       return Promise.reject(
-        new Error('Selection growth requires browser worker support. Direct brush editing is still available.'),
+        new Error('Boundary suggestions require browser worker support. Direct brush editing is still available.'),
       );
     const geometry = JSON.stringify([input.dims, input.voxelSizeMm]);
     if (this.source !== input.volume || this.support !== input.observedSupport || this.geometry !== geometry) {
@@ -82,7 +91,11 @@ export class SeededVolumeWorker {
       };
       const timeout = window.setTimeout(() => {
         if (this.pending?.id === id)
-          this.fail(new Error('Selection took too long. Keep the marks closer together and retry.'));
+          this.fail(
+            new Error(
+              'Boundary suggestion took too long. Your marks are unchanged; retry or continue editing directly.',
+            ),
+          );
       }, 30_000);
       this.pending = {
         id,

@@ -7,6 +7,7 @@ export type SeededVolumeInput = {
   dims: [number, number, number];
   voxelSizeMm: [number, number, number];
   foreground: Uint32Array;
+  /** Optional outside marks; an empty array uses only the automatic search boundary. */
   background: Uint32Array;
   bounds?: VoxelBounds;
 };
@@ -35,25 +36,42 @@ export function voxelIndex(point: VoxelPoint, dims: readonly number[]): number {
   return (point.z * dims[1]! + point.y) * dims[0]! + point.x;
 }
 
-/** Physical bounds around all explicit marks, not an intensity-derived tumor hypothesis. */
+/** Use the widest physical context that fits the worker budget, not a guessed tumor radius. */
 export function markedRegionBounds(input: SeededVolumeInput): VoxelBounds {
+  const axes = ['x', 'y', 'z'] as const;
+  const full = { min: { x: 0, y: 0, z: 0 }, max: { x: input.dims[0] - 1, y: input.dims[1] - 1, z: input.dims[2] - 1 } };
+  if (input.volume.length <= MAX_SEGMENTATION_DOMAIN_VOXELS) return full;
   const min = { x: Infinity, y: Infinity, z: Infinity };
   const max = { x: -Infinity, y: -Infinity, z: -Infinity };
   for (const indices of [input.foreground, input.background]) {
     for (const index of indices) {
       const point = voxelPoint(index, input.dims);
-      for (const axis of ['x', 'y', 'z'] as const) {
+      for (const axis of axes) {
         min[axis] = Math.min(min[axis], point[axis]);
         max[axis] = Math.max(max[axis], point[axis]);
       }
     }
   }
-  for (const [position, axis] of (['x', 'y', 'z'] as const).entries()) {
-    const padding = Math.ceil(12 / input.voxelSizeMm[position]!);
-    min[axis] = Math.max(0, min[axis] - padding);
-    max[axis] = Math.min(input.dims[position]! - 1, max[axis] + padding);
+  let bounds = { min, max };
+  let low = 0;
+  let high = Math.max(...input.dims.map((size, axis) => size * input.voxelSizeMm[axis]!));
+  // Keep all explicit marks. The caller rejects an over-budget mark span before allocating scratch.
+  for (let iteration = 0; iteration < 40; iteration++) {
+    const paddingMm = (low + high) / 2;
+    const candidate = { min: { ...min }, max: { ...max } };
+    let count = 1;
+    for (const [position, axis] of axes.entries()) {
+      const padding = Math.floor(paddingMm / input.voxelSizeMm[position]!);
+      candidate.min[axis] = Math.max(0, min[axis] - padding);
+      candidate.max[axis] = Math.min(full.max[axis], max[axis] + padding);
+      count *= candidate.max[axis] - candidate.min[axis] + 1;
+    }
+    if (count <= MAX_SEGMENTATION_DOMAIN_VOXELS) {
+      low = paddingMm;
+      bounds = candidate;
+    } else high = paddingMm;
   }
-  return { min, max };
+  return bounds;
 }
 
 /** Indexed queue: each voxel occupies at most one heap slot, even after a better path is found. */
@@ -136,12 +154,12 @@ export async function segmentSeededVolume(
     total > 0xffffffff ||
     volume.length !== total ||
     (observedSupport && observedSupport.length !== total) ||
-    voxelSizeMm.some((spacing) => !Number.isFinite(spacing) || spacing <= 0)
+    voxelSizeMm.some((spacing, axis) => !Number.isFinite(spacing * dims[axis]!) || spacing <= 0)
   ) {
     throw new Error('Segmentation requires matching volume, physical spacing, and acquired-support geometry.');
   }
-  if (!foreground.length || !background.length) {
-    throw new Error('Mark tissue to include and nearby tissue to exclude before growing the selection.');
+  if (!foreground.length) {
+    throw new Error('Mark inside the tissue you want to select before suggesting a boundary.');
   }
   const excluded = new Set(background);
   for (const indices of [foreground, background]) {
@@ -219,33 +237,58 @@ export async function segmentSeededVolume(
 
   const distances = new Float64Array(count).fill(Infinity);
   const labels = new Uint8Array(count);
-  const queue = new VoxelQueue(distances, labels);
+  const localOffsets = [-1, 1, -nx, nx, -nx * ny, nx * ny];
+  const globalOffsets = [-1, 1, -dims[0], dims[0], -dims[0] * dims[1], dims[0] * dims[1]];
+  const steps = voxelSizeMm.flatMap((spacing) => [spacing, spacing]);
   const seed = (local: number, label: number) => {
     const global = globalIndex(local);
-    if ((observedSupport && !observedSupport[global]) || !Number.isFinite(volume[global])) return;
+    if ((observedSupport && !observedSupport[global]) || !Number.isFinite(volume[global])) return false;
     distances[local] = 0;
     labels[local] = label;
+    return true;
   };
-  // The distant search shell supplies a bounded background, never an automatic foreground.
-  for (let z = 0; z < nz; z++) {
-    for (let y = 0; y < ny; y++) {
-      for (let x = 0; x < nx; x++) {
-        if (
-          (nx > 1 && (x === 0 || x === nx - 1)) ||
-          (ny > 1 && (y === 0 || y === ny - 1)) ||
-          (nz > 1 && (z === 0 || z === nz - 1))
-        )
-          seed((z * ny + y) * nx + x, 2);
+  {
+    // Reach the acquired exterior through missing data connected to the search shell.
+    // Enclosed gaps remain unknown, not automatic outside marks inside the tissue.
+    const visited = new Uint8Array(count);
+    const exterior = new Uint32Array(count);
+    let tail = 0;
+    const visit = (local: number) => {
+      if (seed(local, 2) || visited[local]) return;
+      visited[local] = 1;
+      exterior[tail++] = local;
+    };
+    for (let z = 0; z < nz; z++) {
+      for (let y = 0; y < ny; y++) {
+        for (let x = 0; x < nx; x++) {
+          if (
+            (nx > 1 && (x === 0 || x === nx - 1)) ||
+            (ny > 1 && (y === 0 || y === ny - 1)) ||
+            (nz > 1 && (z === 0 || z === nz - 1))
+          )
+            visit((z * ny + y) * nx + x);
+        }
+      }
+    }
+    for (let head = 0; head < tail; head++) {
+      const current = exterior[head]!;
+      const point = voxelPoint(current, localDims);
+      for (let direction = 0; direction < 6; direction++) {
+        const coordinate = point[axes[direction >> 1]!]!;
+        if (direction % 2 === 0 ? coordinate === 0 : coordinate + 1 === localDims[direction >> 1]) continue;
+        visit(current + localOffsets[direction]!);
+      }
+      if ((head + 1) % 8192 === 0) {
+        abort();
+        await hooks.yieldFn?.();
       }
     }
   }
   for (const index of background) seed(localIndex(index), 2);
   for (const index of foreground) seed(localIndex(index), 1);
+  const queue = new VoxelQueue(distances, labels);
   for (let local = 0; local < count; local++) if (labels[local]) queue.update(local);
 
-  const localOffsets = [-1, 1, -nx, nx, -nx * ny, nx * ny];
-  const globalOffsets = [-1, 1, -dims[0], dims[0], -dims[0] * dims[1], dims[0] * dims[1]];
-  const steps = voxelSizeMm.flatMap((spacing) => [spacing, spacing]);
   let processed = 0;
   while (queue.size) {
     const current = queue.pop();

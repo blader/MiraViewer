@@ -525,6 +525,37 @@ describe('svr/computeCore', () => {
     expect(allSlices).toHaveLength(18);
   });
 
+  it.each(['retainedBytes', 'nativePlaneBytes'] as const)(
+    'includes %s before independent reconstruction allocation',
+    async (owner) => {
+      const allSlices = makeAllSlices();
+      await expect(
+        computeSyntheticSvr(
+          allSlices,
+          { ...SVR_PARAMS, iterations: 0 },
+          {
+            [owner]: SVR_MEMORY_BUDGET_BYTES - 1000,
+          },
+        ),
+      ).rejects.toThrow(/budget/);
+      expect(allSlices).toHaveLength(18);
+    },
+  );
+
+  it('refuses to invent an identity transform for a missing accepted source pose', async () => {
+    const allSlices = makeAllSlices();
+    await expect(
+      computeSyntheticSvr(
+        allSlices,
+        { ...SVR_PARAMS, iterations: 0 },
+        {
+          acceptedSourceTransforms: { 's-ax': { rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1], translationMm: [0, 0, 0] } },
+        },
+      ),
+    ).rejects.toThrow(/no accepted patient-space pose/);
+    expect(allSlices).toHaveLength(18);
+  });
+
   it('rejects ROI-rigid registration scratch before starting an otherwise admissible reconstruction', async () => {
     const roi: NonNullable<SvrParams['roi']> = {
       mode: 'cube',

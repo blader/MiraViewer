@@ -1,9 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
-import type { SvrResult } from '../src/types/svr';
+import type { SvrLabelVolume, SvrResult, SvrVolume } from '../src/types/svr';
 import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
 import { useSvrImaging } from '../src/components/svrImagingContext';
+import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
+import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
+import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 
 const mocks = vi.hoisted(() => ({
   cacheInfo: vi.fn(),
@@ -12,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   run: vi.fn(),
   cancel: vi.fn(),
   clear: vi.fn(),
+  reconstruct: vi.fn(),
+  enhancementLoader: vi.fn(),
   hook: {
     status: 'idle' as 'idle' | 'running' | 'ready' | 'failed' | 'canceled' | 'canceling',
     isRunning: false,
@@ -27,6 +32,13 @@ vi.mock('../src/utils/localApi', () => ({
   getSortedSopInstanceUidsForSeries: mocks.sortedSopUids,
 }));
 
+vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
+  ...(await importOriginal<typeof AcquisitionProvenance>()),
+  // This component suite owns preflight/UI transitions. Real Blob hydration and
+  // revision guards are exercised in acquisitionProvenance.test.ts.
+  hydrateSvrAcquisitionMetadata: vi.fn(async (manifests) => manifests),
+}));
+
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
   useSvrReconstruction: () => ({
     ...mocks.hook,
@@ -36,6 +48,8 @@ vi.mock('../src/hooks/useSvrReconstruction', () => ({
   }),
 }));
 
+vi.mock('../src/utils/svr/reconstructVolume', () => ({ reconstructVolumeMultiPlane: mocks.reconstruct }));
+
 vi.mock('../src/components/SvrVolume3DViewer', () => ({
   SvrVolume3DViewer: function MockSvrViewer({
     volumeIdentity,
@@ -43,6 +57,7 @@ vi.mock('../src/components/SvrVolume3DViewer', () => ({
     volumeIdentity: { patientKey?: string; studyUid?: string } | null;
   }) {
     const imaging = useSvrImaging();
+    mocks.enhancementLoader(imaging.loadEnhancementSource);
     return (
       <div data-testid="accepted-svr-volume">
         {volumeIdentity?.patientKey} / {volumeIdentity?.studyUid}
@@ -141,6 +156,17 @@ function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = fa
       pixelSpacing: '1\\\\1',
       frameOfReferenceUid: frame,
       physicalSlicePosition: index,
+      acquisitionMetadata: {
+        version: 1 as const,
+        imageType: ['ORIGINAL', 'PRIMARY'],
+        mrAcquisitionType: '2D',
+        acquisitionNumber: isCoronal ? 2 : isSagittal ? 3 : 1,
+        scanningSequence: ['SE'],
+        echoTimeMs: 100,
+        repetitionTimeMs: 5000,
+        sourceSopInstanceUids: [],
+        derivationSopInstanceUids: [],
+      },
     })),
   };
 }
@@ -173,6 +199,88 @@ function acceptedResult(): SvrResult {
   };
 }
 
+function nativeEnhancementFixture(
+  dims: [number, number, number],
+  start: [number, number, number],
+  selected: [number, number, number],
+  angle = 0,
+) {
+  const base = manifest('axial-patient-a');
+  const c = Math.cos(angle),
+    s = Math.sin(angle);
+  const direction = [c, -s, 0, s, c, 0, 0, 0, 1] as const;
+  const sourceManifest = {
+    ...base,
+    frames: Array.from({ length: 64 }, (_, index) => ({
+      ...base.frames[0]!,
+      rows: 64,
+      columns: 64,
+      instanceNumber: index + 1,
+      sopInstanceUid: `axial-native-${index}`,
+      imagePositionPatient: `0\\0\\${index}`,
+      imageOrientationPatient: [c, s, 0, -s, c, 0].join('\\'),
+      physicalSlicePosition: index,
+      acquisitionMetadata: { ...base.frames[0]!.acquisitionMetadata, mrAcquisitionType: '3D' },
+    })),
+  };
+  const geometry = {
+    dims,
+    originMm: volumeVoxelToPatient({ originMm: [40, -10, 7], voxelSizeMm: [1, 1, 1], direction }, start),
+    voxelSizeMm: [1, 1, 1] as [number, number, number],
+    direction,
+  };
+  const count = dims.reduce((total, value) => total * value, 1);
+  const volume: SvrVolume = {
+    ...geometry,
+    data: Float32Array.from({ length: count }, (_, index) => index - 17),
+    observedSupport: new Uint8Array(count).fill(1),
+    nativeVoxelSizeMm: [1, 1, 1],
+    boundsMm: physicalVolumeBounds(geometry),
+    intensityRange: [-17, count - 18],
+    sourceProvenance: {
+      mode: 'native-3d',
+      datasetRevision: 7,
+      patientKey: 'patient-a',
+      studyUid: 'study-patient-a',
+      frameOfReferenceUid: 'frame-patient-a',
+      fingerprint: 'native-fixture',
+      primarySeriesUid: base.seriesUid,
+      explanation: 'Synthetic original source',
+      sources: [
+        {
+          seriesUid: base.seriesUid,
+          label: 'Original',
+          kind: 'original-3d',
+          transform: { rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1], translationMm: [40, -10, 7] },
+          contributingSopInstanceUids: [],
+          frames: sourceManifest.frames.map((frame, index) => ({
+            sopInstanceUid: frame.sopInstanceUid,
+            rows: 64,
+            columns: 64,
+            originMm: [0, 0, index] as const,
+            columnDirection: [c, s, 0] as const,
+            rowDirection: [-s, c, 0] as const,
+            pixelSpacingMm: [1, 1] as const,
+          })),
+        },
+      ],
+    },
+  };
+  const labels: SvrLabelVolume = {
+    data: new Uint8Array(count),
+    dims,
+    meta: [{ id: 1, name: 'Selected', color: [0, 1, 1] }],
+  };
+  labels.data[(selected[2] * dims[1] + selected[1]) * dims[0] + selected[0]] = 1;
+  return { sourceManifest, previous: { volume, parameters: DEFAULT_SVR_PARAMS }, labels };
+}
+
+function nativeComparisonData() {
+  const comparisonData = data('patient-a', 1);
+  comparisonData.series_map[comparisonData.sequences[0]!.id]![EXAMINATION]!.instance_count = 64;
+  return comparisonData;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
@@ -193,6 +301,82 @@ afterEach(() => {
 });
 
 describe('SVR reconstruction workspace', () => {
+  it.each([0, 0.31])('reloads real native context outside a tight accepted focus crop (rotation %s)', async (angle) => {
+    const comparisonData = nativeComparisonData();
+    const { sourceManifest, previous, labels } = nativeEnhancementFixture(
+      [24, 64, 64],
+      [20, 0, 0],
+      [12, 32, 32],
+      angle,
+    );
+    mocks.manifests.mockResolvedValue(sourceManifest);
+    mocks.hook.result = previous;
+    mocks.hook.resultIdentity = identity(comparisonData);
+    mocks.hook.status = 'ready';
+    const loaded = acceptedResult();
+    mocks.reconstruct.mockResolvedValue(loaded);
+    render(<Svr3DView data={comparisonData} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+    const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+    const before = previous.volume.data.slice();
+    const result = await load(labels, {});
+    expect(result).toBe(loaded.volume);
+    expect(mocks.reconstruct).toHaveBeenCalledOnce();
+    const request = mocks.reconstruct.mock.lastCall![0];
+    expect(request.acceptedProvenance).toBe(previous.volume.sourceProvenance);
+    expect(request.svrParams.roi.mode).toBe('box');
+    expect(previous.volume.data).toEqual(before);
+    expect(labels.data.reduce((total, value) => total + value, 0)).toBe(1);
+  });
+
+  it.each([
+    [32, 32, 32],
+    [0, 32, 32],
+    [63, 32, 32],
+  ] as [number, number, number][])(
+    'reuses an available native grid and shifts enough real context inward at acquisition edges (%s)',
+    async (...point) => {
+      const comparisonData = nativeComparisonData();
+      const { sourceManifest, previous, labels } = nativeEnhancementFixture([64, 64, 64], [0, 0, 0], point);
+      mocks.manifests.mockResolvedValue(sourceManifest);
+      mocks.hook.result = previous;
+      mocks.hook.resultIdentity = identity(comparisonData);
+      mocks.hook.status = 'ready';
+      render(<Svr3DView data={comparisonData} />);
+      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+      const result = await load(labels, {});
+      expect(mocks.reconstruct).not.toHaveBeenCalled();
+      expect(result.dims.every((size) => size >= 32 && size <= 64)).toBe(true);
+      expect(result.voxelSizeMm).toEqual([1, 1, 1]);
+      expect(result.observedSupport!.every(Boolean)).toBe(true);
+      expect(result.data.buffer).not.toBe(previous.volume.data.buffer);
+    },
+  );
+
+  it.each([false, true])(
+    'counts decoded cache and retained annotation/worker bytes before %s native preparation',
+    async (reload) => {
+      const comparisonData = nativeComparisonData();
+      const { sourceManifest, previous, labels } = nativeEnhancementFixture(
+        reload ? [24, 64, 64] : [64, 64, 64],
+        reload ? [20, 0, 0] : [0, 0, 0],
+        reload ? [12, 32, 32] : [32, 32, 32],
+      );
+      mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 400 * 1024 * 1024 });
+      mocks.manifests.mockResolvedValue(sourceManifest);
+      mocks.hook.result = previous;
+      mocks.hook.resultIdentity = identity(comparisonData);
+      mocks.hook.status = 'ready';
+      render(<Svr3DView data={comparisonData} />);
+      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeInTheDocument());
+      await waitFor(() => expect(mocks.enhancementLoader.mock.lastCall![0]).toBeTypeOf('function'));
+      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+      await expect(load(labels, { retainedBytes: 100 * 1024 * 1024 })).rejects.toThrow(/too large|memory budget/i);
+      expect(mocks.reconstruct).not.toHaveBeenCalled();
+    },
+  );
+
   it('refines accepted source settings and registration instead of the controls for the next run', async () => {
     const comparisonData = data('patient-a');
     const previous = acceptedResult();
@@ -228,17 +412,15 @@ describe('SVR reconstruction workspace', () => {
     expect(transfer.labels.data[0]).toBe(1);
   });
 
-  it('explains one-orientation ineligibility without exposing premature 3D or segmentation controls', async () => {
+  it('opens one reliable source stack without pretending it is independent multi-acquisition fusion', async () => {
     render(<Svr3DView data={data('patient-a', 1)} />);
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /one acquired orientation/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /explore the original mri in 3d/i })).toBeInTheDocument();
     });
 
-    expect(
-      screen.getAllByText(/a second independent acquisition orientation is required for multiplane reconstruction/i),
-    ).not.toHaveLength(0);
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /reconstruct volume/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId('accepted-svr-volume')).not.toBeInTheDocument();
     const sources = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
     expect(sources).toBeInTheDocument();
@@ -252,7 +434,7 @@ describe('SVR reconstruction workspace', () => {
       expect(screen.getAllByText('Unclassified').length).toBeGreaterThan(0);
     });
 
-    expect(screen.getByRole('heading', { name: /one acquired orientation/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
   });
 
   it('refuses to fuse unclassified orientations without a verified shared contrast', async () => {
@@ -266,18 +448,40 @@ describe('SVR reconstruction workspace', () => {
     expect(mocks.run).not.toHaveBeenCalled();
   });
 
-  it('rejects labels that describe different planes when their acquired normals are parallel', async () => {
+  it('does not offer multi-acquisition fusion merely because parallel sources have different plane names', async () => {
     mocks.manifests.mockImplementation(async (seriesUid: string) => manifest(seriesUid, 'patient-a', true));
     render(<Svr3DView data={data('patient-a')} />);
 
     await waitFor(() => {
-      expect(
-        screen.getAllByText(/a second independent acquisition orientation is required for multiplane reconstruction/i),
-      ).not.toHaveLength(0);
+      expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled();
     });
 
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /reconstruct volume/i })).not.toBeInTheDocument();
     expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it('chooses an original 3D acquisition and explicitly excludes its averaged viewing planes', async () => {
+    mocks.manifests.mockImplementation(async (seriesUid: string) => {
+      const source = manifest(seriesUid);
+      return {
+        ...source,
+        frames: source.frames.map((frame) => ({
+          ...frame,
+          acquisitionMetadata: {
+            ...frame.acquisitionMetadata,
+            mrAcquisitionType: '3D',
+            imageType: seriesUid.startsWith('axial')
+              ? ['ORIGINAL', 'PRIMARY']
+              : ['DERIVED', 'SECONDARY', 'REFORMATTED', 'AVERAGE'],
+          },
+        })),
+      };
+    });
+    render(<Svr3DView data={data('patient-a')} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open 3D volume' })).toBeEnabled());
+    expect(screen.getByText('Derived view · not fused')).toBeInTheDocument();
+    expect(screen.queryByText('Advanced SVR settings')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconstruct volume' })).not.toBeInTheDocument();
   });
 
   it('rejects incompatible spatial reference frames before reconstruction', async () => {
@@ -365,7 +569,9 @@ describe('SVR reconstruction workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
 
     const effectiveParams = mocks.run.mock.calls[0]?.[1];
-    expect(effectiveParams.targetVoxelSizeMm).toBe(1.02);
+    // Admission includes the bounded native-plane cache and upload transients
+    // alongside decoded frames, the solver, and incoming CPU/GPU labels.
+    expect(effectiveParams.targetVoxelSizeMm).toBe(1.19);
     expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
   });
 
@@ -387,6 +593,21 @@ describe('SVR reconstruction workspace', () => {
     await waitFor(() => {
       expect(mocks.manifests).toHaveBeenCalledWith('axial-patient-b');
     });
+  });
+
+  it('shows one actionable refinement error while preserving the accepted result', async () => {
+    const comparisonData = data('patient-a');
+    mocks.hook.status = 'failed';
+    mocks.hook.result = acceptedResult();
+    mocks.hook.resultIdentity = identity(comparisonData);
+    mocks.hook.error = 'This region exceeds the memory budget. The original selection is unchanged.';
+    mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 600 * 1024 * 1024, maximumSizeInBytes: 600 * 1024 * 1024 });
+    render(<Svr3DView data={comparisonData} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeDisabled());
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(mocks.hook.error);
+    expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+    expect(screen.queryByText(/exceeds the safe browser-memory budget/i)).not.toBeInTheDocument();
   });
 
   it('distinguishes next-run estimates from the immutable accepted reconstruction', async () => {

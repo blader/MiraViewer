@@ -186,15 +186,20 @@ describe('independent explicitly seeded tumor-shape phantoms', () => {
     },
   );
 
-  it.each(['hyperintense', 'hypointense'] as const)(
-    'follows an explicit off-center %s mark instead of guessing the brightest or darkest structure',
-    async (contrast) => {
+  it.each([
+    { contrast: 'hyperintense', outsideMarks: true },
+    { contrast: 'hypointense', outsideMarks: true },
+    { contrast: 'hyperintense', outsideMarks: false },
+    { contrast: 'hypointense', outsideMarks: false },
+  ] as const)(
+    'follows an explicit off-center $contrast mark with explicit outside marks: $outsideMarks',
+    async ({ contrast, outsideMarks }) => {
       const phantom = offCenterTumorPhantom(contrast);
       const result = await segmentSeededVolume({
         ...phantom,
         voxelSizeMm: [1, 1, 1],
         foreground: Uint32Array.of(voxelIndex(phantom.lesionSeed, phantom.dims)),
-        background: Uint32Array.of(voxelIndex(phantom.healthySeed, phantom.dims)),
+        background: outsideMarks ? Uint32Array.of(voxelIndex(phantom.healthySeed, phantom.dims)) : new Uint32Array(),
       });
       const metrics = quality(phantom.truth, result.indices);
       expect(metrics.dice).toBeGreaterThan(0.97);
@@ -216,6 +221,49 @@ describe('independent explicitly seeded tumor-shape phantoms', () => {
     });
     expect(quality(phantom.truth, result.indices).dice).toBeGreaterThan(0.93);
   });
+
+  it.each([1, -1])(
+    'does not use the inside of a 32 mm lesion with polarity %i as an automatic outside boundary',
+    async (polarity) => {
+      const dims: [number, number, number] = [61, 61, 61];
+      const volume = new Float32Array(61 ** 3).fill(0.5);
+      const truth = new Uint8Array(volume.length);
+      for (let z = 0; z < 61; z++)
+        for (let y = 0; y < 61; y++)
+          for (let x = 0; x < 61; x++) {
+            if ((x - 30) ** 2 + (y - 30) ** 2 + (z - 30) ** 2 > 16 ** 2) continue;
+            const index = (z * 61 + y) * 61 + x;
+            truth[index] = 1;
+            volume[index] = 0.5 + polarity * 0.25;
+          }
+      const input = {
+        volume,
+        dims,
+        voxelSizeMm: [1, 1, 1] as [number, number, number],
+        foreground: Uint32Array.of((30 * 61 + 30) * 61 + 30),
+        background: new Uint32Array(),
+      };
+      const automatic = await segmentSeededVolume(input);
+      const fullContext = await segmentSeededVolume({
+        ...input,
+        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 60, y: 60, z: 60 } },
+      });
+      const automaticQuality = quality(truth, automatic.indices);
+      const fullContextQuality = quality(truth, fullContext.indices);
+      console.info('[large-lesion-search-context]', {
+        polarity,
+        truthVoxels: truth.reduce((sum, value) => sum + value, 0),
+        automatic: { ...automaticQuality, selectedVoxels: automatic.indices.length, bounds: automatic.bounds },
+        fullContext: { ...fullContextQuality, selectedVoxels: fullContext.indices.length, bounds: fullContext.bounds },
+      });
+      expect(automatic.indices).toContain(input.foreground[0]);
+      expect(fullContext.indices).toContain(input.foreground[0]);
+      expect(fullContextQuality.dice).toBeGreaterThan(0.97);
+      expect(fullContextQuality.recall).toBeGreaterThan(0.97);
+      expect(automaticQuality.dice).toBeGreaterThan(0.93);
+      expect(automaticQuality.recall).toBeGreaterThan(0.9);
+    },
+  );
 
   it('discovers preamble-verified extensionless MRI only when explicitly enabled', async () => {
     const { inspectAlignmentCorpus } = await import('./helpers/alignmentRealCorpus');
@@ -254,7 +302,7 @@ const runPrivateCorpus = privateMriRoot ? it : it.skip;
 
 describe('optional private unlabeled MRI support and workflow', () => {
   runPrivateCorpus(
-    'preserves support and explicit marks across a same-study three-orientation reconstruction',
+    'preserves support and marks with or without explicit outside marks across a same-study three-orientation reconstruction',
     async () => {
       const { decodeAlignmentRegistrationSlice, inspectAlignmentCorpus, loadAlignmentLosslessCodec } =
         await import('./helpers/alignmentRealCorpus');
@@ -399,53 +447,57 @@ describe('optional private unlabeled MRI support and workflow', () => {
         background,
         bounds: { min: { x: 15, y: 15, z: 15 }, max: { x: 33, y: 33, z: 33 } },
       };
-      const segmentationStarted = performance.now();
-      const segmentation = await segmentSeededVolume(input);
-      const segmentationMs = performance.now() - segmentationStarted;
-      const repeated = await segmentSeededVolume(input);
-      expect(repeated.indices).toEqual(segmentation.indices);
-      expect(segmentation.indices).toContain(seedIndex);
-      for (const index of background) expect(segmentation.indices).not.toContain(index);
-      const unsupported = [...segmentation.indices].filter((index) => !observedSupport[index]).length;
-      const outsideUserRegion = [...segmentation.indices].filter((index) => {
-        const x = index % dims[0],
-          y = Math.floor(index / dims[0]) % dims[1],
-          z = Math.floor(index / (dims[0] * dims[1]));
-        return x < 15 || x > 33 || y < 15 || y > 33 || z < 15 || z > 33;
-      }).length;
+      for (const outsideMarks of [true, false]) {
+        const segmentationInput = { ...input, background: outsideMarks ? background : new Uint32Array() };
+        const segmentationStarted = performance.now();
+        const segmentation = await segmentSeededVolume(segmentationInput);
+        const segmentationMs = performance.now() - segmentationStarted;
+        const repeated = await segmentSeededVolume(segmentationInput);
+        expect(repeated.indices).toEqual(segmentation.indices);
+        expect(segmentation.indices).toContain(seedIndex);
+        for (const index of segmentationInput.background) expect(segmentation.indices).not.toContain(index);
+        const unsupported = [...segmentation.indices].filter((index) => !observedSupport[index]).length;
+        const outsideUserRegion = [...segmentation.indices].filter((index) => {
+          const x = index % dims[0],
+            y = Math.floor(index / dims[0]) % dims[1],
+            z = Math.floor(index / (dims[0] * dims[1]));
+          return x < 15 || x > 33 || y < 15 || y > 33 || z < 15 || z > 33;
+        }).length;
 
-      console.log(
-        JSON.stringify({
-          stage: 'unlabeled-mri-selection-support-workflow',
-          examination: reviewedExamination,
-          selectedRootStudyOrdinal: examination,
-          reviewedAcquiredDisplayIndices: {
-            AX: reviewed!.AX + 1,
-            COR: reviewed!.COR + 1,
-            SAG: reviewed!.SAG + 1,
-          },
-          clinicallyLabeledTumorMask: false,
-          orientations: selected.map((source) => source!.plane),
-          samePatient: true,
-          sameStudy: true,
-          sameFrameOfReference: true,
-          sameContrast: true,
-          acquiredSlices: allSlices.length,
-          reconstructedVoxels: volume.length,
-          supportedVoxels: observedSupport.reduce((total, supported) => total + supported, 0),
-          selectedVoxels: segmentation.indices.length,
-          unsupported,
-          outsideUserRegion,
-          domainVoxels: segmentation.domainVoxels,
-          indexingDecodingMs: Number((reconstructionStarted - indexedAt).toFixed(2)),
-          reconstructionMs: Number(reconstructionMs.toFixed(2)),
-          segmentationMs: Number(segmentationMs.toFixed(2)),
-        }),
-      );
+        console.log(
+          JSON.stringify({
+            stage: 'unlabeled-mri-selection-support-workflow',
+            examination: reviewedExamination,
+            selectedRootStudyOrdinal: examination,
+            reviewedAcquiredDisplayIndices: {
+              AX: reviewed!.AX + 1,
+              COR: reviewed!.COR + 1,
+              SAG: reviewed!.SAG + 1,
+            },
+            clinicallyLabeledTumorMask: false,
+            explicitOutsideMarks: outsideMarks,
+            orientations: selected.map((source) => source!.plane),
+            samePatient: true,
+            sameStudy: true,
+            sameFrameOfReference: true,
+            sameContrast: true,
+            acquiredSlices: allSlices.length,
+            reconstructedVoxels: volume.length,
+            supportedVoxels: observedSupport.reduce((total, supported) => total + supported, 0),
+            selectedVoxels: segmentation.indices.length,
+            unsupported,
+            outsideUserRegion,
+            domainVoxels: segmentation.domainVoxels,
+            indexingDecodingMs: Number((reconstructionStarted - indexedAt).toFixed(2)),
+            reconstructionMs: Number(reconstructionMs.toFixed(2)),
+            segmentationMs: Number(segmentationMs.toFixed(2)),
+          }),
+        );
 
-      expect(segmentation.indices.length).toBeGreaterThan(0);
-      expect(unsupported).toBe(0);
-      expect(outsideUserRegion).toBe(0);
+        expect(segmentation.indices.length).toBeGreaterThan(0);
+        expect(unsupported).toBe(0);
+        expect(outsideUserRegion).toBe(0);
+      }
     },
     90_000,
   );

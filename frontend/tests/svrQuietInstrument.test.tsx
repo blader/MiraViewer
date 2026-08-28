@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
 import type { SvrResult } from '../src/types/svr';
+import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 
 const mocks = vi.hoisted(() => ({
   manifests: vi.fn(),
@@ -24,6 +25,13 @@ vi.mock('../src/utils/localApi', () => ({
   deleteVolumeSegmentation: vi.fn(async () => undefined),
   getVolumeSegmentation: vi.fn(async () => null),
   saveVolumeSegmentation: vi.fn(async () => undefined),
+}));
+
+vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
+  ...(await importOriginal<typeof AcquisitionProvenance>()),
+  // This presentation fixture has no stored DICOM Blobs. Keep real source
+  // classification; metadata hydration/ownership has its own database tests.
+  hydrateSvrAcquisitionMetadata: vi.fn(async (manifests) => manifests),
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
@@ -114,6 +122,17 @@ function manifest(seriesUid: string) {
       pixelSpacing: '1\\1',
       frameOfReferenceUid: 'quiet-instrument-frame',
       physicalSlicePosition: index,
+      acquisitionMetadata: {
+        version: 1 as const,
+        imageType: ['ORIGINAL', 'PRIMARY'],
+        mrAcquisitionType: '2D' as const,
+        acquisitionNumber: coronal ? 2 : 1,
+        scanningSequence: ['SE'],
+        echoTimeMs: 100,
+        repetitionTimeMs: 5000,
+        sourceSopInstanceUids: [],
+        derivationSopInstanceUids: [],
+      },
     })),
   };
 }
@@ -159,7 +178,8 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     expect(screen.getByText('Synthetic quiet instrument')).not.toHaveClass('hidden');
     const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
     expect(sourceRail.parentElement?.className).toContain('minmax(240px,304px)');
-    expect(within(sourceRail).getByText('Verified acquired evidence')).toHaveClass('text-[var(--evidence)]');
+    expect(within(sourceRail).getByText('Verified source geometry')).toHaveClass('text-[var(--evidence)]');
+    expect(screen.getByText('2 independent acquisitions')).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
   });
 
@@ -227,7 +247,7 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     mocks.hook.isRunning = true;
     render(<Svr3DView data={comparisonData()} />);
 
-    await waitFor(() => expect(screen.getByText('Verified acquired evidence')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Verified source geometry')).toBeInTheDocument());
     expect(screen.getByRole('heading', { name: /reconstructing supported anatomy/i })).toBeInTheDocument();
     expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();

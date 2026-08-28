@@ -5,6 +5,8 @@ import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
 import { useSvrSelection } from '../hooks/useSvrSelection';
 import { useSvrImaging } from './svrImagingContext';
 import { REGION_DETAIL_SPACING_MM } from '../utils/svr/refineRegion';
+import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
+import { hasNativeDetail, volumeDisplayRange, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
 import { physicalBrushIndices, SLICE_AXES, type SelectionPatch } from '../utils/segmentation/selectionEditing';
 import { voxelIndex, type VoxelPoint } from '../utils/segmentation/seededVolume';
 import { clamp } from '../utils/math';
@@ -119,12 +121,16 @@ function useSelectionSlice({
         const index = voxelIndex(point, volume.dims);
         const offset = (row * columns + column) * 4;
         const supported = !volume.observedSupport || Boolean(volume.observedSupport[index]);
+        const width = windowRange[1] - windowRange[0];
+        const normalized =
+          width > 0
+            ? clamp((volume.data[index]! - windowRange[0]) / width, 0, 1)
+            : volume.data[index]! > windowRange[0]
+              ? 1
+              : 0;
         const gray =
           supported && Number.isFinite(volume.data[index])
-            ? Math.round(
-                clamp((volume.data[index]! - windowRange[0]) / Math.max(0.001, windowRange[1] - windowRange[0]), 0, 1) *
-                  255,
-              )
+            ? Math.round((volume.displayInvert ? 1 - normalized : normalized) * 255)
             : 0;
         let color: readonly number[] | null = null;
         let alpha = 0;
@@ -286,6 +292,7 @@ function useSelectionSlice({
 }
 
 function SelectionSlice(props: SliceProps) {
+  const { volume } = useSvrImaging();
   const { plane, cursor, setCursor, tool, radiusMm, zoom, disabled, expanded, onExpand } = props;
   const {
     axes,
@@ -306,7 +313,16 @@ function SelectionSlice(props: SliceProps) {
   return (
     <section className="svr-selection-pane" data-view={plane} aria-label={`${axes.label} selection view`}>
       <header className="svr-selection-pane-heading">
-        <span>{axes.label}</span>
+        <span
+          title={
+            volume?.nativeVoxelSizeMm
+              ? 'Slice through the source-aligned volume grid. For an exact original DICOM image, use Original MRI in the 3D view.'
+              : undefined
+          }
+        >
+          {axes.label}
+          {volume?.direction ? <small className="ml-2 text-[var(--text-tertiary)]">source-aligned</small> : null}
+        </span>
         <div className="svr-selection-pane-actions">
           <label className="svr-selection-slice-number">
             <span className="sr-only">{axes.label} slice</span>
@@ -422,17 +438,17 @@ function SelectionDisplayControls({
   if (!volume) return null;
   const windowWidth = windowRange[1] - windowRange[0];
   const windowLevel = (windowRange[0] + windowRange[1]) / 2;
+  const [intensityLow, intensityHigh] = volumeDisplayRange(volume);
+  const intensitySpan = intensityHigh - intensityLow;
   const crosshairIndex = voxelIndex(cursor, volume.dims);
   const crosshairSupported =
     (!volume.observedSupport || Boolean(volume.observedSupport[crosshairIndex])) &&
     Number.isFinite(volume.data[crosshairIndex]);
-  const patientPosition = [cursor.x, cursor.y, cursor.z].map((coordinate, axis) =>
-    (volume.originMm[axis]! + coordinate * volume.voxelSizeMm[axis]!).toFixed(2),
-  );
+  const patientPosition = volumeVoxelToPatient(volume, [cursor.x, cursor.y, cursor.z]).map((value) => value.toFixed(2));
   return (
     <details className="svr-selection-display-controls">
       <summary>
-        Image detail <span>Shared window / level · {volume.voxelSizeMm[0].toFixed(2)} mm grid</span>
+        Image detail <span>Shared window / level · {volumeSamplingLabel(volume)}</span>
       </summary>
       <div>
         <label>
@@ -440,9 +456,9 @@ function SelectionDisplayControls({
           <input
             aria-label="MRI window width"
             type="range"
-            min={0.01}
-            max={2}
-            step={0.005}
+            min={intensitySpan * 0.005}
+            max={intensitySpan * 2}
+            step={intensitySpan * 0.0025}
             value={windowWidth}
             onChange={(event) => {
               const width = Number(event.currentTarget.value);
@@ -455,9 +471,9 @@ function SelectionDisplayControls({
           <input
             aria-label="MRI window level"
             type="range"
-            min={0}
-            max={1}
-            step={0.005}
+            min={intensityLow}
+            max={intensityHigh}
+            step={intensitySpan * 0.0025}
             value={windowLevel}
             onChange={(event) => {
               const level = Number(event.currentTarget.value);
@@ -472,22 +488,33 @@ function SelectionDisplayControls({
           type="button"
           aria-pressed={cutaway}
           onClick={() => setCutaway(!cutaway)}
-          title="Cut the 3D volume at the current axial crosshair to inspect its internal MRI texture"
+          title="Cut the volume grid at the current axial crosshair. This section is interpolated from the volume, not an original DICOM image."
         >
-          3D cutaway
+          Interpolated cutaway
         </button>
         {refineRegion ? (
           <button
             type="button"
             disabled={
-              disabled || !hasSelection || running || Math.max(...volume.voxelSizeMm) <= REGION_DETAIL_SPACING_MM * 1.05
+              disabled ||
+              !hasSelection ||
+              running ||
+              (volume.nativeVoxelSizeMm
+                ? hasNativeDetail(volume)
+                : Math.max(...volume.voxelSizeMm) <= REGION_DETAIL_SPACING_MM * 1.05)
             }
             onClick={() => {
               if (labels) refineRegion(labels);
             }}
-            title="Request a 0.50 mm grid within the browser memory limit. Reconstruct from acquired MRI and transfer your selection as a draft for review."
+            title={
+              volume.nativeVoxelSizeMm
+                ? 'Load the selected region at the original stored sample spacing, without averaging or inverse reconstruction. Your selection transfers as a draft for review.'
+                : 'Request a 0.50 mm grid within the browser memory limit. Reconstruct from acquired MRI and transfer your selection as a draft for review.'
+            }
           >
-            Refine region · {REGION_DETAIL_SPACING_MM.toFixed(2)} mm
+            {volume.nativeVoxelSizeMm
+              ? 'Load native detail'
+              : `Refine region · ${REGION_DETAIL_SPACING_MM.toFixed(2)} mm`}
           </button>
         ) : null}
         <span>Display only · source values are unchanged</span>
@@ -518,14 +545,15 @@ function SelectionBrushControls({
       <div className="svr-selection-tool-group" role="group" aria-label="Selection tools">
         {(
           [
-            ['navigate', 'Navigate', Crosshair],
-            ['include', 'Add tissue', Plus],
-            ['exclude', 'Remove tissue', Minus],
+            ['navigate', 'Navigate', Crosshair, 'Move through the reconstruction without changing the selection.'],
+            ['include', 'Mark inside', Plus, 'Paint tissue that every suggestion must keep.'],
+            ['exclude', 'Mark outside', Minus, 'Optional: paint tissue that every suggestion must exclude.'],
           ] as const
-        ).map(([mode, label, Icon]) => (
+        ).map(([mode, label, Icon, hint]) => (
           <button
             key={mode}
             type="button"
+            title={hint}
             data-mark={mode === 'navigate' ? undefined : mode}
             disabled={mode !== 'navigate' && disabled}
             aria-pressed={tool === mode}
@@ -567,6 +595,7 @@ export function SvrSegmentationEditor({
   setWindowRange,
   cutaway,
   setCutaway,
+  selectionNotice,
   children,
 }: {
   onChange: (labels: SvrLabelVolume | null, patch?: SelectionPatch, previousData?: Uint8Array) => void;
@@ -583,7 +612,8 @@ export function SvrSegmentationEditor({
   setWindowRange: (range: [number, number]) => void;
   cutaway: boolean;
   setCutaway: (enabled: boolean) => void;
-  children: ReactNode;
+  selectionNotice?: ReactNode;
+  children: ReactNode | ((selectionRunning: boolean, retainedBytes: number) => ReactNode);
 }) {
   const { volume, labels = null } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
@@ -705,24 +735,31 @@ export function SvrSegmentationEditor({
           <div className="svr-selection-commit-actions">
             {selection.status.running ? (
               <button type="button" onClick={selection.cancel}>
-                Cancel growth
+                Cancel suggestion
               </button>
             ) : (
               <button
                 type="button"
-                disabled={disabled || !selection.included || !selection.excluded}
+                className="svr-selection-suggest"
+                disabled={disabled || !selection.included}
+                title={
+                  disabled
+                    ? disabledReason
+                    : !selection.included
+                      ? 'Mark inside first. Outside marks are optional.'
+                      : 'Suggest a draft boundary from your marks, then review it in all three planes.'
+                }
                 onClick={() => void selection.grow()}
               >
-                Grow from marks
+                Suggest boundary
               </button>
             )}
             <button
               type="button"
-              className="svr-selection-accept"
               disabled={disabled || !hasSelection || selection.status.running || reviewed}
               onClick={selection.accept}
             >
-              Accept selection
+              Confirm selection
             </button>
             <button
               type="button"
@@ -738,12 +775,12 @@ export function SvrSegmentationEditor({
           {disabled
             ? (disabledReason ?? 'Editing is temporarily unavailable.')
             : selection.status.running
-              ? `Growing selection${selection.status.progress ? ` · ${Math.round(selection.status.progress * 100)}%` : '…'}`
+              ? `Finding boundary${selection.status.progress ? ` · ${Math.round(selection.status.progress * 100)}%` : '…'}`
               : !selection.included
-                ? 'Add tissue: mark inside the region. Remove tissue: mark nearby anatomy to exclude. This is an editable selection, not automatic tumor detection.'
-                : !selection.excluded
-                  ? 'Use Remove tissue to mark nearby anatomy that should stay outside the selection.'
-                  : 'Grow from marks to propose a boundary. Add or remove tissue directly in any view; growth runs only when you ask.'}
+                ? 'Mark inside the tissue you want to keep, then choose Suggest boundary. Outside marks are optional. This is an editable selection, not automatic tumor detection.'
+                : reviewed
+                  ? 'Selection confirmed. Further marks or a new suggestion return it to a draft for review.'
+                  : 'Suggest boundary keeps your inside marks and proposes the surrounding tissue. Outside marks are optional. Review all three planes before confirming.'}
         </div>
         {storageError ? (
           <div className="svr-selection-warning" role="alert">
@@ -755,6 +792,7 @@ export function SvrSegmentationEditor({
             </button>
           </div>
         ) : null}
+        {selectionNotice}
         <SelectionDisplayControls
           disabled={disabled}
           hasSelection={hasSelection}
@@ -773,7 +811,13 @@ export function SvrSegmentationEditor({
         {selection.status.boundaryCount ? (
           <div className="svr-selection-warning" role="status">
             The selection reaches the search boundary. Check its extent and add marks near any missing tissue before
-            accepting.
+            confirming.
+          </div>
+        ) : null}
+        {selection.status.contextLimited ? (
+          <div className="svr-selection-warning" role="status">
+            This suggestion used a memory-limited region around your marks, not the entire reconstruction. Check its
+            extent before confirming.
           </div>
         ) : null}
       </div>
@@ -805,7 +849,13 @@ export function SvrSegmentationEditor({
             <span>3D preview</span>
             <div className="svr-selection-pane-actions">
               <span>
-                {reviewed ? 'Reviewed selection' : hasSelection ? 'Unreviewed selection' : 'Reconstructed anatomy'}
+                {reviewed
+                  ? 'Reviewed selection'
+                  : hasSelection
+                    ? 'Unreviewed selection'
+                    : volume.nativeVoxelSizeMm
+                      ? 'Original-source anatomy'
+                      : 'Reconstructed anatomy'}
               </span>
               <button
                 type="button"
@@ -816,7 +866,9 @@ export function SvrSegmentationEditor({
               </button>
             </div>
           </header>
-          <div className="svr-selection-volume-content">{children}</div>
+          <div className="svr-selection-volume-content">
+            {typeof children === 'function' ? children(selection.status.running, selection.retainedBytes) : children}
+          </div>
         </section>
       </div>
     </section>

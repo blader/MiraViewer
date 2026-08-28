@@ -1,19 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as Ort from 'onnxruntime-web';
+import cornerstone from 'cornerstone-core';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
-import { deleteModelBlob, getModelBlob, getModelRecord, putModelBlob } from '../utils/segmentation/onnx/modelCache';
-import { TUMOR_MODEL_MANIFEST_EXAMPLE, verifyTumorModelManifest } from '../utils/segmentation/onnx/modelManifest';
+import { deleteModelBlobs, getModelBlob, getModelRecord, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
+import {
+  TUMOR_MODEL_MANIFEST_EXAMPLE,
+  verifyTumorModelManifest,
+  type TumorModelManifest,
+} from '../utils/segmentation/onnx/modelManifest';
 import { createOrtSessionFromModelBlob } from '../utils/segmentation/onnx/ortLoader';
 import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmentation';
+import { assertTumorModelGrid, prepareTumorModelInput } from '../utils/segmentation/onnx/volumeInput';
 import { formatMiB } from '../utils/svr/svrUtils';
 import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES } from '../utils/svr/svrMemoryPlan';
+import {
+  nativeDecodedCacheBudgetBytes,
+  nativePlaneMemoryBytes,
+  retainedSvrVolumeBytes,
+} from '../utils/svr/nativeVolume';
 
 const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 const ONNX_TUMOR_MANIFEST_KEY = `${ONNX_TUMOR_MODEL_KEY}:manifest`;
 const ONNX_PREFLIGHT_CLASS_COUNT = TUMOR_MODEL_MANIFEST_EXAMPLE.classes.length;
 
 type OnnxSessionMode = 'webgpu-preferred' | 'wasm';
+type VerifiedOnnxSession = { session: Ort.InferenceSession; mode: OnnxSessionMode; manifest: TumorModelManifest };
 
 export type OnnxStatus = {
   cached: boolean;
@@ -32,6 +44,7 @@ export type OnnxPreflight = {
   nvox: number;
   logitsBytes: number;
   inputBytes: number;
+  preprocessingBytes: number;
   readyResidentBytes: number;
   estimatedPeakBytes: number;
   budgetBytes: number;
@@ -57,18 +70,19 @@ export function useOnnxTumorSession(
   volume: SvrVolume | null,
   onLabels: (labels: SvrLabelVolume) => void,
 ): UseOnnxTumorSession {
-  const sessionRef = useRef<Ort.InferenceSession | null>(null);
-  const sessionModeRef = useRef<OnnxSessionMode | null>(null);
-  const sessionPromiseRef = useRef<Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> | null>(null);
+  const sessionRef = useRef<VerifiedOnnxSession | null>(null);
+  const sessionPromiseRef = useRef<Promise<VerifiedOnnxSession> | null>(null);
   const modelGenerationRef = useRef(0);
+  const modelWriteAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const releaseSession = useCallback((reason: string) => {
     modelGenerationRef.current++;
+    modelWriteAbortRef.current?.abort();
+    modelWriteAbortRef.current = null;
     sessionPromiseRef.current = null;
-    const session = sessionRef.current;
+    const session = sessionRef.current?.session;
     sessionRef.current = null;
-    sessionModeRef.current = null;
 
     if (session) {
       // Avoid leaking WebGPU/WASM resources if the user swaps/clears models.
@@ -111,16 +125,15 @@ export function useOnnxTumorSession(
   useEffect(() => {
     segRunIdRef.current++;
     setSegRunning(inferenceTaskRef.current !== null);
-    setStatus((s) => (s.loading ? { ...s, loading: false } : s));
   }, [volume]);
 
-  const refreshCacheStatus = useCallback(() => {
+  const refreshCacheStatus = useCallback((operationError?: string) => {
     const generation = modelGenerationRef.current;
-    void Promise.all([getModelRecord(ONNX_TUMOR_MODEL_KEY), getModelBlob(ONNX_TUMOR_MANIFEST_KEY)])
+    return Promise.all([getModelRecord(ONNX_TUMOR_MODEL_KEY), getModelBlob(ONNX_TUMOR_MANIFEST_KEY)])
       .then(async ([record, manifest]) => {
         if (modelGenerationRef.current !== generation) return;
         if (!record?.blob || record.savedAtMs == null) {
-          setStatus((s) => ({ ...s, cached: false, verified: false, savedAtMs: null, error: undefined }));
+          setStatus((s) => ({ ...s, cached: false, verified: false, savedAtMs: null, error: operationError }));
           return;
         }
         const { blob: model, savedAtMs } = record;
@@ -128,7 +141,7 @@ export function useOnnxTumorSession(
         try {
           await verifyTumorModelManifest(model, manifest);
           if (modelGenerationRef.current !== generation) return;
-          setStatus((s) => ({ ...s, cached: true, verified: true, savedAtMs, error: undefined }));
+          setStatus((s) => ({ ...s, cached: true, verified: true, savedAtMs, error: operationError }));
         } catch (error) {
           if (modelGenerationRef.current !== generation) return;
           setStatus((s) => ({
@@ -137,14 +150,14 @@ export function useOnnxTumorSession(
             verified: false,
             sessionReady: false,
             savedAtMs,
-            error: error instanceof Error ? error.message : String(error),
+            error: operationError ?? (error instanceof Error ? error.message : String(error)),
           }));
         }
       })
       .catch((e) => {
         if (modelGenerationRef.current !== generation) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setStatus((s) => ({ ...s, verified: false, error: msg }));
+        setStatus((s) => ({ ...s, verified: false, error: operationError ?? msg }));
       });
   }, []);
 
@@ -158,15 +171,33 @@ export function useOnnxTumorSession(
     const nvox = nx * ny * nz;
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
+    const preprocessingBytes = nvox * 4;
+    let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
+    try {
+      const cache = cornerstone.imageCache?.getCacheInfo?.();
+      // Long model operations may overlap continued interactive browsing,
+      // unlike the bounded non-inserting native assembly pass.
+      const maximum = cache?.maximumSizeInBytes;
+      decodedCacheBytes = Math.max(
+        nativeDecodedCacheBudgetBytes(cache),
+        Number.isFinite(maximum) && maximum! >= 0 ? maximum! : 256 * 1024 * 1024,
+      );
+    } catch {
+      // A missing optional cache API cannot make retained source frames free.
+    }
     // The existing labels remain visible while inference builds their
     // replacement. Both overlap the immutable supported result and tensors.
     const inferencePlan = estimateSvrPeakMemoryBytes({
       phase: 'inference',
-      voxelCount: nvox,
+      voxelCount: 0,
       sourceBytes: 0,
       iterations: 0,
       labelBytes: nvox * Uint8Array.BYTES_PER_ELEMENT * 2,
-      modelTensorBytes: inputBytes + logitsBytes,
+      retainedBytes:
+        retainedSvrVolumeBytes(volume) +
+        decodedCacheBytes +
+        nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []),
+      modelTensorBytes: preprocessingBytes + inputBytes + logitsBytes,
     });
     const readyResidentBytes = inferencePlan.totalBytes - inferencePlan.modelTensorBytes;
     const estimatedPeakBytes = inferencePlan.totalBytes;
@@ -177,6 +208,7 @@ export function useOnnxTumorSession(
       nvox,
       logitsBytes,
       inputBytes,
+      preprocessingBytes,
       readyResidentBytes,
       estimatedPeakBytes,
       budgetBytes: SVR_MEMORY_BUDGET_BYTES,
@@ -188,6 +220,9 @@ export function useOnnxTumorSession(
 
   const clearModel = useCallback(() => {
     releaseSession('clear-model');
+    const generation = modelGenerationRef.current;
+    const controller = new AbortController();
+    modelWriteAbortRef.current = controller;
     setStatus((s) => ({
       ...s,
       sessionReady: false,
@@ -197,14 +232,21 @@ export function useOnnxTumorSession(
       error: undefined,
     }));
 
-    void Promise.all([deleteModelBlob(ONNX_TUMOR_MODEL_KEY), deleteModelBlob(ONNX_TUMOR_MANIFEST_KEY)])
+    void deleteModelBlobs([ONNX_TUMOR_MODEL_KEY, ONNX_TUMOR_MANIFEST_KEY], { signal: controller.signal })
       .then(() => {
+        if (modelGenerationRef.current !== generation) return;
         setStatus((s) => ({ ...s, loading: false, message: 'Cleared cached model' }));
         refreshCacheStatus();
       })
-      .catch((e) => {
+      .catch(async (e) => {
+        if (modelGenerationRef.current !== generation) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setStatus((s) => ({ ...s, loading: false, error: msg }));
+        setStatus((s) => ({ ...s, error: msg }));
+        await refreshCacheStatus(msg);
+        if (modelGenerationRef.current === generation) setStatus((s) => ({ ...s, loading: false }));
+      })
+      .finally(() => {
+        if (modelWriteAbortRef.current === controller) modelWriteAbortRef.current = null;
       });
   }, [refreshCacheStatus, releaseSession]);
 
@@ -221,50 +263,68 @@ export function useOnnxTumorSession(
       }
 
       releaseSession('upload-model');
+      const generation = modelGenerationRef.current;
+      const controller = new AbortController();
+      modelWriteAbortRef.current = controller;
       setStatus((s) => ({
         ...s,
         loading: true,
-        verified: false,
         sessionReady: false,
         message: `Verifying model: ${model.name}`,
         error: undefined,
       }));
 
       void (async () => {
-        await deleteModelBlob(ONNX_TUMOR_MANIFEST_KEY);
-        await putModelBlob(ONNX_TUMOR_MODEL_KEY, model);
         await verifyTumorModelManifest(model, manifest);
-        await putModelBlob(ONNX_TUMOR_MANIFEST_KEY, manifest!);
+        if (modelGenerationRef.current !== generation) return;
+        // Keep the prior pair intact until verification succeeds, then replace both
+        // artifacts atomically. Abort also fences a write awaiting database access.
+        await putModelBlobs(
+          [
+            { key: ONNX_TUMOR_MODEL_KEY, blob: model },
+            { key: ONNX_TUMOR_MANIFEST_KEY, blob: manifest! },
+          ],
+          { signal: controller.signal },
+        );
       })()
         .then(() => {
+          if (modelGenerationRef.current !== generation) return;
           setStatus((s) => ({ ...s, loading: false, verified: true, message: 'Verified model and manifest cached' }));
           refreshCacheStatus();
         })
-        .catch((e) => {
+        .catch(async (e) => {
+          if (modelGenerationRef.current !== generation) return;
           const msg = e instanceof Error ? e.message : String(e);
-          setStatus((s) => ({ ...s, cached: true, verified: false, loading: false, error: msg }));
+          setStatus((s) => ({ ...s, error: msg }));
+          await refreshCacheStatus(msg);
+          if (modelGenerationRef.current === generation) setStatus((s) => ({ ...s, loading: false }));
+        })
+        .finally(() => {
+          if (modelWriteAbortRef.current === controller) modelWriteAbortRef.current = null;
         });
     },
     [refreshCacheStatus, releaseSession],
   );
 
-  const ensureSession = useCallback(async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
+  const ensureSession = useCallback(async (): Promise<VerifiedOnnxSession> => {
     if (sessionRef.current) {
-      return { session: sessionRef.current, mode: sessionModeRef.current ?? 'webgpu-preferred' };
+      return sessionRef.current;
     }
 
     if (sessionPromiseRef.current) return sessionPromiseRef.current;
 
     const generation = modelGenerationRef.current;
-    const pending = (async (): Promise<{ session: Ort.InferenceSession; mode: OnnxSessionMode }> => {
+    const pending = (async (): Promise<VerifiedOnnxSession> => {
       const [blob, manifest] = await Promise.all([
         getModelBlob(ONNX_TUMOR_MODEL_KEY),
         getModelBlob(ONNX_TUMOR_MANIFEST_KEY),
       ]);
+      if (modelGenerationRef.current !== generation) throw new Error('Model changed during initialization');
       if (!blob) {
         throw new Error('No cached ONNX model found. Upload one first.');
       }
-      await verifyTumorModelManifest(blob, manifest);
+      const verifiedManifest = await verifyTumorModelManifest(blob, manifest);
+      if (modelGenerationRef.current !== generation) throw new Error('Model changed during initialization');
 
       let session: Ort.InferenceSession;
       let mode: OnnxSessionMode = 'webgpu-preferred';
@@ -281,9 +341,9 @@ export function useOnnxTumorSession(
         throw new Error('Model changed during initialization');
       }
 
-      sessionRef.current = session;
-      sessionModeRef.current = mode;
-      return { session, mode };
+      const accepted = { session, mode, manifest: verifiedManifest };
+      sessionRef.current = accepted;
+      return accepted;
     })();
 
     sessionPromiseRef.current = pending;
@@ -295,10 +355,12 @@ export function useOnnxTumorSession(
   }, []);
 
   const initSession = useCallback(() => {
+    const generation = modelGenerationRef.current;
     setStatus((s) => ({ ...s, loading: true, message: 'Initializing ONNX runtime…', error: undefined }));
 
     void ensureSession()
       .then(({ mode }) => {
+        if (modelGenerationRef.current !== generation) return;
         setStatus((s) => ({
           ...s,
           loading: false,
@@ -307,6 +369,7 @@ export function useOnnxTumorSession(
         }));
       })
       .catch((e) => {
+        if (modelGenerationRef.current !== generation) return;
         const msg = e instanceof Error ? e.message : String(e);
         setStatus((s) => ({ ...s, loading: false, sessionReady: false, error: msg }));
       });
@@ -347,6 +410,8 @@ export function useOnnxTumorSession(
     }
 
     const runId = ++segRunIdRef.current;
+    const generation = modelGenerationRef.current;
+    const isCurrent = () => segRunIdRef.current === runId && modelGenerationRef.current === generation;
     setSegRunning(true);
 
     const started = performance.now();
@@ -354,32 +419,22 @@ export function useOnnxTumorSession(
 
     const inferenceTask: Promise<void> = (async () => {
       try {
-        const { session, mode } = await ensureSession();
-        if (segRunIdRef.current !== runId) return;
+        const { session, mode, manifest } = await ensureSession();
+        if (!isCurrent()) return;
+        assertTumorModelGrid(volume, manifest);
 
         setStatus((s) => ({
           ...s,
           sessionReady: true,
           loading: true,
-          message:
-            mode === 'wasm' ? 'Running ONNX segmentation… (WASM)' : 'Running ONNX segmentation… (WebGPU preferred)',
+          message: `Running ONNX segmentation… (${mode === 'wasm' ? 'WASM' : 'WebGPU preferred'})${manifest.input.spatialFrame === 'source-grid' ? ' · Source-aligned input; no resampling.' : ''}`,
         }));
 
-        let modelInput = volume.data;
-        if (observedSupport) {
-          for (let index = 0; index < observedSupport.length; index++) {
-            if (!observedSupport[index] && modelInput[index] !== 0) {
-              modelInput = new Float32Array(volume.data);
-              for (let masked = index; masked < modelInput.length; masked++) {
-                if (!observedSupport[masked]) modelInput[masked] = 0;
-              }
-              break;
-            }
-          }
-        }
+        const modelInput = await prepareTumorModelInput(volume, isCurrent);
+        if (!isCurrent()) return;
 
         const res = await runTumorSegmentationOnnx({ session, volume: modelInput, dims: volume.dims });
-        if (segRunIdRef.current !== runId) return;
+        if (!isCurrent()) return;
 
         if (observedSupport) {
           for (let index = 0; index < res.labels.length; index++) {
@@ -387,12 +442,17 @@ export function useOnnxTumorSession(
           }
         }
 
-        onLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META });
+        onLabels({ data: res.labels, dims: volume.dims, meta: BRATS_BASE_LABEL_META, reviewState: 'draft' });
 
         const ms = Math.round(performance.now() - started);
-        setStatus((s) => ({ ...s, loading: false, sessionReady: true, message: `Segmentation complete (${ms}ms)` }));
+        setStatus((s) => ({
+          ...s,
+          loading: false,
+          sessionReady: true,
+          message: `Segmentation complete (${ms}ms)${manifest.input.spatialFrame === 'source-grid' ? ' · Source-aligned model suggestion; review against original slices.' : ''}`,
+        }));
       } catch (e) {
-        if (segRunIdRef.current !== runId) return;
+        if (!isCurrent()) return;
         const msg = e instanceof Error ? e.message : String(e);
         setStatus((s) => ({ ...s, loading: false, sessionReady: sessionRef.current !== null, error: msg }));
       } finally {
@@ -400,7 +460,7 @@ export function useOnnxTumorSession(
         // single in-flight ref itself is the only lifecycle authority.
         inferenceTaskRef.current = null;
         setSegRunning(false);
-        if (segRunIdRef.current !== runId) {
+        if (segRunIdRef.current !== runId && modelGenerationRef.current === generation) {
           setStatus((current) => ({
             ...current,
             loading: false,
@@ -413,7 +473,7 @@ export function useOnnxTumorSession(
   }, [ensureSession, onLabels, preflight, volume]);
 
   const cancelSegmentation = useCallback(() => {
-    if (!segRunning) return;
+    if (!inferenceTaskRef.current) return;
     segRunIdRef.current++;
     setStatus((s) => ({
       ...s,
@@ -421,7 +481,7 @@ export function useOnnxTumorSession(
       message: 'Result discarded; waiting for the current model operation to release its memory…',
       error: undefined,
     }));
-  }, [segRunning]);
+  }, []);
 
   return {
     status,

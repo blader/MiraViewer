@@ -260,7 +260,7 @@ describe('svr/acquired-support texture', () => {
   it('skips unsupported empty space before fetching support while still rejecting it before anatomical sampling', () => {
     const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
     const occupancyLookup = march.indexOf('texelFetch(u_occ, cell, 0)');
-    const intensityLookup = march.indexOf('texture(u_vol, tc).r');
+    const intensityLookup = march.indexOf('displayedIntensity(tc, resolutionScale)');
 
     expect(supportGate).toBeGreaterThan(0);
     expect(occupancyLookup).toBeGreaterThan(0);
@@ -272,8 +272,8 @@ describe('svr/acquired-support texture', () => {
   it('isolates acquired lesion labels before paying for anatomy and gradient sampling', () => {
     const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
     const lesionLookup = march.indexOf('labelCoverage = lesionCoverage(tc, lid)');
-    const lesionGate = march.indexOf('labelCoverage <= 0.08');
-    const intensityLookup = march.indexOf('texture(u_vol, tc).r');
+    const lesionGate = march.indexOf('if (labelCoverage <=');
+    const intensityLookup = march.indexOf('displayedIntensity(tc, resolutionScale)');
 
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_tumorOnly;');
     expect(supportGate).toBeGreaterThan(0);
@@ -301,10 +301,10 @@ describe('svr/acquired-support texture', () => {
 
   it('clips focused rays to the complete lesion domain and smoothly samples categorical boundaries', () => {
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_focusEnabled;');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_cameraCenter;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMin;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMax;');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('ro += u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('vec3 ro = u_invRot * roW + u_cameraCenter;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmin = max(bmin, u_focusMin);');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmax = min(bmax, u_focusMax);');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('smoothstep(0.12, 0.78, labelCoverage)');
@@ -313,21 +313,23 @@ describe('svr/acquired-support texture', () => {
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('accum = mix(accum, visibleLesion');
   });
 
-  it('samples the exact cut plane through categorical support and labels before any display shading', () => {
+  it('samples the exact cut plane through categorical support and selected-region isolation before display shading', () => {
     const section = RAYMARCH_FRAGMENT_SHADER.slice(
       RAYMARCH_FRAGMENT_SHADER.indexOf('vec4 cutSurface'),
       RAYMARCH_FRAGMENT_SHADER.indexOf('bool intersectBox'),
     );
     const support = section.indexOf('texture(u_support, tc)');
-    const labels = section.indexOf('u_tumorOnly != 0 && label == 0u');
-    const intensity = section.indexOf('windowed(texture(u_vol, tc).r)');
+    const labels = section.indexOf('if (u_tumorOnly != 0)');
+    const intensity = section.indexOf('displayedIntensity(tc)');
     expect(support).toBeGreaterThan(0);
     expect(labels).toBeGreaterThan(support);
     expect(intensity).toBeGreaterThan(labels);
+    expect(section).toContain('else if (label == 0u) return vec4(0.0)');
+    expect(section).toContain('lesionCoverage(tc, label)');
     expect(section).toContain('vec3 color = vec3(value)');
     expect(section).not.toMatch(/u_opacity|u_thr|u_gamma|shade/);
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t0)');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t1)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t0, cutPixelWidth)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t1, cutPixelWidth)');
   });
 
   it('restores conservative cell skipping through sparse acquired MRI support without changing visible anatomy', () => {

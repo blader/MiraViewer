@@ -66,6 +66,21 @@ export async function putModelBlobs(
   models: ReadonlyArray<Pick<ModelRecord, 'key' | 'blob'>>,
   options: { signal?: AbortSignal } = {},
 ): Promise<void> {
+  await changeModelBlobs(models, options);
+}
+
+/** Clear related artifacts together, with the same cancellation boundary as replacement. */
+export async function deleteModelBlobs(keys: readonly string[], options: { signal?: AbortSignal } = {}): Promise<void> {
+  await changeModelBlobs(
+    keys.map((key) => ({ key, blob: null })),
+    options,
+  );
+}
+
+async function changeModelBlobs(
+  models: ReadonlyArray<{ key: string; blob: Blob | null }>,
+  options: { signal?: AbortSignal },
+): Promise<void> {
   if (models.length === 0) return;
   const abortIfRequested = () => {
     if (options.signal?.aborted) throw new DOMException('Backup restoration cancelled.', 'AbortError');
@@ -74,21 +89,28 @@ export async function putModelBlobs(
   const db = await getDb();
   abortIfRequested();
   const transaction = db.transaction(STORE, 'readwrite');
+  const abortTransaction = () => {
+    try {
+      transaction.abort();
+    } catch {
+      // A committed transaction is already durable and cannot be rolled back.
+    }
+  };
+  options.signal?.addEventListener('abort', abortTransaction, { once: true });
   try {
     for (const model of models) {
       abortIfRequested();
-      await transaction.store.put({ key: model.key, blob: model.blob, savedAtMs: Date.now() }, model.key);
+      if (model.blob === null) await transaction.store.delete(model.key);
+      else await transaction.store.put({ key: model.key, blob: model.blob, savedAtMs: Date.now() }, model.key);
     }
     abortIfRequested();
     await transaction.done;
   } catch (error) {
-    try {
-      transaction.abort();
-    } catch {
-      // A completed transaction cannot be aborted; its failure still prevents the medical commit.
-    }
+    abortTransaction();
     await transaction.done.catch(() => {});
     throw error;
+  } finally {
+    options.signal?.removeEventListener('abort', abortTransaction);
   }
 }
 

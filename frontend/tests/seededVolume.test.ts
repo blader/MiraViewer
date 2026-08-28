@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { segmentSeededVolume, type SeededVolumeInput } from '../src/utils/segmentation/seededVolume';
+import {
+  markedRegionBounds,
+  MAX_SEGMENTATION_DOMAIN_VOXELS,
+  segmentSeededVolume,
+  type SeededVolumeInput,
+} from '../src/utils/segmentation/seededVolume';
 import { segmentationQuality } from './helpers/segmentationQuality';
 
 function anatomy(polarity = 1, spacing: [number, number, number] = [1, 1, 1], heldOut = false) {
@@ -45,14 +50,25 @@ function anatomy(polarity = 1, spacing: [number, number, number] = [1, 1, 1], he
 }
 
 describe('explicitly seeded physical-volume segmentation', () => {
-  it.each([1, -1])(
-    'separates heterogeneous tissue with polarity %i without guessing an intensity class',
-    async (polarity) => {
+  it.each([
+    { polarity: 1, outsideMarks: true },
+    { polarity: -1, outsideMarks: true },
+    { polarity: 1, outsideMarks: false },
+    { polarity: -1, outsideMarks: false },
+  ])(
+    'separates heterogeneous tissue with polarity $polarity and explicit outside marks: $outsideMarks',
+    async ({ polarity, outsideMarks }) => {
       const { input, truth } = anatomy(polarity);
+      if (!outsideMarks) input.background = new Uint32Array();
       const original = input.volume.slice();
       const result = await segmentSeededVolume(input);
       const metrics = segmentationQuality(truth, result.indices);
-      console.info('[seeded-selection-phantom]', { polarity, ...metrics, domainVoxels: result.domainVoxels });
+      console.info('[seeded-selection-phantom]', {
+        polarity,
+        outsideMarks,
+        ...metrics,
+        domainVoxels: result.domainVoxels,
+      });
       expect(metrics.dice).toBeGreaterThan(0.94);
       expect(metrics.precision).toBeGreaterThan(0.97);
       const selected = new Set(result.indices);
@@ -115,6 +131,44 @@ describe('explicitly seeded physical-volume segmentation', () => {
     ).rejects.toThrow(/span too much tissue/);
   });
 
+  it.each([
+    { x: 96, y: 80, z: 48 },
+    { x: 0, y: 0, z: 0 },
+    { x: 191, y: 159, z: 95 },
+  ])('maximizes bounded physical context at $x,$y,$z without clipping marks', (point) => {
+    const dims: [number, number, number] = [192, 160, 96];
+    const voxelSizeMm: [number, number, number] = [0.7, 1.3, 2.8];
+    const foreground = (point.z * dims[1] + point.y) * dims[0] + point.x;
+    const background = foreground + (point.x > 0 ? -1 : 1);
+    const bounds = markedRegionBounds({
+      dims,
+      voxelSizeMm,
+      volume: new Float32Array(dims[0] * dims[1] * dims[2]),
+      foreground: Uint32Array.of(foreground),
+      background: Uint32Array.of(background),
+    });
+    const axes = ['x', 'y', 'z'] as const;
+    let count = 1,
+      expandedCount = 1;
+    const physicalPadding = [];
+    for (const [position, axis] of axes.entries()) {
+      const firstMark = axis === 'x' ? Math.min(point.x, point.x + (point.x > 0 ? -1 : 1)) : point[axis];
+      const lastMark = axis === 'x' ? Math.max(point.x, point.x + (point.x > 0 ? -1 : 1)) : point[axis];
+      expect(bounds.min[axis]).toBeGreaterThanOrEqual(0);
+      expect(bounds.max[axis]).toBeLessThan(dims[position]!);
+      expect(bounds.min[axis]).toBeLessThanOrEqual(firstMark);
+      expect(bounds.max[axis]).toBeGreaterThanOrEqual(lastMark);
+      count *= bounds.max[axis] - bounds.min[axis] + 1;
+      expandedCount *= Math.min(dims[position]! - 1, bounds.max[axis] + 1) - Math.max(0, bounds.min[axis] - 1) + 1;
+      if (bounds.min[axis] > 0) physicalPadding.push((firstMark - bounds.min[axis]) * voxelSizeMm[position]!);
+      if (bounds.max[axis] < dims[position]! - 1)
+        physicalPadding.push((bounds.max[axis] - lastMark) * voxelSizeMm[position]!);
+    }
+    expect(count).toBeLessThanOrEqual(MAX_SEGMENTATION_DOMAIN_VOXELS);
+    expect(expandedCount).toBeGreaterThan(MAX_SEGMENTATION_DOMAIN_VOXELS);
+    expect(Math.max(...physicalPadding) - Math.min(...physicalPadding)).toBeLessThanOrEqual(Math.max(...voxelSizeMm));
+  });
+
   it('is deterministic under seed ordering, duplicate marks, and exact-cost ties', async () => {
     const input: SeededVolumeInput = {
       volume: new Float32Array(15).fill(0.7),
@@ -142,7 +196,10 @@ describe('explicitly seeded physical-volume segmentation', () => {
       foreground: new Uint32Array([3]),
       background: new Uint32Array([9]),
     };
+    const insideOnly = await segmentSeededVolume({ ...input, background: new Uint32Array() });
+    expect(insideOnly.indices).toContain(7);
     const result = await segmentSeededVolume(input);
+    expect(result.indices.length).toBeLessThan(insideOnly.indices.length);
     expect(result.indices).toContain(3);
     expect(result.indices).not.toContain(9);
     expect([...result.indices].every((index) => index < 7)).toBe(true);
@@ -151,25 +208,223 @@ describe('explicitly seeded physical-volume segmentation', () => {
     expect(corrected.indices).not.toContain(5);
   });
 
-  it('never seeds or connects through missing support and does not mutate marks', async () => {
+  it.each([true, false])(
+    'never crosses missing support or mutates marks with explicit outside marks: %s',
+    async (outsideMarks) => {
+      const input: SeededVolumeInput = {
+        volume: new Float32Array(17).fill(0.7),
+        observedSupport: new Uint8Array(17).fill(1),
+        dims: [17, 1, 1],
+        voxelSizeMm: [1, 1, 1],
+        foreground: new Uint32Array([3]),
+        background: Uint32Array.from(outsideMarks ? [13] : []),
+      };
+      input.observedSupport![8] = 0;
+      const result = await segmentSeededVolume(input);
+      expect([...result.indices].every((index) => index < 8)).toBe(true);
+      await expect(segmentSeededVolume({ ...input, foreground: new Uint32Array([8]) })).rejects.toThrow(/acquired/);
+      expect(input.foreground).toEqual(new Uint32Array([3]));
+    },
+  );
+
+  it.each([
+    { polarity: 1, frontierMark: false },
+    { polarity: -1, frontierMark: false },
+    { polarity: 1, frontierMark: true },
+  ])(
+    'localizes an inside-only structure within an acquired island at polarity $polarity with frontier mark: $frontierMark',
+    async ({ polarity, frontierMark }) => {
+      const dims: [number, number, number] = [9, 9, 9];
+      const volume = new Float32Array(9 ** 3).fill(Number.NaN);
+      const observedSupport = new Uint8Array(volume.length);
+      const truth = new Uint8Array(volume.length);
+      const index = (x: number, y: number, z: number) => (z * 9 + y) * 9 + x;
+      for (let z = 1; z <= 7; z++)
+        for (let y = 1; y <= 7; y++)
+          for (let x = 1; x <= 7; x++) {
+            const voxel = index(x, y, z);
+            const inside = x >= 3 && x <= 5 && y >= 3 && y <= 5 && z >= 3 && z <= 5;
+            observedSupport[voxel] = 1;
+            truth[voxel] = inside ? 1 : 0;
+            volume[voxel] = 0.4 + (inside ? polarity * 0.3 : 0);
+          }
+      const foreground = Uint32Array.from(frontierMark ? [index(4, 4, 4), index(1, 4, 4)] : [index(4, 4, 4)]);
+      const result = await segmentSeededVolume({
+        volume,
+        observedSupport,
+        dims,
+        voxelSizeMm: [1, 1, 1],
+        foreground,
+        background: new Uint32Array(),
+      });
+      const selected = new Set(result.indices);
+      for (const mark of foreground) expect(selected.has(mark)).toBe(true);
+      expect([...selected].every((voxel) => observedSupport[voxel] && Number.isFinite(volume[voxel]))).toBe(true);
+      // The intensity boundary must matter even when no acquired pixel touches the rectangular search shell.
+      expect(selected.size).toBeLessThan(7 ** 3 / 2);
+      expect(segmentationQuality(truth, result.indices).recall).toBe(1);
+      if (!frontierMark) expect(segmentationQuality(truth, result.indices).dice).toBeGreaterThan(0.95);
+    },
+  );
+
+  it.each([1, -1])(
+    'keeps enclosed missing-data cavities neutral within a marked structure at polarity %i',
+    async (polarity) => {
+      const dims: [number, number, number] = [9, 9, 9];
+      const volume = new Float32Array(9 ** 3).fill(0.4);
+      const observedSupport = new Uint8Array(volume.length).fill(1);
+      const truth = new Uint8Array(volume.length);
+      const index = (x: number, y: number, z: number) => (z * 9 + y) * 9 + x;
+      for (let z = 2; z <= 6; z++)
+        for (let y = 2; y <= 6; y++)
+          for (let x = 2; x <= 6; x++) {
+            const voxel = index(x, y, z);
+            truth[voxel] = 1;
+            volume[voxel] = 0.4 + polarity * 0.3;
+          }
+      // One absent observation and one nonfinite observation form an enclosed cavity, not an outside mark.
+      const missing = index(4, 4, 4);
+      const nonfinite = index(4, 5, 4);
+      observedSupport[missing] = 0;
+      volume[nonfinite] = Number.NaN;
+      truth[missing] = truth[nonfinite] = 0;
+      const foreground = Uint32Array.of(index(2, 4, 4));
+      const result = await segmentSeededVolume({
+        volume,
+        observedSupport,
+        dims,
+        voxelSizeMm: [1, 1, 1],
+        foreground,
+        background: new Uint32Array(),
+      });
+      const selected = new Set(result.indices);
+      expect(selected.has(foreground[0]!)).toBe(true);
+      expect(selected.has(missing)).toBe(false);
+      expect(selected.has(nonfinite)).toBe(false);
+      expect([...selected].every((voxel) => observedSupport[voxel] && Number.isFinite(volume[voxel]))).toBe(true);
+      // Exact synthetic truth checks both the cavity rim and the rest of the structure for artificial erosion.
+      expect(segmentationQuality(truth, result.indices)).toEqual({ dice: 1, precision: 1, recall: 1 });
+    },
+  );
+
+  it('keeps an inside-only suggestion bounded and deterministic with duplicated or reordered marks', async () => {
     const input: SeededVolumeInput = {
-      volume: new Float32Array(17).fill(0.7),
-      observedSupport: new Uint8Array(17).fill(1),
-      dims: [17, 1, 1],
+      volume: new Float32Array(31).fill(0.7),
+      observedSupport: new Uint8Array(31).fill(1),
+      dims: [31, 1, 1],
       voxelSizeMm: [1, 1, 1],
-      foreground: new Uint32Array([3]),
-      background: new Uint32Array([13]),
+      foreground: Uint32Array.of(10, 11),
+      background: new Uint32Array(),
+      bounds: { min: { x: 4, y: 0, z: 0 }, max: { x: 22, y: 0, z: 0 } },
     };
-    input.observedSupport![8] = 0;
+    input.observedSupport![16] = 0;
+    input.volume[15] = Number.NaN;
     const result = await segmentSeededVolume(input);
-    expect([...result.indices].every((index) => index < 8)).toBe(true);
-    await expect(segmentSeededVolume({ ...input, foreground: new Uint32Array([8]) })).rejects.toThrow(/acquired/);
-    expect(input.foreground).toEqual(new Uint32Array([3]));
+    const repeated = await segmentSeededVolume({ ...input, foreground: Uint32Array.of(11, 10, 11) });
+    expect(repeated.indices).toEqual(result.indices);
+    expect(result.bounds).toEqual(input.bounds);
+    expect(result.domainVoxels).toBe(19);
+    expect([...result.indices]).toEqual(expect.arrayContaining([10, 11]));
+    expect([...result.indices].every((index) => index >= 4 && index < 15)).toBe(true);
+    expect(
+      [...result.indices].every((index) => input.observedSupport![index] && Number.isFinite(input.volume[index])),
+    ).toBe(true);
   });
 
-  it('requires both kinds of marks and rejects contradictions, invalid geometry, and unbounded work', async () => {
+  it.each([
+    { dims: [17, 13, 11], spacing: [1, 1, 1] },
+    { dims: [17, 13, 11], spacing: [0.45, 1.4, 4] },
+    { dims: [17, 13, 1], spacing: [0.7, 1.2, 5] },
+    { dims: [17, 1, 11], spacing: [0.7, 1.2, 5] },
+    { dims: [1, 13, 11], spacing: [0.7, 1.2, 5] },
+    { dims: [1, 1, 17], spacing: [0.7, 1.2, 5] },
+    { dims: [1, 1, 1], spacing: [0.7, 1.2, 5] },
+  ])(
+    'never removes long, cross-plane, or boundary inside marks on $dims at spacing $spacing',
+    async ({ dims, spacing }) => {
+      const [nx, ny, nz] = dims as [number, number, number];
+      const volume = new Float32Array(nx * ny * nz);
+      const observedSupport = new Uint8Array(volume.length).fill(1);
+      const foreground = [],
+        background = [];
+      for (let z = 0; z < nz; z++)
+        for (let y = 0; y < ny; y++)
+          for (let x = 0; x < nx; x++) {
+            const index = (z * ny + y) * nx + x;
+            volume[index] = 0.5 + 0.3 * Math.sin(index * 0.81);
+            if (
+              (x === Math.floor(nx / 2) && y === Math.floor(ny / 2)) ||
+              (y === Math.floor(ny / 2) && z === Math.floor(nz / 2)) ||
+              index === 0 ||
+              index === volume.length - 1
+            )
+              foreground.push(index);
+            else if (index % 23 === 0) observedSupport[index] = 0;
+            else if (index % 17 === 0) background.push(index);
+          }
+      const input: SeededVolumeInput = {
+        volume,
+        observedSupport,
+        dims: [nx, ny, nz],
+        voxelSizeMm: spacing as [number, number, number],
+        foreground: Uint32Array.from(foreground),
+        background: Uint32Array.from(background),
+      };
+      for (const backgroundMarks of [input.background, new Uint32Array()]) {
+        const request = { ...input, background: backgroundMarks };
+        const first = await segmentSeededVolume(request);
+        const repeated = await segmentSeededVolume(request);
+        const reordered = await segmentSeededVolume({
+          ...request,
+          foreground: Uint32Array.from([...foreground].reverse().concat(foreground[0]!)),
+          background: backgroundMarks.slice().reverse(),
+        });
+        expect(repeated.indices).toEqual(first.indices);
+        expect(reordered.indices).toEqual(first.indices);
+        const selected = new Set(first.indices);
+        expect(foreground.filter((index) => !selected.has(index))).toEqual([]);
+        expect([...backgroundMarks].filter((index) => selected.has(index))).toEqual([]);
+        expect([...selected].every((index) => observedSupport[index])).toBe(true);
+      }
+      expect(input.foreground).toEqual(Uint32Array.from(foreground));
+      expect(input.background).toEqual(Uint32Array.from(background));
+    },
+  );
+
+  it('preserves disconnected inside islands and honors the latest conflict-resolved mark set on rerun', async () => {
+    const input: SeededVolumeInput = {
+      volume: new Float32Array(31).fill(0.7),
+      observedSupport: new Uint8Array(31).fill(1),
+      dims: [31, 1, 1],
+      voxelSizeMm: [1, 1, 1],
+      foreground: Uint32Array.of(4, 24),
+      background: Uint32Array.of(8, 20),
+    };
+    input.observedSupport![15] = 0;
+    const first = await segmentSeededVolume(input);
+    expect(first.indices).toContain(4);
+    expect(first.indices).toContain(24);
+    expect(first.indices).not.toContain(15);
+    const corrected = await segmentSeededVolume({
+      ...input,
+      foreground: Uint32Array.of(4, 20),
+      background: Uint32Array.of(8, 24),
+    });
+    expect(corrected.indices).toContain(4);
+    expect(corrected.indices).toContain(20);
+    expect(corrected.indices).not.toContain(24);
+    expect(corrected.indices).not.toContain(8);
+    expect(corrected.indices).not.toContain(15);
+    expect(first.indices).toContain(24);
+    await expect(segmentSeededVolume({ ...input, background: Uint32Array.of(24) })).rejects.toThrow(/both/);
+  });
+
+  it('requires inside marks and rejects contradictions, invalid geometry, and unbounded work', async () => {
     const { input } = anatomy();
-    await expect(segmentSeededVolume({ ...input, background: new Uint32Array() })).rejects.toThrow(/include.*exclude/);
+    await expect(segmentSeededVolume({ ...input, foreground: new Uint32Array() })).rejects.toThrow(/inside|include/i);
+    await expect(
+      segmentSeededVolume({ ...input, foreground: new Uint32Array(), background: new Uint32Array() }),
+    ).rejects.toThrow(/inside|include/i);
     await expect(segmentSeededVolume({ ...input, background: input.foreground })).rejects.toThrow(/both/);
     await expect(segmentSeededVolume({ ...input, voxelSizeMm: [1, 0, 1] })).rejects.toThrow(/geometry/);
     await expect(segmentSeededVolume({ ...input, foreground: new Uint32Array([0xffffffff]) })).rejects.toThrow(
@@ -180,16 +435,34 @@ describe('explicitly seeded physical-volume segmentation', () => {
     ).rejects.toThrow(/every explicit mark/);
   });
 
-  it('cancels before work and at cooperative worker yields without publishing a partial mask', async () => {
-    const { input } = anatomy();
-    const controller = new AbortController();
-    controller.abort();
-    await expect(segmentSeededVolume(input, { signal: controller.signal })).rejects.toMatchObject({
-      name: 'AbortError',
-    });
-    const midRun = new AbortController();
-    await expect(
-      segmentSeededVolume(input, { signal: midRun.signal, yieldFn: async () => midRun.abort() }),
-    ).rejects.toMatchObject({ name: 'AbortError' });
-  });
+  it.each(['exterior', 'geodesic'] as const)(
+    'cancels before work and during %s traversal without publishing a partial mask',
+    async (phase) => {
+      const { input } = anatomy();
+      if (phase === 'exterior') {
+        input.observedSupport!.fill(0);
+        for (const index of [...input.foreground, ...input.background]) input.observedSupport![index] = 1;
+      }
+      const controller = new AbortController();
+      controller.abort();
+      await expect(segmentSeededVolume(input, { signal: controller.signal })).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      const midRun = new AbortController();
+      let yields = 0;
+      let geodesicProgress = 0;
+      await expect(
+        segmentSeededVolume(input, {
+          signal: midRun.signal,
+          yieldFn: async () => {
+            yields++;
+            midRun.abort();
+          },
+          onProgress: () => geodesicProgress++,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(yields).toBe(1);
+      expect(geodesicProgress).toBe(phase === 'exterior' ? 0 : 1);
+    },
+  );
 });

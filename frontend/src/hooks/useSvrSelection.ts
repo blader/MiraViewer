@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { SeededVolumeWorker } from '../utils/segmentation/seededVolumeWorker';
 import {
@@ -11,7 +11,13 @@ import {
 type LabelDescription = Pick<SvrLabelVolume, 'meta' | 'reviewState' | 'seeds'>;
 type Edit = { mask: SelectionPatch; before: LabelDescription; after: LabelDescription };
 type History = { volume: SvrVolume; labels: SvrLabelVolume | null; undo: Edit[]; redo: Edit[] };
-type SelectionStatus = { running: boolean; progress?: number; error?: string; boundaryCount?: number };
+type SelectionStatus = {
+  running: boolean;
+  progress?: number;
+  error?: string;
+  boundaryCount?: number;
+  contextLimited?: boolean;
+};
 const IDLE_STATUS: SelectionStatus = { running: false };
 const initial = (volume: SvrVolume, labels: SvrLabelVolume | null): History => ({ volume, labels, undo: [], redo: [] });
 const description = (labels: SvrLabelVolume | null): LabelDescription => ({
@@ -52,8 +58,11 @@ export function useSvrSelection(
   onChange: (labels: SvrLabelVolume | null, patch?: SelectionPatch, previousData?: Uint8Array) => void,
 ) {
   const [history, setHistory] = useState(() => initial(volume, labels));
+  if (history.volume !== volume || history.labels !== labels) setHistory(initial(volume, labels));
   const state = history.volume === volume && history.labels === labels ? history : initial(volume, labels);
   const [ownedStatus, setOwnedStatus] = useState(() => ({ volume, labels, status: IDLE_STATUS }));
+  if (ownedStatus.volume !== volume || ownedStatus.labels !== labels)
+    setOwnedStatus({ volume, labels, status: IDLE_STATUS });
   const status = ownedStatus.volume === volume && ownedStatus.labels === labels ? ownedStatus.status : IDLE_STATUS;
   const runner = useRef<SeededVolumeWorker | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -71,11 +80,14 @@ export function useSvrSelection(
     [volume],
   );
 
-  useEffect(() => {
+  // Hydrated labels become interactive in this commit. Synchronize the action
+  // authority before paint so an immediate confirm/mark cannot use the old grid.
+  useLayoutEffect(() => {
     currentLabels.current = labels;
     if (labels !== published.current) {
       request.current?.abort();
       request.current = null;
+      published.current = null;
     }
   }, [labels, volume]);
   useEffect(
@@ -165,8 +177,8 @@ export function useSvrSelection(
   const grow = useCallback(async () => {
     cancel();
     const seeds = currentLabels.current?.seeds;
-    if (!seeds?.foreground.length || !seeds.background.length) {
-      setStatus({ running: false, error: 'Mark tissue to include, then mark nearby tissue to exclude.' });
+    if (!seeds?.foreground.length) {
+      setStatus({ running: false, error: 'Mark inside the tissue you want to select before suggesting a boundary.' });
       return;
     }
     const controller = new AbortController();
@@ -193,8 +205,17 @@ export function useSvrSelection(
       const next = new Uint8Array(volume.data.length);
       for (const index of result.indices)
         if (index < next.length && (!volume.observedSupport || volume.observedSupport[index])) next[index] = 1;
+      // The solver proposes unmarked tissue; explicit user edits remain the authority.
+      for (const index of seeds.foreground) if (supportsMark(volume, index)) next[index] = 1;
+      for (const index of seeds.background) if (index < next.length) next[index] = 0;
       record(next, { meta: SELECTION_LABEL_META, reviewState: 'draft', seeds });
-      setStatus({ running: false, boundaryCount: result.boundaryCount });
+      setStatus({
+        running: false,
+        boundaryCount: result.boundaryCount,
+        contextLimited: (['x', 'y', 'z'] as const).some(
+          (axis, position) => result.bounds.min[axis] > 0 || result.bounds.max[axis] < volume.dims[position]! - 1,
+        ),
+      });
     } catch (error) {
       if (!controller.signal.aborted)
         setStatus({ running: false, error: error instanceof Error ? error.message : String(error) });
@@ -241,6 +262,25 @@ export function useSvrSelection(
     if (mark === 1) included++;
     else excluded++;
   }
+  // These existing owners stay resident while enhancement borrows the volume.
+  // Count backing buffers once: seed snapshots often share storage with history.
+  const buffers = new Set<ArrayBufferLike>();
+  const addSeeds = (seeds: SvrLabelVolume['seeds']) => {
+    if (seeds) {
+      buffers.add(seeds.foreground.buffer);
+      buffers.add(seeds.background.buffer);
+    }
+  };
+  addSeeds(labels?.seeds);
+  for (const edit of [...state.undo, ...state.redo]) {
+    for (const array of [edit.mask.indices, edit.mask.before, edit.mask.after]) buffers.add(array.buffer);
+    addSeeds(edit.before.seeds);
+    addSeeds(edit.after.seeds);
+  }
+  const retainedBytes = [...buffers].reduce(
+    (bytes, buffer) => bytes + buffer.byteLength,
+    runner.current?.residentSourceBytes ?? 0,
+  );
   return {
     marks,
     included,
@@ -248,6 +288,7 @@ export function useSvrSelection(
     canUndo: state.undo.length > 0,
     canRedo: state.redo.length > 0,
     status,
+    retainedBytes,
     stroke,
     grow,
     cancel,

@@ -19,7 +19,14 @@
  * numeric behavior is a hard invariant of that move.
  */
 
-import type { SvrParams, SvrProgress, SvrRoi } from '../../types/svr';
+import type { SvrParams, SvrProgress, SvrRoi, SvrPatientTransform } from '../../types/svr';
+import {
+  composePatientTransforms,
+  IDENTITY_PATIENT_TRANSFORM,
+  rotatePoint,
+  snapshotPatientTransform,
+  transformPoint,
+} from './volumeGeometry';
 import { INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from './dicomGeometry';
 import type { VolumeDims } from './trilinear';
 import type { SvrReconstructionGrid, SvrReconstructionOptions } from './reconstructionCore';
@@ -62,6 +69,8 @@ export type SvrComputeResult = {
   originMm: Vec3;
   voxelSizeMm: number;
   bounds: BoundsMm;
+  sourceTransforms: Record<string, SvrPatientTransform>;
+  contributingSopInstanceUids: Record<string, readonly string[]>;
 };
 
 /**
@@ -81,6 +90,10 @@ export type SvrComputePayload = {
   debug: boolean;
   /** Decoded-frame cache retained on the main thread while this worker owns its source copies. */
   residentCacheBytes?: number;
+  /** Native-source patient mm -> accepted patient mm. Reused fits are applied once, never refitted. */
+  acceptedSourceTransforms?: Record<string, SvrPatientTransform>;
+  retainedBytes?: number;
+  nativePlaneBytes?: number;
 };
 
 export type SvrComputeWorkerRequest =
@@ -284,6 +297,7 @@ async function rigidAlignSeriesInRoi(params: {
   signal?: AbortSignal;
   onProgress?: (p: SvrProgress) => void;
   debug: boolean;
+  sourceTransforms: Record<string, SvrPatientTransform>;
 }): Promise<void> {
   const { allSlices, roiBounds, dims, voxelSizeMm, roi, signal, onProgress, debug } = params;
 
@@ -473,6 +487,18 @@ async function rigidAlignSeriesInRoi(params: {
     const tMm = v3(tx, ty, tz);
 
     applyRigidToSeriesSlices({ slices: movingSlices, centerMm, rot, tMm });
+    const rotatedCenter = rotatePoint(rot, [centerMm.x, centerMm.y, centerMm.z]);
+    params.sourceTransforms[uid] = composePatientTransforms(
+      {
+        rotation: rot,
+        translationMm: [
+          centerMm.x - rotatedCenter[0] + tx,
+          centerMm.y - rotatedCenter[1] + ty,
+          centerMm.z - rotatedCenter[2] + tz,
+        ],
+      },
+      params.sourceTransforms[uid]!,
+    );
 
     console.info('[svr] ROI rigid series alignment applied', {
       source: idx + 1,
@@ -634,6 +660,23 @@ export async function computeSvrFromLoadedSlices(
 
   assertNotAborted(signal);
   if (allSlices.length === 0) throw new Error('SVR requires at least one physically located source slice');
+  const sourceTransforms: Record<string, SvrPatientTransform> = {};
+  for (const slice of allSlices) {
+    if (params.acceptedSourceTransforms && !Object.hasOwn(params.acceptedSourceTransforms, slice.seriesUid))
+      throw new Error('An acquired source has no accepted patient-space pose. Reopen the volume before refining.');
+    const transform =
+      sourceTransforms[slice.seriesUid] ??
+      snapshotPatientTransform(params.acceptedSourceTransforms?.[slice.seriesUid] ?? IDENTITY_PATIENT_TRANSFORM);
+    sourceTransforms[slice.seriesUid] = transform;
+    if (params.acceptedSourceTransforms) {
+      const origin = transformPoint(transform, [slice.ippMm.x, slice.ippMm.y, slice.ippMm.z]);
+      slice.ippMm = v3(...origin);
+      for (const field of ['rowDir', 'colDir', 'normalDir'] as const) {
+        const direction = slice[field];
+        slice[field] = v3(...rotatePoint(transform.rotation, [direction.x, direction.y, direction.z]));
+      }
+    }
+  }
 
   let acceptedFrameOfReferenceUid: string | undefined;
   for (const slice of allSlices) {
@@ -668,7 +711,7 @@ export async function computeSvrFromLoadedSlices(
   //
   // Bounding-box centers are not anatomical landmarks: a valid partial-FOV
   // acquisition must keep its DICOM position unless the user explicitly opts in.
-  const wantsBoundsCenter = svrParams.seriesRegistrationMode === 'bounds-center';
+  const wantsBoundsCenter = !params.acceptedSourceTransforms && svrParams.seriesRegistrationMode === 'bounds-center';
 
   if (wantsBoundsCenter) {
     onProgress?.({ phase: 'initializing', current: 52, total: 100, message: 'Coarse series alignment…' });
@@ -733,6 +776,10 @@ export async function computeSvrFromLoadedSlices(
         for (const s of slices) {
           s.ippMm = v3(s.ippMm.x + t.x, s.ippMm.y + t.y, s.ippMm.z + t.z);
         }
+        sourceTransforms[uid] = composePatientTransforms(
+          { rotation: IDENTITY_PATIENT_TRANSFORM.rotation, translationMm: [t.x, t.y, t.z] },
+          sourceTransforms[uid]!,
+        );
 
         debugSvrLog(
           'registration.bounds-center',
@@ -800,14 +847,15 @@ export async function computeSvrFromLoadedSlices(
     }
   }
   const registrationBytes =
-    roi && svrParams.seriesRegistrationMode === 'roi-rigid'
+    !params.acceptedSourceTransforms && roi && svrParams.seriesRegistrationMode === 'roi-rigid'
       ? estimateSvrRegistrationBytes(nvox, registrationScoreMaxDim)
       : 0;
   const memoryPlan = estimateSvrPeakMemoryBytes({
     voxelCount: nvox,
     sourceBytes,
     iterations,
-    retainedBytes: params.residentCacheBytes,
+    retainedBytes: (params.residentCacheBytes ?? 0) + (params.retainedBytes ?? 0) + (params.nativePlaneBytes ?? 0),
+    labelBytes: nvox * 2,
     registrationBytes,
   });
   const peakBytes = memoryPlan.totalBytes;
@@ -857,7 +905,7 @@ export async function computeSvrFromLoadedSlices(
   //
   // This is intentionally done *after* selecting the output grid so the similarity metric is
   // computed in the same coordinate frame we will use for the final reconstruction.
-  if (svrParams.seriesRegistrationMode === 'roi-rigid') {
+  if (!params.acceptedSourceTransforms && svrParams.seriesRegistrationMode === 'roi-rigid') {
     if (!roi) {
       console.info('[svr] roi-rigid requested without an ROI; preserving source DICOM geometry');
     } else {
@@ -872,6 +920,7 @@ export async function computeSvrFromLoadedSlices(
         signal,
         onProgress,
         debug,
+        sourceTransforms,
       });
     }
   }
@@ -890,7 +939,7 @@ export async function computeSvrFromLoadedSlices(
       const s = allSlices[i];
       if (!s) continue;
 
-      if (cropSliceToRoiInPlace(s, roiCorners)) {
+      if (cropSliceToRoiInPlace(s, roiCorners, voxelSizeMm)) {
         cropped.push(s);
       }
 
@@ -1074,6 +1123,11 @@ export async function computeSvrFromLoadedSlices(
     grid: fineGrid,
     supportedVoxelCount,
   });
+  const contributingSopInstanceUids: Record<string, string[]> = {};
+  for (const slice of allSlices) {
+    if (!slice.sopInstanceUid) continue;
+    (contributingSopInstanceUids[slice.seriesUid] ??= []).push(slice.sopInstanceUid);
+  }
 
   // The solver is the last consumer of the slice stack. Its decoded/downsampled pixel
   // buffers (typically tens of MiB across all series) would otherwise stay reachable until
@@ -1093,5 +1147,7 @@ export async function computeSvrFromLoadedSlices(
     originMm,
     voxelSizeMm,
     bounds,
+    sourceTransforms,
+    contributingSopInstanceUids,
   };
 }

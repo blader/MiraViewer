@@ -11,6 +11,7 @@ vi.mock('../src/utils/svr/reconstructVolume', () => ({
 }));
 
 import { useSvrReconstruction } from '../src/hooks/useSvrReconstruction';
+import { retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
 
 const selectedSeries: SvrSelectedSeries[] = [
   {
@@ -166,6 +167,69 @@ describe('useSvrReconstruction', () => {
     expect(result.current.error).toBe('Worker failed');
     expect(result.current.result?.volume.data[0]).toBe(3);
     expect(result.current.resultIdentity).toBe('patient-a');
+  });
+
+  it('budgets the accepted raw/display owners for ordinary reruns, including retries, and releases them only on clear', async () => {
+    const previous = volume(-320);
+    previous.volume.intensityRange = [-320, 120];
+    mocks.reconstructVolumeMultiPlane
+      .mockResolvedValueOnce(previous)
+      .mockRejectedValueOnce(new Error('Native region exceeds memory budget'))
+      .mockResolvedValueOnce(volume(4))
+      .mockResolvedValueOnce(volume(5));
+    const { result } = renderHook(() => useSvrReconstruction());
+    await act(async () => {
+      await result.current.run(selectedSeries);
+    });
+    expect(mocks.reconstructVolumeMultiPlane.mock.calls[0]![0].retainedBytes).toBe(0);
+    await act(async () => {
+      await result.current.run(selectedSeries);
+    });
+    expect(mocks.reconstructVolumeMultiPlane.mock.calls[1]![0].retainedBytes).toBe(
+      retainedSvrVolumeBytes(previous.volume),
+    );
+    expect(result.current.result).toBe(previous);
+    await act(async () => {
+      await result.current.run(selectedSeries);
+    });
+    expect(mocks.reconstructVolumeMultiPlane.mock.calls[2]![0].retainedBytes).toBe(
+      retainedSvrVolumeBytes(previous.volume),
+    );
+    act(() => result.current.clear());
+    await act(async () => {
+      await result.current.run(selectedSeries);
+    });
+    expect(mocks.reconstructVolumeMultiPlane.mock.calls[3]![0].retainedBytes).toBe(0);
+  });
+
+  it('counts a shared accepted refinement source once and passes its accepted source poses unchanged', async () => {
+    const previous = volume(1);
+    previous.volume.sourceProvenance = {
+      mode: 'native-3d',
+      datasetRevision: 7,
+      patientKey: 'patient',
+      studyUid: 'study-a',
+      frameOfReferenceUid: 'frame-a',
+      fingerprint: 'accepted',
+      primarySeriesUid: 'source-axial',
+      explanation: 'Native source',
+      sources: [],
+    };
+    mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(previous).mockResolvedValueOnce(volume(2));
+    const { result } = renderHook(() => useSvrReconstruction());
+    await act(async () => {
+      await result.current.run(selectedSeries);
+    });
+    await act(async () => {
+      await result.current.run(selectedSeries, undefined, 'patient', {
+        volume: previous.volume,
+        labels: { data: Uint8Array.of(1), dims: [1, 1, 1], meta: [] },
+      });
+    });
+    expect(mocks.reconstructVolumeMultiPlane.mock.calls[1]![0]).toMatchObject({
+      retainedBytes: retainedSvrVolumeBytes(previous.volume),
+      acceptedProvenance: previous.volume.sourceProvenance,
+    });
   });
 
   it('never lets a superseded operation replace a newer accepted result', async () => {

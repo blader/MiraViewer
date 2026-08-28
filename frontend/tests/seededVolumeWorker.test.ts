@@ -60,12 +60,36 @@ afterEach(() => {
 });
 
 describe('SeededVolumeWorker', () => {
-  it('initializes a volume once and reuses its worker for explicit seed updates', async () => {
-    const first = runner.run(baseOptions);
+  it('reports full retained backing buffers once and releases accounting only when the worker is disposed', async () => {
+    const buffer = new ArrayBuffer(32);
+    const source = new Float32Array(buffer, 4, 4);
+    const support = new Uint8Array(buffer, 0, 4).fill(1);
+    expect(runner.residentSourceBytes).toBe(0);
+    const first = runner.run({ ...baseOptions, volume: source, observedSupport: support });
+    expect(runner.residentSourceBytes).toBe(32);
+    MockWorker.instances[0]!.respond({ type: 'done', id: 1, result: result([0]) });
+    await first;
+    expect(runner.residentSourceBytes).toBe(32);
+    const second = runner.run({ ...baseOptions, volume: source, observedSupport: new Uint8Array(4).fill(1) });
+    expect(runner.residentSourceBytes).toBe(36);
+    runner.cancel();
+    await expect(second).rejects.toMatchObject({ name: 'AbortError' });
+    expect(runner.residentSourceBytes).toBe(36);
+    runner.dispose();
+    expect(runner.residentSourceBytes).toBe(0);
+  });
+
+  it('initializes a volume once and reuses its worker when optional outside marks are added', async () => {
+    const first = runner.run({ ...baseOptions, background: new Uint32Array() });
     const worker = MockWorker.instances[0]!;
 
     expect(worker.messages.map((message) => message.type)).toEqual(['init', 'run']);
     expect(worker.messages[0]).toMatchObject({ type: 'init', volume });
+    expect(worker.messages[1]).toMatchObject({
+      type: 'run',
+      foreground: Uint32Array.of(0),
+      background: new Uint32Array(),
+    });
 
     worker.respond({ type: 'done', id: 1, result: result([0, 1]) });
     await expect(first).resolves.toMatchObject({ count: 2 });
@@ -73,6 +97,7 @@ describe('SeededVolumeWorker', () => {
     const second = runner.run({ ...baseOptions, foreground: Uint32Array.of(1) });
     expect(MockWorker.instances).toHaveLength(1);
     expect(worker.messages.map((message) => message.type)).toEqual(['init', 'run', 'run']);
+    expect(worker.messages[2]).toMatchObject({ foreground: Uint32Array.of(1), background: Uint32Array.of(3) });
 
     worker.respond({ type: 'done', id: 2, result: result([0]) });
     await expect(second).resolves.toMatchObject({ count: 1 });
@@ -135,7 +160,7 @@ describe('SeededVolumeWorker', () => {
 
   it('fails closed when workers are unavailable instead of blocking the UI thread', async () => {
     vi.stubGlobal('Worker', undefined);
-    await expect(runner.run(baseOptions)).rejects.toThrow('requires browser worker support');
+    await expect(runner.run(baseOptions)).rejects.toThrow(/browser worker support/i);
   });
 
   it('reinitializes for physical geometry changes even when the source buffer is unchanged', async () => {

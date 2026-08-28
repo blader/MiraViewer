@@ -1,6 +1,7 @@
 import dicomParser from 'dicom-parser';
 import { assertStorageHeadroom, DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation } from '../db/db';
 import type { DicomStudy, DicomSeries, DicomInstance } from '../db/schema';
+import { extractDicomAcquisitionMetadata } from './dicomAcquisitionMetadata';
 import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
 import {
   parseImageOrientationPatient,
@@ -431,6 +432,7 @@ async function prepareDicomFile(file: File): Promise<DicomIngestResult | Prepare
     instanceNumber: getNumber(dataSet, TAGS.InstanceNumber),
     frameOfReferenceUid,
     acquisitionTime,
+    acquisitionMetadata: extractDicomAcquisitionMetadata(dataSet),
     numberOfFrames,
     physicalSlicePosition: physicalSlicePosition(iop, imagePosition),
     rows,

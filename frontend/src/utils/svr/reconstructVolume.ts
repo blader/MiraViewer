@@ -1,5 +1,12 @@
 import cornerstone from 'cornerstone-core';
-import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../../types/svr';
+import type {
+  SvrParams,
+  SvrProgress,
+  SvrResult,
+  SvrSelectedSeries,
+  SvrSourceProvenance,
+  SvrPatientTransform,
+} from '../../types/svr';
 import {
   getDatasetRevision,
   getSelectedPatientKey,
@@ -8,9 +15,21 @@ import {
 } from '../localApi';
 import { decodeImageWithValidity, loadCornerstoneImage, type DecodedFrameResampleKernel } from '../decodedFrame';
 import type { SliceGeometry } from './dicomGeometry';
-import { downsampledSliceOriginMm, getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE } from './dicomGeometry';
+import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
-import { filterSvrManifestFramesForRoi } from './sliceRoiCrop';
+import { filterSvrManifestFramesForRoi, getSvrSourceCropWindow } from './sliceRoiCrop';
+import {
+  classifySvrAcquisitions,
+  hydrateSvrAcquisitionMetadata,
+  nativeReferenceSources,
+} from './acquisitionProvenance';
+import {
+  assembleNativeVolume,
+  nativeDecodedCacheBudgetBytes,
+  nativePlaneMemoryBytes,
+  planNativeVolume,
+} from './nativeVolume';
+import { IDENTITY_PATIENT_TRANSFORM, snapshotPatientTransform } from './volumeGeometry';
 import { dot } from './vec3';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
 import type { LoadedSlice } from './rigidRegistration';
@@ -21,7 +40,9 @@ import type {
   SvrComputeWorkerResponse,
 } from './svrComputeCore';
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
-import { assertNotAborted, yieldToMain } from './svrUtils';
+import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from './sourceMemory';
+import { SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
+import { assertNotAborted, formatMiB, yieldToMain } from './svrUtils';
 
 const DECODE_PROGRESS_START = 5;
 const DECODE_PROGRESS_END = 35;
@@ -42,10 +63,8 @@ async function admitSvrSeries(
   let referencePatient: string | undefined;
   let referenceStudy: string | undefined;
   let referenceFrame: string | undefined;
-  let referenceNormal: SliceGeometry['normalDir'] | undefined;
   let referenceWeight: string | undefined;
   let referenceSequence: string | undefined;
-  let independentOrientation = false;
 
   for (const series of selectedSeries) {
     assertNotAborted(signal);
@@ -103,22 +122,12 @@ async function admitSvrSeries(
       seenInstances.add(frame.sopInstanceUid);
     }
 
-    const normal = getSliceGeometryFromInstance(manifest.frames[0]!).normalDir;
-    if (referenceNormal && Math.abs(dot(referenceNormal, normal)) < INDEPENDENT_NORMAL_COSINE) {
-      independentOrientation = true;
-    }
-
     referencePatient ??= manifest.patientKey;
     referenceStudy ??= manifest.studyUid;
     referenceFrame ??= manifest.frameOfReferenceUid;
-    referenceNormal ??= normal;
     referenceWeight ??= weight;
     referenceSequence ??= sequence;
     admitted.push({ series, manifest });
-  }
-
-  if (!independentOrientation) {
-    throw new Error('SVR requires at least two physically independent acquisition orientations');
   }
 
   return admitted;
@@ -152,6 +161,8 @@ async function loadSeriesSlices(params: {
   sliceDownsampleMode: SvrParams['sliceDownsampleMode'];
   sliceDownsampleMaxSize: number;
   targetVoxelSizeMm: number;
+  svrParams: SvrParams;
+  acceptedTransform?: SvrPatientTransform;
   maxIntensitySamples: number;
   signal?: AbortSignal;
   onProgress?: (p: SvrProgress) => void;
@@ -236,19 +247,24 @@ async function loadSeriesSlices(params: {
 
     const geom: SliceGeometry = getSliceGeometryFromInstance(inst);
 
-    const { dsRows, dsCols } = computeSvrDownsampleSize({
-      rows: geom.rows,
-      cols: geom.cols,
-      maxSize: sliceDownsampleMaxSize,
-      mode: sliceDownsampleMode,
-      rowSpacingMm: geom.rowSpacingMm,
-      colSpacingMm: geom.colSpacingMm,
-      targetVoxelSizeMm,
-    });
+    const crop = params.svrParams.roi
+      ? getSvrSourceCropWindow(inst, params.svrParams.roi, params.svrParams, params.acceptedTransform)
+      : null;
+    const { dsRows, dsCols } = crop
+      ? { dsRows: crop.rows, dsCols: crop.columns }
+      : computeSvrDownsampleSize({
+          rows: geom.rows,
+          cols: geom.cols,
+          maxSize: sliceDownsampleMaxSize,
+          mode: sliceDownsampleMode,
+          rowSpacingMm: geom.rowSpacingMm,
+          colSpacingMm: geom.colSpacingMm,
+          targetVoxelSizeMm,
+        });
 
     // Adjust spacings for the downsampled grid (physical FOV preserved).
-    const rowSpacingDsMm = geom.rowSpacingMm * (geom.rows / dsRows);
-    const colSpacingDsMm = geom.colSpacingMm * (geom.cols / dsCols);
+    const rowSpacingDsMm = crop ? geom.rowSpacingMm : geom.rowSpacingMm * (geom.rows / dsRows);
+    const colSpacingDsMm = crop ? geom.colSpacingMm : geom.colSpacingMm * (geom.cols / dsCols);
 
     // Decode pixels via Cornerstone (uses our miradb: loader + codecs).
     const prefetchedImage = await prefetchedImages.shift()!;
@@ -263,13 +279,23 @@ async function loadSeriesSlices(params: {
     // Higher-fidelity downsampling (anti-aliasing) to reduce aliasing.
     // Default is box/area averaging; Lanczos is available behind a debug flag.
     // Apply modality scaling when available. (Linear, so applying post-downsample is equivalent.)
-    const { pixels: down, validity } = decodeImageWithValidity(image, dsRows, dsCols, resampleKernel);
-    const valid = new Uint8Array(validity.length);
-    for (let p = 0; p < validity.length; p++) {
-      const support = validity[p]!;
-      valid[p] = support > 0 ? Math.max(1, Math.min(255, Math.round(support * 255))) : 0;
-      if (valid[p]) acquiredPixelCount++;
-    }
+    const decoded = decodeImageWithValidity(
+      image,
+      crop ? geom.rows : dsRows,
+      crop ? geom.cols : dsCols,
+      resampleKernel,
+    );
+    const down = crop ? new Float32Array(dsRows * dsCols) : decoded.pixels;
+    const valid = new Uint8Array(down.length);
+    for (let row = 0; row < dsRows; row++)
+      for (let column = 0; column < dsCols; column++) {
+        const p = row * dsCols + column;
+        const source = crop ? (row + crop.rowStart) * geom.cols + column + crop.columnStart : p;
+        if (crop) down[p] = decoded.pixels[source]!;
+        const support = decoded.validity[source]!;
+        valid[p] = support > 0 ? Math.max(1, Math.min(255, Math.round(support * 255))) : 0;
+        if (valid[p]) acquiredPixelCount++;
+      }
 
     // Sample intensities deterministically for robust global normalization.
     if (intensitySamples.length < maxIntensitySamples) {
@@ -301,7 +327,7 @@ async function loadSeriesSlices(params: {
       colSpacingMm: geom.colSpacingMm,
       sliceThicknessMm,
       spacingBetweenSlicesMm,
-      ippMm: downsampledSliceOriginMm(geom, dsRows, dsCols),
+      ippMm: crop?.originMm ?? downsampledSliceOriginMm(geom, dsRows, dsCols),
       rowDir: geom.rowDir,
       colDir: geom.colDir,
       normalDir: geom.normalDir,
@@ -549,26 +575,209 @@ export async function reconstructVolumeMultiPlane(params: {
   svrParams: SvrParams;
   signal?: AbortSignal;
   onProgress?: (p: SvrProgress) => void;
+  acceptedProvenance?: SvrSourceProvenance;
+  retainedBytes?: number;
 }): Promise<SvrResult> {
   const { selectedSeries, svrParams, signal, onProgress } = params;
-  if (selectedSeries.length < 2) {
-    throw new Error('Select at least 2 series (multi-plane) for SVR');
-  }
+  if (!selectedSeries.length) throw new Error('Select a source series to open its volume.');
 
   const t0 = performance.now();
   onProgress?.({ phase: 'loading', current: 0, total: 100, message: 'Validating source examinations…' });
 
   const [datasetRevision, selectedPatientKey] = await Promise.all([getDatasetRevision(), getSelectedPatientKey()]);
   const canonicalSeries = await admitSvrSeries(selectedSeries, selectedPatientKey, signal);
+  const manifests = await hydrateSvrAcquisitionMetadata(
+    canonicalSeries.map((source) => source.manifest),
+    { signal, datasetRevision, selectedPatientKey },
+  );
+  canonicalSeries.forEach((source, index) => {
+    source.manifest = manifests[index]!;
+  });
   await assertSvrIdentityUnchanged(datasetRevision, selectedPatientKey, 'while validating SVR sources');
-  const admittedSeries = canonicalSeries.map((source, sourceIndex) => {
+  const classification = classifySvrAcquisitions(manifests);
+  if (classification.mode === 'conflicting') throw new Error(classification.explanation);
+  const first = canonicalSeries[0]!;
+  const accepted = params.acceptedProvenance;
+  if (
+    accepted &&
+    (accepted.datasetRevision !== datasetRevision ||
+      accepted.patientKey !== first.manifest.patientKey ||
+      accepted.studyUid !== first.manifest.studyUid ||
+      accepted.frameOfReferenceUid !== first.manifest.frameOfReferenceUid ||
+      accepted.sources.some(
+        (prior) => !canonicalSeries.some((source) => prior.seriesUid === source.series.seriesUid),
+      ) ||
+      (classification.mode === 'independent-2d' &&
+        classification.eligibleIndependentSources.some(
+          (source) => !accepted.sources.some((prior) => prior.seriesUid === source.seriesUid),
+        )))
+  ) {
+    throw new Error(
+      'The accepted source geometry no longer matches this examination. Reopen the volume before refining.',
+    );
+  }
+  const acceptedSourceTransforms = accepted
+    ? Object.fromEntries(
+        accepted.sources.map((source) => [source.seriesUid, snapshotPatientTransform(source.transform)]),
+      )
+    : undefined;
+  const provenance = (
+    mode: SvrSourceProvenance['mode'],
+    primarySeriesUid: string,
+    fingerprint: string,
+    transforms: Record<string, SvrPatientTransform>,
+    contributing: Record<string, readonly string[]>,
+  ): SvrSourceProvenance =>
+    Object.freeze({
+      mode,
+      datasetRevision,
+      patientKey: first.manifest.patientKey,
+      studyUid: first.manifest.studyUid,
+      frameOfReferenceUid: first.manifest.frameOfReferenceUid!,
+      primarySeriesUid,
+      fingerprint,
+      explanation: classification.explanation,
+      sources: Object.freeze(
+        canonicalSeries.flatMap(({ series, manifest }) => {
+          if (!Object.hasOwn(transforms, series.seriesUid)) return [];
+          const kind = classification.sources.find((source) => source.seriesUid === series.seriesUid)?.kind;
+          return [
+            Object.freeze({
+              seriesUid: series.seriesUid,
+              label: series.label,
+              kind: kind === 'conflicting' || !kind ? 'unknown' : kind,
+              transform: snapshotPatientTransform(transforms[series.seriesUid] ?? IDENTITY_PATIENT_TRANSFORM),
+              contributingSopInstanceUids: Object.freeze([...(contributing[series.seriesUid] ?? [])]),
+              frames: Object.freeze(
+                manifest.frames.map((frame) => {
+                  const geometry = getSliceGeometryFromInstance(frame);
+                  return Object.freeze({
+                    sopInstanceUid: frame.sopInstanceUid,
+                    rows: frame.rows,
+                    columns: frame.columns,
+                    originMm: Object.freeze([geometry.ippMm.x, geometry.ippMm.y, geometry.ippMm.z] as const),
+                    columnDirection: Object.freeze([geometry.rowDir.x, geometry.rowDir.y, geometry.rowDir.z] as const),
+                    rowDirection: Object.freeze([geometry.colDir.x, geometry.colDir.y, geometry.colDir.z] as const),
+                    pixelSpacingMm: Object.freeze([geometry.rowSpacingMm, geometry.colSpacingMm] as const),
+                    windowCenter: frame.windowCenter,
+                    windowWidth: frame.windowWidth,
+                  });
+                }),
+              ),
+            }),
+          ];
+        }),
+      ),
+    });
+  if (classification.mode !== 'independent-2d') {
+    const primary =
+      canonicalSeries.find((source) => source.series.seriesUid === classification.primaryOriginal3d?.seriesUid) ??
+      first;
+    const references = nativeReferenceSources(manifests, primary.manifest);
+    let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
+    try {
+      decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
+    } catch {
+      // Optional telemetry may be unavailable; reserve the configured default cache.
+    }
+    const transform = acceptedSourceTransforms?.[primary.series.seriesUid] ?? IDENTITY_PATIENT_TRANSFORM;
+    const plan = planNativeVolume(primary.manifest, svrParams, {
+      retainedBytes: params.retainedBytes,
+      decodedCacheBytes,
+      transform,
+      nativePlaneBytes: nativePlaneMemoryBytes(references),
+    });
+    const contributing: string[] = [];
+    const volume = await assembleNativeVolume(
+      plan,
+      async (frame) => {
+        // Cornerstone loadImage reuses an existing cache entry, but unlike
+        // loadAndCacheImage it does not retain every streamed processing frame.
+        const image = await cornerstone.loadImage(`miradb:${frame.sopInstanceUid}`);
+        assertNotAborted(signal);
+        if ((image.rows ?? image.height) !== frame.rows || (image.columns ?? image.width) !== frame.columns)
+          throw new Error('A native source frame changed its accepted pixel dimensions.');
+        contributing.push(frame.sopInstanceUid);
+        const paddingImage = image as typeof image & { pixelPaddingValue?: number; pixelPaddingRangeLimit?: number };
+        return {
+          pixels: image.getPixelData(),
+          slope: image.slope,
+          intercept: image.intercept,
+          pixelPaddingValue: paddingImage.pixelPaddingValue ?? frame.pixelPaddingValue,
+          pixelPaddingRangeLimit: paddingImage.pixelPaddingRangeLimit ?? frame.pixelPaddingRangeLimit,
+          invert: image.invert,
+        };
+      },
+      {
+        signal,
+        onProgress: (current, total) =>
+          onProgress?.({
+            phase: 'loading',
+            current: 5 + Math.round((90 * current) / total),
+            total: 100,
+            message: plan.overview ? 'Loading native-volume overview…' : 'Loading original source pixels…',
+          }),
+      },
+    );
+    await assertSvrIdentityUnchanged(datasetRevision, selectedPatientKey, 'during native volume loading');
+    let hash = 2166136261;
+    const identity = JSON.stringify([
+      datasetRevision,
+      primary.series.seriesUid,
+      contributing,
+      plan.dims,
+      plan.originMm,
+      plan.direction,
+      plan.voxelSizeMm,
+      transform,
+    ]);
+    for (let index = 0; index < identity.length; index++) hash = Math.imul(hash ^ identity.charCodeAt(index), 16777619);
+    const fingerprint = `native-v1-${(hash >>> 0).toString(16)}`;
+    volume.reconstructionFingerprint = fingerprint;
+    volume.sourceProvenance = provenance(
+      classification.mode === 'native-3d' ? 'native-3d' : 'source-stack',
+      primary.series.seriesUid,
+      fingerprint,
+      Object.fromEntries(references.map((source) => [source.seriesUid, transform])),
+      { [primary.series.seriesUid]: contributing },
+    );
+    onProgress?.({ phase: 'finalizing', current: 100, total: 100, message: 'Native source volume ready' });
+    return { volume, parameters: svrParams };
+  }
+  const contributingSeries = canonicalSeries.filter((source) =>
+    classification.eligibleIndependentSources.some((manifest) => manifest.seriesUid === source.series.seriesUid),
+  );
+  const admittedSeries = contributingSeries.map((source, sourceIndex) => {
     assertNotAborted(signal);
-    const manifest = filterSvrManifestFramesForRoi(source.manifest, svrParams.roi, svrParams);
+    const manifest = filterSvrManifestFramesForRoi(
+      source.manifest,
+      svrParams.roi,
+      svrParams,
+      acceptedSourceTransforms?.[source.series.seriesUid],
+    );
     if (manifest.frames.length === 0) {
       throw new Error(`The SVR focus region does not intersect acquired frames from source ${sourceIndex + 1}`);
     }
     return manifest === source.manifest ? source : { ...source, manifest };
   });
+  let cacheInfo: SvrDecodedCacheInfo | undefined;
+  try {
+    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
+  } catch {
+    /* Reserve the default cache if telemetry is unavailable. */
+  }
+  const sourceMemory = estimateSvrSourceMemory(
+    contributingSeries.map((source) => source.manifest),
+    svrParams,
+    { cacheInfo, acceptedSourceTransforms },
+  );
+  const nativePlaneBytes = nativePlaneMemoryBytes(contributingSeries.map((source) => source.manifest));
+  const sourceResidentFloor =
+    sourceMemory.sourceBytes + sourceMemory.decodedSourceCacheBytes + (params.retainedBytes ?? 0) + nativePlaneBytes;
+  if (sourceResidentFloor > SVR_MEMORY_BUDGET_BYTES)
+    throw new Error(
+      `SVR source inputs alone require an estimated ${formatMiB(sourceResidentFloor)}, exceeding the ${formatMiB(SVR_MEMORY_BUDGET_BYTES)} browser memory budget before decoding. Select a smaller focus region or clear the previous volume.`,
+    );
   onProgress?.({ phase: 'loading', current: DECODE_PROGRESS_START, total: 100, message: 'Loading acquired slices…' });
 
   const allSlices: LoadedSlice[] = [];
@@ -622,6 +831,8 @@ export async function reconstructVolumeMultiPlane(params: {
       sliceDownsampleMode: svrParams.sliceDownsampleMode,
       sliceDownsampleMaxSize: svrParams.sliceDownsampleMaxSize,
       targetVoxelSizeMm: svrParams.targetVoxelSizeMm,
+      svrParams,
+      acceptedTransform: acceptedSourceTransforms?.[series.seriesUid],
       maxIntensitySamples: maxIntensitySamplesPerSeries,
       signal,
       onProgress,
@@ -695,14 +906,17 @@ export async function reconstructVolumeMultiPlane(params: {
   // Only clone-safe pixel evidence and source identity cross the boundary;
   // SvrSelectedSeries display metadata stays main-side (the compute phase needs
   // physical slices, not free-text labels or duplicate source counts).
-  let residentCacheBytes = 0;
+  // Preserve the same projected source-cache owner used by UI and pre-decode
+  // admission; missing optional telemetry cannot erase it before allocation.
+  let residentCacheBytes = sourceMemory.decodedSourceCacheBytes;
   try {
     const cacheSize = cornerstone.imageCache?.getCacheInfo?.()?.cacheSizeInBytes;
     if (typeof cacheSize === 'number' && Number.isFinite(cacheSize) && cacheSize > 0) {
-      residentCacheBytes = Math.ceil(cacheSize);
+      residentCacheBytes = Math.max(residentCacheBytes, Math.ceil(cacheSize));
     }
   } catch {
     // Some supported hosts do not expose Cornerstone's optional cache telemetry.
+    // The shared conservative reservation still applies.
   }
 
   const computed = await runSvrComputePhase({
@@ -711,6 +925,9 @@ export async function reconstructVolumeMultiPlane(params: {
       intensitySamples,
       svrParams,
       residentCacheBytes,
+      retainedBytes: params.retainedBytes,
+      nativePlaneBytes,
+      acceptedSourceTransforms,
       debug,
     },
     signal,
@@ -725,7 +942,16 @@ export async function reconstructVolumeMultiPlane(params: {
   // objects before result assembly.
   allSlices.length = 0;
 
-  const { volume, dims, originMm, voxelSizeMm, bounds, ...acquisitionEvidence } = computed;
+  const {
+    volume,
+    dims,
+    originMm,
+    voxelSizeMm,
+    bounds,
+    sourceTransforms,
+    contributingSopInstanceUids,
+    ...acquisitionEvidence
+  } = computed;
 
   onProgress?.({
     phase: 'finalizing',
@@ -739,6 +965,13 @@ export async function reconstructVolumeMultiPlane(params: {
     volume: {
       data: volume,
       ...acquisitionEvidence,
+      sourceProvenance: provenance(
+        'independent-2d',
+        svrParams.roi?.sourceSeriesUid ?? admittedSeries[0]!.series.seriesUid,
+        computed.reconstructionFingerprint,
+        sourceTransforms,
+        contributingSopInstanceUids,
+      ),
       effectiveResolutionMm: acquisitionEvidence.effectiveResolutionMm,
       dims: [dims.nx, dims.ny, dims.nz],
       voxelSizeMm: [voxelSizeMm, voxelSizeMm, voxelSizeMm],

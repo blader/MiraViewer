@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type CornerstoneCore from 'cornerstone-core';
 import { DATASET_REVISION_STATE_KEY, deleteAllStoredMriData, getDB } from '../src/db/db';
-import type { DicomInstance } from '../src/db/schema';
+import type { DicomAcquisitionMetadata, DicomInstance } from '../src/db/schema';
 import { DEFAULT_SVR_PARAMS, type SvrProgress, type SvrSelectedSeries } from '../src/types/svr';
-import { setSelectedPatientKey } from '../src/utils/localApi';
+import { getSeriesFrameManifest, setSelectedPatientKey } from '../src/utils/localApi';
 import * as computeCore from '../src/utils/svr/svrComputeCore';
+import { estimateSvrSourceMemory } from '../src/utils/svr/sourceMemory';
 
 const cornerstone = vi.hoisted(() => ({
   loadAndCacheImage: vi.fn(),
   loadImage: vi.fn(),
-  getCacheInfo: vi.fn((): { cacheSizeInBytes?: number } => ({})),
+  getCacheInfo: vi.fn((): { cacheSizeInBytes?: number; maximumSizeInBytes?: number } => ({})),
 }));
 
 vi.mock('cornerstone-core', () => ({
@@ -48,7 +50,10 @@ type SourceFixture = {
   columns?: number;
   slicePositionsMm?: number[];
   sliceThicknessMm?: number;
+  acquisitionMetadata?: Partial<DicomAcquisitionMetadata> | null;
 };
+
+let acquisitionNumber = 0;
 
 const images = new Map<
   string,
@@ -64,6 +69,21 @@ async function seedSeries(options: SourceFixture): Promise<SvrSelectedSeries> {
   const coronal = options.orientation === 'coronal';
   const rows = options.rows ?? 2;
   const columns = options.columns ?? 2;
+  const acquisitionMetadata: DicomAcquisitionMetadata =
+    options.acquisitionMetadata === null
+      ? { version: 1, imageType: [], sourceSopInstanceUids: [], derivationSopInstanceUids: [], unavailable: true }
+      : {
+          version: 1,
+          imageType: ['ORIGINAL', 'PRIMARY'],
+          mrAcquisitionType: '2D',
+          acquisitionNumber: ++acquisitionNumber,
+          scanningSequence: ['SE'],
+          echoTimeMs: 90,
+          repetitionTimeMs: 4000,
+          sourceSopInstanceUids: [],
+          derivationSopInstanceUids: [],
+          ...options.acquisitionMetadata,
+        };
 
   await db.put('studies', {
     studyInstanceUid: studyUid,
@@ -100,6 +120,7 @@ async function seedSeries(options: SourceFixture): Promise<SvrSelectedSeries> {
       sliceThickness: options.sliceThicknessMm ?? 1,
       spacingBetweenSlices: 1,
       pixelPaddingValue: options.pixelPaddingValue,
+      acquisitionMetadata,
       fileBlob: new Blob(),
     };
     await db.put('instances', instance);
@@ -138,6 +159,8 @@ function syntheticComputeResult(reconstructionFingerprint: string, intensity = 1
     effectiveResolutionMm: [1, 1, 1],
     sliceProfileSource: 'declared',
     reconstructionFingerprint,
+    sourceTransforms: {},
+    contributingSopInstanceUids: {},
     dims: { nx: 1, ny: 1, nz: 1 },
     originMm: { x: 0, y: 0, z: 0 },
     voxelSizeMm: 1,
@@ -148,14 +171,17 @@ function syntheticComputeResult(reconstructionFingerprint: string, intensity = 1
 describe('SVR canonical source admission and acquired support', () => {
   beforeEach(() => {
     images.clear();
+    acquisitionNumber = 0;
     localStorage.setItem('miraviewer:debug-svr', '0');
     cornerstone.getCacheInfo.mockReset();
     cornerstone.getCacheInfo.mockReturnValue({});
-    cornerstone.loadAndCacheImage.mockImplementation(async (imageId: string) => {
+    const readImage = async (imageId: string) => {
       const image = images.get(imageId);
       if (!image) throw new Error('Synthetic source frame disappeared');
       return image;
-    });
+    };
+    cornerstone.loadAndCacheImage.mockImplementation(readImage);
+    cornerstone.loadImage.mockImplementation(readImage);
     vi.spyOn(console, 'info').mockImplementation(() => {});
   });
 
@@ -238,13 +264,272 @@ describe('SVR canonical source admission and acquired support', () => {
     );
   });
 
-  it('derives independent acquisition orientations from patient-space geometry, not display labels', async () => {
+  it('opens one honest source stack when displayed plane labels do not establish independent geometry', async () => {
     const axial = await seedSeries({ seriesUid: 'first-axial' });
     const anotherAxial = await seedSeries({ seriesUid: 'second-axial' });
+    const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
+    const result = await reconstruct([axial, { ...anotherAxial, plane: 'Coronal', label: 'Coronal' }]);
+    expect(compute).not.toHaveBeenCalled();
+    expect(result.volume.sourceProvenance?.mode).toBe('source-stack');
+    expect(result.volume.sourceProvenance?.primarySeriesUid).toBe(axial.seriesUid);
+    expect(cornerstone.loadImage.mock.calls.map(([imageId]) => imageId)).toEqual([
+      'miradb:first-axial.0',
+      'miradb:first-axial.1',
+    ]);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+  });
 
-    await expect(reconstruct([axial, { ...anotherAxial, plane: 'Coronal', label: 'Coronal' }])).rejects.toThrow(
-      /physically independent acquisition orientations/i,
+  it('does not fuse unknown complementary views or treat derived reformats as additional measurements', async () => {
+    const axial = await seedSeries({ seriesUid: 'unknown-axial', acquisitionMetadata: null });
+    const coronal = await seedSeries({
+      seriesUid: 'derived-coronal',
+      orientation: 'coronal',
+      acquisitionMetadata: { imageType: ['DERIVED', 'SECONDARY', 'MPR'], sourceSopInstanceUids: ['unknown-axial.0'] },
+    });
+    const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
+    const result = await reconstruct([axial, coronal]);
+    expect(compute).not.toHaveBeenCalled();
+    expect(result.volume.sourceProvenance?.mode).toBe('source-stack');
+    expect(result.volume.acquiredOrientationCount).toBe(1);
+    expect(result.volume.data).toEqual(Float32Array.from([1, 2, 3, 4, 1, 2, 3, 4]));
+    expect(result.volume.sourceProvenance?.sources.map((source) => source.contributingSopInstanceUids)).toEqual([
+      ['unknown-axial.0', 'unknown-axial.1'],
+    ]);
+    expect(result.volume.sourceProvenance?.sources.map((source) => source.seriesUid)).toEqual(['unknown-axial']);
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(2);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+  });
+
+  it('uses original 3D native values and canonical source frames while a regional crop never enters the inverse solver', async () => {
+    const derived = await seedSeries({
+      seriesUid: 'reformat',
+      orientation: 'coronal',
+      acquisitionMetadata: { imageType: ['DERIVED', 'SECONDARY', 'MPR'], sourceSopInstanceUids: ['original.0'] },
+    });
+    const original = await seedSeries({
+      seriesUid: 'original',
+      count: 20,
+      rows: 10,
+      columns: 10,
+      pixels: Int16Array.from({ length: 100 }, (_, index) => index - 50),
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
+    const result = await reconstructVolumeMultiPlane({
+      selectedSeries: [derived, original],
+      svrParams: {
+        ...params,
+        maxVolumeDim: 2,
+        sliceDownsampleMaxSize: 2,
+        roi: { mode: 'cube', sourcePlane: 'axial', boundsMm: { min: [4, 4, 8], max: [5, 5, 10] } },
+      },
+    });
+    expect(compute).not.toHaveBeenCalled();
+    expect(result.volume.sourceProvenance?.mode).toBe('native-3d');
+    expect(result.volume.nativeVoxelSizeMm).toEqual([1, 1, 1]);
+    expect(result.volume.voxelSizeMm).toEqual([1, 1, 1]);
+    expect(result.volume.dims).toEqual([4, 4, 5]);
+    expect(result.volume.originMm).toEqual([3, 3, 7]);
+    expect(result.volume.data[0]).toBe(-17);
+    const source = result.volume.sourceProvenance!.sources.find((source) => source.seriesUid === 'original')!;
+    expect(source.frames).toHaveLength(20);
+    expect(Object.isFrozen(result.volume.sourceProvenance)).toBe(true);
+    expect(Object.isFrozen(source.frames)).toBe(true);
+    expect(Object.isFrozen(source.frames[0])).toBe(true);
+    expect(Object.isFrozen(source.frames[0]!.originMm)).toBe(true);
+    expect(Object.isFrozen(source.transform)).toBe(true);
+    expect(Object.isFrozen(source.contributingSopInstanceUids)).toBe(true);
+    expect(source.frames[0]).toMatchObject({ rows: 10, columns: 10, originMm: [0, 0, 0], pixelSpacingMm: [1, 1] });
+    expect(source.contributingSopInstanceUids).toEqual([
+      'original.7',
+      'original.8',
+      'original.9',
+      'original.10',
+      'original.11',
+    ]);
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(5);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+  });
+
+  it('streams native frames without cache insertion while reusing existing entries through real Cornerstone loadImage', async () => {
+    const original = await seedSeries({
+      seriesUid: 'streamed-native',
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    const { default: realCornerstone } = await vi.importActual<{ default: typeof CornerstoneCore }>('cornerstone-core');
+    const scheme = 'native-stream-test';
+    const key = (imageId: string) => imageId.replace('miradb:', `${scheme}:`);
+    const loader = vi.fn((imageId: string) => {
+      const image = images.get(imageId.replace(`${scheme}:`, 'miradb:'))!;
+      return { promise: Promise.resolve({ ...image, imageId, sizeInBytes: image.getPixelData().byteLength }) };
+    });
+    realCornerstone.registerImageLoader(scheme, loader);
+    const firstKey = key('miradb:streamed-native.0');
+    await realCornerstone.loadAndCacheImage(firstKey);
+    const before = realCornerstone.imageCache.getCacheInfo();
+    loader.mockClear();
+    cornerstone.loadImage.mockImplementation((imageId: string) => realCornerstone.loadImage(key(imageId)));
+    try {
+      const result = await reconstruct([original]);
+      expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+      expect(loader).toHaveBeenCalledOnce();
+      expect(loader).toHaveBeenCalledWith(key('miradb:streamed-native.1'), undefined);
+      expect(realCornerstone.imageCache.getImageLoadObject(firstKey)).toBeDefined();
+      expect(realCornerstone.imageCache.getImageLoadObject(key('miradb:streamed-native.1'))).toBeUndefined();
+      expect(realCornerstone.imageCache.getCacheInfo()).toEqual(before);
+      expect(result.volume.data).toEqual(Float32Array.of(1, 2, 3, 4, 1, 2, 3, 4));
+    } finally {
+      realCornerstone.imageCache.removeImageLoadObject(firstKey);
+    }
+  });
+
+  it('cancels a stalled native decoder, retries successfully, and never reads or publishes its late source pixels', async () => {
+    const original = await seedSeries({
+      seriesUid: 'cancel-native',
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    const lateImage = {
+      rows: 2,
+      columns: 2,
+      getPixelData: vi.fn(() => Int16Array.of(-1, -2, -3, -4)),
+    };
+    let resolveLate!: (image: typeof lateImage) => void;
+    cornerstone.loadImage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLate = resolve;
+        }),
     );
+    const controller = new AbortController();
+    const publish = vi.fn();
+    const progress = vi.fn();
+    const pending = reconstructVolumeMultiPlane({
+      selectedSeries: [original],
+      svrParams: params,
+      signal: controller.signal,
+      onProgress: progress,
+    }).then(publish);
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(cornerstone.loadImage).toHaveBeenCalledOnce());
+    controller.abort();
+    await rejected;
+    const progressAtAbort = progress.mock.calls.length;
+    const retry = await reconstruct([original]);
+    expect(retry.volume.data).toEqual(Float32Array.of(1, 2, 3, 4, 1, 2, 3, 4));
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(3);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+    resolveLate(lateImage);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lateImage.getPixelData).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(progress).toHaveBeenCalledTimes(progressAtAbort);
+  });
+
+  it('does not give excluded derived sources an invented identity pose after independent-source registration', async () => {
+    const axial = await seedSeries({ seriesUid: 'accepted-axial' });
+    const coronal = await seedSeries({ seriesUid: 'accepted-coronal', orientation: 'coronal' });
+    const derived = await seedSeries({
+      seriesUid: 'excluded-derived',
+      acquisitionMetadata: {
+        imageType: ['DERIVED', 'SECONDARY'],
+        sourceSopInstanceUids: ['accepted-coronal.0'],
+      },
+    });
+    const result = await reconstruct([axial, coronal, derived]);
+    expect(result.volume.sourceProvenance?.mode).toBe('independent-2d');
+    expect(result.volume.sourceProvenance?.sources.map((source) => source.seriesUid)).toEqual([
+      'accepted-axial',
+      'accepted-coronal',
+    ]);
+    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).not.toContain(
+      'miradb:excluded-derived.0',
+    );
+  });
+
+  it('exposes only the native original and verified same-acquisition reformats and inherits the primary accepted pose', async () => {
+    const original = await seedSeries({
+      seriesUid: 'native-primary',
+      count: 5,
+      rows: 4,
+      columns: 4,
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    const reformat = await seedSeries({
+      seriesUid: 'native-reformat',
+      orientation: 'coronal',
+      acquisitionMetadata: { imageType: ['DERIVED', 'SECONDARY', 'MPR'], sourceSopInstanceUids: ['native-primary.0'] },
+    });
+    const other = await seedSeries({ seriesUid: 'other-original', acquisitionMetadata: { mrAcquisitionType: '3D' } });
+    const unknown = await seedSeries({ seriesUid: 'unknown-reference', acquisitionMetadata: null });
+    const selectedSeries = [original, reformat, other, unknown];
+    const first = await reconstruct(selectedSeries);
+    const provenance = first.volume.sourceProvenance!;
+    expect(provenance.sources.map((source) => source.seriesUid)).toEqual(['native-primary', 'native-reformat']);
+    const transform = { rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1] as const, translationMm: [10, 20, 30] as const };
+    const accepted = { ...provenance, sources: provenance.sources.map((source) => ({ ...source, transform })) };
+    const snapshot = JSON.stringify(accepted);
+    const refined = await reconstructVolumeMultiPlane({
+      selectedSeries,
+      svrParams: params,
+      acceptedProvenance: accepted,
+    });
+    expect(refined.volume.originMm).toEqual([10, 20, 30]);
+    expect(refined.volume.sourceProvenance!.sources.map((source) => source.transform)).toEqual([transform, transform]);
+    expect(refined.volume.sourceProvenance!.sources[1]!.transform).not.toBe(transform);
+    expect(JSON.stringify(accepted)).toBe(snapshot);
+  });
+
+  it('rejects an over-budget native-pitch regional source stack before any image decode or solver allocation', async () => {
+    const large = { count: 60, rows: 1024, columns: 1024, pixels: Int16Array.of(1) };
+    const axial = await seedSeries({ ...large, seriesUid: 'large-regional-axial' });
+    const coronal = await seedSeries({ ...large, seriesUid: 'large-regional-coronal', orientation: 'coronal' });
+    const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
+    await expect(
+      reconstructVolumeMultiPlane({
+        selectedSeries: [axial, coronal],
+        svrParams: {
+          ...params,
+          roi: { mode: 'cube', sourcePlane: 'axial', boundsMm: { min: [0, -1023, 0], max: [1023, 1023, 1023] } },
+        },
+      }),
+    ).rejects.toThrow(/source inputs.*budget before decoding/);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+    expect(compute).not.toHaveBeenCalled();
+  });
+
+  it('uses the same native-pitch source-copy estimate for UI planning and the decoded worker payload', async () => {
+    const axial = await seedSeries({ seriesUid: 'memory-axial', count: 4, rows: 12, columns: 12 });
+    const coronal = await seedSeries({
+      seriesUid: 'memory-coronal',
+      count: 4,
+      rows: 12,
+      columns: 12,
+      orientation: 'coronal',
+    });
+    const selectedSeries = [axial, coronal];
+    const svrParams = {
+      ...params,
+      roi: {
+        mode: 'cube' as const,
+        sourcePlane: 'axial' as const,
+        boundsMm: { min: [4, -2, 1] as [number, number, number], max: [6, 0, 3] as [number, number, number] },
+      },
+    };
+    const planned = estimateSvrSourceMemory(
+      await Promise.all(selectedSeries.map((source) => getSeriesFrameManifest(source.seriesUid))),
+      svrParams,
+    );
+    let actualBytes = 0;
+    vi.spyOn(computeCore, 'computeSvrFromLoadedSlices').mockImplementation(async (payload) => {
+      actualBytes = payload.allSlices.reduce(
+        (bytes, slice) => bytes + slice.pixels.byteLength + slice.valid!.byteLength,
+        0,
+      );
+      return syntheticComputeResult('shared-source-memory');
+    });
+    await reconstructVolumeMultiPlane({ selectedSeries, svrParams });
+    expect(actualBytes).toBe(planned.sourceBytes);
   });
 
   it('rejects physically compatible sources with explicitly conflicting acquisition contrast or sequence', async () => {
@@ -328,7 +613,7 @@ describe('SVR canonical source admission and acquired support', () => {
       slicePositionsMm: positions,
     });
 
-    await reconstructVolumeMultiPlane({
+    const result = await reconstructVolumeMultiPlane({
       selectedSeries: [axial, coronal],
       svrParams: {
         ...params,
@@ -344,6 +629,11 @@ describe('SVR canonical source admission and acquired support', () => {
       'miradb:rigid-margin-coronal.0',
       'miradb:rigid-margin-coronal.1',
       'miradb:rigid-margin-coronal.2',
+    ]);
+    expect(result.volume.sourceProvenance!.sources.map((source) => source.frames.length)).toEqual([4, 4]);
+    expect(result.volume.sourceProvenance!.sources.map((source) => source.contributingSopInstanceUids)).toEqual([
+      ['rigid-margin-axial.0'],
+      ['rigid-margin-coronal.0'],
     ]);
   });
 
@@ -524,7 +814,10 @@ describe('SVR canonical source admission and acquired support', () => {
   it('transfers acquired-support buffers without free-text series metadata and preserves worker result support', async () => {
     const axial = await seedSeries({ seriesUid: 'worker-axial' });
     const coronal = await seedSeries({ seriesUid: 'worker-coronal', orientation: 'coronal' });
-    cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 96 * 1024 * 1024 });
+    cornerstone.getCacheInfo.mockReturnValue({
+      cacheSizeInBytes: 96 * 1024 * 1024,
+      maximumSizeInBytes: 256 * 1024 * 1024,
+    });
     let transferred: Transferable[] = [];
     let sourceMasks: Uint8Array[] = [];
     let residentCacheBytes: number | undefined;
@@ -562,14 +855,15 @@ describe('SVR canonical source admission and acquired support', () => {
     for (const mask of sourceMasks) {
       expect(transferred).toContain(mask.buffer);
     }
-    expect(residentCacheBytes).toBe(96 * 1024 * 1024);
+    // The four incoming 2x2 frames retain their worst-case Float32 decoder representation too.
+    expect(residentCacheBytes).toBe(96 * 1024 * 1024 + 4 * 2 * 2 * 4);
     expect(Array.from(result.volume.observedSupport ?? [])).toEqual([1]);
     expect(result.volume.supportedVoxelCount).toBe(1);
     expect(result.volume.acquiredOrientationCount).toBe(2);
     expect(result.volume.reconstructionFingerprint).toBe('synthetic-worker-acquisition');
   });
 
-  it('safely treats missing, invalid, or inaccessible native cache telemetry as zero resident bytes', async () => {
+  it('retains the shared conservative decoded-cache reservation when telemetry is missing, invalid, or inaccessible', async () => {
     const axial = await seedSeries({ seriesUid: 'telemetry-axial' });
     const coronal = await seedSeries({ seriesUid: 'telemetry-coronal', orientation: 'coronal' });
     const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
@@ -577,14 +871,14 @@ describe('SVR canonical source admission and acquired support', () => {
     for (const cacheSizeInBytes of [Number.NaN, Number.POSITIVE_INFINITY, -50]) {
       cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes });
       await reconstruct([axial, coronal]);
-      expect(compute).toHaveBeenLastCalledWith(expect.objectContaining({ residentCacheBytes: 0 }));
+      expect(compute).toHaveBeenLastCalledWith(expect.objectContaining({ residentCacheBytes: 256 * 1024 * 1024 }));
     }
 
     cornerstone.getCacheInfo.mockImplementation(() => {
       throw new Error('Native cache telemetry is unavailable');
     });
     await reconstruct([axial, coronal]);
-    expect(compute).toHaveBeenLastCalledWith(expect.objectContaining({ residentCacheBytes: 0 }));
+    expect(compute).toHaveBeenLastCalledWith(expect.objectContaining({ residentCacheBytes: 256 * 1024 * 1024 }));
   });
 
   it('keeps source-decoding progress within its monotonic 5–35% budget', async () => {

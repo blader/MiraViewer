@@ -1,8 +1,9 @@
-import type { SvrParams, SvrRoi } from '../../types/svr';
+import type { SvrParams, SvrRoi, SvrPatientTransform } from '../../types/svr';
 import type { SeriesFrameManifest } from '../localApi';
 import { getSliceGeometryFromInstance } from './dicomGeometry';
 import type { Vec3 } from './vec3';
 import { dot, v3 } from './vec3';
+import { inverseTransformPoint } from './volumeGeometry';
 
 export type BoundsMm = { min: Vec3; max: Vec3 };
 
@@ -48,9 +49,10 @@ export function filterSvrManifestFramesForRoi(
   manifest: SeriesFrameManifest,
   roi: SvrRoi | null | undefined,
   params: Pick<SvrParams, 'targetVoxelSizeMm' | 'maxVolumeDim' | 'seriesRegistrationMode'>,
+  acceptedTransform?: SvrPatientTransform,
 ): SeriesFrameManifest {
   // Coarse bounds-center registration can translate sources without a physical bound.
-  if (!roi || params.seriesRegistrationMode === 'bounds-center') return manifest;
+  if (!roi || (params.seriesRegistrationMode === 'bounds-center' && !acceptedTransform)) return manifest;
 
   const spans = roi.boundsMm.min.map((lower, axis) => roi.boundsMm.max[axis]! - lower);
   if (
@@ -60,13 +62,15 @@ export function filterSvrManifestFramesForRoi(
     throw new Error('The SVR focus region has invalid patient-space bounds');
   }
 
-  const corners = boundsCornersMm({ min: v3(...roi.boundsMm.min), max: v3(...roi.boundsMm.max) });
+  const corners = boundsCornersMm({ min: v3(...roi.boundsMm.min), max: v3(...roi.boundsMm.max) }).map((point) =>
+    acceptedTransform ? v3(...inverseTransformPoint(acceptedTransform, [point.x, point.y, point.z])) : point,
+  );
   const regionExtentMm = Math.hypot(...spans);
   const requestedVoxelSizeMm =
     Number.isFinite(params.targetVoxelSizeMm) && params.targetVoxelSizeMm > 0 ? params.targetVoxelSizeMm : 1;
   const maxVolumeDim = Math.max(2, Math.floor(params.maxVolumeDim));
   const outputVoxelMarginMm = Math.max(requestedVoxelSizeMm, Math.max(...spans) / Math.max(1, maxVolumeDim - 1));
-  const rigidRegistration = params.seriesRegistrationMode === 'roi-rigid';
+  const rigidRegistration = params.seriesRegistrationMode === 'roi-rigid' && !acceptedTransform;
 
   const frames = manifest.frames.filter((frame) => {
     const geometry = getSliceGeometryFromInstance(frame);
@@ -110,7 +114,69 @@ export function filterSvrManifestFramesForRoi(
   return frames.length === manifest.frames.length ? manifest : { ...manifest, frames };
 }
 
-export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boolean {
+/** Native-pixel window shared by admission budgeting and decoding; registered ROIs are inverse-mapped. */
+export function getSvrSourceCropWindow(
+  frame: SeriesFrameManifest['frames'][number],
+  roi: SvrRoi | null | undefined,
+  params: Pick<SvrParams, 'targetVoxelSizeMm' | 'maxVolumeDim' | 'seriesRegistrationMode'>,
+  acceptedTransform?: SvrPatientTransform,
+) {
+  const geometry = getSliceGeometryFromInstance(frame);
+  const full = { rowStart: 0, columnStart: 0, rows: geometry.rows, columns: geometry.cols, originMm: geometry.ippMm };
+  if (!roi || (params.seriesRegistrationMode === 'bounds-center' && !acceptedTransform)) return full;
+  const spans = roi.boundsMm.min.map((value, axis) => roi.boundsMm.max[axis]! - value);
+  const outputPitch = Math.max(params.targetVoxelSizeMm, Math.max(...spans) / Math.max(1, params.maxVolumeDim - 1));
+  const profile = Math.max(0, frame.sliceThickness ?? 0) / 2;
+  const registrationMargin =
+    !acceptedTransform && params.seriesRegistrationMode === 'roi-rigid'
+      ? MAX_RIGID_TRANSLATION_MM +
+        MAX_RIGID_ROTATION_DISPLACEMENT *
+          (Math.hypot(...spans) + MAX_RIGID_TRANSLATION_MM * Math.sqrt(3) + profile + outputPitch)
+      : 0;
+  const lower = roi.boundsMm.min.map((value) => value - registrationMargin);
+  const upper = roi.boundsMm.max.map((value) => value + registrationMargin);
+  let minRow = Infinity,
+    maxRow = -Infinity,
+    minColumn = Infinity,
+    maxColumn = -Infinity;
+  for (const x of [lower[0]!, upper[0]!])
+    for (const y of [lower[1]!, upper[1]!])
+      for (const z of [lower[2]!, upper[2]!]) {
+        const point = acceptedTransform ? inverseTransformPoint(acceptedTransform, [x, y, z]) : [x, y, z];
+        const delta = v3(point[0]! - geometry.ippMm.x, point[1]! - geometry.ippMm.y, point[2]! - geometry.ippMm.z);
+        const row = dot(delta, geometry.colDir) / geometry.rowSpacingMm;
+        const column = dot(delta, geometry.rowDir) / geometry.colSpacingMm;
+        minRow = Math.min(minRow, row);
+        maxRow = Math.max(maxRow, row);
+        minColumn = Math.min(minColumn, column);
+        maxColumn = Math.max(maxColumn, column);
+      }
+  const rowPadding = Math.ceil(outputPitch / geometry.rowSpacingMm) + 1;
+  const columnPadding = Math.ceil(outputPitch / geometry.colSpacingMm) + 1;
+  const rowStart = Math.max(0, Math.min(geometry.rows - 1, Math.floor(minRow) - rowPadding));
+  const columnStart = Math.max(0, Math.min(geometry.cols - 1, Math.floor(minColumn) - columnPadding));
+  const rowEnd = Math.max(rowStart, Math.min(geometry.rows - 1, Math.ceil(maxRow) + rowPadding));
+  const columnEnd = Math.max(columnStart, Math.min(geometry.cols - 1, Math.ceil(maxColumn) + columnPadding));
+  return {
+    rowStart,
+    columnStart,
+    rows: rowEnd - rowStart + 1,
+    columns: columnEnd - columnStart + 1,
+    originMm: v3(
+      geometry.ippMm.x +
+        geometry.colDir.x * rowStart * geometry.rowSpacingMm +
+        geometry.rowDir.x * columnStart * geometry.colSpacingMm,
+      geometry.ippMm.y +
+        geometry.colDir.y * rowStart * geometry.rowSpacingMm +
+        geometry.rowDir.y * columnStart * geometry.colSpacingMm,
+      geometry.ippMm.z +
+        geometry.colDir.z * rowStart * geometry.rowSpacingMm +
+        geometry.rowDir.z * columnStart * geometry.colSpacingMm,
+    ),
+  };
+}
+
+export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[], interpolationMarginMm = 0): boolean {
   if (slice.valid && slice.valid.length !== slice.pixels.length) {
     throw new Error('SVR acquired-pixel support does not match its image dimensions');
   }
@@ -129,7 +195,7 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
 
   const thicknessMm = slice.sliceThicknessMm ?? slice.spacingBetweenSlicesMm ?? 0;
   // The physical slice slab, not just its center plane, contributes to the PSF.
-  const tol = 1e-3 + (Number.isFinite(thicknessMm) && thicknessMm > 0 ? thicknessMm / 2 : 0);
+  const tol = 1e-3 + interpolationMarginMm + (Number.isFinite(thicknessMm) && thicknessMm > 0 ? thicknessMm / 2 : 0);
   if (planeD < minD - tol || planeD > maxD + tol) {
     return false;
   }
@@ -158,10 +224,12 @@ export function cropSliceToRoiInPlace(slice: CropSlice, roiCorners: Vec3[]): boo
   if (!Number.isFinite(minR) || !Number.isFinite(minC)) return false;
 
   // Expand slightly; we want to be conservative.
-  const r0 = Math.max(0, Math.min(slice.dsRows - 1, Math.floor(minR) - 1));
-  const r1 = Math.max(0, Math.min(slice.dsRows - 1, Math.ceil(maxR) + 1));
-  const c0 = Math.max(0, Math.min(slice.dsCols - 1, Math.floor(minC) - 1));
-  const c1 = Math.max(0, Math.min(slice.dsCols - 1, Math.ceil(maxC) + 1));
+  const rowPadding = Math.ceil(interpolationMarginMm / slice.rowSpacingDsMm) + 1;
+  const columnPadding = Math.ceil(interpolationMarginMm / slice.colSpacingDsMm) + 1;
+  const r0 = Math.max(0, Math.min(slice.dsRows - 1, Math.floor(minR) - rowPadding));
+  const r1 = Math.max(0, Math.min(slice.dsRows - 1, Math.ceil(maxR) + rowPadding));
+  const c0 = Math.max(0, Math.min(slice.dsCols - 1, Math.floor(minC) - columnPadding));
+  const c1 = Math.max(0, Math.min(slice.dsCols - 1, Math.ceil(maxC) + columnPadding));
 
   if (r1 < r0 || c1 < c0) return false;
 

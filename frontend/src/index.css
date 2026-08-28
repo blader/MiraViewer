@@ -1,10 +1,12 @@
 @import 'tailwindcss';
 
 .svr-selection-workbench {
+  --svr-pane-min-height: 490px;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow-y: auto;
   color: var(--text-primary);
   background: var(--bg-primary);
 }
@@ -133,8 +135,9 @@
   margin-left: auto;
   gap: 6px;
 }
-.svr-selection-toolbar .svr-selection-accept {
-  color: var(--text-primary);
+.svr-selection-toolbar button.svr-selection-suggest:not(:disabled) {
+  color: var(--bg-primary);
+  background: var(--signal-metal);
   border-color: var(--signal-metal);
 }
 .svr-selection-toolbar .svr-selection-clear {
@@ -186,11 +189,11 @@
 
 .svr-selection-grid {
   display: grid;
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 0;
   min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(var(--svr-pane-min-height), 1fr));
   gap: 8px;
   padding: 8px;
 }
@@ -209,7 +212,7 @@
 }
 .svr-selection-grid[data-expanded] {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: minmax(var(--svr-pane-min-height), 1fr);
 }
 .svr-selection-grid[data-expanded='axial'] > :not([data-view='axial']),
 .svr-selection-grid[data-expanded='coronal'] > :not([data-view='coronal']),
@@ -293,6 +296,9 @@
   position: absolute;
   z-index: 1;
   pointer-events: none;
+  text-shadow:
+    0 1px 2px #000,
+    0 -1px 2px #000;
 }
 .svr-orientation-left {
   left: 10px;
@@ -324,6 +330,247 @@
 }
 .svr-selection-volume-content > div {
   height: 100%;
+}
+.svr-native-controls {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.svr-enhancement-controls {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.svr-enhancement-actions,
+.svr-enhancement-comparison,
+.svr-enhancement-strength {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.svr-enhancement-label {
+  padding-right: 4px;
+  color: var(--text-tertiary);
+}
+.svr-enhancement-controls button,
+.svr-enhancement-controls summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.svr-enhancement-controls button[aria-pressed='true'] {
+  border-color: var(--signal-metal);
+  color: var(--text-primary);
+}
+.svr-enhancement-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.svr-enhancement-controls button:hover:not(:disabled),
+.svr-enhancement-controls summary:hover {
+  background: var(--bg-tertiary);
+}
+.svr-enhancement-strength {
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+.svr-enhancement-strength input {
+  width: 65px;
+  min-height: 24px;
+  accent-color: var(--signal-metal);
+}
+.svr-enhancement-controls p {
+  margin: 5px 0 0;
+  line-height: 1.5;
+}
+.svr-enhancement-controls progress {
+  width: 80px;
+  height: 4px;
+  accent-color: var(--signal-metal);
+}
+.svr-enhancement-percent {
+  font: 10px var(--font-mono);
+}
+.svr-enhancement-hint,
+.svr-enhancement-provenance {
+  color: var(--text-tertiary);
+}
+.svr-enhancement-controls .svr-enhancement-error {
+  color: var(--warning);
+}
+.svr-enhancement-info summary {
+  list-style: none;
+}
+.svr-enhancement-info summary::-webkit-details-marker {
+  display: none;
+}
+.svr-enhancement-info > div {
+  position: absolute;
+  z-index: 45;
+  left: 10px;
+  right: 10px;
+  top: calc(100% - 1px);
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 20px #0005;
+}
+.svr-enhancement-info > div > button {
+  margin-top: 8px;
+}
+@media (pointer: coarse) {
+  .svr-enhancement-controls button,
+  .svr-enhancement-controls summary,
+  .svr-enhancement-strength input {
+    min-height: 44px;
+  }
+}
+.svr-native-heading,
+.svr-native-browse,
+.svr-native-view-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.svr-native-heading {
+  flex-wrap: wrap;
+}
+.svr-native-heading > select,
+.svr-native-heading > span {
+  min-width: 64px;
+  flex: 1;
+}
+.svr-native-controls button,
+.svr-native-controls summary,
+.svr-native-controls select {
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.svr-native-controls select {
+  width: 80px;
+  background: var(--bg-primary);
+}
+.svr-native-controls button[aria-pressed='true'] {
+  border-color: var(--signal-metal);
+  color: var(--text-primary);
+}
+.svr-native-controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.svr-native-controls button:hover:not(:disabled),
+.svr-native-controls summary:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.svr-native-browse {
+  margin-top: 6px;
+}
+.svr-native-browse > input {
+  flex: 1;
+  min-width: 32px;
+}
+.svr-native-browse > label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+}
+.svr-native-browse input[type='number'] {
+  width: 43px;
+  padding: 3px;
+  appearance: textfield;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  color: var(--text-primary);
+}
+.svr-native-browse input::-webkit-inner-spin-button {
+  appearance: none;
+}
+.svr-native-view-options {
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.svr-native-view-options > div[role='group'] {
+  display: flex;
+  gap: 3px;
+}
+.svr-native-view-options > span {
+  margin-left: auto;
+  font: 10px var(--font-mono);
+  color: var(--text-tertiary);
+}
+.svr-native-controls summary {
+  list-style: none;
+}
+.svr-native-controls summary::-webkit-details-marker {
+  display: none;
+}
+.svr-native-display-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% - 1px);
+  left: 10px;
+  right: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-secondary);
+  box-shadow: 0 10px 20px #0005;
+}
+.svr-native-display-popover label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.svr-native-display-popover input[type='range'] {
+  width: 110px;
+}
+.svr-native-display-popover p {
+  flex-basis: 100%;
+  margin: 0;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.svr-native-error {
+  margin-top: 6px;
+  line-height: 1.5;
+  color: var(--warning);
+}
+@media (pointer: coarse) {
+  .svr-native-controls button,
+  .svr-native-controls summary,
+  .svr-native-controls select {
+    min-height: 44px;
+  }
+  .svr-native-browse > button {
+    min-width: 44px;
+  }
 }
 .svr-render-settings {
   position: absolute;
@@ -361,15 +608,12 @@
 }
 @media (max-width: 620px) {
   .svr-selection-workbench {
-    overflow-y: auto;
+    --svr-pane-min-height: 600px;
   }
   .svr-selection-grid {
     flex: 0 0 auto;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: repeat(4, minmax(300px, 50vh));
-  }
-  .svr-selection-grid[data-expanded] {
-    flex: 1 0 max(320px, 50vh);
+    grid-template-rows: repeat(4, minmax(var(--svr-pane-min-height), 55vh));
   }
   .svr-selection-title-row {
     gap: 6px 10px;
@@ -389,6 +633,9 @@
   }
 }
 @media (pointer: coarse) {
+  .svr-selection-workbench {
+    --svr-pane-min-height: 600px;
+  }
   .svr-selection-toolbar button,
   .svr-selection-pane-actions button {
     min-height: 44px;
