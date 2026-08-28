@@ -95,7 +95,7 @@ describe('comparison accessibility', () => {
     expect(stylesheet).toMatch(/@media\s*\(pointer:\s*coarse\)/);
     expect(stylesheet).toMatch(/\.study-tools-trigger\[aria-expanded=['"]true['"]\]/);
     expect(stylesheet).toMatch(/\.svr-generation-layout\[data-generation-open=['"]true['"]\]/);
-    expect(stylesheet).toMatch(/\.svr-volume-layout\[data-controls-open=['"]true['"]\]/);
+    expect(stylesheet).toMatch(/\.svr-scene-body\[data-settings-open=['"]true['"]\]/);
   });
 
   it('immediately cancels active slice playback and disables navigation while interaction is blocked', () => {

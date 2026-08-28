@@ -725,7 +725,7 @@ function useSvrReconstructionWorkspace({
     sliceDownsampleMode: 'voxel-aware',
     seriesRegistrationMode: 'roi-rigid',
   }));
-  const [generationCollapsed, setGenerationCollapsed] = useState(false);
+  const [generationCollapsed, setGenerationCollapsed] = useState(true);
 
   const { status, isRunning, progress, result, resultIdentity, error, run, cancel, clear } = useSvrReconstruction();
 
@@ -1255,7 +1255,6 @@ function useSvrReconstructionWorkspace({
       setRoiWorld(roi);
       setRoiRect(null);
       setParams(requested);
-      setGenerationCollapsed(false);
       void run(selectedSeries, { ...planned.effectiveParams, roi }, workspaceIdentity, { volume, labels }).then(
         (outcome) => {
           if (outcome.result) setGenerationCollapsed(true);
@@ -1425,6 +1424,7 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
     selectedSeries,
     sequenceGroupsForDate,
     setSelectedSequenceKey,
+    sourceFrameCount,
     sourceMemoryMiB,
     nativeSource,
   } = workspace;
@@ -1473,12 +1473,19 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
       </div>
 
       {currentReadiness?.manifests.length ? (
-        <div className="border-t border-[var(--border-color)] pt-4">
-          <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
-            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
-            Verified source geometry
-          </div>
+        <details className="svr-sampling-details border-t border-[var(--border-color)] pt-2 text-xs text-[var(--text-secondary)]">
+          <summary>Source details</summary>
           <div className="mt-3 space-y-2.5 text-xs">
+            <div className="text-[var(--evidence)]">Verified source geometry</div>
+            <p className="tabular-nums text-[var(--text-secondary)]">
+              {nativeSource
+                ? currentReadiness.acquisition?.mode === 'native-3d'
+                  ? 'Original 3D acquisition'
+                  : 'Single source stack'
+                : `${currentReadiness.acquisition?.eligibleIndependentSources.length ?? 0} independent acquisitions`}
+              {' · '}
+              {sourceFrameCount} source slices
+            </p>
             {currentReadiness.manifests.map((manifest, index) => {
               const frame = manifest.frames[0]!;
               const geometry = getSliceGeometryFromInstance(frame);
@@ -1507,54 +1514,75 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 </div>
               );
             })}
-            <details className="svr-sampling-details border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
-              <summary>Resolution &amp; device memory</summary>
-              <div className="mt-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
-                  <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
-                </div>
-                {estimatedPeakMemoryMiB !== null ? (
-                  <div className="mt-1 flex items-center justify-between gap-2">
-                    <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
-                    <span
-                      className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
-                    >
-                      {Math.ceil(estimatedPeakMemoryMiB)} MiB
-                    </span>
-                  </div>
-                ) : null}
-                {!nativeSource ? (
-                  <div className="mt-1 flex items-center justify-between gap-2">
-                    <span>Requested voxel spacing</span>
-                    <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
-                  </div>
-                ) : null}
-                <div className="mt-1 flex items-center justify-between gap-2">
-                  <span>
-                    {nativeSource
-                      ? 'Largest stored-grid step'
-                      : acceptedResult
-                        ? 'Next effective spacing'
-                        : 'Effective voxel spacing'}
-                  </span>
-                  <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
-                </div>
-                {automaticallyAdjustedVoxelSpacing ? (
-                  <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
-                    Source sampling automatically adjusted to stay within the 512 MiB memory budget.
-                  </div>
-                ) : null}
+            <div className="border-t border-[var(--border-color)] pt-3 text-[var(--text-secondary)]">
+              <div className="flex items-center justify-between gap-2">
+                <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
+                <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
               </div>
-            </details>
+              {estimatedPeakMemoryMiB !== null ? (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
+                  <span
+                    className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
+                  >
+                    {Math.ceil(estimatedPeakMemoryMiB)} MiB
+                  </span>
+                </div>
+              ) : null}
+              {!nativeSource ? (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span>Requested voxel spacing</span>
+                  <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
+                </div>
+              ) : null}
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span>
+                  {nativeSource
+                    ? 'Largest stored-grid step'
+                    : acceptedResult
+                      ? 'Next effective spacing'
+                      : 'Effective voxel spacing'}
+                </span>
+                <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
+              </div>
+              {automaticallyAdjustedVoxelSpacing ? (
+                <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
+                  Source sampling automatically adjusted to stay within the 512 MiB memory budget.
+                </div>
+              ) : null}
+            </div>
             {currentReadiness.acquisition ? (
               <p className="leading-relaxed text-[var(--text-secondary)]">{currentReadiness.acquisition.explanation}</p>
+            ) : null}
+            {nativeSource ? (
+              <p className="leading-relaxed text-[var(--text-tertiary)]">
+                Original MRI values are preserved. The overview adapts to available memory; a focus region loads at the
+                original stored spacing. No reconstruction or reformat fusion is applied.
+              </p>
             ) : null}
             <p className="leading-relaxed text-[var(--text-tertiary)]">
               Stored sample spacing is not a measurement of acquired resolution.
             </p>
+            {acceptedResult ? (
+              <div className="border-t border-[var(--border-color)] pt-3 text-[var(--text-secondary)]">
+                <div className="font-medium text-[var(--text-primary)]">
+                  {acceptedResult.volume.nativeVoxelSizeMm ? 'Original-source volume' : 'Accepted reconstruction'}
+                </div>
+                <div className="mt-1 tabular-nums">
+                  {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]}{' '}
+                  voxels · {volumeSamplingLabel(acceptedResult.volume)}
+                </div>
+                {acceptedResult.volume.observedSupport ? (
+                  <div className="mt-1 text-[var(--evidence)]">
+                    {typeof acceptedResult.volume.supportedVoxelCount === 'number'
+                      ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
+                      : 'Acquired-voxel support preserved'}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-        </div>
+        </details>
       ) : null}
     </>
   );
@@ -1563,18 +1591,12 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
 function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const { isRunning, params, setParams } = workspace;
 
-  if (workspace.nativeSource)
-    return (
-      <p className="border-t border-[var(--border-color)] pt-3 text-xs leading-relaxed text-[var(--text-tertiary)]">
-        Original MRI values are preserved. The full-volume overview adapts to available memory; a focus region loads at
-        the original stored spacing. No inverse reconstruction or reformat fusion is applied.
-      </p>
-    );
+  if (workspace.nativeSource) return null;
 
   return (
     <details className="border-t border-[var(--border-color)] pt-3">
       <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        Advanced SVR settings
+        Reconstruction settings
       </summary>
 
       <div className="mt-2 space-y-3">
@@ -1645,30 +1667,12 @@ function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorksp
           </label>
         </div>
 
-        <div className="space-y-1 text-xs text-[var(--text-tertiary)] leading-snug">
-          <div>
-            <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing. Smaller =
-            more detail but slower/heavier. The voxel size may be increased automatically to respect{' '}
-            <span className="text-[var(--text-secondary)]">Max volume dim</span>.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to run. 0 =
-            quick “splat/average only”; higher can reduce slice-to-slice inconsistency but costs time.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be
-            downsampled before reconstruction, but we won't downsample so far that in-plane spacing becomes worse than
-            the target voxel size.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid dimension (in
-            voxels) by increasing voxel size if needed. Lower = faster/smaller; higher = more memory/time.
-          </div>
-          <div>
-            Tip: draw a box on an input slice and run{' '}
-            <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller + faster.
-          </div>
-        </div>
+        <p className="text-xs leading-relaxed text-[var(--text-tertiary)]">
+          Smaller voxels and more iterations take longer and use more memory. Zero iterations uses only the initial
+          average. Slice size caps input sampling; maximum volume size caps the output grid. Input downsampling respects
+          the requested voxel spacing, and output spacing adjusts when needed to fit the memory budget. A focus box
+          limits processing to the area you need.
+        </p>
       </div>
     </details>
   );
@@ -1699,12 +1703,11 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   return (
     <details className="border-t border-[var(--border-color)] pt-3">
       <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        Focus box (optional)
+        Focus region (optional)
       </summary>
       <div className="mt-2 space-y-2">
         <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-          Draw a box around an area of interest to reconstruct a smaller volume. This is a crop, not a tumor
-          segmentation.
+          Draw a box to load a smaller region. This crops the volume; it does not select tumor tissue.
         </p>
         <div className="flex items-center gap-2">
           <label htmlFor={roiSeriesSelectId} className="text-xs text-[var(--text-secondary)] w-16">
@@ -1801,12 +1804,6 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
             </div>
           ) : null}
         </div>
-
-        <div className="text-xs text-[var(--text-tertiary)]">
-          Drag to draw a box on an input slice. When a box is set,{' '}
-          <span className="text-[var(--text-secondary)]">Reconstruct focus box</span> will reconstruct only that box.
-          Starting with a smaller box lets you decrease voxel size for more detail without making the volume huge.
-        </div>
       </div>
     </details>
   );
@@ -1818,7 +1815,7 @@ function SvrReconstructButton({ workspace }: { workspace: SvrReconstructionWorks
       type="button"
       disabled={!workspace.canRun}
       onClick={workspace.startReconstruction}
-      aria-describedby={workspace.sourceReadinessMessage ? 'svr-source-readiness' : undefined}
+      aria-describedby={workspace.error || workspace.sourceReadinessMessage ? 'svr-source-readiness' : undefined}
       className="svr-reconstruct-button"
     >
       {workspace.nativeSource
@@ -1835,8 +1832,41 @@ function SvrReconstructButton({ workspace }: { workspace: SvrReconstructionWorks
 function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const {
     acceptedResult,
-    cancel,
     clear,
+    isRunning,
+    roiDragRef,
+    setRoiRect,
+    setRoiSeriesUid,
+    setRoiWorld,
+    setSelectedSequenceKey,
+  } = workspace;
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
+      <button
+        type="button"
+        disabled={isRunning}
+        onClick={() => {
+          setSelectedSequenceKey(null);
+          setRoiSeriesUid(null);
+          setRoiRect(null);
+          roiDragRef.current = null;
+          setRoiWorld(null);
+          clear();
+        }}
+        className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
+      >
+        Reset setup
+      </button>
+      {acceptedResult ? <SvrReconstructButton workspace={workspace} /> : null}
+    </div>
+  );
+}
+
+function SvrReconstructionStatus({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const {
+    acceptedResult,
+    cancel,
     currentReadiness,
     error,
     exceedsMemoryBudget,
@@ -1844,108 +1874,72 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
     percent,
     progress,
     progressMessage,
-    roiDragRef,
-    setRoiRect,
-    setRoiSeriesUid,
-    setRoiWorld,
-    setSelectedSequenceKey,
     sourceReadinessMessage,
     status,
   } = workspace;
 
-  return (
-    <>
-      <div className="flex items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
-        <button
-          type="button"
-          disabled={isRunning}
-          onClick={() => {
-            setSelectedSequenceKey(null);
-            setRoiSeriesUid(null);
-            setRoiRect(null);
-            roiDragRef.current = null;
-            setRoiWorld(null);
-            clear();
-          }}
-          className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
-        >
-          Clear
-        </button>
-
-        <div className="flex items-center gap-2">
-          {isRunning && acceptedResult ? (
-            <button
-              type="button"
-              onClick={cancel}
-              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-tertiary)]"
-            >
-              Cancel
-            </button>
-          ) : null}
-
-          {acceptedResult ? <SvrReconstructButton workspace={workspace} /> : null}
-        </div>
-      </div>
-
-      {(error || sourceReadinessMessage) && !isRunning ? (
+  if (isRunning) {
+    return (
+      <div className="flex items-center gap-4 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 sm:px-6">
         <div
-          id="svr-source-readiness"
-          role={error || currentReadiness?.error ? 'alert' : 'status'}
-          className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
-            error
-              ? 'border-l-[var(--danger)] bg-[var(--bg-tertiary)] text-[var(--danger)]'
-              : currentReadiness?.error || exceedsMemoryBudget
-                ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
-                : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
-          }`}
-        >
-          {error ?? sourceReadinessMessage}
-        </div>
-      ) : null}
-
-      {isRunning && progress ? (
-        <div
-          role="progressbar"
-          aria-label={progressMessage}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-          className="border-t border-[var(--border-color)] pt-3"
+          role={progress ? 'progressbar' : 'status'}
+          aria-label={progress ? progressMessage : undefined}
+          aria-valuemin={progress ? 0 : undefined}
+          aria-valuemax={progress ? 100 : undefined}
+          aria-valuenow={progress ? percent : undefined}
+          className="min-w-0 flex-1"
         >
           <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-            <span className="truncate">{progressMessage}</span>
-            <span className="ml-auto tabular-nums">{percent}%</span>
+            <span>{progressMessage || 'Preparing MRI source images…'}</span>
+            {progress ? <span className="ml-auto shrink-0 tabular-nums">{percent}%</span> : null}
           </div>
-          <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
-            <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
-          </div>
-        </div>
-      ) : null}
-
-      {acceptedResult ? (
-        <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
-          <div className="font-medium text-[var(--text-primary)]">
-            {acceptedResult.volume.nativeVoxelSizeMm ? 'Original-source volume' : 'Accepted reconstruction'}
-          </div>
-          <div className="mt-1 tabular-nums">
-            {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]} voxels ·{' '}
-            {volumeSamplingLabel(acceptedResult.volume)}
-          </div>
-          {acceptedResult.volume.observedSupport ? (
-            <div className="mt-1 text-[var(--evidence)]">
-              {typeof acceptedResult.volume.supportedVoxelCount === 'number'
-                ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
-                : 'Acquired-voxel support preserved'}
+          {progress ? (
+            <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
+              <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
             </div>
           ) : null}
         </div>
-      ) : status === 'canceled' ? (
-        <div role="status" className="text-xs text-[var(--text-secondary)]">
-          Reconstruction canceled. Verified source images remain available.
-        </div>
-      ) : null}
-    </>
-  );
+        <button
+          type="button"
+          onClick={cancel}
+          disabled={status === 'canceling'}
+          className="min-h-11 shrink-0 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+        >
+          {status === 'canceling' ? 'Canceling…' : 'Cancel reconstruction'}
+        </button>
+      </div>
+    );
+  }
+
+  if (error || sourceReadinessMessage) {
+    return (
+      <div
+        id="svr-source-readiness"
+        role={error || currentReadiness?.error ? 'alert' : 'status'}
+        className={`border-b border-[var(--border-color)] px-4 py-3 text-xs leading-relaxed sm:px-6 ${
+          error
+            ? 'text-[var(--danger)]'
+            : currentReadiness?.error || exceedsMemoryBudget
+              ? 'text-[var(--warning)]'
+              : 'text-[var(--text-secondary)]'
+        }`}
+      >
+        {acceptedResult && !error ? 'Next reconstruction: ' : null}
+        {error ?? sourceReadinessMessage}
+      </div>
+    );
+  }
+
+  return status === 'canceled' ? (
+    <div
+      role="status"
+      className="border-b border-[var(--border-color)] px-4 py-3 text-xs text-[var(--text-secondary)] sm:px-6"
+    >
+      {acceptedResult
+        ? 'Reconstruction canceled. Your volume and selection are unchanged.'
+        : 'Reconstruction canceled. Source images remain available.'}
+    </div>
+  ) : null;
 }
 
 export function Svr3DView(props: Svr3DViewProps) {
@@ -1960,23 +1954,16 @@ export function Svr3DView(props: Svr3DViewProps) {
     exceedsMemoryBudget,
     generationCollapsed,
     isRunning,
-    params,
-    percent,
-    progress,
-    progressMessage,
     roiDragRef,
     roiPreviewSliceStable,
     roiRect,
     selectedGroup,
     selectedPlaneCount,
-    selectedSeries,
     setGenerationCollapsed,
     setRoiRect,
     setRoiWorld,
     setShowAcquiredStack,
     showAcquiredStack,
-    sourceFrameCount,
-    sourceReadinessMessage,
     stepRoiSlice,
     volumeIdentity,
     workspaceIdentity,
@@ -1999,35 +1986,24 @@ export function Svr3DView(props: Svr3DViewProps) {
       aria-label="MRI reconstruction workspace"
       className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-primary)]"
     >
-      <header className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="shrink-0 text-xs font-medium tracking-[0.12em] text-[var(--text-tertiary)]">
-            3D WORKSPACE
-          </span>
-          {displayedPatient ? (
-            <span className="truncate text-xs text-[var(--text-primary)]">{formatPatientName(displayedPatient)}</span>
+      <header
+        aria-label={displayedPatient ? `3D scan context for ${formatPatientName(displayedPatient)}` : '3D scan context'}
+        className="svr-source-header flex shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-1.5 sm:px-6"
+      >
+        <div className="svr-source-context min-w-0 flex-1 text-xs leading-5">
+          {displayedDate ? (
+            <time
+              dateTime={displayedDate}
+              aria-label={`Displayed examination ${formatDate(displayedDate)}`}
+              title={formatDate(displayedDate)}
+              className="block truncate tabular-nums text-[var(--text-primary)] [font-family:var(--font-mono)]"
+            >
+              {formatDate(displayedDate)}
+            </time>
           ) : null}
-        </div>
-        {displayedDate ? (
-          <span className="text-xs tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
-            Examination {formatDate(displayedDate)}
+          <span className="block truncate text-[var(--text-secondary)]" title={selectedGroup?.label}>
+            {selectedGroup?.label ?? 'Choose a sequence'}
           </span>
-        ) : null}
-        {selectedGroup ? <span className="text-xs text-[var(--text-secondary)]">{selectedGroup.label}</span> : null}
-        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs tabular-nums text-[var(--text-secondary)]">
-          {currentReadiness?.manifests.length ? (
-            <>
-              <span>
-                {workspace.nativeSource
-                  ? currentReadiness.acquisition?.mode === 'native-3d'
-                    ? 'Original 3D acquisition'
-                    : 'Single source stack'
-                  : `${currentReadiness.acquisition?.eligibleIndependentSources.length ?? 0} independent acquisitions`}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>{sourceFrameCount} source slices</span>
-            </>
-          ) : null}
         </div>
         <button
           type="button"
@@ -2038,12 +2014,13 @@ export function Svr3DView(props: Svr3DViewProps) {
               : 'Hide reconstruction sources and controls'
           }
           aria-expanded={!generationCollapsed}
-          className="inline-flex min-h-10 items-center gap-2 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
         >
           <SourcesIcon className="h-4 w-4" aria-hidden="true" />
           Sources
         </button>
       </header>
+      <SvrReconstructionStatus workspace={workspace} />
       <div
         data-generation-open={!generationCollapsed}
         className={`svr-generation-layout grid min-h-0 flex-1 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(240px,304px)_minmax(0,1fr)]'}`}
@@ -2054,9 +2031,9 @@ export function Svr3DView(props: Svr3DViewProps) {
             className="space-y-5 overflow-auto border-r border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5"
           >
             <SvrSourceEvidence workspace={workspace} />
-            <SvrReconstructionActions workspace={workspace} />
             <SvrFocusBox workspace={workspace} />
             <SvrAdvancedSettings workspace={workspace} />
+            <SvrReconstructionActions workspace={workspace} />
           </aside>
         )}
 
@@ -2073,83 +2050,38 @@ export function Svr3DView(props: Svr3DViewProps) {
               <div className="w-full max-w-lg text-center">
                 {isRunning ? (
                   <>
-                    <div className="text-xs tracking-[0.14em] text-[var(--signal-metal)]">ACQUIRED EVIDENCE</div>
-                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      {workspace.nativeSource ? 'Opening original MRI anatomy' : 'Reconstructing supported anatomy'}
+                    <h2 className="text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
+                      {workspace.nativeSource ? 'Opening MRI in 3D' : 'Building your 3D view'}
                     </h2>
-                    <p aria-live="polite" className="mt-2 text-sm text-[var(--text-secondary)]">
-                      {progressMessage || 'Validating acquired MRI source images…'}
-                    </p>
-                    <p className="mt-2 text-xs tabular-nums text-[var(--text-tertiary)]">
-                      {progress ? `${percent}% · ` : ''}
-                      {sourceFrameCount} acquired slices
-                    </p>
-                    <button
-                      type="button"
-                      onClick={workspace.cancel}
-                      className="mt-6 min-h-11 rounded-[4px] border border-[var(--border-color)] px-4 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                    >
-                      Cancel reconstruction
-                    </button>
+                    <p className="mt-2 text-sm text-[var(--text-secondary)]">Your source images stay unchanged.</p>
                   </>
                 ) : (
                   <>
-                    <div
-                      className={`text-xs tracking-[0.14em] ${
-                        currentReadiness?.error || exceedsMemoryBudget
-                          ? 'text-[var(--warning)]'
-                          : canRun
-                            ? 'text-[var(--evidence)]'
-                            : 'text-[var(--text-tertiary)]'
-                      }`}
-                    >
+                    <h2 className="text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
                       {currentReadiness?.error || exceedsMemoryBudget
-                        ? 'SOURCE REVIEW REQUIRED'
-                        : canRun
-                          ? 'VERIFIED SOURCE EVIDENCE'
-                          : 'ACQUIRED SOURCE EVIDENCE'}
-                    </div>
-                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      {currentReadiness?.error || exceedsMemoryBudget
-                        ? 'This acquisition cannot be reconstructed safely'
-                        : canRun
-                          ? workspace.nativeSource
-                            ? 'Explore the original MRI in 3D'
-                            : 'Ready to reconstruct supported anatomy'
-                          : selectedSeries.length === 1
-                            ? 'Inspect this MRI acquisition'
-                            : 'Verify acquired MRI source images'}
+                        ? 'Check the source images'
+                        : selectedGroup
+                          ? 'Explore this MRI in 3D'
+                          : 'Choose an MRI sequence'}
                     </h2>
                     <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[var(--text-secondary)]">
-                      {sourceReadinessMessage ??
-                        currentReadiness?.acquisition?.explanation ??
-                        'Independent acquired orientations are ready for a physically supported reconstruction.'}
+                      {canRun
+                        ? 'Explore the volume, or select tissue to isolate and inspect it.'
+                        : selectedGroup
+                          ? 'Review the source status above. Open Sources to adjust this view.'
+                          : 'Open Sources and choose the sequence you want to explore.'}
                     </p>
-                    {currentReadiness?.manifests.length ? (
-                      <p className="mt-3 text-xs tabular-nums text-[var(--text-tertiary)]">
-                        {selectedPlaneCount} {selectedPlaneCount === 1 ? 'orientation' : 'orientations'} ·{' '}
-                        {sourceFrameCount} source slices
-                        {workspace.nativeSource
-                          ? ' · original data, no reformat fusion'
-                          : ` · ${params.targetVoxelSizeMm.toFixed(2)} mm requested voxels`}
-                      </p>
-                    ) : null}
+                    <div className="mt-6">
+                      <SvrReconstructButton workspace={workspace} />
+                    </div>
                     {selectedPlaneCount === 1 && roiPreviewSliceStable ? (
                       <button
                         type="button"
                         onClick={() => setShowAcquiredStack((current) => !current)}
-                        className="mt-6 min-h-10 rounded-[4px] border border-[var(--border-color)] px-4 py-2 text-xs font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--signal-metal)]"
+                        className="mt-3 min-h-10 px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                       >
                         {showAcquiredStack ? 'Hide acquired stack' : 'Inspect acquired stack'}
                       </button>
-                    ) : null}
-                    <div className="mt-6">
-                      <SvrReconstructButton workspace={workspace} />
-                    </div>
-                    {canRun ? (
-                      <p className="mt-3 text-xs text-[var(--text-tertiary)]">
-                        Mark the tissue you want to isolate, then inspect its original MRI slices in 3D.
-                      </p>
                     ) : null}
                     {showAcquiredStack && roiPreviewSliceStable ? (
                       <div className="mx-auto mt-5 max-w-sm text-left">

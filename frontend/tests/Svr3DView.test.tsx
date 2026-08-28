@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
-import type { SvrLabelVolume, SvrResult, SvrVolume } from '../src/types/svr';
+import type { SvrLabelVolume, SvrProgress, SvrResult, SvrVolume } from '../src/types/svr';
 import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
 import { useSvrImaging } from '../src/components/svrImagingContext';
 import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   hook: {
     status: 'idle' as 'idle' | 'running' | 'ready' | 'failed' | 'canceled' | 'canceling',
     isRunning: false,
-    progress: null,
+    progress: null as SvrProgress | null,
     result: null as SvrResult | null,
     resultIdentity: null as string | null,
     error: null as string | null,
@@ -281,6 +281,20 @@ function nativeComparisonData() {
   return comparisonData;
 }
 
+function openSources() {
+  fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
+}
+
+async function openSourceDetails() {
+  openSources();
+  fireEvent.click(await screen.findByText('Source details'));
+}
+
+function openReconstructionSettings() {
+  openSources();
+  fireEvent.click(screen.getByText('Reconstruction settings'));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
@@ -301,6 +315,118 @@ afterEach(() => {
 });
 
 describe('SVR reconstruction workspace', () => {
+  it('starts with one primary action and keeps source details behind an explicit disclosure', async () => {
+    render(<Svr3DView data={data('patient-a')} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeEnabled());
+    expect(screen.getAllByRole('button', { name: 'Reconstruct volume' })).toHaveLength(1);
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show reconstruction sources and controls/i })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.getByRole('banner')).toHaveAccessibleName('3D scan context for Synthetic patient-a');
+    expect(screen.queryByText('Synthetic patient-a')).not.toBeInTheDocument();
+    expect(screen.queryByText(/independent acquisitions/)).not.toBeInTheDocument();
+    expect(mocks.run).not.toHaveBeenCalled();
+
+    openSources();
+    const details = screen.getByText('Source details').closest('details');
+    expect(details).not.toHaveAttribute('open');
+    expect(screen.getByText('Verified source geometry')).not.toBeVisible();
+    expect(screen.getByText('Focus region (optional)').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('Reconstruction settings').closest('details')).not.toHaveAttribute('open');
+
+    fireEvent.click(screen.getByText('Source details'));
+    expect(screen.getByText('Verified source geometry')).toBeVisible();
+    expect(screen.getByText(/2 independent acquisitions · 6 source slices/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeEnabled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps the actual displayed examination and sequence visible without repeating the parent patient band', async () => {
+    const comparisonData = data('patient-a');
+    const newerExamination = '2035-02-20T09:30:00';
+    comparisonData.dates = [newerExamination, EXAMINATION];
+    for (const byDate of Object.values(comparisonData.series_map)) {
+      const source = byDate[EXAMINATION]!;
+      byDate[newerExamination] = { ...source, series_uid: `${source.series_uid}-newer` };
+    }
+    const { rerender } = render(<Svr3DView data={comparisonData} defaultDateIso={EXAMINATION} />);
+
+    const header = screen.getByRole('banner', { name: /3d scan context for synthetic patient-a/i });
+    const date = within(header).getByLabelText(/displayed examination/i);
+    expect(date).toHaveAttribute('datetime', EXAMINATION);
+    expect(date).toHaveTextContent('Jan 15, 2035');
+    expect(within(header).getByText('T2 FLAIR')).toBeVisible();
+    expect(within(header).getByRole('button', { name: /show reconstruction sources and controls/i })).toBeVisible();
+    expect(within(header).queryByText('3D VIEW')).not.toBeInTheDocument();
+    expect(within(header).queryByText('Synthetic patient-a')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeEnabled());
+
+    rerender(<Svr3DView data={comparisonData} defaultDateIso={newerExamination} />);
+    expect(within(header).getByLabelText(/displayed examination/i)).toHaveAttribute('datetime', newerExamination);
+    expect(within(header).getByText('T2 FLAIR')).toBeVisible();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeEnabled());
+  });
+
+  it.each([false, true])(
+    'keeps measured progress and cancellation visible with accepted volume %s and sources closed',
+    async (hasAcceptedVolume) => {
+      const comparisonData = data('patient-a');
+      mocks.hook.status = 'running';
+      mocks.hook.isRunning = true;
+      mocks.hook.progress = { phase: 'reconstructing', current: 35, total: 100, message: 'Reconstructing anatomy' };
+      if (hasAcceptedVolume) {
+        mocks.hook.result = acceptedResult();
+        mocks.hook.resultIdentity = identity(comparisonData);
+      }
+      render(<Svr3DView data={comparisonData} />);
+
+      expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+      expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+      expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '35');
+      expect(screen.getAllByText('Reconstructing anatomy')).toHaveLength(1);
+      expect(screen.getAllByRole('button', { name: 'Cancel reconstruction' })).toHaveLength(1);
+      if (hasAcceptedVolume) expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+
+      openSources();
+      expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+      expect(screen.getAllByRole('button', { name: 'Cancel reconstruction' })).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel reconstruction' }));
+      expect(mocks.cancel).toHaveBeenCalledOnce();
+
+      await waitFor(() => expect(mocks.manifests).toHaveBeenCalledTimes(2));
+    },
+  );
+
+  it('does not invent measured progress before work reports its first completed unit', async () => {
+    mocks.hook.status = 'running';
+    mocks.hook.isRunning = true;
+    render(<Svr3DView data={data('patient-a')} />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('Preparing MRI source images');
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel reconstruction' })).toBeEnabled();
+    await waitFor(() => expect(mocks.manifests).toHaveBeenCalledTimes(2));
+  });
+
+  it('reports a canceled refinement without hiding the accepted volume or opening sources', async () => {
+    const comparisonData = data('patient-a');
+    mocks.hook.status = 'canceled';
+    mocks.hook.result = acceptedResult();
+    mocks.hook.resultIdentity = identity(comparisonData);
+    render(<Svr3DView data={comparisonData} />);
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/volume and selection are unchanged/i));
+    expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+  });
+
   it.each([0, 0.31])('reloads real native context outside a tight accepted focus crop (rotation %s)', async (angle) => {
     const comparisonData = nativeComparisonData();
     const { sourceManifest, previous, labels } = nativeEnhancementFixture(
@@ -316,6 +442,7 @@ describe('SVR reconstruction workspace', () => {
     const loaded = acceptedResult();
     mocks.reconstruct.mockResolvedValue(loaded);
     render(<Svr3DView data={comparisonData} />);
+    openSources();
     await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
     const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
     const before = previous.volume.data.slice();
@@ -343,6 +470,7 @@ describe('SVR reconstruction workspace', () => {
       mocks.hook.resultIdentity = identity(comparisonData);
       mocks.hook.status = 'ready';
       render(<Svr3DView data={comparisonData} />);
+      openSources();
       await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
       const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
       const result = await load(labels, {});
@@ -369,6 +497,7 @@ describe('SVR reconstruction workspace', () => {
       mocks.hook.resultIdentity = identity(comparisonData);
       mocks.hook.status = 'ready';
       render(<Svr3DView data={comparisonData} />);
+      openSources();
       await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeInTheDocument());
       await waitFor(() => expect(mocks.enhancementLoader.mock.lastCall![0]).toBeTypeOf('function'));
       const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
@@ -396,7 +525,9 @@ describe('SVR reconstruction workspace', () => {
     mocks.hook.resultIdentity = identity(comparisonData);
     mocks.hook.status = 'ready';
     render(<Svr3DView data={comparisonData} />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled());
+    openSources();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Refine test region' }));
     expect(mocks.run).toHaveBeenCalledTimes(1);
     const [sources, settings, resultIdentity, transfer] = mocks.run.mock.calls[0]!;
@@ -410,18 +541,21 @@ describe('SVR reconstruction workspace', () => {
     expect(resultIdentity).toBe(identity(comparisonData));
     expect(transfer.volume).toBe(previous.volume);
     expect(transfer.labels.data[0]).toBe(1);
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
   });
 
   it('opens one reliable source stack without pretending it is independent multi-acquisition fusion', async () => {
     render(<Svr3DView data={data('patient-a', 1)} />);
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /explore the original mri in 3d/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /explore this mri in 3d/i })).toBeInTheDocument();
     });
 
     expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled();
     expect(screen.queryByRole('button', { name: /reconstruct volume/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId('accepted-svr-volume')).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+    openSources();
     const sources = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
     expect(sources).toBeInTheDocument();
     expect(sources.parentElement).toHaveClass('grid-cols-[minmax(240px,304px)_minmax(0,1fr)]');
@@ -479,8 +613,9 @@ describe('SVR reconstruction workspace', () => {
     });
     render(<Svr3DView data={data('patient-a')} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open 3D volume' })).toBeEnabled());
+    await openSourceDetails();
     expect(screen.getByText('Derived view · not fused')).toBeInTheDocument();
-    expect(screen.queryByText('Advanced SVR settings')).not.toBeInTheDocument();
+    expect(screen.queryByText('Reconstruction settings')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reconstruct volume' })).not.toBeInTheDocument();
   });
 
@@ -557,6 +692,7 @@ describe('SVR reconstruction workspace', () => {
     });
 
     render(<Svr3DView data={comparisonData} />);
+    await openSourceDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/(?:[1-4]\d\d|50\d|51[0-2]) MiB/);
@@ -603,11 +739,16 @@ describe('SVR reconstruction workspace', () => {
     mocks.hook.error = 'This region exceeds the memory budget. The original selection is unchanged.';
     mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 600 * 1024 * 1024, maximumSizeInBytes: 600 * 1024 * 1024 });
     render(<Svr3DView data={comparisonData} />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeDisabled());
     expect(screen.getAllByRole('alert')).toHaveLength(1);
     expect(screen.getByRole('alert')).toHaveTextContent(mocks.hook.error);
+    expect(screen.getByRole('alert')).toBeVisible();
     expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
     expect(screen.queryByText(/exceeds the safe browser-memory budget/i)).not.toBeInTheDocument();
+    openSources();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeDisabled());
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert').closest('aside')).toBeNull();
   });
 
   it('distinguishes next-run estimates from the immutable accepted reconstruction', async () => {
@@ -617,6 +758,7 @@ describe('SVR reconstruction workspace', () => {
     mocks.hook.resultIdentity = identity(comparisonData);
 
     render(<Svr3DView data={comparisonData} />);
+    await openSourceDetails();
 
     await waitFor(() => {
       expect(screen.getByText('Next source data')).toBeInTheDocument();
@@ -663,6 +805,7 @@ describe('SVR reconstruction workspace', () => {
       expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
     });
 
+    openReconstructionSettings();
     fireEvent.change(screen.getByLabelText(/max volume dim/i), { target: { value: '384' } });
 
     await waitFor(() => {
@@ -705,6 +848,7 @@ describe('SVR reconstruction workspace', () => {
       expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
     });
 
+    openReconstructionSettings();
     fireEvent.change(screen.getByLabelText(/max volume dim/i), { target: { value: '384' } });
 
     await waitFor(() => {
@@ -720,6 +864,7 @@ describe('SVR reconstruction workspace', () => {
       expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
     });
 
+    openReconstructionSettings();
     const voxelSize = screen.getByLabelText(/voxel size/i);
     fireEvent.change(voxelSize, { target: { value: '0' } });
     expect(voxelSize).toHaveValue(0.1);
@@ -763,6 +908,9 @@ describe('SVR reconstruction workspace', () => {
     await waitFor(() => {
       expect(screen.getAllByText(/clear the previous reconstruction/i).length).toBeGreaterThan(0);
     });
+    expect(screen.getByRole('status')).toHaveTextContent('Next reconstruction:');
+    expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+    openSources();
     expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
     expect(mocks.run).not.toHaveBeenCalled();
   });

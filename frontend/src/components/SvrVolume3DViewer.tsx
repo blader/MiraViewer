@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { SvrSegmentationEditor } from './SvrSegmentationEditor';
 import { SvrImagingContext, useSvrImaging } from './svrImagingContext';
@@ -699,7 +699,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     uploadClick: onnxUploadClick,
     handleSelectedFiles: onnxHandleSelectedFiles,
     clearModel: onnxClearModel,
-    initSession: initOnnxSession,
     runSegmentation: runOnnxSegmentation,
     cancelSegmentation: cancelOnnxSegmentation,
   } = onnx;
@@ -2268,7 +2267,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     hasLabels,
     hasTumorLabels,
     initError,
-    initOnnxSession,
     labelMetrics,
     labels,
     currentMigration,
@@ -2345,12 +2343,10 @@ function SvrEnhancementControls({
 }) {
   const model = useViewerControls();
   const detail = model.enhancement;
-  const stats = detail.result?.stats;
-  const gain = stats && stats.baselineMse > 0 ? 100 * (1 - stats.enhancedMse / stats.baselineMse) : null;
+  if (!model.hasTumorLabels && !detail.running && !detail.result && !detail.error && !detail.message) return null;
   return (
     <div className="svr-enhancement-controls" aria-label="Super-resolution detail">
       <div className="svr-enhancement-actions">
-        <span className="svr-enhancement-label">Detail</span>
         {detail.running ? (
           <>
             <progress aria-label="Enhancement progress" value={detail.progress} max={1} />
@@ -2360,82 +2356,36 @@ function SvrEnhancementControls({
             </button>
           </>
         ) : detail.result ? (
-          <>
-            <div role="group" aria-label="Volume detail comparison" className="svr-enhancement-comparison">
-              <button type="button" aria-pressed={!detail.enabled} onClick={() => detail.setEnabled(false)}>
-                Original
-              </button>
-              <button type="button" aria-pressed={detail.enabled} onClick={() => detail.setEnabled(true)}>
-                Enhanced · 2×
-              </button>
-            </div>
-            <label className="svr-enhancement-strength">
-              Strength
-              <input
-                aria-label="Super-resolution strength"
-                type="range"
-                min={0}
-                max={100}
-                step={5}
-                value={detail.strength * 100}
-                disabled={!detail.enabled}
-                onChange={(event) => detail.setStrength(Number(event.currentTarget.value) / 100)}
-              />
-            </label>
-            <details className="svr-enhancement-info">
-              <summary>About</summary>
-              <div>
-                <p>
-                  Self-trained 3D super-resolution · 2× per axis. Finer texture and a sub-voxel display surface are
-                  inferred, not acquired. Original MRI planes and selection measurements stay unchanged.
-                </p>
-                <p>
-                  {stats?.trainingSamples.toLocaleString()} training patches · {stats?.heldOutBlocks} separate test
-                  blocks.
-                </p>
-                <p>
-                  {gain === null
-                    ? 'Held-out detail gain is not measurable in this region.'
-                    : gain > 0
-                      ? `${gain.toFixed(1)}% lower error than interpolation on synthetically reduced test patches.`
-                      : 'The model did not improve the held-out patch error over interpolation. Treat this view as experimental.'}{' '}
-                  This does not establish accuracy beyond the source resolution.
-                </p>
-                <p>
-                  Grid: {detail.result.dims.join(' × ')} ·{' '}
-                  {detail.result.voxelSizeMm.map((pitch) => pitch.toFixed(3)).join(' × ')} mm. Computed in{' '}
-                  {((stats?.durationMs ?? 0) / 1000).toFixed(1)} s.
-                </p>
-                <button type="button" onClick={detail.clear}>
-                  Discard enhancement
-                </button>
-              </div>
-            </details>
-          </>
-        ) : (
-          <>
-            <button
-              type="button"
-              disabled={!model.hasTumorLabels || !model.selectionReady || selectionRunning}
-              title={
-                selectionRunning
-                  ? 'Wait for the boundary suggestion to finish before enhancing this region.'
-                  : model.hasTumorLabels
-                    ? 'Learn 3D detail from this examination and enhance the selected region locally.'
-                    : 'Mark a region to enhance its detail.'
-              }
-              onClick={async () => {
-                if (await detail.run(retainedBytes)) {
-                  model.setNativePlaneEnabled(false);
-                  model.setVisualizationMode('tumor');
-                  model.fitSelection();
-                }
-              }}
-            >
-              Enhance selection · 2×
+          <div role="group" aria-label="Volume detail comparison" className="svr-enhancement-comparison">
+            <button type="button" aria-pressed={!detail.enabled} onClick={() => detail.setEnabled(false)}>
+              Original
             </button>
-            <span className="svr-enhancement-hint">Local super-resolution</span>
-          </>
+            <button type="button" aria-pressed={detail.enabled} onClick={() => detail.setEnabled(true)}>
+              Enhanced · 2×
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-label="Enhance selection · 2×"
+            disabled={!model.hasTumorLabels || !model.selectionReady || selectionRunning}
+            title={
+              selectionRunning
+                ? 'Wait for the boundary suggestion to finish before enhancing this region.'
+                : model.hasTumorLabels
+                  ? 'Learn 3D detail from this examination and enhance the selected region locally.'
+                  : 'Mark a region to enhance its detail.'
+            }
+            onClick={async () => {
+              if (await detail.run(retainedBytes)) {
+                model.setNativePlaneEnabled(false);
+                model.setVisualizationMode('tumor');
+                model.fitSelection();
+              }
+            }}
+          >
+            Enhance · 2×
+          </button>
         )}
       </div>
       {detail.running ? (
@@ -2457,10 +2407,122 @@ function SvrEnhancementControls({
   );
 }
 
+function SvrEnhancementSettings() {
+  const { enhancement: detail } = useViewerControls();
+  if (!detail.result) return null;
+  const stats = detail.result.stats;
+  const gain = stats.baselineMse > 0 ? 100 * (1 - stats.enhancedMse / stats.baselineMse) : null;
+  return (
+    <details className="svr-inspector-section svr-enhancement-info">
+      <summary>Enhanced detail</summary>
+      <div>
+        <label className="svr-enhancement-strength">
+          Strength
+          <input
+            aria-label="Super-resolution strength"
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={detail.strength * 100}
+            disabled={!detail.enabled}
+            onChange={(event) => detail.setStrength(Number(event.currentTarget.value) / 100)}
+          />
+        </label>
+        <p>
+          Self-trained 3D super-resolution · 2× per axis. Finer texture and a sub-voxel display surface are inferred,
+          not acquired. Original MRI planes and selection measurements stay unchanged.
+        </p>
+        <p>
+          {stats.trainingSamples.toLocaleString()} training patches · {stats.heldOutBlocks} separate test blocks.
+        </p>
+        <p>
+          {gain === null
+            ? 'Held-out detail gain is not measurable in this region.'
+            : gain > 0
+              ? `${gain.toFixed(1)}% lower error than interpolation on synthetically reduced test patches.`
+              : 'The model did not improve the held-out patch error over interpolation. Treat this view as experimental.'}{' '}
+          This does not establish accuracy beyond the source resolution.
+        </p>
+        <p>
+          Grid: {detail.result.dims.join(' × ')} ·{' '}
+          {detail.result.voxelSizeMm.map((pitch) => pitch.toFixed(3)).join(' × ')} mm. Computed in{' '}
+          {(stats.durationMs / 1000).toFixed(1)} s.
+        </p>
+        <button type="button" onClick={detail.clear}>
+          Discard enhancement
+        </button>
+      </div>
+    </details>
+  );
+}
+
 /** Source controls live with the 3D scene; the editing views keep one linked cursor. */
 function SvrNativePlaneControls() {
   const model = useViewerControls();
-  const { nativeSources, nativeSource, nativeFrameIndex, nativeImage, nativeWindowRange } = model;
+  const { nativeSources, nativeSource, nativeFrameIndex } = model;
+  if (!nativeSources?.length || !nativeSource) return null;
+  return (
+    <div className="svr-native-controls" aria-label="Original MRI plane controls">
+      <button
+        type="button"
+        aria-pressed={model.nativePlaneEnabled}
+        onClick={() => model.setNativePlaneEnabled(!model.nativePlaneEnabled)}
+        title="Show the source MRI slice inside the 3D volume"
+      >
+        MRI slice
+      </button>
+      {model.nativePlaneEnabled ? (
+        <div className="svr-native-browse">
+          <button
+            type="button"
+            aria-label="Previous original MRI slice"
+            disabled={nativeFrameIndex === 0}
+            onClick={() => model.setNativeFrameIndex(nativeFrameIndex - 1)}
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <input
+            type="range"
+            aria-label="Original MRI slice position"
+            min={0}
+            max={nativeSource.frames.length - 1}
+            step={1}
+            value={nativeFrameIndex}
+            onChange={(event) => model.setNativeFrameIndex(Number(event.currentTarget.value))}
+          />
+          <button
+            type="button"
+            aria-label="Next original MRI slice"
+            disabled={nativeFrameIndex >= nativeSource.frames.length - 1}
+            onClick={() => model.setNativeFrameIndex(nativeFrameIndex + 1)}
+          >
+            <ChevronRight size={14} />
+          </button>
+          <label>
+            <span className="sr-only">Original MRI slice</span>
+            <input
+              type="number"
+              aria-label="Original MRI slice"
+              min={1}
+              max={nativeSource.frames.length}
+              value={nativeFrameIndex + 1}
+              onChange={(event) => {
+                if (Number.isFinite(event.currentTarget.valueAsNumber))
+                  model.setNativeFrameIndex(event.currentTarget.valueAsNumber - 1);
+              }}
+            />
+            <span>/ {nativeSource.frames.length}</span>
+          </label>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SvrNativePlaneSettings() {
+  const model = useViewerControls();
+  const { nativeSources, nativeSource, nativeImage, nativeWindowRange } = model;
   if (!nativeSources?.length || !nativeSource) return null;
   const title =
     nativeSource.kind === 'derived'
@@ -2475,112 +2537,53 @@ function SvrNativePlaneControls() {
     (nativeImage.plane?.windowRange[1] ?? 1) - (nativeImage.plane?.windowRange[0] ?? 0),
   );
   return (
-    <div className="svr-native-controls" aria-label="Original MRI plane controls">
-      <div className="svr-native-heading">
-        <button
-          type="button"
-          aria-pressed={model.nativePlaneEnabled}
-          onClick={() => model.setNativePlaneEnabled(!model.nativePlaneEnabled)}
-        >
-          {title}
-        </button>
-        {nativeSources.length > 1 ? (
-          <select
-            aria-label="MRI plane source"
-            value={model.nativeSourceIndex}
-            onChange={(event) => model.setNativeSourceIndex(Number(event.currentTarget.value))}
-          >
-            {nativeSources.map((source, index) => (
-              <option key={source.seriesUid} value={index}>
-                {source.label}
-                {source.kind === 'derived'
-                  ? ' · derived'
-                  : source.kind === 'unknown'
-                    ? ' · unverified acquisition'
-                    : ' · original'}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span>{nativeSource.label}</span>
-        )}
-        <button
-          type="button"
-          onClick={model.faceNativePlane}
-          disabled={!nativeImage.plane}
-          title="Look straight at the MRI slice, without changing its values or the selection"
-        >
-          Face slice
-        </button>
-        <button type="button" onClick={model.fitSelection} disabled={!model.hasTumorLabels}>
-          Fit selection
-        </button>
-      </div>
-      {model.nativePlaneEnabled ? (
-        <>
-          <div className="svr-native-browse">
-            <button
-              type="button"
-              aria-label="Previous original MRI slice"
-              disabled={nativeFrameIndex === 0}
-              onClick={() => model.setNativeFrameIndex(nativeFrameIndex - 1)}
+    <details className="svr-inspector-section svr-native-settings">
+      <summary>Source image</summary>
+      <div>
+        <div className="svr-native-heading">
+          <span className="svr-source-kind">{title}</span>
+          {nativeSources.length > 1 ? (
+            <select
+              aria-label="MRI plane source"
+              value={model.nativeSourceIndex}
+              onChange={(event) => model.setNativeSourceIndex(Number(event.currentTarget.value))}
             >
-              <ChevronLeft size={14} />
-            </button>
-            <input
-              type="range"
-              aria-label="Original MRI slice position"
-              min={0}
-              max={nativeSource.frames.length - 1}
-              step={1}
-              value={nativeFrameIndex}
-              onChange={(event) => model.setNativeFrameIndex(Number(event.currentTarget.value))}
-            />
-            <button
-              type="button"
-              aria-label="Next original MRI slice"
-              disabled={nativeFrameIndex >= nativeSource.frames.length - 1}
-              onClick={() => model.setNativeFrameIndex(nativeFrameIndex + 1)}
-            >
-              <ChevronRight size={14} />
-            </button>
-            <label>
-              <span className="sr-only">Original MRI slice</span>
-              <input
-                type="number"
-                aria-label="Original MRI slice"
-                min={1}
-                max={nativeSource.frames.length}
-                value={nativeFrameIndex + 1}
-                onChange={(event) => {
-                  if (Number.isFinite(event.currentTarget.valueAsNumber))
-                    model.setNativeFrameIndex(event.currentTarget.valueAsNumber - 1);
-                }}
-              />
-              <span>/ {nativeSource.frames.length}</span>
-            </label>
-          </div>
-          <div className="svr-native-view-options">
-            <div role="group" aria-label="MRI plane coverage">
-              <button
-                type="button"
-                aria-pressed={!model.nativeSelectionOnly}
-                onClick={() => model.setNativeSelectionOnly(false)}
-              >
-                Whole slice
-              </button>
-              <button
-                type="button"
-                aria-pressed={model.nativeSelectionOnly}
-                disabled={!model.hasTumorLabels}
-                onClick={() => model.setNativeSelectionOnly(true)}
-              >
-                Selection only
-              </button>
-            </div>
-            <details>
-              <summary>Slice display</summary>
-              <div className="svr-native-display-popover">
+              {nativeSources.map((source, index) => (
+                <option key={source.seriesUid} value={index}>
+                  {source.label}
+                  {source.kind === 'derived'
+                    ? ' · derived'
+                    : source.kind === 'unknown'
+                      ? ' · unverified acquisition'
+                      : ' · original'}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span>{nativeSource.label}</span>
+          )}
+        </div>
+        {model.nativePlaneEnabled ? (
+          <>
+            <div className="svr-native-view-options">
+              <div role="group" aria-label="MRI plane coverage">
+                <button
+                  type="button"
+                  aria-pressed={!model.nativeSelectionOnly}
+                  onClick={() => model.setNativeSelectionOnly(false)}
+                >
+                  Whole slice
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={model.nativeSelectionOnly}
+                  disabled={!model.hasTumorLabels}
+                  onClick={() => model.setNativeSelectionOnly(true)}
+                >
+                  Within selection
+                </button>
+              </div>
+              <div className="svr-native-display-settings">
                 <label>
                   <input
                     type="checkbox"
@@ -2640,23 +2643,18 @@ function SvrNativePlaneControls() {
                 </button>
                 <p>Source window / level is independent of the 3D overview. Original pixel values stay unchanged.</p>
               </div>
-            </details>
-            <span role="status" aria-live="off">
-              {nativeImage.loading
-                ? 'Loading original…'
-                : nativeImage.plane
-                  ? `${nativeImage.plane.frame.columns} × ${nativeImage.plane.frame.rows} · ${model.nativeInterpolate ? 'interpolated display' : 'source pixels'}`
-                  : ''}
-            </span>
-          </div>
-          {nativeImage.error ? (
-            <p role="alert" className="svr-native-error">
-              {nativeImage.error}
-            </p>
-          ) : null}
-        </>
-      ) : null}
-    </div>
+              <span role="status" aria-live="off">
+                {nativeImage.loading
+                  ? 'Loading original…'
+                  : nativeImage.plane
+                    ? `${nativeImage.plane.frame.columns} × ${nativeImage.plane.frame.rows} · ${model.nativeInterpolate ? 'interpolated display' : 'source pixels'}`
+                    : ''}
+              </span>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
@@ -2680,11 +2678,9 @@ function SvrSavedSelectionNotice() {
   );
 }
 
-function SvrOnnxModelControls() {
+function SvrOnnxModelControls({ selectionRunning }: { selectionRunning: boolean }) {
   const model = useViewerControls();
   const {
-    cancelOnnxSegmentation,
-    initOnnxSession,
     onnxClearModel,
     onnxFileInputRef,
     onnxHandleSelectedFiles,
@@ -2697,11 +2693,10 @@ function SvrOnnxModelControls() {
   } = model;
 
   return (
-    <details className="pt-2 mt-2 border-t border-[var(--border-color)] text-xs text-[var(--text-secondary)]">
-      <summary className="min-h-9 cursor-pointer py-2 font-medium hover:text-[var(--text-primary)]">
-        Optional verified ONNX model
-      </summary>
+    <details className="svr-inspector-section">
+      <summary>Custom model</summary>
       <div className="space-y-2">
+        <p>Optional. Use your own verified ONNX model to suggest a draft selection.</p>
         <input
           ref={onnxFileInputRef}
           type="file"
@@ -2729,38 +2724,20 @@ function SvrOnnxModelControls() {
 
           <button
             type="button"
-            onClick={initOnnxSession}
-            disabled={!onnxStatus.cached || !onnxStatus.verified || onnxStatus.loading}
-            className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
-          >
-            Init
-          </button>
-
-          <button
-            type="button"
             onClick={runOnnxSegmentation}
             disabled={
               !volume ||
               !onnxStatus.cached ||
               !onnxStatus.verified ||
               onnxStatus.loading ||
-              model.currentMigration?.running ||
+              !model.selectionReady ||
+              selectionRunning ||
               !!onnxPreflight?.blockedByDefault
             }
             className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
           >
-            Run ML
+            Suggest with model
           </button>
-
-          {onnxSegRunning ? (
-            <button
-              type="button"
-              onClick={cancelOnnxSegmentation}
-              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-            >
-              Cancel
-            </button>
-          ) : null}
 
           <button
             type="button"
@@ -2793,11 +2770,7 @@ function SvrOnnxModelControls() {
           </div>
         ) : null}
 
-        {onnxStatus.error ? (
-          <div role="alert" className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--danger)]">
-            {onnxStatus.error}
-          </div>
-        ) : onnxStatus.message ? (
+        {!onnxStatus.error && !onnxStatus.loading && !onnxSegRunning && onnxStatus.message ? (
           <div role="status" className="text-xs text-[var(--text-tertiary)]">
             {onnxStatus.message}
           </div>
@@ -2871,8 +2844,8 @@ function SvrAppearanceControls() {
   const { THRESHOLD_MAX, gamma, opacity, resetView, setGamma, setOpacity, setThreshold, threshold, volume } = model;
 
   return (
-    <>
-      <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">3D Controls</div>
+    <section className="svr-appearance-controls" aria-label="3D appearance">
+      <h3>Appearance</h3>
 
       <div className="grid grid-cols-2 gap-3">
         <label className="block text-xs text-[var(--text-secondary)]">
@@ -2923,7 +2896,7 @@ function SvrAppearanceControls() {
         </label>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={resetView}
@@ -2932,12 +2905,25 @@ function SvrAppearanceControls() {
         >
           Reset view
         </button>
+        <button type="button" onClick={model.fitSelection} disabled={!model.hasTumorLabels}>
+          Fit selection
+        </button>
+        {model.nativeSource ? (
+          <button
+            type="button"
+            onClick={model.faceNativePlane}
+            disabled={!model.nativeImage.plane}
+            title="Look straight at the MRI slice, without changing its values or the selection"
+          >
+            Face slice
+          </button>
+        ) : null}
       </div>
 
       <div className="text-xs text-[var(--text-tertiary)]">
         Opacity and edge shading are applied evenly across the acquired volume; unsupported regions never become tissue.
       </div>
-    </>
+    </section>
   );
 }
 
@@ -2963,26 +2949,54 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
     () => ({ volume, labels: model.labels, refineRegion: model.refineRegion }),
     [volume, model.labels, model.refineRegion],
   );
+  const controlsButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!controlsCollapsed) settingsRef.current?.focus({ preventScroll: true });
+  }, [controlsCollapsed]);
+  const closeControls = () => {
+    setControlsCollapsed(true);
+    controlsButtonRef.current?.focus({ preventScroll: true });
+  };
   const scene = (selectionRunning = false, retainedBytes = 0) => (
-    <div className="flex min-h-0 flex-col">
-      <SvrEnhancementControls selectionRunning={selectionRunning} retainedBytes={retainedBytes} />
-      <SvrNativePlaneControls />
-      <div className="flex-1 min-h-0 overflow-hidden bg-[var(--bg-primary)]">
-        <div className="relative w-full h-full min-h-0">
-          {volume ? (
-            <button
-              type="button"
-              onClick={() => setControlsCollapsed((v) => !v)}
-              aria-label={controlsCollapsed ? 'Show 3D control panels' : 'Hide 3D control panels'}
-              aria-expanded={!controlsCollapsed}
-              className="absolute right-3 top-3 z-20 inline-flex min-h-11 items-center justify-center gap-2 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-              title={controlsCollapsed ? 'Show panels' : 'Hide panels'}
-            >
-              {controlsCollapsed ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-              Controls
+    <div className="svr-scene">
+      {volume ? (
+        <div className="svr-scene-toolbar">
+          <SvrNativePlaneControls />
+          <SvrEnhancementControls selectionRunning={selectionRunning} retainedBytes={retainedBytes} />
+          <button
+            ref={controlsButtonRef}
+            type="button"
+            onClick={() => setControlsCollapsed((value) => !value)}
+            aria-label={controlsCollapsed ? 'Show 3D settings' : 'Hide 3D settings'}
+            aria-expanded={!controlsCollapsed}
+            className="svr-scene-settings-toggle"
+          >
+            <SlidersHorizontal size={15} aria-hidden="true" /> Settings
+          </button>
+        </div>
+      ) : null}
+      {model.nativePlaneEnabled && model.nativeImage.error ? (
+        <p role="alert" className="svr-scene-notice svr-native-error">
+          {model.nativeImage.error}
+        </p>
+      ) : null}
+      {model.onnxSegRunning || model.onnxStatus.loading ? (
+        <div className="svr-scene-notice" role="status">
+          <span>{model.onnxStatus.message}</span>
+          {model.onnxSegRunning ? (
+            <button type="button" onClick={model.cancelOnnxSegmentation}>
+              Cancel model suggestion
             </button>
           ) : null}
-
+        </div>
+      ) : model.onnxStatus.error ? (
+        <p role="alert" className="svr-scene-notice svr-native-error">
+          {model.onnxStatus.error}
+        </p>
+      ) : null}
+      <div className="svr-scene-body" data-settings-open={!controlsCollapsed}>
+        <div className="svr-scene-canvas">
           <canvas
             ref={canvasRef}
             className="absolute inset-0 w-full h-full"
@@ -3005,7 +3019,7 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
 
           {!volume ? (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] p-4 text-center text-xs text-[var(--text-secondary)]">
-              Run SVR to generate a volume for 3D viewing.
+              Open a volume to explore it in 3D.
             </div>
           ) : initError ? (
             <div
@@ -3040,83 +3054,96 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
                 : 'Drag or use arrow keys to rotate · Wheel or +/− to zoom'}
             </div>
           )}
-
-          {volume && renderPlan ? (
-            <details className="svr-volume-details">
-              <summary>
-                <ChevronRight className="h-3 w-3" aria-hidden="true" />
-                <span>Volume details</span>
-                {observedSupportSummary ? (
-                  <span className={observedSupportSummary.valid ? 'text-[var(--evidence)]' : 'text-[var(--warning)]'}>
-                    {observedSupportSummary.valid
-                      ? `${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}% support`
-                      : 'Support mismatch'}
-                  </span>
-                ) : null}
-              </summary>
-              <div className="svr-volume-details-content">
-                <div className="mb-1 text-[var(--text-secondary)]">{volumeSamplingLabel(volume)}</div>
-                {volume.sourceProvenance ? (
-                  <div className="mb-2 text-[var(--text-secondary)]">{volume.sourceProvenance.explanation}</div>
-                ) : null}
-                <div className="tabular-nums [font-family:var(--font-mono)]">
-                  Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
-                  {' · '}
-                  {actualTextureFormat === 'f16'
-                    ? '16-bit float'
-                    : actualTextureFormat === 'u8'
-                      ? '8-bit'
-                      : 'preparing'}
-                </div>
-                {volume.acquiredOrientationCount !== undefined ? (
-                  <div className="mt-1 text-[var(--text-secondary)]">
-                    {volume.acquiredOrientationCount} source orientation
-                    {volume.acquiredOrientationCount === 1 ? '' : 's'}
-                  </div>
-                ) : null}
-                {volume.effectiveResolutionMm ? (
-                  <div className="mt-1 tabular-nums text-[var(--text-secondary)]">
-                    Source sampling estimate:{' '}
-                    {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')} mm
-                  </div>
-                ) : null}
-                {volume.sliceProfileSource ? (
-                  <div
-                    className={
-                      volume.sliceProfileSource === 'declared'
-                        ? 'mt-1 text-[var(--text-secondary)]'
-                        : 'mt-1 text-[var(--warning)]'
-                    }
-                  >
-                    Slice profile: {volume.sliceProfileSource}
-                    {volume.sliceProfileSource === 'unknown' ? ' (thickness was not declared)' : ''}
-                  </div>
-                ) : null}
-                {observedSupportSummary ? (
-                  <div
-                    className={
-                      observedSupportSummary.valid ? 'mt-1 text-[var(--evidence)]' : 'mt-1 text-[var(--warning)]'
-                    }
-                  >
-                    {observedSupportSummary.valid
-                      ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
-                      : 'Acquired support does not match the reconstruction.'}
-                  </div>
-                ) : null}
-              </div>
-            </details>
-          ) : null}
-          {volume && !controlsCollapsed ? (
-            <aside
-              className={`svr-render-settings ${COARSE_POINTER_CONTROL_TARGETS}`}
-              aria-label="3D appearance and model settings"
-            >
-              <SvrAppearanceControls />
-              <SvrOnnxModelControls />
-              <SvrSegmentationMetrics />
-            </aside>
-          ) : null}
         </div>
+        {volume && !controlsCollapsed ? (
+          <aside
+            ref={settingsRef}
+            tabIndex={-1}
+            className={`svr-render-settings ${COARSE_POINTER_CONTROL_TARGETS}`}
+            aria-label="3D settings"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                closeControls();
+              }
+            }}
+          >
+            <div className="svr-inspector-heading">
+              <h2>3D settings</h2>
+              <button type="button" onClick={closeControls} aria-label="Close 3D settings">
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <SvrAppearanceControls />
+            <SvrNativePlaneSettings />
+            <SvrEnhancementSettings />
+            {renderPlan ? (
+              <details className="svr-inspector-section svr-volume-details">
+                <summary>
+                  <span>Volume details</span>
+                </summary>
+                <div className="svr-volume-details-content">
+                  <div className="mb-1 text-[var(--text-secondary)]">{volumeSamplingLabel(volume)}</div>
+                  {volume.sourceProvenance ? (
+                    <div className="mb-2 text-[var(--text-secondary)]">{volume.sourceProvenance.explanation}</div>
+                  ) : null}
+                  <div className="tabular-nums [font-family:var(--font-mono)]">
+                    Render: {renderPlan.dims.nx} × {renderPlan.dims.ny} × {renderPlan.dims.nz}
+                    {' · '}
+                    {actualTextureFormat === 'f16'
+                      ? '16-bit float'
+                      : actualTextureFormat === 'u8'
+                        ? '8-bit'
+                        : 'preparing'}
+                  </div>
+                  {volume.acquiredOrientationCount !== undefined ? (
+                    <div className="mt-1 text-[var(--text-secondary)]">
+                      {volume.acquiredOrientationCount} source orientation
+                      {volume.acquiredOrientationCount === 1 ? '' : 's'}
+                    </div>
+                  ) : null}
+                  {volume.effectiveResolutionMm ? (
+                    <div className="mt-1 tabular-nums text-[var(--text-secondary)]">
+                      Source sampling estimate:{' '}
+                      {volume.effectiveResolutionMm.map((value) => value.toFixed(2)).join(' × ')} mm
+                    </div>
+                  ) : null}
+                  {volume.sliceProfileSource ? (
+                    <div
+                      className={
+                        volume.sliceProfileSource === 'declared'
+                          ? 'mt-1 text-[var(--text-secondary)]'
+                          : 'mt-1 text-[var(--warning)]'
+                      }
+                    >
+                      Slice profile: {volume.sliceProfileSource}
+                      {volume.sliceProfileSource === 'unknown' ? ' (thickness was not declared)' : ''}
+                    </div>
+                  ) : null}
+                  {observedSupportSummary ? (
+                    <div
+                      className={
+                        observedSupportSummary.valid ? 'mt-1 text-[var(--evidence)]' : 'mt-1 text-[var(--warning)]'
+                      }
+                    >
+                      {observedSupportSummary.valid
+                        ? `Acquired support: ${observedSupportSummary.count.toLocaleString()} of ${observedSupportSummary.total.toLocaleString()} voxels (${Math.round((observedSupportSummary.count / Math.max(1, observedSupportSummary.total)) * 100)}%)`
+                        : 'Acquired support does not match the reconstruction.'}
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+            {model.hasTumorLabels ? (
+              <details className="svr-inspector-section">
+                <summary>Selection measurements</summary>
+                <SvrSegmentationMetrics />
+              </details>
+            ) : null}
+            <SvrOnnxModelControls selectionRunning={selectionRunning} />
+          </aside>
+        ) : null}
       </div>
     </div>
   );
@@ -3140,6 +3167,13 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
               setWindowRange={model.setWindowRange}
               cutaway={model.cutaway}
               setCutaway={model.setCutaway}
+              onShow3D={() => {
+                model.setVisualizationMode(model.hasTumorLabels ? 'tumor' : 'anatomy');
+                if (model.hasTumorLabels) {
+                  model.setNativePlaneEnabled(false);
+                  model.fitSelection();
+                }
+              }}
               selectionNotice={<SvrSavedSelectionNotice />}
             >
               {scene}

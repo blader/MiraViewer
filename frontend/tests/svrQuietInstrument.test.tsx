@@ -161,10 +161,14 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Quiet Instrument reconstruction lightbox', () => {
-  it('keeps cancellation available when the source panel is collapsed during reconstruction', () => {
+  it('keeps cancellation available when the source panel is collapsed during reconstruction', async () => {
     mocks.hook.status = 'running';
     mocks.hook.isRunning = true;
     render(<Svr3DView data={comparisonData()} />);
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
+    fireEvent.click(await screen.findByText('Source details', { selector: 'summary' }));
+    expect(await screen.findByText(/2 independent acquisitions/)).toHaveTextContent('6 source slices');
     fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
     expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel reconstruction' }));
@@ -175,11 +179,23 @@ describe('Quiet Instrument reconstruction lightbox', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled());
 
-    expect(screen.getByText('Synthetic quiet instrument')).not.toHaveClass('hidden');
+    expect(screen.getByLabelText('3D scan context for Synthetic quiet instrument')).not.toHaveClass('hidden');
+    expect(screen.getByLabelText(/^Displayed examination/)).toHaveAttribute('dateTime', EXAMINATION);
+    expect(screen.getByRole('heading', { name: 'Explore this MRI in 3D' })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
     const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
     expect(sourceRail.parentElement?.className).toContain('minmax(240px,304px)');
+    fireEvent.click(within(sourceRail).getByText('Source details', { selector: 'summary' }));
     expect(within(sourceRail).getByText('Verified source geometry')).toHaveClass('text-[var(--evidence)]');
-    expect(screen.getByText('2 independent acquisitions')).toBeInTheDocument();
+    expect(
+      within(sourceRail).getByText('Focus region (optional)', { selector: 'summary' }).parentElement,
+    ).not.toHaveAttribute('open');
+    expect(
+      within(sourceRail).getByText('Reconstruction settings', { selector: 'summary' }).parentElement,
+    ).not.toHaveAttribute('open');
+    expect(within(sourceRail).getByText(/2 independent acquisitions/)).toHaveTextContent('6 source slices');
     expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
   });
 
@@ -199,17 +215,20 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     };
 
     const { container } = render(<Svr3DView data={comparisonData()} />);
-    await waitFor(() =>
-      expect(screen.getByRole('application', { name: /axial reconstructed slice/i })).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Select tissue' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute('data-editing', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    fireEvent.click(screen.getByText('Slice settings', { selector: 'summary' }));
     const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
       screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
     );
 
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
-    expect(screen.queryByText('3D Controls')).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: '3D settings' })).not.toBeInTheDocument();
     expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
 
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
     fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
 
     expect(
@@ -217,8 +236,8 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     ).not.toBeInTheDocument();
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
     for (const canvas of planes) expect(canvas).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D control panels' }));
-    expect(screen.getByText('3D Controls')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
+    expect(screen.getByRole('complementary', { name: '3D settings' })).toBeInTheDocument();
     for (const canvas of planes) expect(canvas).toBeInTheDocument();
     expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
   });
@@ -247,8 +266,10 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     mocks.hook.isRunning = true;
     render(<Svr3DView data={comparisonData()} />);
 
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
+    fireEvent.click(await screen.findByText('Source details', { selector: 'summary' }));
     await waitFor(() => expect(screen.getByText('Verified source geometry')).toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: /reconstructing supported anatomy/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Building your 3D view' })).toBeInTheDocument();
     expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
