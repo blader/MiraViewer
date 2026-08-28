@@ -6,7 +6,7 @@ import { AlignmentBadge, ImageControls, StudyAnnotationControls } from '../src/c
 import { AutomaticAlignmentStatus } from '../src/components/comparison/AutomaticAlignmentStatus';
 import { RepeatButton } from '../src/components/RepeatButton';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
-import type { AlignmentAdjustment } from '../src/types/api';
+import type { AlignmentAdjustment, PanelSettings } from '../src/types/api';
 import { DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 
 const alignmentAdjustment: AlignmentAdjustment = {
@@ -18,6 +18,20 @@ const alignmentAdjustment: AlignmentAdjustment = {
   brightness: 15,
   contrast: -8,
 };
+
+function renderImageControls(settings: Partial<PanelSettings>, { instanceIndex = 3, isAligned = false } = {}) {
+  const onUpdate = vi.fn();
+  render(
+    <ImageControls
+      settings={{ ...DEFAULT_PANEL_SETTINGS, ...settings }}
+      instanceIndex={instanceIndex}
+      instanceCount={10}
+      onUpdate={onUpdate}
+      isAligned={isAligned}
+    />,
+  );
+  return onUpdate;
+}
 
 describe('StepControl', () => {
   it('triggers increment and decrement', () => {
@@ -51,15 +65,7 @@ describe('ImageControls', () => {
   });
 
   it('keeps native tone reset independent of geometry and does not offer nonexistent corrections', () => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{ ...DEFAULT_PANEL_SETTINGS, brightness: 140, contrast: 125, rotation: 5 }}
-        instanceIndex={3}
-        instanceCount={10}
-        onUpdate={onUpdate}
-      />,
-    );
+    const onUpdate = renderImageControls({ brightness: 140, contrast: 125, rotation: 5 });
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset brightness & contrast' }));
 
@@ -68,15 +74,7 @@ describe('ImageControls', () => {
   });
 
   it('resets corrected tone to matching without discarding geometry, slice correction, or linkage', () => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{ ...DEFAULT_PANEL_SETTINGS, brightness: 135, contrast: 102, alignmentAdjustment }}
-        instanceIndex={3}
-        instanceCount={10}
-        onUpdate={onUpdate}
-      />,
-    );
+    const onUpdate = renderImageControls({ brightness: 135, contrast: 102, alignmentAdjustment });
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset brightness & contrast' }));
 
@@ -87,15 +85,7 @@ describe('ImageControls', () => {
   });
 
   it('requests an adjustment reset without replacing the latest automatic baseline or slice-order preference', () => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{ ...DEFAULT_PANEL_SETTINGS, reverseSliceOrder: true, affine00: 1.08, alignmentAdjustment }}
-        instanceIndex={3}
-        instanceCount={10}
-        onUpdate={onUpdate}
-      />,
-    );
+    const onUpdate = renderImageControls({ reverseSliceOrder: true, affine00: 1.08, alignmentAdjustment });
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset adjustments' }));
 
@@ -103,16 +93,7 @@ describe('ImageControls', () => {
   });
 
   it('resets an unadjusted aligned panel to its matched baseline instead of absolute native tone', () => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{ ...DEFAULT_PANEL_SETTINGS, brightness: 137, contrast: 91 }}
-        instanceIndex={3}
-        instanceCount={10}
-        onUpdate={onUpdate}
-        isAligned
-      />,
-    );
+    const onUpdate = renderImageControls({ brightness: 137, contrast: 91 }, { isAligned: true });
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset brightness & contrast' }));
 
@@ -121,21 +102,7 @@ describe('ImageControls', () => {
   });
 
   it('resets acquired tone without mutating saved corrections or resuming alignment', () => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{
-          ...DEFAULT_PANEL_SETTINGS,
-          brightness: 137,
-          contrast: 91,
-          alignmentPaused: true,
-          alignmentAdjustment,
-        }}
-        instanceIndex={3}
-        instanceCount={10}
-        onUpdate={onUpdate}
-      />,
-    );
+    const onUpdate = renderImageControls({ brightness: 137, contrast: 91, alignmentPaused: true, alignmentAdjustment });
 
     expect(screen.queryByRole('button', { name: 'Reset adjustments' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Reset brightness & contrast' }));
@@ -148,19 +115,9 @@ describe('ImageControls', () => {
     { reversed: false, instanceIndex: 3, offset: 5, nextOffset: 8 },
     { reversed: true, instanceIndex: 6, offset: 8, nextOffset: 5 },
   ])('keeps the physical slice stable when reversing corrected slice navigation: $reversed', (testCase) => {
-    const onUpdate = vi.fn();
-    render(
-      <ImageControls
-        settings={{
-          ...DEFAULT_PANEL_SETTINGS,
-          offset: testCase.offset,
-          reverseSliceOrder: testCase.reversed,
-          alignmentAdjustment,
-        }}
-        instanceIndex={testCase.instanceIndex}
-        instanceCount={10}
-        onUpdate={onUpdate}
-      />,
+    const onUpdate = renderImageControls(
+      { offset: testCase.offset, reverseSliceOrder: testCase.reversed, alignmentAdjustment },
+      { instanceIndex: testCase.instanceIndex },
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Reverse slice order' }));

@@ -105,20 +105,10 @@ export function GridCell({
           seriesUid={refData.series_uid}
           instanceIndex={idx}
           instanceCount={refData.instance_count}
-          reverseSliceOrder={settings.reverseSliceOrder}
+          {...settings}
           onInstanceChange={(i) => {
             setProgress(getProgressFromSlice(i, refData.instance_count, settings.offset));
           }}
-          brightness={settings.brightness}
-          contrast={settings.contrast}
-          zoom={settings.zoom}
-          rotation={settings.rotation}
-          panX={settings.panX}
-          panY={settings.panY}
-          affine00={settings.affine00}
-          affine01={settings.affine01}
-          affine10={settings.affine10}
-          affine11={settings.affine11}
           onPanChange={
             nativeAnnotationsAvailable && gtPolygonToolOpen
               ? undefined

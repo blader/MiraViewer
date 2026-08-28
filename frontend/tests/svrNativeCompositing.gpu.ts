@@ -216,11 +216,7 @@ export function runSvrSliceGpuProbe() {
     });
     native.setPlane(plane());
     native.bind({ enabled: true, cutaway: true });
-    update(
-      4,
-      supportTexture,
-      support.map(() => 0),
-    );
+    update(4, supportTexture, new Uint8Array(support.length));
     const unsupported = draw();
     record('Unsupported reconstruction cells cannot acquire an MRI cap', red(unsupported) === 0, red(unsupported));
     update(4, supportTexture, support);

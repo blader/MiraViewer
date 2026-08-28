@@ -6,7 +6,7 @@ import { GridCell } from '../src/components/comparison/GridCell';
 import { OverlayView, type OverlayViewProps } from '../src/components/comparison/OverlayView';
 import { StudyToolsWorkspace } from '../src/components/comparison/StudyTools';
 import { AlignedBrowsingContext } from '../src/hooks/useAlignedFrame';
-import type { AlignmentAdjustment, AlignmentResult, SeriesRef } from '../src/types/api';
+import type { AlignmentAdjustment, AlignmentResult, PanelSettings, SeriesRef } from '../src/types/api';
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { clearDerivedAlignmentFrames, setDerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
 import { getProgressFromSlice } from '../src/utils/math';
@@ -112,6 +112,35 @@ function overlayProps(overrides: Partial<OverlayViewProps> = {}): OverlayViewPro
     setProgress: vi.fn(),
     ...overrides,
   };
+}
+
+function renderPanel(
+  mode: 'Grid' | 'Overlay',
+  panelSettings: PanelSettings,
+  updatePanelSetting: OverlayViewProps['updatePanelSetting'],
+) {
+  return render(
+    mode === 'Grid' ? (
+      <GridCell
+        comboId={reference.sequenceId}
+        date={date}
+        refData={series}
+        settings={panelSettings}
+        progress={0.5}
+        setProgress={vi.fn()}
+        updatePanelSetting={updatePanelSetting}
+      />
+    ) : (
+      <OverlayView
+        {...overlayProps({
+          overlayDisplayedSettings: panelSettings,
+          overlaySelectedSettings: panelSettings,
+          updatePanelSetting,
+        })}
+      />
+    ),
+    { wrapper: Workspace },
+  );
 }
 
 afterEach(() => act(() => clearDerivedAlignmentFrames()));
@@ -227,28 +256,7 @@ describe('controls for a held aligned plane', () => {
       const updatePanelSetting = vi.fn();
       const adjustedSettings = { ...settings, alignmentAdjustment };
       setDerivedAlignmentFrame(acceptedPlane(5, 9));
-      const { container } = render(
-        mode === 'Grid' ? (
-          <GridCell
-            comboId={reference.sequenceId}
-            date={date}
-            refData={series}
-            settings={adjustedSettings}
-            progress={0.5}
-            setProgress={vi.fn()}
-            updatePanelSetting={updatePanelSetting}
-          />
-        ) : (
-          <OverlayView
-            {...overlayProps({
-              overlayDisplayedSettings: adjustedSettings,
-              overlaySelectedSettings: adjustedSettings,
-              updatePanelSetting,
-            })}
-          />
-        ),
-        { wrapper: Workspace },
-      );
+      const { container } = renderPanel(mode, adjustedSettings, updatePanelSetting);
 
       expect(container.querySelector('[data-alignment-state="aligned"]')).not.toBeNull();
       expect(container.querySelector('[data-alignment-adjusted="true"]')).not.toBeNull();
@@ -271,28 +279,7 @@ describe('controls for a held aligned plane', () => {
       const updatePanelSetting = vi.fn();
       const matchedSettings = { ...settings, brightness: 137, contrast: 91 };
       setDerivedAlignmentFrame({ ...acceptedPlane(5, 9), computedSettings: matchedSettings });
-      render(
-        mode === 'Grid' ? (
-          <GridCell
-            comboId={reference.sequenceId}
-            date={date}
-            refData={series}
-            settings={matchedSettings}
-            progress={0.5}
-            setProgress={vi.fn()}
-            updatePanelSetting={updatePanelSetting}
-          />
-        ) : (
-          <OverlayView
-            {...overlayProps({
-              overlayDisplayedSettings: matchedSettings,
-              overlaySelectedSettings: matchedSettings,
-              updatePanelSetting,
-            })}
-          />
-        ),
-        { wrapper: Workspace },
-      );
+      renderPanel(mode, matchedSettings, updatePanelSetting);
 
       await user.click(screen.getByRole('button', { name: 'Adjust image' }));
       await user.click(screen.getByRole('button', { name: 'Reset brightness & contrast' }));
@@ -310,28 +297,7 @@ describe('controls for a held aligned plane', () => {
       const user = userEvent.setup();
       const updatePanelSetting = vi.fn();
       const pausedSettings = { ...settings, alignmentPaused: true, alignmentAdjustment };
-      const { container } = render(
-        mode === 'Grid' ? (
-          <GridCell
-            comboId={reference.sequenceId}
-            date={date}
-            refData={series}
-            settings={pausedSettings}
-            progress={0.5}
-            setProgress={vi.fn()}
-            updatePanelSetting={updatePanelSetting}
-          />
-        ) : (
-          <OverlayView
-            {...overlayProps({
-              overlayDisplayedSettings: pausedSettings,
-              overlaySelectedSettings: pausedSettings,
-              updatePanelSetting,
-            })}
-          />
-        ),
-        { wrapper: Workspace },
-      );
+      const { container } = renderPanel(mode, pausedSettings, updatePanelSetting);
 
       expect(container.querySelector('[data-alignment-state="acquired"]')).not.toBeNull();
       expect(container.querySelector('[data-alignment-paused="true"]')).not.toBeNull();
@@ -378,18 +344,7 @@ describe('controls for a held aligned plane', () => {
     const user = userEvent.setup();
     const updatePanelSetting = vi.fn();
     setDerivedAlignmentFrame(acceptedPlane(3, 7));
-    render(
-      <GridCell
-        comboId={reference.sequenceId}
-        date={date}
-        refData={series}
-        settings={{ ...settings, alignmentAdjustment }}
-        progress={0.5}
-        setProgress={vi.fn()}
-        updatePanelSetting={updatePanelSetting}
-      />,
-      { wrapper: Workspace },
-    );
+    renderPanel('Grid', { ...settings, alignmentAdjustment }, updatePanelSetting);
 
     await user.click(screen.getByRole('button', { name: 'Adjust image' }));
     const reset = screen.getByRole('button', { name: 'Reset adjustments' });

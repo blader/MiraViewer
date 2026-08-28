@@ -42,7 +42,8 @@ export function normalizeAlignmentAdjustment(value: unknown): AlignmentAdjustmen
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const source = value as Record<string, unknown>;
   const result = { ...DEFAULT_ALIGNMENT_ADJUSTMENT };
-  for (const key of Object.keys(result) as (keyof AlignmentAdjustment)[]) {
+  const keys = Object.keys(result) as (keyof AlignmentAdjustment)[];
+  for (const key of keys) {
     const candidate = source[key];
     if (typeof candidate !== 'number' || !Number.isFinite(candidate)) continue;
     if (key === 'zoom' && candidate <= 0) continue;
@@ -50,14 +51,7 @@ export function normalizeAlignmentAdjustment(value: unknown): AlignmentAdjustmen
   }
   result.sliceOffset = Math.round(clamp(result.sliceOffset, -100_000, 100_000));
   result.rotation = normalizeRotation(result.rotation);
-  return Object.keys(result).some(
-    (key) =>
-      Math.abs(
-        result[key as keyof AlignmentAdjustment] - DEFAULT_ALIGNMENT_ADJUSTMENT[key as keyof AlignmentAdjustment],
-      ) > 1e-9,
-  )
-    ? result
-    : undefined;
+  return keys.some((key) => Math.abs(result[key] - DEFAULT_ALIGNMENT_ADJUSTMENT[key]) > 1e-9) ? result : undefined;
 }
 
 /** Slice displacement is applied by the native resampler, not a second time in CSS or the footer. */

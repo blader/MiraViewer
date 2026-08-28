@@ -15,6 +15,7 @@ import {
 } from '../src/utils/derivedAlignmentFrame';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { getImageIdForInstance } from '../src/utils/localApi';
+import { deferred } from './helpers/deferred';
 
 vi.mock('../src/utils/localApi', () => ({
   getImageIdForInstance: vi.fn(
@@ -123,7 +124,9 @@ function alignedResult(referenceSliceIndex = 40, bestSliceIndex = 4): AlignmentR
   };
 }
 
-function renderPresentation(initialProps: PresentationOptions) {
+function renderPresentation(
+  initialProps: PresentationOptions = { context: context(), seriesUid: 'target-series', instanceIndex: 4 },
+) {
   let currentContext = initialProps.context;
   const wrapper = ({ children }: PropsWithChildren) => (
     <AlignedBrowsingContext.Provider value={currentContext}>{children}</AlignedBrowsingContext.Provider>
@@ -188,11 +191,7 @@ describe('aligned browsing presentation continuity', () => {
 
   it('holds an accepted plane during a same-reference slice correction and reuses exact pixels on undo', () => {
     setDerivedAlignmentFrame(alignedResult());
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     const original = result.current.frame;
     const correctedContext = {
       ...context(),
@@ -216,11 +215,7 @@ describe('aligned browsing presentation continuity', () => {
 
   it('honors an acquired pause even when the exact derived plane is still cached', () => {
     setDerivedAlignmentFrame(alignedResult());
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     const accepted = result.current.frame;
     rerender({
       context: { ...context(), targetSeriesUids: new Set(), acquiredSeriesUids: new Set(['target-series']) },
@@ -237,11 +232,7 @@ describe('aligned browsing presentation continuity', () => {
     const accepted = alignedResult();
     setDerivedAlignmentFrame(accepted);
     const acceptedFrame = getDerivedAlignmentFrame('target-series', 4)!;
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     expect(result.current).toEqual({
       frame: acceptedFrame,
       pending: false,
@@ -301,11 +292,7 @@ describe('aligned browsing presentation continuity', () => {
     const second = alignedResult(41, 4);
     setDerivedAlignmentFrame(first);
     setDerivedAlignmentFrame(second);
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
 
     expect(result.current.pending).toBe(false);
     expect(result.current.frame?.acceptedResult).toBe(first);
@@ -347,11 +334,7 @@ describe('aligned browsing presentation continuity', () => {
   it('distinguishes held anatomy from active, paused, and failed work without replacing its pixels or settings', () => {
     const accepted = alignedResult();
     setDerivedAlignmentFrame(accepted);
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     const acceptedFrame = result.current.frame;
     const pendingContext = context({ sliceIndex: 41 });
 
@@ -386,11 +369,7 @@ describe('aligned browsing presentation continuity', () => {
 
   it('does not retain a local presentation after its cache is explicitly cleared', () => {
     setDerivedAlignmentFrame(alignedResult());
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     rerender({ context: context({ sliceIndex: 41 }), seriesUid: 'target-series', instanceIndex: 5 });
     expect(result.current.frame).not.toBeNull();
 
@@ -402,11 +381,7 @@ describe('aligned browsing presentation continuity', () => {
 
   it('never keeps a locally held frame after a replacement registration invalidates its model', () => {
     setDerivedAlignmentFrame(alignedResult());
-    const { result, rerender } = renderPresentation({
-      context: context(),
-      seriesUid: 'target-series',
-      instanceIndex: 4,
-    });
+    const { result, rerender } = renderPresentation();
     const oldFrame = result.current.frame;
     rerender({ context: context({ sliceIndex: 41 }), seriesUid: 'target-series', instanceIndex: 5 });
     const replacement = { ...alignedResult(42, 6), registrationId: 'replacement-volume-pose' };
@@ -456,11 +431,7 @@ describe('aligned browsing presentation continuity', () => {
     'does not reuse anatomy after the %s changes',
     (_label, changed) => {
       setDerivedAlignmentFrame(alignedResult());
-      const { result, rerender } = renderPresentation({
-        context: context(),
-        seriesUid: 'target-series',
-        instanceIndex: 4,
-      });
+      const { result, rerender } = renderPresentation();
       expect(result.current.frame).not.toBeNull();
 
       rerender({ context: context(changed), seriesUid: 'target-series', instanceIndex: 4 });
@@ -586,13 +557,8 @@ describe('DicomViewer aligned browsing', () => {
     next.computedSettings = { ...next.computedSettings, brightness: 80, contrast: 125, rotation: 10, zoom: 1.1 };
     act(() => setDerivedAlignmentFrame(next));
     const nextImageId = getDerivedAlignmentFrame('target-series', 4)!.imageId;
-    let finishLoading!: (image: { imageId: string }) => void;
-    vi.mocked(cornerstone.loadImage).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishLoading = resolve;
-        }),
-    );
+    const pendingImage = deferred<{ imageId: string }>();
+    vi.mocked(cornerstone.loadImage).mockReturnValueOnce(pendingImage.promise);
 
     rerender(viewer(context({ sliceIndex: 41 }), 4));
     await waitFor(() => expect(cornerstone.loadImage).toHaveBeenCalledTimes(2));
@@ -602,7 +568,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(1.11) contrast(0.89)');
     expect(presentation.style.transform).toBe(acceptedTransform);
 
-    await act(async () => finishLoading({ imageId: nextImageId }));
+    await act(async () => pendingImage.resolve({ imageId: nextImageId }));
 
     expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
     expect(presentation.style.filter).toBe('brightness(0.8) contrast(1.25)');

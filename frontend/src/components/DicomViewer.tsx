@@ -565,19 +565,10 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     interactionBlocked = false,
     reverseSliceOrder = false,
     imageUrlOverride,
-    brightness: requestedBrightness = 100,
-    contrast: requestedContrast = 100,
-    zoom: requestedZoom = 1,
-    rotation: requestedRotation = 0,
-    panX: requestedPanX = 0,
-    panY: requestedPanY = 0,
-    affine00: requestedAffine00 = 1,
-    affine01: requestedAffine01 = 0,
-    affine10: requestedAffine10 = 0,
-    affine11: requestedAffine11 = 1,
     onPanChange,
     onZoomChange,
     children,
+    ...requestedPresentation
   }: DicomViewerProps,
   ref,
 ) {
@@ -590,16 +581,18 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     status: alignmentStatus,
     settings: acceptedSettings,
   } = useAlignedFrame(seriesUid, effectiveInstanceIndex);
-  const brightness = acceptedSettings?.brightness ?? requestedBrightness;
-  const contrast = acceptedSettings?.contrast ?? requestedContrast;
-  const zoom = acceptedSettings?.zoom ?? requestedZoom;
-  const rotation = acceptedSettings?.rotation ?? requestedRotation;
-  const panX = acceptedSettings?.panX ?? requestedPanX;
-  const panY = acceptedSettings?.panY ?? requestedPanY;
-  const affine00 = acceptedSettings?.affine00 ?? requestedAffine00;
-  const affine01 = acceptedSettings?.affine01 ?? requestedAffine01;
-  const affine10 = acceptedSettings?.affine10 ?? requestedAffine10;
-  const affine11 = acceptedSettings?.affine11 ?? requestedAffine11;
+  const {
+    brightness = 100,
+    contrast = 100,
+    zoom = 1,
+    rotation = 0,
+    panX = 0,
+    panY = 0,
+    affine00 = 1,
+    affine01 = 0,
+    affine10 = 0,
+    affine11 = 1,
+  } = acceptedSettings ?? requestedPresentation;
 
   // Mouse wheel behavior:
   // - Plain wheel events advance slices, matching the center-pane global wheel behavior.

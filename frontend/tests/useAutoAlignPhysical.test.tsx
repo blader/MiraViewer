@@ -11,6 +11,7 @@ import {
 import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
 import { resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
+import { deferred } from './helpers/deferred';
 import {
   makeTissueLabelPhantom,
   REFERENCE_CONTRAST,
@@ -767,22 +768,16 @@ describe('physically registered longitudinal auto-alignment', () => {
     async (loadingPhase) => {
       await configureAutomaticAlignment(32);
       const nativeWindow = { windowCenter: 0.5, windowWidth: 1 };
-      let releaseWindow!: (window: typeof nativeWindow) => void;
-      const pendingWindow = new Promise<typeof nativeWindow>((resolve) => {
-        releaseWindow = resolve;
-      });
-      let windowRequested!: () => void;
-      const requested = new Promise<void>((resolve) => {
-        windowRequested = resolve;
-      });
+      const pendingWindow = deferred<typeof nativeWindow>();
+      const requested = deferred<void>();
       if (loadingPhase === 'fallback') {
         mocks.loadCornerstoneImage
           .mockResolvedValueOnce({ windowCenter: 0.5, windowWidth: 0 })
           .mockResolvedValueOnce(nativeWindow);
       }
       mocks.loadCornerstoneImage.mockImplementationOnce(() => {
-        windowRequested();
-        return pendingWindow;
+        requested.resolve();
+        return pendingWindow.promise;
       });
       const { result } = renderHook(useAutoAlign);
       let cancelled: AlignmentResult[] = [];
@@ -794,10 +789,10 @@ describe('physically registered longitudinal auto-alignment', () => {
           0.5,
           { reuseRegistration: true, requestKey: 'cancel-during-calibration-window' },
         );
-        await requested;
+        await requested.promise;
         expect(mocks.register3d).toHaveBeenCalled();
         result.current.abort();
-        releaseWindow(nativeWindow);
+        pendingWindow.resolve(nativeWindow);
         cancelled = await alignment;
       });
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import type { AlignmentReference, ComparisonData, PanelSettings, SeriesRef } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
+import { alignmentDisplayBaseline } from '../utils/alignmentAdjustment';
 import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 import { getEffectiveInstanceIndex, getSliceIndex } from '../utils/math';
 import type { OutputGridMode } from '../utils/outputPlaneGrid';
@@ -90,17 +91,11 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
       : null;
   // Only target sampling intent belongs in a request identity. Applying automatic
   // settings or editing target display controls must not restart registration.
-  const {
-    progress: _persistedProgress,
-    alignmentAdjustment: _adjustment,
-    alignmentBaseline: _baseline,
-    alignmentPaused: _paused,
-    ...referenceGeometry
-  } = settings;
-  void _persistedProgress;
-  void _adjustment;
-  void _baseline;
-  void _paused;
+  const referenceGeometry = {
+    ...alignmentDisplayBaseline(settings),
+    offset: settings.offset,
+    reverseSliceOrder: settings.reverseSliceOrder,
+  };
   const requestKey =
     reference && targetDates.length > 0
       ? JSON.stringify([
