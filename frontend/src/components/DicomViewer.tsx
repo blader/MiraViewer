@@ -134,7 +134,6 @@ function useViewportPan({
   };
 
   const resetPan = () => {
-    if (!canPan) return;
     setDrag(null);
     onPanChange?.(0, 0);
   };

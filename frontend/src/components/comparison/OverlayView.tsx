@@ -145,9 +145,7 @@ function OverlaySelectedLayer({
       onPanChange={
         isComparing || (nativeAnnotationsAvailable && annotation.gtPolygonToolOpen)
           ? undefined
-          : (panX, panY) => {
-              updatePanelSetting(date, { panX, panY });
-            }
+          : (panX, panY) => updatePanelSetting(date, { panX, panY })
       }
       onZoomChange={(zoom) => updatePanelSetting(date, { zoom })}
     >
@@ -380,8 +378,6 @@ export function OverlayView({
 
   const selectedPresentation = useAlignedFrame(overlaySelectedRef?.series_uid ?? '', selectedEffectiveSliceIndex);
   const comparePresentation = useAlignedFrame(overlayCompareRef?.series_uid ?? '', compareEffectiveSliceIndex);
-  const selectedDerivedFrame = selectedPresentation.frame;
-  const compareDerivedFrame = comparePresentation.frame;
   const displayedPresentation = isOverlayComparing ? comparePresentation : selectedPresentation;
   const displayedDerivedFrame = displayedPresentation.frame;
   const displayedSliceIndex =
@@ -452,7 +448,7 @@ export function OverlayView({
                     sliceIndex: overlaySelectedSliceIndex,
                     effectiveSliceIndex: selectedEffectiveSliceIndex,
                     imageSize: selectedImageSize,
-                    nativeAnnotationsAvailable: !selectedDerivedFrame,
+                    nativeAnnotationsAvailable: !selectedPresentation.frame,
                   }}
                   annotation={{
                     showSavedTumor,
@@ -474,7 +470,7 @@ export function OverlayView({
                   sliceIndex: overlayCompareSliceIndex,
                   effectiveSliceIndex: compareEffectiveSliceIndex,
                   imageSize: compareImageSize,
-                  nativeAnnotationsAvailable: !compareDerivedFrame,
+                  nativeAnnotationsAvailable: !comparePresentation.frame,
                 }}
                 presentation={{
                   isComparing: isOverlayComparing,

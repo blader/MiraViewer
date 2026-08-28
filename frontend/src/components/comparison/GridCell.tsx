@@ -106,19 +106,13 @@ export function GridCell({
           instanceIndex={idx}
           instanceCount={refData.instance_count}
           {...settings}
-          onInstanceChange={(i) => {
-            setProgress(getProgressFromSlice(i, refData.instance_count, settings.offset));
-          }}
+          onInstanceChange={(i) => setProgress(getProgressFromSlice(i, refData.instance_count, settings.offset))}
           onPanChange={
             nativeAnnotationsAvailable && gtPolygonToolOpen
               ? undefined
-              : (newPanX, newPanY) => {
-                  updatePanelSetting(date, { panX: newPanX, panY: newPanY });
-                }
+              : (newPanX, newPanY) => updatePanelSetting(date, { panX: newPanX, panY: newPanY })
           }
-          onZoomChange={(newZoom) => {
-            updatePanelSetting(date, { zoom: newZoom });
-          }}
+          onZoomChange={(newZoom) => updatePanelSetting(date, { zoom: newZoom })}
         >
           <Suspense fallback={null}>
             {nativeAnnotationsAvailable && showSavedTumor ? (

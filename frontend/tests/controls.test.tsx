@@ -33,6 +33,22 @@ function renderImageControls(settings: Partial<PanelSettings>, { instanceIndex =
   return onUpdate;
 }
 
+function renderAlignmentStatus(enabled = true) {
+  const onRealign = vi.fn();
+  render(
+    <AutomaticAlignmentStatus
+      enabled={enabled}
+      busy={false}
+      aligned={2}
+      targets={2}
+      manual
+      onToggle={vi.fn()}
+      onRealign={onRealign}
+    />,
+  );
+  return onRealign;
+}
+
 describe('StepControl', () => {
   it('triggers increment and decrement', () => {
     const onDec = vi.fn();
@@ -144,18 +160,7 @@ describe('alignment adjustment status', () => {
   });
 
   it('reports linked adjustments and explains that refitting keeps them', () => {
-    const onRealign = vi.fn();
-    render(
-      <AutomaticAlignmentStatus
-        enabled
-        busy={false}
-        aligned={2}
-        targets={2}
-        manual
-        onToggle={vi.fn()}
-        onRealign={onRealign}
-      />,
-    );
+    const onRealign = renderAlignmentStatus();
 
     expect(screen.getByRole('status')).toHaveTextContent('Aligned with adjustments');
     const realign = screen.getByRole('button', { name: 'Realign visible scans' });
@@ -165,17 +170,7 @@ describe('alignment adjustment status', () => {
   });
 
   it('keeps an explicit global pause visible when adjusted examinations exist', () => {
-    render(
-      <AutomaticAlignmentStatus
-        enabled={false}
-        busy={false}
-        aligned={2}
-        targets={2}
-        manual
-        onToggle={vi.fn()}
-        onRealign={vi.fn()}
-      />,
-    );
+    renderAlignmentStatus(false);
 
     expect(screen.getByRole('status')).toHaveTextContent('Alignment paused');
     expect(screen.getByRole('button', { name: 'Resume automatic alignment' })).toBeInTheDocument();
