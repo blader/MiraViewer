@@ -158,9 +158,6 @@ async function loadSeriesSlices(params: {
   series: SvrSelectedSeries;
   seriesIndex: number;
   manifest: SeriesFrameManifest;
-  sliceDownsampleMode: SvrParams['sliceDownsampleMode'];
-  sliceDownsampleMaxSize: number;
-  targetVoxelSizeMm: number;
   svrParams: SvrParams;
   acceptedTransform?: SvrPatientTransform;
   maxIntensitySamples: number;
@@ -169,19 +166,8 @@ async function loadSeriesSlices(params: {
   progressBase: { current: number; total: number };
   debug?: boolean;
 }): Promise<{ slices: LoadedSlice[]; intensitySamples: number[] }> {
-  const {
-    series,
-    seriesIndex,
-    manifest,
-    sliceDownsampleMode,
-    sliceDownsampleMaxSize,
-    targetVoxelSizeMm,
-    maxIntensitySamples,
-    signal,
-    onProgress,
-    progressBase,
-    debug,
-  } = params;
+  const { series, seriesIndex, manifest, maxIntensitySamples, signal, onProgress, progressBase, debug } = params;
+  const { sliceDownsampleMode, sliceDownsampleMaxSize, targetVoxelSizeMm } = params.svrParams;
 
   const slices: LoadedSlice[] = [];
 
@@ -828,9 +814,6 @@ export async function reconstructVolumeMultiPlane(params: {
       series,
       seriesIndex: seriesIndex + 1,
       manifest,
-      sliceDownsampleMode: svrParams.sliceDownsampleMode,
-      sliceDownsampleMaxSize: svrParams.sliceDownsampleMaxSize,
-      targetVoxelSizeMm: svrParams.targetVoxelSizeMm,
       svrParams,
       acceptedTransform: acceptedSourceTransforms?.[series.seriesUid],
       maxIntensitySamples: maxIntensitySamplesPerSeries,

@@ -331,7 +331,8 @@
 .svr-selection-volume-content > div {
   height: 100%;
 }
-.svr-native-controls {
+.svr-native-controls,
+.svr-enhancement-controls {
   position: relative;
   flex: 0 0 auto;
   padding: 8px 10px;
@@ -341,13 +342,7 @@
   font-size: 11px;
 }
 .svr-enhancement-controls {
-  position: relative;
-  flex: 0 0 auto;
   padding: 7px 10px;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 11px;
 }
 .svr-enhancement-actions,
 .svr-enhancement-comparison,
@@ -372,14 +367,6 @@
   border-radius: 3px;
   color: var(--text-secondary);
   cursor: pointer;
-}
-.svr-enhancement-controls button[aria-pressed='true'] {
-  border-color: var(--signal-metal);
-  color: var(--text-primary);
-}
-.svr-enhancement-controls button:disabled {
-  cursor: not-allowed;
-  opacity: 0.4;
 }
 .svr-enhancement-controls button:hover:not(:disabled),
 .svr-enhancement-controls summary:hover {
@@ -413,12 +400,6 @@
 .svr-enhancement-controls .svr-enhancement-error {
   color: var(--warning);
 }
-.svr-enhancement-info summary {
-  list-style: none;
-}
-.svr-enhancement-info summary::-webkit-details-marker {
-  display: none;
-}
 .svr-enhancement-info > div {
   position: absolute;
   z-index: 45;
@@ -432,13 +413,6 @@
 }
 .svr-enhancement-info > div > button {
   margin-top: 8px;
-}
-@media (pointer: coarse) {
-  .svr-enhancement-controls button,
-  .svr-enhancement-controls summary,
-  .svr-enhancement-strength input {
-    min-height: 44px;
-  }
 }
 .svr-native-heading,
 .svr-native-browse,
@@ -471,11 +445,13 @@
   width: 80px;
   background: var(--bg-primary);
 }
-.svr-native-controls button[aria-pressed='true'] {
+.svr-native-controls button[aria-pressed='true'],
+.svr-enhancement-controls button[aria-pressed='true'] {
   border-color: var(--signal-metal);
   color: var(--text-primary);
 }
-.svr-native-controls button:disabled {
+.svr-native-controls button:disabled,
+.svr-enhancement-controls button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
@@ -522,10 +498,12 @@
   font: 10px var(--font-mono);
   color: var(--text-tertiary);
 }
-.svr-native-controls summary {
+.svr-native-controls summary,
+.svr-enhancement-info summary {
   list-style: none;
 }
-.svr-native-controls summary::-webkit-details-marker {
+.svr-native-controls summary::-webkit-details-marker,
+.svr-enhancement-info summary::-webkit-details-marker {
   display: none;
 }
 .svr-native-display-popover {
@@ -563,6 +541,9 @@
   color: var(--warning);
 }
 @media (pointer: coarse) {
+  .svr-enhancement-controls button,
+  .svr-enhancement-controls summary,
+  .svr-enhancement-strength input,
   .svr-native-controls button,
   .svr-native-controls summary,
   .svr-native-controls select {

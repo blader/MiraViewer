@@ -185,48 +185,22 @@ describe('within-volume learned 2x detail', () => {
   it.each([0.31, 1.17])(
     'improves an independent known fine-grid oracle, not only the downsampled validation proxy (%s)',
     async (phase) => {
-      const input = phantom(phase);
-      const truth = Float32Array.from({ length: 64 ** 3 }, (_, index) => {
-        const x = ((index % 64) + 0.5) / 2 - 0.5;
-        const y = ((Math.floor(index / 64) % 64) + 0.5) / 2 - 0.5;
-        const z = (Math.floor(index / 4096) + 0.5) / 2 - 0.5;
-        return (
+      const metrics = await evaluateFineOracle(
+        (x, y, z) =>
           -120 +
           73 * Math.sin((x + phase) * 0.53) +
           37 * Math.cos((y - phase) * 0.37) +
           51 * Math.sin((z + 0.5 * phase) * 0.47) +
-          21 * Math.sin((x + y + z) * 0.19)
-        );
-      });
-      for (let z = 0; z < 32; z++)
-        for (let y = 0; y < 32; y++)
-          for (let x = 0; x < 32; x++)
-            input.data[(z * 32 + y) * 32 + x] =
-              children({ data: truth, dims: [64, 64, 64] }, x, y, z).reduce((sum, value) => sum + value, 0) / 8;
-      const result = await enhanceVolume2x(input);
-      let baselineMse = 0,
-        enhancedMse = 0,
-        count = 0;
-      for (let z = 2; z < 30; z++)
-        for (let y = 2; y < 30; y++)
-          for (let x = 2; x < 30; x++) {
-            const known = children({ data: truth, dims: [64, 64, 64] }, x, y, z),
-              baseline = interpolationBaseline(input, x, y, z),
-              enhanced = children(result, x, y, z);
-            for (let child = 0; child < 8; child++) {
-              baselineMse += (baseline[child]! - known[child]!) ** 2;
-              enhancedMse += (enhanced[child]! - known[child]!) ** 2;
-              count++;
-            }
-          }
-      expect(enhancedMse).toBeLessThan(baselineMse);
+          21 * Math.sin((x + y + z) * 0.19),
+      );
+      expect(metrics.fineEnhancedMse).toBeLessThan(metrics.fineBaselineMse);
       if (process.env.SVR_SR_DIAGNOSTICS)
         console.info('SR known fine-grid oracle', {
           phase,
-          samples: count,
-          baselineMse: baselineMse / count,
-          enhancedMse: enhancedMse / count,
-          durationMs: result.stats.durationMs,
+          samples: metrics.samples,
+          baselineMse: metrics.fineBaselineMse,
+          enhancedMse: metrics.fineEnhancedMse,
+          durationMs: metrics.durationMs,
         });
     },
   );

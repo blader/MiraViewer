@@ -16,7 +16,6 @@ export default defineConfig({
           'src/utils/segmentation/seededVolume.ts',
           // Patient-space annotation transfer yields between bounded chunks;
           // parallelizing it would duplicate buffers and break cancellation.
-          'src/utils/svr/refineRegion.ts',
           'src/utils/svr/annotationTransfer.ts',
           // Native grids stream one decoded frame at a time within the memory
           // budget. Model-input conversion yields over one shared output buffer.

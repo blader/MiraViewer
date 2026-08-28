@@ -1729,13 +1729,9 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
           </select>
         </div>
 
-        {roiSeriesSopUidsError ? (
+        {roiSeriesSopUidsError || roiSliceGeomError ? (
           <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-            {roiSeriesSopUidsError}
-          </div>
-        ) : roiSliceGeomError ? (
-          <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-            {roiSliceGeomError}
+            {roiSeriesSopUidsError || roiSliceGeomError}
           </div>
         ) : null}
 
@@ -1779,9 +1775,7 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
           setRoiRect={setRoiRect}
           roiDragRef={roiDragRef}
           onSliceDelta={stepRoiSlice}
-          onRoiFinalized={(roi) => {
-            setRoiWorld(roi);
-          }}
+          onRoiFinalized={setRoiWorld}
           disabled={isRunning}
         />
 

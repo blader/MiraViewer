@@ -1,14 +1,4 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-} from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { SvrSegmentationEditor } from './SvrSegmentationEditor';
@@ -352,40 +342,19 @@ type RenderBuildState = {
 
 type VolumeVisualizationMode = 'anatomy' | 'overlay' | 'tumor';
 
-type VolumeSegmentationState = {
-  volume: SvrVolume | null;
-  generatedLabels: SvrLabelVolume | null;
-};
-
-type VolumeSegmentationUpdate =
-  | Partial<Omit<VolumeSegmentationState, 'volume'>>
-  | ((state: VolumeSegmentationState) => Partial<Omit<VolumeSegmentationState, 'volume'>>);
-
-function initialVolumeSegmentationState(volume: SvrVolume | null): VolumeSegmentationState {
-  return {
-    volume,
-    generatedLabels: null,
-  };
-}
-
 function useVolumeSegmentationState(volume: SvrVolume | null) {
-  const [stored, dispatch] = useReducer(
-    (
-      previous: VolumeSegmentationState,
-      action: { volume: SvrVolume | null; update: VolumeSegmentationUpdate },
-    ): VolumeSegmentationState => {
-      const current = previous.volume === action.volume ? previous : initialVolumeSegmentationState(action.volume);
-      return { ...current, ...(typeof action.update === 'function' ? action.update(current) : action.update) };
-    },
-    volume,
-    initialVolumeSegmentationState,
-  );
-  const state = stored.volume === volume ? stored : initialVolumeSegmentationState(volume);
-  const update = useCallback((next: VolumeSegmentationUpdate) => dispatch({ volume, update: next }), [volume]);
+  const [stored, setStored] = useState<{
+    volume: SvrVolume | null;
+    generatedLabels: SvrLabelVolume | null;
+  }>({ volume, generatedLabels: null });
 
   return {
-    ...state,
-    setGeneratedLabels: useCallback((generatedLabels: SvrLabelVolume | null) => update({ generatedLabels }), [update]),
+    volume,
+    generatedLabels: stored.volume === volume ? stored.generatedLabels : null,
+    setGeneratedLabels: useCallback(
+      (generatedLabels: SvrLabelVolume | null) => setStored({ volume, generatedLabels }),
+      [volume],
+    ),
   };
 }
 

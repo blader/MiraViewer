@@ -500,31 +500,14 @@ export function downsampleLabelsNearest(params: {
   srcDims: RenderDims;
   dstDims: RenderDims;
 }): Uint8Array {
-  const { src, srcDims, dstDims } = params;
+  const { srcDims, dstDims } = params;
 
   const out = new Uint8Array(dstDims.nx * dstDims.ny * dstDims.nz);
-
-  const srcStrideY = srcDims.nx;
-  const srcStrideZ = srcDims.nx * srcDims.ny;
-
-  const dstStrideY = dstDims.nx;
-  const dstStrideZ = dstDims.nx * dstDims.ny;
-
-  for (let z = 0; z < dstDims.nz; z++) {
-    const sz = Math.min(srcDims.nz - 1, Math.floor(((z + 0.5) * srcDims.nz) / dstDims.nz));
-
-    for (let y = 0; y < dstDims.ny; y++) {
-      const sy = Math.min(srcDims.ny - 1, Math.floor(((y + 0.5) * srcDims.ny) / dstDims.ny));
-
-      const srcBase = sz * srcStrideZ + sy * srcStrideY;
-      const dstBase = z * dstStrideZ + y * dstStrideY;
-
-      for (let x = 0; x < dstDims.nx; x++) {
-        const sx = Math.min(srcDims.nx - 1, Math.floor(((x + 0.5) * srcDims.nx) / dstDims.nx));
-        out[dstBase + x] = src[srcBase + sx] ?? 0;
-      }
-    }
-  }
+  updateLabelsNearestRegion({
+    ...params,
+    dst: out,
+    srcBox: { min: { x: 0, y: 0, z: 0 }, max: { x: srcDims.nx - 1, y: srcDims.ny - 1, z: srcDims.nz - 1 } },
+  });
 
   return out;
 }
