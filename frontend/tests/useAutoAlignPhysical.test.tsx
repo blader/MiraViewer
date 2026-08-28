@@ -5,9 +5,13 @@ import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import {
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
+  getDerivedAlignmentFrameForReference,
   setDerivedAlignmentFrame,
 } from '../src/utils/derivedAlignmentFrame';
 import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
+import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
+import { resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
+import { deferred } from './helpers/deferred';
 import {
   makeTissueLabelPhantom,
   REFERENCE_CONTRAST,
@@ -26,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   register2d: vi.fn(),
   registerAffine: vi.fn(),
   captureSlice: vi.fn(),
+  loadCornerstoneImage: vi.fn(),
   createScorer: vi.fn(),
   closeScorer: vi.fn(),
 }));
@@ -37,6 +42,10 @@ vi.mock('../src/utils/localApi', () => ({
 
 vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
   renderSliceToPixels: mocks.captureSlice,
+}));
+
+vi.mock('../src/utils/decodedFrame', () => ({
+  loadCornerstoneImage: mocks.loadCornerstoneImage,
 }));
 
 vi.mock('../src/utils/alignmentScoringRunner', () => ({
@@ -164,9 +173,96 @@ async function runPhysicalAlignment(
   return results;
 }
 
+async function configureAutomaticAlignment(size = 4) {
+  const sourcePixels = renderTissueContrast(makeTissueLabelPhantom(size), REFERENCE_CONTRAST);
+  const fixed = Float32Array.from(sourcePixels, (value, index) =>
+    value > 0 ? Math.min(0.98, value + 0.04 * Math.sin(index * 0.07) + 0.025 * Math.cos((index / size) * 0.17)) : 0,
+  );
+  const residual = {
+    A: { m00: 1.025, m01: 0.018, m10: -0.012, m11: 0.985 },
+    b: { x: 3.5, y: -2.25 },
+  };
+  const moving = size >= 64 ? renderMovingFromFixed(fixed, size, residual) : fixed;
+  const sourceManifest = (seriesUid: string) => {
+    const source = manifest(seriesUid, 'patient-a', seriesUid === reference.seriesUid ? 'frame-a' : 'frame-b');
+    return {
+      ...source,
+      frames: source.frames.map((frame) => ({
+        ...frame,
+        rows: size,
+        columns: size,
+        windowCenter: 0.5,
+        windowWidth: 1,
+      })),
+    };
+  };
+  const fixedManifest = sourceManifest(reference.seriesUid);
+  const informativeGrid = buildOutputPlaneGrid(fixedManifest.frames[1]!, {
+    frameOfReferenceUid: fixedManifest.frameOfReferenceUid,
+  });
+  const informative = { dsRows: size, dsCols: size, pixels: fixed, valid: new Uint8Array(fixed.length).fill(1) };
+  mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => sourceManifest(seriesUid));
+  mocks.prepareReference.mockResolvedValue({
+    referenceSourceIndex: 1,
+    referenceSlices: [informative],
+    referenceSliceIndex: 0,
+    referenceSourceIndices: [1],
+    outputGrid: informativeGrid,
+  });
+  mocks.prepare.mockResolvedValue({
+    referenceSlices: [informative],
+    targetSlices: [informative],
+    referenceSliceIndex: 0,
+    referenceSourceIndices: [1],
+    targetSourceIndices: [0, 1, 2],
+    outputGrid: informativeGrid,
+  });
+  mocks.decodeReference.mockResolvedValue(informative);
+  const initial = await mocks.register3d();
+  mocks.register3d.mockClear();
+  mocks.register3d.mockResolvedValue({
+    ...initial,
+    pixels: moving,
+    valid: new Uint8Array(moving.length).fill(1),
+    rows: size,
+    cols: size,
+  });
+  mocks.registerAffine.mockResolvedValue({ movingToFixed: residual, webWorker: undefined });
+  mocks.densify.mockImplementation(async (_manifest, _reference, estimate, options) => ({
+    ...estimate,
+    pixels: moving,
+    valid: new Uint8Array(moving.length).fill(1),
+    rows: size,
+    cols: size,
+    coverage: 1,
+    outputGrid: options.outputGrid,
+  }));
+}
+
+async function browseAutomatically(
+  engine: ReturnType<typeof useAutoAlign>,
+  sliceIndex: number,
+  requestKey = `view-${sliceIndex}`,
+  settings = reference.settings,
+  manualSliceOffset = 0,
+) {
+  let aligned: AlignmentResult[] = [];
+  await act(async () => {
+    aligned = await engine.alignAllDates(
+      { ...reference, sliceIndex, settings, exclusionMask: undefined },
+      ['target'],
+      { target },
+      sliceIndex / 2,
+      { reuseRegistration: true, requestKey, targetSliceOffsets: new Map([['target', manualSliceOffset]]) },
+    );
+  });
+  return aligned;
+}
+
 describe('physically registered longitudinal auto-alignment', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.loadCornerstoneImage.mockResolvedValue({ windowCenter: 0.5, windowWidth: 1 });
     mocks.captureSlice.mockImplementation(async (series: string, index: number, size: number) => ({
       pixels: Float32Array.from({ length: size * size }, (_, pixel) => (pixel % size) / Math.max(1, size - 1)),
       imageId: `miradb:${series}-${index}`,
@@ -287,6 +383,500 @@ describe('physically registered longitudinal auto-alignment', () => {
     act(() => result.current.clearRegistrationCache());
     await run(2, 10);
     expect(mocks.register3d).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains the complete verified model when the requested edge plane lacks support, without displaying another plane', async () => {
+    await configureAutomaticAlignment(256);
+    const supportedReslice = mocks.densify.getMockImplementation()!;
+    mocks.densify.mockImplementation(async (manifest, frame, estimate, options) =>
+      options.outputGrid.referenceSopInstanceUid === 'reference-series-0'
+        ? {
+            ok: false,
+            reason: 'insufficient-coverage',
+            message: 'The requested edge plane is outside acquired support',
+          }
+        : supportedReslice(manifest, frame, estimate, options),
+    );
+    const { result } = renderHook(useAutoAlign);
+    const [unsupported] = await browseAutomatically(result.current, 0);
+
+    expect(unsupported).toMatchObject({
+      outcome: 'insufficient-overlap',
+      message: 'The requested edge plane is outside acquired support',
+    });
+    expect(unsupported?.derivedFrame).toBeUndefined();
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+    expect(
+      result.current.canReuseRegistration({ ...reference, sliceIndex: 2, exclusionMask: undefined }, ['target'], {
+        target,
+      }),
+    ).toBe(true);
+
+    const [supported] = await browseAutomatically(result.current, 2);
+    expect(supported).toMatchObject({
+      outcome: 'aligned',
+      registrationId: unsupported?.runId,
+      derivedFrame: { referenceFrameIndex: 2, displayTone: { windowCenter: 0.5, windowWidth: 1 } },
+    });
+    expect(supported?.computedSettings.affine01).not.toBe(0);
+    expect(supported?.computedSettings.rotation).not.toBe(0);
+    expect(supported?.computedSettings.brightness).toBe(reference.settings.brightness);
+    expect(supported?.computedSettings.contrast).toBe(reference.settings.contrast);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+    expect(mocks.densify.mock.lastCall![3].refinePose).toBe(false);
+
+    const [next] = await browseAutomatically(result.current, 1);
+    expect(next?.registrationId).toBe(supported?.registrationId);
+    expect(next?.derivedFrame?.displayTone).toBe(supported?.derivedFrame?.displayTone);
+    expect(next?.computedSettings.affine01).toBe(supported?.computedSettings.affine01);
+  });
+
+  it('reslices manual corrections from one immutable pose, retaining affine and tone through browsing and undo', async () => {
+    await configureAutomaticAlignment(256);
+    const { result } = renderHook(useAutoAlign);
+    const [initial] = await browseAutomatically(result.current, 1, 'baseline');
+    expect(initial?.derivedFrame?.displayTone).toBeDefined();
+    expect(initial?.computedSettings.affine01).not.toBe(0);
+    act(() => setDerivedAlignmentFrame(initial!));
+    const initialFrame = getDerivedAlignmentFrameForReference(target.series_uid, reference)!;
+    const targetManifest = await mocks.getSeriesFrameManifest(target.series_uid);
+    const stack = targetManifest.frames.map((frame: ReturnType<typeof manifest>['frames'][number], index: number) => ({
+      ...getSliceGeometryFromInstance(frame),
+      pixels: Float32Array.from(initial!.derivedFrame!.pixels, (value) => value + (index - 1) * 0.05),
+      valid: new Uint8Array(256 * 256).fill(1),
+      dsRows: 256,
+      dsCols: 256,
+      rowSpacingDsMm: 1,
+      colSpacingDsMm: 1,
+      sliceThicknessMm: 1,
+      spacingBetweenSlicesMm: 1,
+      sopInstanceUid: frame.sopInstanceUid,
+    }));
+    const sourceSnapshots = stack.map((slice: { pixels: Float32Array }) => Array.from(slice.pixels));
+    mocks.densify.mockClear();
+    mocks.densify.mockImplementation(async (_manifest, _reference, estimate, options) => ({
+      ...estimate,
+      ...resliceStackToReferencePlane({
+        targetSlices: stack,
+        referenceSlice: stack[1]!,
+        outputGrid: options.outputGrid,
+        targetToReference: estimate.targetToReference,
+        centerMm: estimate.centerMm,
+      }),
+    }));
+
+    const run = async (referenceIndex: number, manualSliceOffset: number) => {
+      const [aligned] = await browseAutomatically(
+        result.current,
+        referenceIndex,
+        `view-${referenceIndex}-${manualSliceOffset}`,
+        reference.settings,
+        manualSliceOffset,
+      );
+      expect(aligned?.outcome).toBe('aligned');
+      expect(aligned?.registrationId).toBe(initial?.registrationId);
+      expect(aligned?.manualSliceOffset).toBe(manualSliceOffset);
+      expect(aligned?.derivedFrame?.displayTone).toBe(initial?.derivedFrame?.displayTone);
+      expect(aligned?.computedSettings.affine01).toBe(initial?.computedSettings.affine01);
+      expect(aligned?.computedSettings.brightness).toBe(reference.settings.brightness);
+      expect(aligned?.computedSettings.contrast).toBe(reference.settings.contrast);
+      act(() => setDerivedAlignmentFrame(aligned!));
+      return aligned!;
+    };
+    const plus = await run(1, 1);
+    expect(plus.bestSliceIndex).toBe(2);
+    expect(plus.derivedFrame?.sourceImageId).toBe('miradb:target-series-2');
+    expect(plus.derivedFrame?.referenceSopInstanceUid).toBe('reference-series-1');
+    expect(Array.from(plus.derivedFrame!.pixels)).toEqual(Array.from(stack[2]!.pixels));
+    expect(mocks.densify).toHaveBeenCalledTimes(1);
+    expect(mocks.densify.mock.lastCall![3].refinePose).toBe(false);
+
+    const browsed = await run(0, 1);
+    expect(browsed.bestSliceIndex).toBe(1);
+    expect(Array.from(browsed.derivedFrame!.pixels)).toEqual(Array.from(stack[1]!.pixels));
+    expect(mocks.densify.mock.lastCall![2].targetToReference.tz).toBe(-1);
+    const minus = await run(1, -1);
+    expect(minus.bestSliceIndex).toBe(0);
+    expect(Array.from(minus.derivedFrame!.pixels)).toEqual(Array.from(stack[0]!.pixels));
+    expect(mocks.densify.mock.lastCall![2].targetToReference.tz).toBe(1);
+
+    const reslicesBeforeUndo = mocks.densify.mock.calls.length;
+    const undone = await run(1, 0);
+    expect(undone.derivedFrame?.pixels).toBe(initial?.derivedFrame?.pixels);
+    expect(getDerivedAlignmentFrameForReference(target.series_uid, reference)?.imageId).toBe(initialFrame.imageId);
+    expect(mocks.densify).toHaveBeenCalledTimes(reslicesBeforeUndo);
+
+    await run(2, 0);
+    expect(mocks.densify.mock.lastCall![2].targetToReference.tz).toBe(0);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+    expect(stack.map((slice: { pixels: Float32Array }) => Array.from(slice.pixels))).toEqual(sourceSnapshots);
+  });
+
+  it('calibrates a cold model on unadjusted anatomy before applying an existing manual correction', async () => {
+    await configureAutomaticAlignment(256);
+    const originalReslice = mocks.densify.getMockImplementation()!;
+    mocks.densify.mockImplementation(async (...args) => {
+      const dense = await originalReslice(...args);
+      return args[2].targetToReference.tz === 0 ? dense : { ...dense, pixels: new Float32Array(dense.pixels.length) };
+    });
+    const { result } = renderHook(useAutoAlign);
+    const [corrected] = await browseAutomatically(result.current, 1, 'cold-corrected', reference.settings, 1);
+
+    expect(corrected?.outcome).toBe('aligned');
+    expect(corrected?.derivedFrame?.displayTone).toBeDefined();
+    expect(corrected?.computedSettings.affine01).not.toBe(0);
+    expect(corrected?.derivedFrame?.pixels.every((value) => value === 0)).toBe(true);
+    expect(corrected?.derivedFrame?.sourceImageId).toBe('miradb:target-series-2');
+    expect(corrected?.derivedFrame?.rigidTransform?.[2]).toBe(-1);
+    expect(mocks.densify).toHaveBeenCalledTimes(2);
+    expect(mocks.densify.mock.calls[0]![2].targetToReference.tz).toBe(0);
+    expect(mocks.densify.mock.calls[0]![3].refinePose).toBe(true);
+    expect(mocks.densify.mock.calls[1]![2].targetToReference.tz).toBe(-1);
+    expect(mocks.densify.mock.calls[1]![3].refinePose).toBe(false);
+    expect(mocks.loadCornerstoneImage).toHaveBeenCalledWith('miradb:target-series-1');
+    expect(mocks.loadCornerstoneImage).not.toHaveBeenCalledWith('miradb:target-series-2');
+
+    const [reset] = await browseAutomatically(result.current, 1, 'reset-correction');
+    expect(reset?.derivedFrame?.rigidTransform?.[2]).toBe(0);
+    expect(reset?.derivedFrame?.displayTone).toBe(corrected?.derivedFrame?.displayTone);
+    expect(reset?.computedSettings.affine01).toBe(corrected?.computedSettings.affine01);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['cold', 'warm'])(
+    'retains the unadjusted %s model when manual correction leaves acquired support',
+    async (cache) => {
+      await configureAutomaticAlignment();
+      const originalReslice = mocks.densify.getMockImplementation()!;
+      mocks.densify.mockImplementation(async (...args) =>
+        args[2].targetToReference.tz < -1
+          ? { ok: false, reason: 'insufficient-coverage', message: 'Manual plane is outside acquired support' }
+          : originalReslice(...args),
+      );
+      const { result } = renderHook(useAutoAlign);
+      if (cache === 'warm') await browseAutomatically(result.current, 1);
+      const [unsupported] = await browseAutomatically(
+        result.current,
+        1,
+        'unsupported-correction',
+        reference.settings,
+        20,
+      );
+      expect(unsupported).toMatchObject({ outcome: 'insufficient-overlap', manualSliceOffset: 20 });
+      expect(unsupported?.derivedFrame).toBeUndefined();
+
+      const [reset] = await browseAutomatically(result.current, 1, 'reset-after-unsupported');
+      expect(reset).toMatchObject({ outcome: 'aligned', manualSliceOffset: 0 });
+      expect(reset?.derivedFrame?.rigidTransform?.[2]).toBe(0);
+      expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('rejects manual through-plane correction without physical geometry instead of returning a false offset-only success', async () => {
+    const { result } = renderHook(useAutoAlign);
+    let aligned: AlignmentResult[] = [];
+    await act(async () => {
+      aligned = await result.current.alignAllDates(
+        { ...reference, patientKey: undefined, studyUid: undefined },
+        ['target'],
+        { target },
+        0.5,
+        { reuseRegistration: true, targetSliceOffsets: new Map([['target', 1]]) },
+      );
+    });
+    expect(aligned[0]).toMatchObject({ outcome: 'incompatible-geometry', manualSliceOffset: 1 });
+    expect(aligned[0]?.derivedFrame).toBeUndefined();
+    expect(mocks.createScorer).not.toHaveBeenCalled();
+    expect(mocks.register3d).not.toHaveBeenCalled();
+  });
+
+  it('replays an exact cached plane without reslicing and only replaces its model after explicit realignment', async () => {
+    await configureAutomaticAlignment();
+    const { result } = renderHook(useAutoAlign);
+    const [first] = await browseAutomatically(result.current, 1, 'initial-view');
+    expect(first?.outcome).toBe('aligned');
+    expect(first?.registrationId).toBe(first?.runId);
+    act(() => setDerivedAlignmentFrame(first!));
+
+    const [next] = await browseAutomatically(result.current, 2);
+    expect(next?.registrationId).toBe(first?.registrationId);
+    act(() => setDerivedAlignmentFrame(next!));
+    const reslicesBeforeRevisit = mocks.densify.mock.calls.length;
+    const [revisited] = await browseAutomatically(result.current, 1, 'revisited-view');
+
+    expect(revisited?.registrationId).toBe(first?.registrationId);
+    expect(revisited?.derivedFrame?.pixels).toBe(first?.derivedFrame?.pixels);
+    expect(revisited?.runId).not.toBe(first?.runId);
+    expect(revisited?.requestKey).toBe('revisited-view');
+    expect(mocks.densify).toHaveBeenCalledTimes(reslicesBeforeRevisit);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.clearRegistrationCache());
+    expect(
+      result.current.canReuseRegistration({ ...reference, exclusionMask: undefined }, ['target'], { target }),
+    ).toBe(false);
+    const [realigned] = await browseAutomatically(result.current, 1, 'explicit-realignment');
+    expect(realigned?.outcome).toBe('aligned');
+    expect(realigned?.registrationId).not.toBe(first?.registrationId);
+    expect(realigned?.registrationId).toBe(realigned?.runId);
+    expect(mocks.register3d).toHaveBeenCalledTimes(2);
+    expect(mocks.densify).toHaveBeenCalledTimes(reslicesBeforeRevisit + 1);
+  });
+
+  it.each([
+    ['missing', undefined, undefined],
+    ['different', 20, 40],
+  ])(
+    'calibrates from decoded windows when manifest windows are %s and retains that anchor while browsing',
+    async (_label, windowCenter, windowWidth) => {
+      await configureAutomaticAlignment(32);
+      const getManifest = mocks.getSeriesFrameManifest.getMockImplementation()!;
+      mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => {
+        const source = await getManifest(seriesUid);
+        return {
+          ...source,
+          frames: source.frames.map((frame: object) => ({ ...frame, windowCenter, windowWidth })),
+        };
+      });
+      const referenceWindow = { windowCenter: 0.75, windowWidth: 1.5 };
+      const movingWindow = { windowCenter: 1, windowWidth: 2 };
+      mocks.loadCornerstoneImage.mockImplementation(async (imageId: string) =>
+        imageId === 'miradb:reference-series-1'
+          ? referenceWindow
+          : imageId.startsWith('miradb:target-series-')
+            ? movingWindow
+            : { windowCenter: 0.5, windowWidth: 1 },
+      );
+      const { result } = renderHook(useAutoAlign);
+      const [first] = await browseAutomatically(result.current, 0);
+      const [next] = await browseAutomatically(result.current, 2);
+
+      expect(first?.outcome).toBe('aligned');
+      expect(first?.derivedFrame?.displayTone).toMatchObject({ ...movingWindow, referenceWindow });
+      expect(first?.derivedFrame?.referenceSopInstanceUid).toBe('reference-series-0');
+      expect(next?.derivedFrame?.referenceSopInstanceUid).toBe('reference-series-2');
+      expect(next?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+      expect(next?.derivedFrame?.displayTone?.referenceWindow).toBe(first?.derivedFrame?.displayTone?.referenceWindow);
+      expect(next?.registrationId).toBe(first?.registrationId);
+    },
+  );
+
+  it('shares non-neutral reference controls exactly once with calibrated planes, including a cached revisit', async () => {
+    await configureAutomaticAlignment(32);
+    const { result } = renderHook(useAutoAlign);
+    const initialSettings = { ...reference.settings, brightness: 83, contrast: 117 };
+    const [first] = await browseAutomatically(result.current, 1, 'initial-tone', initialSettings);
+    expect(first?.derivedFrame?.displayTone).toBeDefined();
+    expect(first?.computedSettings).toMatchObject({ brightness: 83, contrast: 117 });
+    act(() => setDerivedAlignmentFrame(first!));
+
+    const nextSettings = { ...reference.settings, brightness: 126, contrast: 92 };
+    const [next] = await browseAutomatically(result.current, 2, 'next-tone', nextSettings);
+    expect(next?.computedSettings).toMatchObject({ brightness: 126, contrast: 92 });
+    expect(next?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+    act(() => setDerivedAlignmentFrame(next!));
+    mocks.densify.mockClear();
+    mocks.register3d.mockClear();
+
+    const editedSettings = { ...reference.settings, brightness: 113, contrast: 106 };
+    const [revisited] = await browseAutomatically(result.current, 1, 'revisited-tone', editedSettings);
+    expect(revisited?.computedSettings).toMatchObject({ brightness: 113, contrast: 106 });
+    expect(revisited?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+    expect(revisited?.derivedFrame?.pixels).toBe(first?.derivedFrame?.pixels);
+    expect(mocks.densify).not.toHaveBeenCalled();
+    expect(mocks.register3d).not.toHaveBeenCalled();
+  });
+
+  it.each(['matching', 'missing', 'different'] as const)(
+    'keeps initial and cached fallback tone consistent with %s manifest windows and follows edited controls',
+    async (metadataKind) => {
+      const size = 32;
+      await configureAutomaticAlignment(size);
+      const getManifest = mocks.getSeriesFrameManifest.getMockImplementation()!;
+      mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => {
+        const source = await getManifest(seriesUid);
+        return {
+          ...source,
+          frames: source.frames.map((frame: object) => ({
+            ...frame,
+            ...(metadataKind === 'missing'
+              ? { windowCenter: undefined, windowWidth: undefined }
+              : metadataKind === 'different'
+                ? { windowCenter: 7, windowWidth: 10 }
+                : {}),
+          })),
+        };
+      });
+      const preparation = await mocks.prepare.getMockImplementation()!();
+      const flat = {
+        ...preparation.referenceSlices[0],
+        pixels: new Float32Array(size * size).fill(0.4),
+      };
+      mocks.prepare.mockResolvedValue({ ...preparation, referenceSlices: [flat] });
+      const preparedReference = await mocks.prepareReference.getMockImplementation()!();
+      mocks.prepareReference.mockResolvedValue({ ...preparedReference, referenceSlices: [flat] });
+      const fixedValue = (pixel: number, columns: number) =>
+        [0.25, 0.35, 0.5, 0.65][Math.floor(((pixel % columns) * 4) / columns)]!;
+      mocks.captureSlice.mockImplementation(async (series: string, index: number, columns: number) => ({
+        pixels: Float32Array.from({ length: columns * columns }, (_, pixel) => fixedValue(pixel, columns)),
+        imageId: `miradb:${series}-${index}`,
+        windowCenter: 0.5,
+        windowWidth: 1,
+        timingMs: {},
+      }));
+      const moving = Float32Array.from({ length: size * size }, (_, pixel) => fixedValue(pixel, size) * 0.6 + 0.1);
+      const reslice = mocks.densify.getMockImplementation()!;
+      mocks.densify.mockImplementation(async (...args) => ({ ...(await reslice(...args)), pixels: moving }));
+      const { result } = renderHook(useAutoAlign);
+      const initialSettings = { ...reference.settings, brightness: 120, contrast: 90 };
+      const [first] = await browseAutomatically(result.current, 1, 'flat-calibration', initialSettings);
+
+      expect(first?.outcome).toBe('aligned');
+      expect(first?.derivedFrame?.displayTone).toBeUndefined();
+      // Displayed fixed = 1.08 * fixed + .05 = 1.8 * moving - .13.
+      expect(first?.computedSettings).toMatchObject({ brightness: 143, contrast: 126 });
+      act(() => setDerivedAlignmentFrame(first!));
+      mocks.densify.mockClear();
+      mocks.register3d.mockClear();
+
+      const [unchanged] = await browseAutomatically(result.current, 1, 'flat-calibration-revisited', initialSettings);
+      expect(unchanged?.computedSettings).toEqual(first?.computedSettings);
+      expect(unchanged?.derivedFrame?.pixels).toBe(first?.derivedFrame?.pixels);
+
+      const editedSettings = { ...reference.settings, brightness: 80, contrast: 110 };
+      const [revisited] = await browseAutomatically(
+        result.current,
+        1,
+        'flat-calibration-edited-controls',
+        editedSettings,
+      );
+      // The same native tissue now needs 1.4666... * moving - .19666....
+      expect(revisited?.computedSettings).toMatchObject({ brightness: 105, contrast: 139 });
+      expect(revisited?.derivedFrame?.displayTone).toBeUndefined();
+      expect(revisited?.derivedFrame?.pixels).toBe(first?.derivedFrame?.pixels);
+      expect(mocks.densify).not.toHaveBeenCalled();
+      expect(mocks.register3d).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['calibration', 'fallback'] as const)(
+    'does not cache or publish a model cancelled while its decoded %s window is loading',
+    async (loadingPhase) => {
+      await configureAutomaticAlignment(32);
+      const nativeWindow = { windowCenter: 0.5, windowWidth: 1 };
+      const pendingWindow = deferred<typeof nativeWindow>();
+      const requested = deferred<void>();
+      if (loadingPhase === 'fallback') {
+        mocks.loadCornerstoneImage
+          .mockResolvedValueOnce({ windowCenter: 0.5, windowWidth: 0 })
+          .mockResolvedValueOnce(nativeWindow);
+      }
+      mocks.loadCornerstoneImage.mockImplementationOnce(() => {
+        requested.resolve();
+        return pendingWindow.promise;
+      });
+      const { result } = renderHook(useAutoAlign);
+      let cancelled: AlignmentResult[] = [];
+      await act(async () => {
+        const alignment = result.current.alignAllDates(
+          { ...reference, exclusionMask: undefined },
+          ['target'],
+          { target },
+          0.5,
+          { reuseRegistration: true, requestKey: 'cancel-during-calibration-window' },
+        );
+        await requested.promise;
+        expect(mocks.register3d).toHaveBeenCalled();
+        result.current.abort();
+        pendingWindow.resolve(nativeWindow);
+        cancelled = await alignment;
+      });
+
+      expect(cancelled).toEqual([]);
+      expect(result.current.results).toEqual([]);
+      expect(result.current.error).toBeNull();
+      expect(result.current.isAligning).toBe(false);
+      expect(
+        result.current.canReuseRegistration({ ...reference, exclusionMask: undefined }, ['target'], { target }),
+      ).toBe(false);
+      expect(getDerivedAlignmentFrame(target.series_uid, 1)).toBeNull();
+      const [next] = await browseAutomatically(result.current, 1);
+      expect(next?.outcome).toBe('aligned');
+      expect(next?.derivedFrame?.displayTone).toBeDefined();
+      expect(mocks.register3d).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not retain a model cancelled during affine calibration after a browsing-plane support failure', async () => {
+    await configureAutomaticAlignment(256);
+    const supportedReslice = mocks.densify.getMockImplementation()!;
+    mocks.densify.mockImplementation(async (manifest, frame, estimate, options) =>
+      options.outputGrid.referenceSopInstanceUid === 'reference-series-0'
+        ? { ok: false, reason: 'insufficient-coverage', message: 'No acquired support at this browsing plane' }
+        : supportedReslice(manifest, frame, estimate, options),
+    );
+    const { result } = renderHook(useAutoAlign);
+    const affine = mocks.registerAffine.getMockImplementation()!;
+    mocks.registerAffine.mockImplementationOnce(async (...args) => {
+      result.current.abort();
+      return affine(...args);
+    });
+
+    expect(await browseAutomatically(result.current, 0)).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(
+      result.current.canReuseRegistration({ ...reference, exclusionMask: undefined }, ['target'], { target }),
+    ).toBe(false);
+
+    const [next] = await browseAutomatically(result.current, 1);
+    expect(next?.outcome).toBe('aligned');
+    expect(mocks.register3d).toHaveBeenCalledTimes(2);
+    expect(mocks.registerAffine).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['cancelled', 'cancelled'],
+    ['invalid-geometry', 'incompatible-geometry'],
+    ['insufficient-evidence', 'ambiguous'],
+  ])('does not treat a %s presentation as a reusable model', async (reason, outcome) => {
+    await configureAutomaticAlignment();
+    const supportedReslice = mocks.densify.getMockImplementation()!;
+    mocks.densify.mockImplementation(async (manifest, frame, estimate, options) =>
+      options.outputGrid.referenceSopInstanceUid === 'reference-series-0'
+        ? { ok: false, reason, message: 'The requested presentation is not verified' }
+        : supportedReslice(manifest, frame, estimate, options),
+    );
+    const { result } = renderHook(useAutoAlign);
+
+    const [failed] = await browseAutomatically(result.current, 0);
+    expect(failed?.outcome).toBe(outcome);
+    expect(failed?.derivedFrame).toBeUndefined();
+    expect(
+      result.current.canReuseRegistration({ ...reference, exclusionMask: undefined }, ['target'], { target }),
+    ).toBe(false);
+    expect((await browseAutomatically(result.current, 1))[0]?.outcome).toBe('aligned');
+    expect(mocks.register3d).toHaveBeenCalledTimes(2);
+  });
+
+  it('never caches malformed informative pixels when the requested browsing plane is unsupported', async () => {
+    await configureAutomaticAlignment();
+    mocks.densify
+      .mockImplementationOnce(async (_manifest, _frame, estimate) => ({ ...estimate, pixels: new Float32Array() }))
+      .mockResolvedValueOnce({ ok: false, reason: 'insufficient-coverage', message: 'No acquired support' });
+    const { result } = renderHook(useAutoAlign);
+
+    const [failed] = await browseAutomatically(result.current, 0);
+    expect(failed?.outcome).toBe('incompatible-geometry');
+    expect(failed?.derivedFrame).toBeUndefined();
+    expect(
+      result.current.canReuseRegistration({ ...reference, exclusionMask: undefined }, ['target'], { target }),
+    ).toBe(false);
+    expect((await browseAutomatically(result.current, 1))[0]?.outcome).toBe('aligned');
+    expect(mocks.register3d).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a selected derived reference stationary while registering against its verified displayed physical plane', async () => {

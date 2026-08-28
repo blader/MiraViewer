@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import type { AlignmentReference, ComparisonData, PanelSettings, SeriesRef } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
+import { alignmentDisplayBaseline } from '../utils/alignmentAdjustment';
 import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 import { getEffectiveInstanceIndex, getSliceIndex } from '../utils/math';
 import type { OutputGridMode } from '../utils/outputPlaneGrid';
@@ -11,13 +12,13 @@ type VisibleAlignmentOptions = {
   sequenceId: string | null;
   columns: readonly { date: string; ref?: SeriesRef }[];
   panelSettings: Map<string, PanelSettings>;
-  manuallyAdjustedDates?: ReadonlySet<string>;
   progress: number;
   viewportSize: number;
   outputMode: OutputGridMode;
   enabled: boolean;
   settingsReady: boolean;
   alignAllDates: ReturnType<typeof useAutoAlign>['alignAllDates'];
+  canReuseRegistration?: ReturnType<typeof useAutoAlign>['canReuseRegistration'];
   abort: () => void;
 };
 
@@ -34,8 +35,8 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     enabled,
     settingsReady,
     alignAllDates,
+    canReuseRegistration,
     abort,
-    manuallyAdjustedDates,
   } = options;
   const [generation, setGeneration] = useState(0);
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== 'hidden');
@@ -55,10 +56,15 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
       )
     : 0;
   const derivedReferenceId = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
-    series ? (getDerivedAlignmentFrame(series.series_uid, sliceIndex)?.imageId ?? null) : null,
+    series && !settings.alignmentPaused
+      ? (getDerivedAlignmentFrame(series.series_uid, sliceIndex)?.imageId ?? null)
+      : null,
   );
   const targetDates = columns.flatMap(({ date, ref }, index) =>
-    index > 0 && ref && !manuallyAdjustedDates?.has(date) ? [date] : [],
+    index > 0 && ref && !panelSettings.get(date)?.alignmentPaused ? [date] : [],
+  );
+  const targetSliceOffsets = new Map(
+    targetDates.map((date) => [date, panelSettings.get(date)?.alignmentAdjustment?.sliceOffset ?? 0]),
   );
   const reference: AlignmentReference | null =
     first &&
@@ -67,7 +73,6 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     sequenceId &&
     data.dataset_revision !== undefined &&
     settingsReady &&
-    targetDates.length &&
     viewportSize > 0
       ? {
           date: first.date,
@@ -84,26 +89,34 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
           settings,
         }
       : null;
-  // Target settings are deliberately absent: applying an automatic result must not
-  // schedule another registration. The reference's persisted progress is also derived.
-  const { progress: _persistedProgress, ...referenceGeometry } = settings;
-  void _persistedProgress;
-  const requestKey = reference
-    ? JSON.stringify([
-        reference.patientKey,
-        sequenceId,
-        reference.datasetRevision,
-        reference.seriesUid,
-        sliceIndex,
-        referenceGeometry,
-        progress,
-        viewportSize,
-        outputMode,
-        derivedReferenceId,
-        generation,
-        targetDates.map((date) => [date, data!.series_map[sequenceId!]?.[date]?.series_uid]),
-      ])
-    : null;
+  // Only target sampling intent belongs in a request identity. Applying automatic
+  // settings or editing target display controls must not restart registration.
+  const referenceGeometry = {
+    ...alignmentDisplayBaseline(settings),
+    offset: settings.offset,
+    reverseSliceOrder: settings.reverseSliceOrder,
+  };
+  const requestKey =
+    reference && targetDates.length > 0
+      ? JSON.stringify([
+          reference.patientKey,
+          sequenceId,
+          reference.datasetRevision,
+          reference.seriesUid,
+          sliceIndex,
+          referenceGeometry,
+          viewportSize,
+          outputMode,
+          derivedReferenceId,
+          generation,
+          targetDates.map((date) => [
+            date,
+            data!.series_map[sequenceId!]?.[date]?.series_uid,
+            targetSliceOffsets.get(date),
+            !!panelSettings.get(date)?.reverseSliceOrder,
+          ]),
+        ])
+      : null;
   const run = useEffectEvent(async () => {
     if (!reference || !requestKey || !data || !sequenceId) return;
     try {
@@ -111,6 +124,7 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
         outputMode,
         requestKey,
         reuseRegistration: true,
+        targetSliceOffsets,
       });
     } catch {
       // The alignment owner publishes an actionable error. Do not retry a failed
@@ -118,9 +132,16 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     }
   });
   const active = enabled && pageVisible;
+  const schedulingDelay = useEffectEvent(() =>
+    reference && canReuseRegistration?.(reference, targetDates, data!.series_map[sequenceId!] ?? {}, outputMode)
+      ? 0
+      : 650,
+  );
   useEffect(() => {
     if (!active || !requestKey) return;
-    const timer = window.setTimeout(() => void run(), 650);
+    // An accepted scan-pair model needs only a new physical plane, not the
+    // initial registration's quiet interval. Keep scrolling responsive.
+    const timer = window.setTimeout(() => void run(), schedulingDelay());
     return () => {
       window.clearTimeout(timer);
       abort();
@@ -132,6 +153,32 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
   }, [abort]);
   return {
     activeRequestKey: active ? requestKey : null,
+    // Pausing computation must not revoke the accepted presentation. A selected
+    // derived reference uses the engine's original physical anchor and legacy
+    // exact-frame path, not this native-reference browsing cache.
+    browsing: reference
+      ? {
+          reference: derivedReferenceId ? null : { ...reference, outputMode },
+          updating: active,
+          adjustments: new Map(
+            columns.flatMap(({ date, ref }) => {
+              const adjustment = panelSettings.get(date)?.alignmentAdjustment;
+              return ref && adjustment ? [[ref.series_uid, adjustment] as const] : [];
+            }),
+          ),
+          acquiredSeriesUids: new Set(
+            columns.flatMap(({ date, ref }) =>
+              ref && panelSettings.get(date)?.alignmentPaused ? [ref.series_uid] : [],
+            ),
+          ),
+          targetSeriesUids: new Set(
+            targetDates.flatMap((date) => {
+              const target = data!.series_map[sequenceId!]?.[date];
+              return target ? [target.series_uid] : [];
+            }),
+          ),
+        }
+      : null,
     realign,
     targetCount: targetDates.length,
   };

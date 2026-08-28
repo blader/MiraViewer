@@ -467,7 +467,7 @@ function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0"
+      className="absolute inset-0 pointer-events-auto"
       onPointerDown={onPointerDown}
       onClickCapture={onClickCapture}
       onContextMenu={(e) => {

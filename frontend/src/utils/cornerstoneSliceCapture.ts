@@ -1,7 +1,7 @@
 import { ALIGNMENT_IMAGE_SIZE } from './imageCapture';
 import { getImageIdForInstance } from './localApi';
 import { nowMs } from './math';
-import { decodeImageWithValidity, loadCornerstoneImage } from './decodedFrame';
+import { decodeImageWithValidity, loadCornerstoneImage, type DecodedFrame } from './decodedFrame';
 
 const IMAGE_ID_LOOKUP_TIMEOUT_MS = 10_000;
 const IMAGE_LOAD_TIMEOUT_MS = 30_000;
@@ -49,7 +49,7 @@ function waitForBoundedOperation<T>(
   });
 }
 
-export type RenderedSlice = {
+export type RenderedSlice = Pick<DecodedFrame, 'windowCenter' | 'windowWidth'> & {
   pixels: Float32Array;
   /** Native acquired-footprint support, independent of modality intensity or canvas background. */
   validity?: Float32Array;
@@ -87,24 +87,23 @@ export async function renderSliceToPixels(
   const tGetId1 = nowMs();
 
   const tLoad0 = nowMs();
-  const image = await waitForBoundedOperation(loadCornerstoneImage(imageId), {
+  const image = (await waitForBoundedOperation(loadCornerstoneImage(imageId), {
     signal: options.signal,
     timeoutMs: IMAGE_LOAD_TIMEOUT_MS,
     label: `DICOM image load for ${imageId}`,
-  });
+  })) as Parameters<typeof decodeImageWithValidity>[0];
   const tLoad1 = nowMs();
 
   const tCapture0 = nowMs();
-  const captured = decodeImageWithValidity(
-    image as unknown as Parameters<typeof decodeImageWithValidity>[0],
-    targetSize,
-    targetSize,
-  );
+  const captured = decodeImageWithValidity(image, targetSize, targetSize);
   const tCapture1 = nowMs();
 
   return {
     ...captured,
     imageId,
+    // Use the decoder's effective VOI, including its fallback for missing DICOM tags.
+    windowCenter: image.windowCenter,
+    windowWidth: image.windowWidth,
     timingMs: {
       getImageId: tGetId1 - tGetId0,
       loadImage: tLoad1 - tLoad0,

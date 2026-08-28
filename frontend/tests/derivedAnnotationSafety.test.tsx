@@ -7,36 +7,11 @@ import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { clearDerivedAlignmentFrames, setDerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
 
 vi.mock('../src/components/DicomViewer', () => ({
-  DicomViewer: () => <div data-testid="displayed-dicom-frame" />,
-}));
-
-vi.mock('../src/components/DragRectActionOverlay', () => ({
-  DragRectActionOverlay: ({
-    children,
-    actions,
-  }: {
-    children: ReactNode;
-    actions: Array<{ key: string; disabled?: boolean }>;
-  }) => (
-    <div>
-      <button
-        type="button"
-        data-testid="segment-action"
-        disabled={actions.find((action) => action.key === 'segment-tumor')?.disabled}
-      >
-        Segment action
-      </button>
-      {children}
-    </div>
-  ),
+  DicomViewer: ({ children }: { children?: ReactNode }) => <div data-testid="displayed-dicom-frame">{children}</div>,
 }));
 
 vi.mock('../src/components/TumorSavedSegmentationOverlay', () => ({
   TumorSavedSegmentationOverlay: () => <div data-testid="native-saved-annotation" />,
-}));
-
-vi.mock('../src/components/TumorSegmentationOverlaySeedGrow', () => ({
-  TumorSegmentationOverlay: () => <div data-testid="native-segmentation-tool" />,
 }));
 
 vi.mock('../src/components/GroundTruthPolygonOverlay', () => ({
@@ -103,8 +78,8 @@ describe('native annotation coordinate-space safety', () => {
 
     expect(screen.queryByTestId('native-saved-annotation')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Segment' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Outline' })).toBeDisabled();
-    expect(screen.getByTestId('segment-action')).toBeDisabled();
 
     act(() => clearDerivedAlignmentFrames());
     expect(await screen.findByTestId('native-saved-annotation')).toBeInTheDocument();
@@ -143,6 +118,7 @@ describe('native annotation coordinate-space safety', () => {
 
     expect(screen.queryByTestId('native-saved-annotation')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeDisabled();
-    expect(screen.getByTestId('segment-action')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Segment' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Outline' })).toBeDisabled();
   });
 });

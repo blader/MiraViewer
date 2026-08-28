@@ -19,6 +19,7 @@ import { useComparisonSequenceAvailability } from '../hooks/useComparisonSequenc
 import { useComparisonWorkspaceNavigation } from '../hooks/useComparisonWorkspaceNavigation';
 import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useComparisonAlignment } from '../hooks/useComparisonAlignment';
+import { AlignedBrowsingContext } from '../hooks/useAlignedFrame';
 import { AutomaticAlignmentStatus } from './comparison/AutomaticAlignmentStatus';
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
@@ -139,6 +140,7 @@ export function ComparisonMatrix() {
     enabledDatesKey,
     data?.selected_patient_key ?? null,
     interactionBlocked,
+    selectedSeqId ? data?.series_map[selectedSeqId] : undefined,
   );
   const {
     panelSettings,
@@ -327,16 +329,18 @@ export function ComparisonMatrix() {
             />
           ) : null}
 
-          <ComparisonStage
-            data={data}
-            selectedSeqId={selectedSeqId}
-            hasData={Boolean(hasData)}
-            navigation={workspaceNavigation}
-            panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
-            onUseAcquired={useAcquiredImage}
-            onOpenUpload={() => setActiveDialog('upload')}
-            onOpenExaminations={() => setRightSidebarOpen(true)}
-          />
+          <AlignedBrowsingContext value={alignment.browsing}>
+            <ComparisonStage
+              data={data}
+              selectedSeqId={selectedSeqId}
+              hasData={Boolean(hasData)}
+              navigation={workspaceNavigation}
+              panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
+              onUseAcquired={useAcquiredImage}
+              onOpenUpload={() => setActiveDialog('upload')}
+              onOpenExaminations={() => setRightSidebarOpen(true)}
+            />
+          </AlignedBrowsingContext>
 
           {hasData && viewMode !== 'svr3d' ? (
             <ComparisonDatesSidebar

@@ -234,5 +234,121 @@ describe('cornerstoneInit', () => {
       expect(Math.abs(calibratedLuminance[index]! / 255 - value!)).toBeLessThan(1 / 255);
     }
     expect(Array.from(raw)).toEqual([0, 25, 50, 75, 100, -100]);
+
+    const referencePixels = Uint16Array.from([0, 50, 100, 150, 250, 0]);
+    const referenceImage = {
+      rows: 2,
+      columns: 3,
+      minPixelValue: 0,
+      maxPixelValue: 250,
+      slope: 1,
+      intercept: 0,
+      windowCenter: 200,
+      windowWidth: 400,
+      invert: false,
+      getPixelData: () => referencePixels,
+    };
+    const calibratedRaw = Float32Array.from([0, 25, 50, 75, 125, -100]);
+    const tone = {
+      windowCenter: 50,
+      windowWidth: 100,
+      source: [0.25, 0.5, 0.75],
+      reference: [0.25, 0.5, 0.75],
+      referenceWindow: { windowCenter: 100, windowWidth: 200 },
+    };
+    const toneBeforeDisplay = JSON.stringify(tone);
+    const calibratedFrame = {
+      rows: 2,
+      columns: 3,
+      pixels: calibratedRaw,
+      valid: Uint8Array.from([1, 1, 1, 1, 1, 0]),
+      sourceImageId: 'miradb:native-frame',
+      referenceSopInstanceUid: 'current-reference-frame',
+      displayTone: tone,
+    };
+    sources.derived.mockReturnValue(calibratedFrame);
+    sources.decoded.mockImplementation(async (imageId: string) => {
+      if (imageId === 'miradb:native-frame') return nativeImage;
+      if (imageId === 'miradb:current-reference-frame') return referenceImage;
+      throw new Error(`Unexpected display source: ${imageId}`);
+    });
+
+    // A cached native-intensity mapping must follow the visible reference's VOI,
+    // including when its polarity differs from the acquired moving image.
+    for (const referenceInvert of [false, true]) {
+      Object.assign(nativeImage, { windowCenter: 900, windowWidth: 1800, invert: !referenceInvert });
+      referenceImage.invert = referenceInvert;
+      for (const width of [400, 200, 100]) {
+        referenceImage.windowWidth = width;
+        referenceImage.windowCenter = width / 2;
+        sources.decoded.mockClear();
+        const current = await derivedLoader(`miraderived:reference-window-${width}-${referenceInvert}`).promise;
+        expect(sources.decoded).toHaveBeenCalledWith('miradb:current-reference-frame');
+        expect(current.invert).toBe(referenceInvert);
+        const matchedLuminance = renderImageLuminance(current, current.invert);
+        const referenceLuminance = renderImageLuminance(referenceImage, referenceInvert);
+        for (let index = 0; index < referencePixels.length - 1; index++) {
+          expect(Math.abs(matchedLuminance[index]! - referenceLuminance[index]!)).toBeLessThanOrEqual(1);
+        }
+        // Unsupported padding stays black, even for MONOCHROME1 reference tissue.
+        expect(matchedLuminance.at(-1)).toBe(0);
+      }
+    }
+    expect(JSON.stringify(tone)).toBe(toneBeforeDisplay);
+    expect(Array.from(calibratedRaw)).toEqual([0, 25, 50, 75, 125, -100]);
+    expect(Array.from(referencePixels)).toEqual([0, 50, 100, 150, 250, 0]);
+
+    // Persisted pre-calibration frames also have a reference identity. Its presence
+    // alone must not reinterpret their legacy normalized mapping or inversion.
+    sources.derived.mockReturnValue({
+      ...calibratedFrame,
+      displayTone: { ...tone, referenceWindow: undefined },
+    });
+    Object.assign(nativeImage, { invert: true });
+    sources.decoded.mockClear();
+    const legacyRestored = await derivedLoader('miraderived:restored-legacy-tone').promise;
+    expect(sources.decoded).toHaveBeenCalledTimes(1);
+    expect(sources.decoded).toHaveBeenCalledWith('miradb:native-frame');
+    expect(legacyRestored.invert).toBe(true);
+    expect(renderImageLuminance(legacyRestored, legacyRestored.invert)).toEqual([255, 191, 128, 64, 0, 0]);
+
+    const highlightRaw = Float32Array.from([20, 50, 80, 100, 125, -100]);
+    const highlightReference = {
+      ...referenceImage,
+      maxPixelValue: 270,
+      windowCenter: 200,
+      windowWidth: 400,
+      invert: false,
+      cachedLut: undefined,
+      getPixelData: () => Uint16Array.from([60, 120, 180, 220, 270, 0]),
+    };
+    sources.derived.mockReturnValue({
+      ...calibratedFrame,
+      pixels: highlightRaw,
+      displayTone: {
+        ...tone,
+        source: [0.2, 0.5, 0.8],
+        reference: [0.15, 0.3, 0.45],
+        referenceWindow: { windowCenter: 200, windowWidth: 400 },
+      },
+    });
+    sources.decoded.mockImplementation(async (imageId: string) => {
+      if (imageId === 'miradb:native-frame') return nativeImage;
+      if (imageId === 'miradb:current-reference-frame') return highlightReference;
+      throw new Error(`Unexpected display source: ${imageId}`);
+    });
+    const highlightMatched = await derivedLoader('miraderived:measured-highlight-contrast').promise;
+    const highlightLuminance = renderImageLuminance(highlightMatched, highlightMatched.invert);
+    const expectedHighlightLuminance = renderImageLuminance(highlightReference, highlightReference.invert);
+    for (let index = 0; index < highlightRaw.length - 1; index++) {
+      expect(Math.abs(highlightLuminance[index]! - expectedHighlightLuminance[index]!)).toBeLessThanOrEqual(1);
+    }
+    // Native moving values at and above its calibration window remain textured gray,
+    // not artificially boosted toward white or clipped before reference windowing.
+    expect(highlightLuminance[3]).toBeLessThan(150);
+    expect(highlightLuminance[4]).toBeGreaterThan(highlightLuminance[3]!);
+    expect(highlightLuminance[4]).toBeLessThan(180);
+    expect(highlightLuminance[5]).toBe(0);
+    expect(Array.from(highlightRaw)).toEqual([20, 50, 80, 100, 125, -100]);
   });
 });

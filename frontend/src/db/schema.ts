@@ -1,6 +1,7 @@
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
 import type { AlignmentDisplayTone } from '../utils/alignmentDisplayTone';
 import type { SvrDirection, SvrNativeSource, SvrPatientTransform, SvrSourceProvenance } from '../types/svr';
+import type { PanelSettings } from '../types/api';
 
 export interface DicomStudy {
   studyInstanceUid: string;
@@ -265,16 +266,7 @@ export interface DicomInstance {
 
 export interface PanelSettingsRow {
   comboId: string;
-  settings: Record<
-    string,
-    ViewerTransform & {
-      offset: number;
-      reverseSliceOrder: boolean;
-      brightness: number;
-      contrast: number;
-      progress: number;
-    }
-  >;
+  settings: Record<string, PanelSettings>;
 }
 
 export interface AppStateRow {

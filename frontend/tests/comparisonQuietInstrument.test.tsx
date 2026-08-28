@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { act, fireEvent, render as renderWithoutWorkspace, renderHook, screen } from '@testing-library/react';
+import { act, fireEvent, render as renderWithoutWorkspace, renderHook, screen, waitFor } from '@testing-library/react';
 import { StudyToolsWorkspace } from '../src/components/comparison/StudyTools';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentResult, SeriesRef } from '../src/types/api';
@@ -18,15 +18,20 @@ vi.mock('../src/components/DicomViewer', () => ({
     seriesUid,
     interactionBlocked,
     onInstanceChange,
+    onPanChange,
     onZoomChange,
+    children,
   }: {
     seriesUid: string;
     interactionBlocked?: boolean;
     onInstanceChange?: (index: number) => void;
+    onPanChange?: (panX: number, panY: number) => void;
     onZoomChange?: (zoom: number) => void;
+    children?: ReactNode;
   }) => (
     <div
       data-testid={`diagnostic-image-${seriesUid}`}
+      data-pan-enabled={String(!interactionBlocked && Boolean(onPanChange))}
       onWheel={(event) => {
         if (interactionBlocked) return;
         if (event.metaKey || event.ctrlKey) {
@@ -35,26 +40,6 @@ vi.mock('../src/components/DicomViewer', () => ({
         }
         onInstanceChange?.(1);
       }}
-    />
-  ),
-}));
-
-vi.mock('../src/components/DragRectActionOverlay', () => ({
-  DragRectActionOverlay: ({
-    children,
-    imageSize,
-    actions,
-  }: {
-    children: ReactNode;
-    imageSize?: { width: number; height: number };
-    actions?: Array<{ key: string; disabled?: boolean }>;
-  }) => (
-    <div
-      data-testid="diagnostic-drag-overlay"
-      data-image-width={imageSize?.width}
-      data-image-height={imageSize?.height}
-      data-actions={actions?.map((action) => action.key).join(',')}
-      data-segment-disabled={String(actions?.find((action) => action.key === 'segment-tumor')?.disabled ?? false)}
     >
       {children}
     </div>
@@ -62,9 +47,12 @@ vi.mock('../src/components/DragRectActionOverlay', () => ({
 }));
 
 vi.mock('../src/components/comparison/LazyStudyOverlays', () => ({
-  GroundTruthPolygonOverlay: () => null,
-  TumorSavedSegmentationOverlay: () => null,
-  TumorSegmentationOverlay: () => null,
+  GroundTruthPolygonOverlay: ({ onRequestClose }: { onRequestClose: () => void }) => (
+    <button type="button" data-testid="manual-outline" onClick={onRequestClose}>
+      Close manual outline
+    </button>
+  ),
+  TumorSavedSegmentationOverlay: () => <div data-testid="saved-tumor-overlay" />,
 }));
 
 const selectedDate = '2025-01-01T00:00:00.000Z';
@@ -358,33 +346,74 @@ describe('Quiet Instrument comparison surfaces', () => {
   });
 
   it.each(['grid', 'overlay'] as const)(
-    'uses displayed derived-plane dimensions and prevents native segmentation on resliced %s images',
+    'keeps derived %s images pannable while native annotation controls remain unavailable',
     (mode) => {
-      const result = alignedResult(selectedSeries, selectedDate);
-      result.derivedFrame = {
-        ...result.derivedFrame!,
-        rows: 96,
-        columns: 384,
-        pixels: new Float32Array(96 * 384),
-      };
-      act(() => setDerivedAlignmentFrame(result));
+      act(() => setDerivedAlignmentFrame(alignedResult(selectedSeries, selectedDate)));
       render(mode === 'grid' ? <GridCell {...gridCellProps()} /> : <OverlayView {...overlayProps()} />);
-      const overlay = screen.getByTestId('diagnostic-drag-overlay');
-
-      expect(overlay).toHaveAttribute('data-image-width', '384');
-      expect(overlay).toHaveAttribute('data-image-height', '96');
-      expect(overlay).toHaveAttribute('data-segment-disabled', 'true');
-      expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
+      fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+      expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Outline' })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Segment' })).not.toBeInTheDocument();
+      expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toHaveAttribute(
+        'data-pan-enabled',
+        'true',
+      );
     },
   );
 
   it.each(['grid', 'overlay'] as const)(
-    'reserves %s selections for segmentation, without separate alignment actions',
+    'defaults %s images to pan and reserves annotation input for the explicit Outline tool',
     (mode) => {
       render(mode === 'grid' ? <GridCell {...gridCellProps()} /> : <OverlayView {...overlayProps()} />);
-      const overlay = screen.getByTestId('diagnostic-drag-overlay');
-      expect(overlay).toHaveAttribute('data-actions', 'segment-tumor');
-      expect(overlay).toHaveAttribute('data-segment-disabled', 'false');
+      const viewer = screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`);
+      const surface = viewer.closest('[data-diagnostic-surface="true"]');
+      expect(viewer).toHaveAttribute('data-pan-enabled', 'true');
+      expect(surface).not.toHaveClass('cursor-crosshair', 'touch-none');
+      expect(screen.queryByTestId('manual-outline')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+      const outline = screen.getByRole('button', { name: 'Outline' });
+      expect(screen.queryByRole('button', { name: 'Segment' })).not.toBeInTheDocument();
+      expect(outline).toHaveAttribute('aria-pressed', 'false');
+
+      fireEvent.click(outline);
+      expect(outline).toHaveAttribute('aria-pressed', 'true');
+      expect(viewer).toHaveAttribute('data-pan-enabled', 'false');
+      expect(surface).toHaveClass('cursor-crosshair', 'touch-none');
+      expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeEnabled();
+      expect(viewer).toContainElement(screen.getByTestId('manual-outline'));
+      fireEvent.click(screen.getByRole('button', { name: 'Saved tumor' }));
+      expect(viewer).toContainElement(screen.getByTestId('saved-tumor-overlay'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close manual outline' }));
+      expect(outline).toHaveAttribute('aria-pressed', 'false');
+      expect(viewer).toHaveAttribute('data-pan-enabled', 'true');
+      expect(surface).not.toHaveClass('cursor-crosshair', 'touch-none');
+      expect(screen.queryByTestId('manual-outline')).not.toBeInTheDocument();
+
+      fireEvent.click(outline);
+      fireEvent.click(outline);
+      expect(viewer).toHaveAttribute('data-pan-enabled', 'true');
+      expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toBe(viewer);
+    },
+  );
+
+  it.each(['grid', 'overlay'] as const)(
+    'restores pan when an active %s annotation tool becomes unavailable on a derived plane',
+    (mode) => {
+      render(mode === 'grid' ? <GridCell {...gridCellProps()} /> : <OverlayView {...overlayProps()} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Outline' }));
+      expect(screen.getByTestId('manual-outline')).toBeInTheDocument();
+
+      act(() => setDerivedAlignmentFrame(alignedResult(selectedSeries, selectedDate)));
+
+      expect(screen.getByRole('button', { name: 'Outline' })).toBeDisabled();
+      expect(screen.queryByTestId('manual-outline')).not.toBeInTheDocument();
+      expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toHaveAttribute(
+        'data-pan-enabled',
+        'true',
+      );
     },
   );
 
@@ -418,6 +447,14 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toBeInTheDocument();
     expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toBeInTheDocument();
     expect(screen.getByText('Comparing examination')).toBeInTheDocument();
+    expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toHaveAttribute(
+      'data-pan-enabled',
+      'false',
+    );
+    expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toHaveAttribute(
+      'data-pan-enabled',
+      'false',
+    );
 
     fireEvent.wheel(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`), {
       deltaY: -100,
@@ -437,6 +474,45 @@ describe('Quiet Instrument comparison surfaces', () => {
     expect(container.querySelector('[aria-label="Increase Zoom"]')?.closest('[inert]')).toBeNull();
     expect(container.querySelector('[aria-label="Increase Slice offset"]')?.closest('[inert]')).toBeNull();
     expect(screen.getByRole('button', { name: 'Adjust image' })).toBeEnabled();
+  });
+
+  it('closes the outline tool during read-only comparison and returns to pan afterward', async () => {
+    const props = overlayProps();
+    const { rerender } = render(<OverlayView {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Saved tumor' }));
+    const outline = screen.getByRole('button', { name: 'Outline' });
+    fireEvent.click(outline);
+    expect(screen.getByTestId('manual-outline')).toBeInTheDocument();
+
+    rerender(
+      <OverlayView
+        {...props}
+        isOverlayComparing
+        overlayDisplayedRef={compareSeries}
+        overlayDisplayedDate={compareDate}
+      />,
+    );
+    expect(screen.queryByTestId('manual-outline')).not.toBeInTheDocument();
+    expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toHaveAttribute(
+      'data-pan-enabled',
+      'false',
+    );
+    expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toHaveAttribute(
+      'data-pan-enabled',
+      'false',
+    );
+    expect(screen.getByTestId(`diagnostic-image-${compareSeries.series_uid}`)).toContainElement(
+      screen.getByTestId('saved-tumor-overlay'),
+    );
+    await waitFor(() => expect(outline).toHaveAttribute('aria-pressed', 'false'));
+
+    rerender(<OverlayView {...props} />);
+    expect(screen.getByTestId(`diagnostic-image-${selectedSeries.series_uid}`)).toHaveAttribute(
+      'data-pan-enabled',
+      'true',
+    );
+    expect(screen.queryByTestId('manual-outline')).not.toBeInTheDocument();
   });
 
   it('reports only the actual selected slice and exposes its precise accessible value', () => {

@@ -122,6 +122,8 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
       columns: 2,
       slope: 2,
       intercept: -100,
+      windowCenter: 2000.5,
+      windowWidth: 4001,
       getPixelData: () => new Uint16Array([100, 512, 1000, 4095]),
     });
 
@@ -129,6 +131,7 @@ describe('renderSliceToPixels cancellation and timeouts', () => {
 
     expect(Array.from(result.pixels)).toEqual([100, 924, 1900, 8090]);
     expect(result.imageId).toBe('miradb:instance');
+    expect(result).toMatchObject({ windowCenter: 2000.5, windowWidth: 4001 });
     expect(result.timingMs.capture).toBeGreaterThanOrEqual(0);
   });
 

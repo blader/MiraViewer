@@ -420,7 +420,7 @@ describe('bounded enhancement GPU resources', () => {
     expect(cut).toContain('smoothstep(0.5 - 0.5 * width, 0.5 + 0.5 * width, coverage)');
     expect(cut).toContain('selected ? displayedIntensity(tc) : texture(u_vol, tc).r');
     expect(shader).toContain('outColor = vec4(section.rgb * section.a, 1.0)');
-    expect(shader.indexOf('cutPixelWidth = fwidth')).toBeLessThan(shader.indexOf('if (nativeHit && u_nativeCutaway'));
+    expect(shader.indexOf('cutPixelWidth = fwidth')).toBeLessThan(shader.indexOf('!intersectBox(ro, rd'));
     expect(shader).toContain('selected ? displayedIntensity(xp) : texture(u_vol, xp).r');
   });
 

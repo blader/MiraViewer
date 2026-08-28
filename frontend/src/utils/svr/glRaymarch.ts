@@ -756,8 +756,9 @@ float nativeMaskAt(ivec2 pixel) {
   return texelFetch(u_nativeMask, pixel, 0).r;
 }
 
-// Intersect a patient-positioned native image, including portions outside a cropped reconstruction.
-// Image samples remain unlit, source-windowed and independent of the raymarch volume's quantization.
+// A native image textures a cross-section of the reconstructed object, not a
+// freestanding rectangle. Geometry/support/visibility come from the volume;
+// displayed intensities still come directly from the original MRI pixels.
 vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
   planeT = -1.0;
   if (u_nativeEnabled == 0) return vec4(0.0);
@@ -770,12 +771,21 @@ vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
   // Derivatives precede every per-fragment return, including validity/mask clipping.
   vec2 coordinateWidth = max(fwidth(coordinates), vec2(1e-6));
   if (parallel || planeT < 0.0) return vec4(0.0);
+  vec3 tc = (ro + rd * planeT) / u_box + 0.5;
+  if (any(lessThan(tc, vec3(0.0))) || any(greaterThanEqual(tc, vec3(1.0)))) return vec4(0.0);
+  if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) return vec4(0.0);
   ivec2 size = textureSize(u_nativeImage, 0);
   if (any(lessThan(coordinates, vec2(-0.5))) || any(greaterThanEqual(coordinates, vec2(size) - 0.5))) return vec4(0.0);
   ivec2 pixel = ivec2(floor(coordinates + 0.5));
   if (texelFetch(u_nativeValidity, pixel, 0).r <= 0.0) return vec4(0.0);
   float mask = nativeMaskAt(pixel);
-  if (u_nativeSelectionOnly != 0 && mask <= 0.0) return vec4(0.0);
+  if (u_tumorOnly != 0 || u_nativeSelectionOnly != 0) {
+    // Use the exact CPU-projected annotation, never a reduced GPU label grid.
+    // A selected dark MRI pixel is still valid tissue, not transparent air.
+    if (mask <= 0.0) return vec4(0.0);
+  } else if (windowed(texture(u_vol, tc).r) < saturate(u_thr) && !(u_labelsEnabled != 0 && mask > 0.0)) {
+    return vec4(0.0);
+  }
   float value = texelFetch(u_nativeImage, pixel, 0).r;
   if (u_nativeInterpolate != 0) {
     ivec2 lower = ivec2(floor(coordinates));
@@ -830,9 +840,6 @@ void main() {
 
   float nativeT;
   vec4 nativeSection = nativeSurface(ro, rd, nativeT);
-  bool nativeHit = nativeSection.a > 0.0;
-  // An explicit camera-facing cut removes only foreground anatomy over valid image pixels.
-  if (nativeHit && u_nativeCutaway != 0) { outColor = nativeSection; return; }
 
   vec3 bmin = -0.5 * u_box;
   vec3 bmax =  0.5 * u_box;
@@ -847,14 +854,35 @@ void main() {
 
   float t0;
   float t1;
-  if (bmax.z < bmin.z || !intersectBox(ro, rd, bmin, bmax, t0, t1)) {
-    outColor = nativeHit ? nativeSection : vec4(0.0, 0.0, 0.0, 1.0);
+  if (any(lessThan(bmax, bmin)) || !intersectBox(ro, rd, bmin, bmax, t0, t1)) {
+    outColor = vec4(0.0, 0.0, 0.0, 1.0);
     return;
   }
   t0 = max(t0, 0.0);
-  if (nativeHit && nativeT <= t0) { outColor = nativeSection; return; }
-  // An opaque MRI plane ends this ray: only anatomy in FRONT of it may contribute.
+  bool nativeHit = nativeSection.a > 0.0 && nativeT >= t0 && nativeT <= t1;
+  if (u_nativeEnabled != 0 && u_nativeCutaway != 0) {
+    vec3 normal = normalize(cross(u_nativeColumnStep, u_nativeRowStep));
+    vec3 center = (bmin + bmax) * 0.5;
+    float radius = dot((bmax - bmin) * 0.5, abs(normal));
+    // Browsing beyond a cropped object must not replace or erase that object.
+    if (abs(dot(center - u_nativeOrigin, normal)) <= radius) {
+      float slope = dot(rd, normal);
+      float distance = dot(ro - u_nativeOrigin, normal);
+      // Retain the same physical half-space when the camera orbits. The native
+      // facing view looks into it; from behind the retained volume stays in front.
+      if (abs(slope) < 1e-6) {
+        if (distance < 0.0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+      } else {
+        float boundary = -distance / slope;
+        if (slope > 0.0) t0 = max(t0, boundary);
+        else t1 = min(t1, boundary);
+      }
+    }
+  }
+  if (nativeHit && nativeT <= t0 + 1e-6 && t0 <= t1 + 1e-6) { outColor = nativeSection; return; }
+  // Composite only the bounded cross-section, in the same depth order as tissue.
   if (nativeHit) t1 = min(t1, nativeT);
+  if (t1 <= t0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
   // When looking into the cut, preserve its acquired grayscale exactly. Fog
   // integration behind it otherwise washes out texture even at high resolution.
@@ -997,9 +1025,9 @@ void main() {
       vec3 normalGradient = refined ? grad / max(d * u_box, vec3(1e-12)) : grad;
       vec3 nrm = normalize(normalGradient + vec3(1e-6));
       float diff = abs(dot(nrm, vDir));
-      float shade = 0.25 + 0.75 * diff;
+      float shade = 0.65 + 0.35 * diff;
 
-      // Make edges matter for visibility (opacity) and for perceived contrast (brightness).
+      // Edges control visibility, not a second darkening of the MRI intensities.
       float a = saturate(val * (u_tumorOnly != 0
         ? 0.55 + 0.45 * edge
         : 0.15 + 0.85 * edge));
@@ -1012,7 +1040,7 @@ void main() {
       float aStep = 1.0 - exp(-u_opacity * a * dt * emphasis);
       aStep = saturate(aStep);
 
-      float sampleV = v * shade * (0.6 + 0.4 * edge);
+      float sampleV = v * shade;
 
       vec3 sampleColor = vec3(sampleV);
 

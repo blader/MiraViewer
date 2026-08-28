@@ -1,6 +1,12 @@
-import type { AlignmentResult } from '../types/api';
+import type { AlignmentReference, AlignmentResult } from '../types/api';
 import type { DerivedAlignmentFrameRow } from '../db/schema';
 import { loadDerivedAlignmentFrames, MAX_DERIVED_ALIGNMENT_FRAMES, saveDerivedAlignmentFrame } from './localApi';
+import { outputGridFingerprint, type OutputGridMode } from './outputPlaneGrid';
+
+export type DerivedAlignmentReference = Pick<
+  AlignmentReference,
+  'seriesUid' | 'sliceIndex' | 'patientKey' | 'sequenceId' | 'datasetRevision'
+> & { outputMode?: OutputGridMode; manualSliceOffset?: number };
 
 export type DerivedAlignmentFrame = NonNullable<AlignmentResult['derivedFrame']> & {
   imageId: string;
@@ -10,15 +16,75 @@ export type DerivedAlignmentFrame = NonNullable<AlignmentResult['derivedFrame']>
   patientKey?: string;
   sequenceId?: string;
   datasetRevision?: number;
+  registrationId?: string;
+  /** Signed target-acquisition sampling correction; absent values mean zero. */
+  manualSliceOffset?: number;
+  /** The accepted packet shares these pixel buffers; replay never copies or re-registers anatomy. */
+  acceptedResult?: AlignmentResult;
 };
 
+const MAX_DERIVED_ALIGNMENT_BYTES = 64 * 1024 * 1024;
 const frames = new Map<string, DerivedAlignmentFrame>();
 const listeners = new Set<() => void>();
 let hydrationGeneration = 0;
 let retainedReference: { frame: DerivedAlignmentFrame; token: symbol } | null = null;
 
-function key(seriesUid: string, instanceIndex: number): string {
-  return `${seriesUid}:${instanceIndex}`;
+function hasAutomaticIdentity(frame: DerivedAlignmentFrame): boolean {
+  return Boolean(
+    frame.registrationId?.trim() &&
+    frame.patientKey &&
+    frame.sequenceId &&
+    Number.isSafeInteger(frame.datasetRevision) &&
+    frame.datasetRevision! >= 0 &&
+    frame.referenceSeriesUid &&
+    ((Number.isSafeInteger(frame.referenceFrameIndex) && frame.referenceFrameIndex! >= 0) ||
+      (frame.referenceSopInstanceUid && frame.outputGrid)),
+  );
+}
+
+function key(frame: DerivedAlignmentFrame): string {
+  return hasAutomaticIdentity(frame)
+    ? JSON.stringify([
+        frame.seriesUid,
+        frame.registrationId,
+        frame.patientKey,
+        frame.sequenceId,
+        frame.datasetRevision,
+        frame.referenceSeriesUid,
+        frame.referenceFrameIndex ?? null,
+        frame.referenceSopInstanceUid ?? null,
+        frame.outputGrid ? outputGridFingerprint(frame.outputGrid) : null,
+        frame.manualSliceOffset ?? 0,
+      ])
+    : `${frame.seriesUid}:${frame.instanceIndex}`;
+}
+
+function sharesRegistration(first: DerivedAlignmentFrame, second: DerivedAlignmentFrame): boolean {
+  return (
+    hasAutomaticIdentity(first) &&
+    hasAutomaticIdentity(second) &&
+    first.registrationId === second.registrationId &&
+    first.patientKey === second.patientKey &&
+    first.sequenceId === second.sequenceId &&
+    first.datasetRevision === second.datasetRevision &&
+    first.referenceSeriesUid === second.referenceSeriesUid
+  );
+}
+
+/** Raw alignment buffers remain resident independently of Cornerstone's decoded-image cache. */
+export function retainedDerivedAlignmentBytes(): number {
+  const buffers = new Set<ArrayBufferLike>();
+  for (const frame of frames.values()) {
+    buffers.add(frame.pixels.buffer);
+    if (frame.valid) buffers.add(frame.valid.buffer);
+  }
+  if (retainedReference) {
+    buffers.add(retainedReference.frame.pixels.buffer);
+    if (retainedReference.frame.valid) buffers.add(retainedReference.frame.valid.buffer);
+  }
+  let bytes = 0;
+  for (const buffer of buffers) bytes += buffer.byteLength;
+  return bytes;
 }
 
 function notify(): void {
@@ -29,7 +95,14 @@ function notify(): void {
 
 /** Only results that passed live patient/sequence/revision validation may enter this display cache. */
 export function setDerivedAlignmentFrame(result: AlignmentResult): void {
-  if (!result.derivedFrame || !result.runId || result.outcome !== 'aligned') return;
+  if (
+    !result.derivedFrame ||
+    !result.runId ||
+    result.outcome !== 'aligned' ||
+    !Number.isFinite(result.manualSliceOffset ?? 0)
+  ) {
+    return;
+  }
   const frame: DerivedAlignmentFrame = {
     ...result.derivedFrame,
     runId: result.runId,
@@ -38,18 +111,25 @@ export function setDerivedAlignmentFrame(result: AlignmentResult): void {
     patientKey: result.patientKey,
     sequenceId: result.sequenceId,
     datasetRevision: result.datasetRevision,
+    referenceSeriesUid: result.derivedFrame.referenceSeriesUid ?? result.referenceSeriesUid,
+    registrationId: result.registrationId,
+    manualSliceOffset: result.manualSliceOffset ?? 0,
+    acceptedResult: result,
     imageId: `miraderived:${result.runId}:${result.seriesUid}:${result.bestSliceIndex}`,
   };
+  if (hasAutomaticIdentity(frame)) frame.imageId = `miraderived:${encodeURIComponent(key(frame))}`;
   hydrationGeneration++;
   storeFrame(frame);
 }
 
 function storeFrame(frame: DerivedAlignmentFrame): void {
   for (const [frameKey, existing] of frames) {
-    if (existing.seriesUid === frame.seriesUid) frames.delete(frameKey);
+    if (existing.seriesUid === frame.seriesUid && !sharesRegistration(existing, frame)) frames.delete(frameKey);
   }
-  frames.set(key(frame.seriesUid, frame.instanceIndex), frame);
-  while (frames.size > MAX_DERIVED_ALIGNMENT_FRAMES) {
+  const frameKey = key(frame);
+  frames.delete(frameKey);
+  frames.set(frameKey, frame);
+  while (frames.size > MAX_DERIVED_ALIGNMENT_FRAMES || retainedDerivedAlignmentBytes() > MAX_DERIVED_ALIGNMENT_BYTES) {
     const oldest = Array.from(frames.entries()).find(([, candidate]) => candidate !== retainedReference?.frame)?.[0];
     if (oldest === undefined) break;
     frames.delete(oldest);
@@ -150,7 +230,53 @@ export async function hydrateDerivedAlignmentFrames(
 }
 
 export function getDerivedAlignmentFrame(seriesUid: string, instanceIndex: number): DerivedAlignmentFrame | null {
-  return frames.get(key(seriesUid, instanceIndex)) ?? null;
+  let latest: DerivedAlignmentFrame | null = null;
+  for (const frame of frames.values()) {
+    if (frame.seriesUid === seriesUid && frame.instanceIndex === instanceIndex) latest = frame;
+  }
+  return latest;
+}
+
+/** Resolve a verified automatic plane, optionally holding the latest compatible plane while reslicing. */
+export function getDerivedAlignmentFrameForReference(
+  seriesUid: string,
+  reference: DerivedAlignmentReference,
+  allowPrevious = false,
+): DerivedAlignmentFrame | null {
+  if (
+    !reference.patientKey ||
+    !reference.sequenceId ||
+    !Number.isSafeInteger(reference.datasetRevision) ||
+    reference.datasetRevision! < 0 ||
+    !Number.isSafeInteger(reference.sliceIndex) ||
+    reference.sliceIndex < 0 ||
+    !Number.isFinite(reference.manualSliceOffset ?? 0)
+  ) {
+    return null;
+  }
+  let exact: DerivedAlignmentFrame | null = null;
+  let latest: DerivedAlignmentFrame | null = null;
+  for (const frame of frames.values()) {
+    if (
+      !hasAutomaticIdentity(frame) ||
+      frame.seriesUid !== seriesUid ||
+      frame.patientKey !== reference.patientKey ||
+      frame.sequenceId !== reference.sequenceId ||
+      frame.datasetRevision !== reference.datasetRevision ||
+      frame.referenceSeriesUid !== reference.seriesUid ||
+      frame.outputGrid?.mode !== (reference.outputMode ?? 'native')
+    ) {
+      continue;
+    }
+    latest = frame;
+    if (
+      frame.referenceFrameIndex === reference.sliceIndex &&
+      (frame.manualSliceOffset ?? 0) === (reference.manualSliceOffset ?? 0)
+    ) {
+      exact = frame;
+    }
+  }
+  return exact ?? (allowPrevious ? latest : null);
 }
 
 export function getDerivedAlignmentFrameByImageId(imageId: string): DerivedAlignmentFrame | null {
@@ -164,14 +290,11 @@ export function getDerivedAlignmentFrameByImageId(imageId: string): DerivedAlign
 export function clearDerivedAlignmentFrame(seriesUid: string, instanceIndex?: number): void {
   hydrationGeneration++;
   let changed = false;
-  if (instanceIndex !== undefined) {
-    changed = frames.delete(key(seriesUid, instanceIndex));
-  } else {
-    for (const [frameKey, frame] of frames) {
-      if (frame.seriesUid !== seriesUid) continue;
-      frames.delete(frameKey);
-      changed = true;
-    }
+  for (const [frameKey, frame] of frames) {
+    if (frame.seriesUid !== seriesUid || (instanceIndex !== undefined && frame.instanceIndex !== instanceIndex))
+      continue;
+    frames.delete(frameKey);
+    changed = true;
   }
   if (changed) notify();
 }

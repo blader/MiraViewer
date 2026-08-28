@@ -86,6 +86,35 @@ afterEach(() => {
 });
 
 describe('display-only learned MRI enhancement lifecycle', () => {
+  it('prepares disposable memory before loading and counts only the resources that remain', async () => {
+    const native = volume();
+    const prepareMemory = vi.fn(() => 1234);
+    const loadSource = vi.fn<EnhancementSourceLoader>().mockImplementation(async (_labels, options) => {
+      expect(prepareMemory).toHaveBeenCalledOnce();
+      expect(options.retainedBytes).toBe(1234);
+      return native;
+    });
+    worker.mockResolvedValue(enhanced(native));
+    const { result } = setup({ loadSource });
+    await act(async () => expect(await result.current.run(prepareMemory)).toBe(true));
+    expect(loadSource).toHaveBeenCalledOnce();
+    expect(worker).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces an active selection operation instead of loading or clearing its work', async () => {
+    const loadSource = vi.fn<EnhancementSourceLoader>();
+    const { result, props } = setup({ loadSource });
+    const labels = props.labels;
+    const prepareMemory = vi.fn(() => {
+      throw new Error('Wait for boundary suggestions to finish.');
+    });
+    await act(async () => expect(await result.current.run(prepareMemory)).toBe(false));
+    expect(result.current).toMatchObject({ running: false, error: 'Wait for boundary suggestions to finish.' });
+    expect(props.labels).toBe(labels);
+    expect(loadSource).not.toHaveBeenCalled();
+    expect(worker).not.toHaveBeenCalled();
+  });
+
   it('includes live annotation history and a retained grower source in every admission, including reruns', async () => {
     const native = volume(),
       output = enhanced(native);

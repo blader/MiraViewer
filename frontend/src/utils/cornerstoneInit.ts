@@ -107,11 +107,17 @@ function miraDerivedLoader(imageId: string) {
         Number.isFinite(source.windowCenter) && Number.isFinite(source.windowWidth) && source.windowWidth > 0;
       const presentationPixels = new Uint16Array(frame.pixels.length);
       const tone = frame.displayTone && validAlignmentDisplayTone(frame.displayTone) ? frame.displayTone : undefined;
+      // The native reference is the display authority. DICOM windows can change on
+      // every slice even though the scan-pair intensity calibration stays constant.
+      const displayReference =
+        tone?.referenceWindow && frame.referenceSopInstanceUid
+          ? await loadCornerstoneImage(`miradb:${frame.referenceSopInstanceUid}`)
+          : undefined;
       for (let index = 0; index < frame.pixels.length; index++) {
         const pixel = frame.pixels[index]!;
         if ((frame.valid && !frame.valid[index]) || !Number.isFinite(pixel)) continue;
         presentationPixels[index] = tone
-          ? 1 + Math.round(applyAlignmentDisplayTone(pixel, tone) * 65_534)
+          ? 1 + Math.round(applyAlignmentDisplayTone(pixel, tone, displayReference) * 65_534)
           : intensityRange > 0
             ? 1 + Math.round(((pixel - minimum) / intensityRange) * 65_534)
             : 1;
@@ -136,6 +142,7 @@ function miraDerivedLoader(imageId: string) {
         windowWidth: tone ? 65_534 : preserveSourceWindow ? source.windowWidth : Math.max(1, intensityRange),
         slope: tone ? 1 : intensityScale,
         intercept: tone ? 0 : minimum - intensityScale,
+        invert: displayReference ? displayReference.invert === true : source.invert,
         pixelPaddingValue: 0,
         pixelPaddingRangeLimit: 0,
         cachedLut: undefined,

@@ -1,19 +1,19 @@
-import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { ScanLine } from 'lucide-react';
-import type { ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { Suspense, useMemo, useState } from 'react';
+import type { PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import {
+  AcquiredImageAction,
+  AlignmentBadge,
+  ImageControls,
+  ResumeAlignmentAction,
+  StudyAnnotationControls,
+} from '../ImageControls';
 import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
-import { DragRectActionOverlay } from '../DragRectActionOverlay';
-import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
-import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../../utils/derivedAlignmentFrame';
-import {
-  GroundTruthPolygonOverlay,
-  TumorSavedSegmentationOverlay,
-  TumorSegmentationOverlay,
-} from './LazyStudyOverlays';
+import { DicomViewer } from '../DicomViewer';
+import { useAlignedFrame } from '../../hooks/useAlignedFrame';
+import { GroundTruthPolygonOverlay, TumorSavedSegmentationOverlay } from './LazyStudyOverlays';
 
 export type GridCellProps = {
   comboId: string;
@@ -27,53 +27,6 @@ export type GridCellProps = {
   onUseAcquired?: (date: string) => void;
 };
 
-type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
-
-export function StudySelectionSurface({
-  reference,
-  presentation,
-  onSegment,
-  children,
-}: {
-  reference: {
-    settings: PanelSettings;
-    imageSize: { width: number; height: number };
-  };
-  presentation: {
-    isComparing: boolean;
-    groundTruthOpen: boolean;
-    nativeAnnotationsAvailable: boolean;
-  };
-  onSegment: (selection: ExclusionMask) => void;
-  children: React.ReactNode;
-}) {
-  const { settings, imageSize } = reference;
-  const { isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
-
-  return (
-    <DragRectActionOverlay
-      className="absolute inset-0 cursor-crosshair"
-      imageSize={imageSize}
-      geometry={settings}
-      disabled={isComparing || groundTruthOpen}
-      actions={[
-        {
-          key: 'segment-tumor',
-          label: 'Segment',
-          title: 'Segment tumor from this rectangle',
-          icon: <ScanLine className="w-4 h-4" />,
-          variant: 'secondary',
-          minSizeSpace: 'screen',
-          disabled: isComparing || !nativeAnnotationsAvailable,
-          onConfirm: (masks) => onSegment(masks.screen),
-        },
-      ]}
-    >
-      {children}
-    </DragRectActionOverlay>
-  );
-}
-
 export function GridCell({
   comboId,
   date,
@@ -85,23 +38,14 @@ export function GridCell({
   onUseAcquired,
 }: GridCellProps) {
   const [showSavedTumor, setShowSavedTumor] = useState(false);
-  const [tumorToolOpen, setTumorToolOpen] = useState(false);
-  const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
-  const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
   const nativeImageSize = useMemo(
     () => ({ w: refData?.columns ?? 512, h: refData?.rows ?? 512 }),
     [refData?.columns, refData?.rows],
   );
   const idx = refData ? getSliceIndex(refData.instance_count, progress, settings.offset) : 0;
   const effectiveIdx = refData ? getEffectiveInstanceIndex(idx, refData.instance_count, settings.reverseSliceOrder) : 0;
-  const derivedFrame = useSyncExternalStore(subscribeToDerivedAlignmentFrames, () =>
-    refData ? getDerivedAlignmentFrame(refData.series_uid, effectiveIdx) : null,
-  );
-  const displayedImageSize = {
-    width: derivedFrame?.columns ?? nativeImageSize.w,
-    height: derivedFrame?.rows ?? nativeImageSize.h,
-  };
+  const { frame: derivedFrame, pending: alignmentPending } = useAlignedFrame(refData?.series_uid ?? '', effectiveIdx);
   const nativeAnnotationsAvailable = derivedFrame === null;
 
   if (!refData) {
@@ -119,111 +63,65 @@ export function GridCell({
     <div
       data-grid-cell-date={date}
       data-alignment-state={derivedFrame ? 'aligned' : 'acquired'}
+      data-alignment-adjusted={Boolean(settings.alignmentAdjustment) || undefined}
+      data-alignment-paused={settings.alignmentPaused || undefined}
+      data-alignment-pending={alignmentPending || undefined}
       className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
     >
       <div className="study-heading">
         <div className="study-heading-identity">
           <span className="study-date">{formatDate(date)}</span>
-          {derivedFrame ? <VerifiedAlignmentBadge /> : null}
+          {derivedFrame ? <AlignmentBadge adjusted={Boolean(settings.alignmentAdjustment)} /> : null}
         </div>
 
         <StudyTools examinationLabel={formatDate(date)}>
           <StudyAnnotationControls
             showSavedTumor={showSavedTumor}
-            tumorToolOpen={tumorToolOpen}
             gtPolygonToolOpen={gtPolygonToolOpen}
             nativeAnnotationsAvailable={nativeAnnotationsAvailable}
             setShowSavedTumor={setShowSavedTumor}
-            setTumorToolOpen={setTumorToolOpen}
             setGtPolygonToolOpen={setGtPolygonToolOpen}
           />
 
-          <ImageControls
-            settings={settings}
-            instanceIndex={idx}
-            instanceCount={refData.instance_count}
-            onUpdate={(update) => updatePanelSetting(date, update)}
-            showSliceControl={false}
-          />
+          <fieldset disabled={alignmentPending} className="min-w-0 disabled:opacity-40">
+            <ImageControls
+              settings={settings}
+              instanceIndex={idx}
+              instanceCount={refData.instance_count}
+              onUpdate={(update) => updatePanelSetting(date, update)}
+              showSliceControl={false}
+              isAligned={Boolean(derivedFrame)}
+            />
+          </fieldset>
         </StudyTools>
       </div>
 
-      <div data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
-        <StudySelectionSurface
-          reference={{
-            settings,
-            imageSize: displayedImageSize,
-          }}
-          presentation={{
-            isComparing: false,
-            groundTruthOpen: gtPolygonToolOpen,
-            nativeAnnotationsAvailable,
-          }}
-          onSegment={(selection) => {
-            setTumorToolOpen(true);
-            setTumorSeedBoxToStart({
-              x0: selection.x,
-              y0: selection.y,
-              x1: selection.x + selection.width,
-              y1: selection.y + selection.height,
-            });
-          }}
+      <div
+        data-diagnostic-surface="true"
+        className={`relative min-h-0 flex-1 bg-[var(--bg-primary)] ${nativeAnnotationsAvailable && gtPolygonToolOpen ? 'cursor-crosshair touch-none' : ''}`}
+      >
+        <DicomViewer
+          studyId={refData.study_id}
+          seriesUid={refData.series_uid}
+          instanceIndex={idx}
+          instanceCount={refData.instance_count}
+          {...settings}
+          onInstanceChange={(i) => setProgress(getProgressFromSlice(i, refData.instance_count, settings.offset))}
+          onPanChange={
+            nativeAnnotationsAvailable && gtPolygonToolOpen
+              ? undefined
+              : (newPanX, newPanY) => updatePanelSetting(date, { panX: newPanX, panY: newPanY })
+          }
+          onZoomChange={(newZoom) => updatePanelSetting(date, { zoom: newZoom })}
         >
-          <DicomViewer
-            ref={tumorViewerRef}
-            studyId={refData.study_id}
-            seriesUid={refData.series_uid}
-            instanceIndex={idx}
-            instanceCount={refData.instance_count}
-            reverseSliceOrder={settings.reverseSliceOrder}
-            onInstanceChange={(i) => {
-              setProgress(getProgressFromSlice(i, refData.instance_count, settings.offset));
-            }}
-            brightness={settings.brightness}
-            contrast={settings.contrast}
-            zoom={settings.zoom}
-            rotation={settings.rotation}
-            panX={settings.panX}
-            panY={settings.panY}
-            affine00={settings.affine00}
-            affine01={settings.affine01}
-            affine10={settings.affine10}
-            affine11={settings.affine11}
-            onPanChange={(newPanX, newPanY) => {
-              updatePanelSetting(date, { panX: newPanX, panY: newPanY });
-            }}
-            onZoomChange={(newZoom) => {
-              updatePanelSetting(date, { zoom: newZoom });
-            }}
-          />
-
           <Suspense fallback={null}>
-            {nativeAnnotationsAvailable && showSavedTumor && !tumorToolOpen ? (
+            {nativeAnnotationsAvailable && showSavedTumor ? (
               <TumorSavedSegmentationOverlay
                 enabled
                 seriesUid={refData.series_uid}
                 effectiveInstanceIndex={effectiveIdx}
                 viewerTransform={settings}
                 imageSize={nativeImageSize}
-              />
-            ) : null}
-
-            {nativeAnnotationsAvailable && tumorToolOpen ? (
-              <TumorSegmentationOverlay
-                enabled
-                onRequestClose={() => {
-                  setTumorToolOpen(false);
-                  setTumorSeedBoxToStart(null);
-                }}
-                seedBoxToStart={tumorSeedBoxToStart}
-                onSeedBoxToStartConsumed={() => setTumorSeedBoxToStart(null)}
-                viewerRef={tumorViewerRef}
-                comboId={comboId}
-                dateIso={date}
-                studyId={refData.study_id}
-                seriesUid={refData.series_uid}
-                effectiveInstanceIndex={effectiveIdx}
-                viewerTransform={settings}
               />
             ) : null}
 
@@ -241,11 +139,13 @@ export function GridCell({
               />
             ) : null}
           </Suspense>
-        </StudySelectionSurface>
+        </DicomViewer>
       </div>
 
       <div className="flex h-12 shrink-0 items-center justify-between gap-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-2">
-        {derivedFrame && onUseAcquired ? (
+        {settings.alignmentPaused ? (
+          <ResumeAlignmentAction onClick={() => updatePanelSetting(date, { alignmentPaused: false })} />
+        ) : derivedFrame && onUseAcquired ? (
           <AcquiredImageAction onClick={() => onUseAcquired(date)} />
         ) : (
           <span
@@ -258,7 +158,7 @@ export function GridCell({
         <div>
           <StepControl
             title="Slice offset"
-            value={`${idx + 1}/${refData.instance_count}`}
+            value={`${(derivedFrame ? getEffectiveInstanceIndex(derivedFrame.instanceIndex, refData.instance_count, settings.reverseSliceOrder) : idx) + 1}/${refData.instance_count}`}
             valueWidth="w-14"
             tabular
             accent

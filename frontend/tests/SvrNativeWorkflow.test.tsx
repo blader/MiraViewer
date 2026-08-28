@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrVolume } from '../src/types/svr';
 import { SvrImagingContext } from '../src/components/svrImagingContext';
@@ -146,8 +146,8 @@ describe('Native MRI workspace controls', () => {
     expect(screen.queryByRole('combobox', { name: 'MRI plane source' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
     fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
-    const coverage = screen.getByRole('group', { name: 'MRI plane coverage' });
-    expect(within(coverage).getByRole('button', { name: 'Within selection' })).toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'MRI plane coverage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Selection only' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Fit selection' })).toBeDisabled();
     expect(screen.getByText('Original MRI', { selector: '.svr-source-kind' })).toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox', { name: 'MRI plane source' }), { target: { value: '1' } });

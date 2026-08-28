@@ -89,7 +89,7 @@ vi.mock('../src/hooks/useGridLayout', () => ({
 }));
 
 vi.mock('../src/components/DicomViewer', () => ({
-  DicomViewer: () => <div data-testid="dicom-viewer" />,
+  DicomViewer: ({ children }: { children?: ReactTypes.ReactNode }) => <div data-testid="dicom-viewer">{children}</div>,
 }));
 
 describe('ComparisonMatrix', () => {

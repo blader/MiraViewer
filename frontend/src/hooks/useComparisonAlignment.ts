@@ -25,9 +25,7 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
     manuallyAdjustedDates,
     batchUpdateSettings,
     reportPersistenceError,
-    holdAlignment,
     updatePanelSetting,
-    clearManualAdjustments,
   } = panel;
   const visible = useVisibleAlignment({
     ...view,
@@ -37,8 +35,8 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
     panelSettings,
     progress,
     settingsReady,
-    manuallyAdjustedDates,
     alignAllDates: engine.alignAllDates,
+    canReuseRegistration: engine.canReuseRegistration,
     abort,
   });
   useApplyAlignmentResults({
@@ -56,7 +54,6 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
       const series = sequenceId && data?.series_map[sequenceId]?.[date];
       if (!series) return;
       abort();
-      holdAlignment(date);
       clearDerivedAlignmentFrame(series.series_uid);
       const settings = panelSettings.get(date) ?? DEFAULT_PANEL_SETTINGS;
       updatePanelSetting(date, {
@@ -64,6 +61,7 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
         offset: settings.offset,
         reverseSliceOrder: settings.reverseSliceOrder,
         progress,
+        alignmentPaused: true,
       });
       if (data?.selected_patient_key) {
         void clearPersistedDerivedAlignmentFrames(data.selected_patient_key, series.series_uid).catch(
@@ -71,21 +69,44 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
         );
       }
     },
-    [abort, data, holdAlignment, panelSettings, progress, reportPersistenceError, sequenceId, updatePanelSetting],
+    [abort, data, panelSettings, progress, reportPersistenceError, sequenceId, updatePanelSetting],
   );
   const { realign: scheduleRealignment } = visible;
   const realign = useCallback(() => {
     clearRegistrationCache();
-    clearManualAdjustments();
+    for (const { date } of columns) {
+      if (panelSettings.get(date)?.alignmentPaused) updatePanelSetting(date, { alignmentPaused: false });
+    }
     scheduleRealignment();
-  }, [clearRegistrationCache, clearManualAdjustments, scheduleRealignment]);
+  }, [clearRegistrationCache, columns, panelSettings, scheduleRealignment, updatePanelSetting]);
 
   return {
     ...engine,
     results: engine.results.filter((result) => !result.requestKey || result.requestKey === visible.activeRequestKey),
     error: !engine.requestKey || engine.requestKey === visible.activeRequestKey ? engine.error : null,
     targetCount: visible.targetCount,
-    hasManualAdjustments: columns.some(({ date }, index) => index > 0 && manuallyAdjustedDates?.has(date)),
+    browsing: visible.browsing
+      ? {
+          ...visible.browsing,
+          updating: Boolean(
+            visible.activeRequestKey && (engine.requestKey !== visible.activeRequestKey || engine.isAligning),
+          ),
+          unavailableSeriesUids: new Set(
+            engine.requestKey === visible.activeRequestKey
+              ? engine.error
+                ? visible.browsing.targetSeriesUids
+                : engine.results.flatMap((result) =>
+                    result.outcome && result.outcome !== 'aligned' && result.outcome !== 'cancelled'
+                      ? [result.seriesUid]
+                      : [],
+                  )
+              : [],
+          ),
+        }
+      : null,
+    hasManualAdjustments: columns.some(
+      ({ date }, index) => index > 0 && !panelSettings.get(date)?.alignmentPaused && manuallyAdjustedDates?.has(date),
+    ),
     realign,
     useAcquiredImage,
   };

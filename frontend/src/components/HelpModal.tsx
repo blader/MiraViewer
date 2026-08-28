@@ -33,7 +33,7 @@ export function HelpModal({ onClose }: HelpModalProps) {
               <Kbd>Scroll</Kbd> in the center pane to navigate slices.
             </li>
             <li>
-              <Kbd>Click</Kbd> on an image to center that point.
+              <Kbd>Drag</Kbd> an image to pan.
             </li>
             <li>
               <Kbd>Double-click</Kbd> to reset pan.
@@ -78,12 +78,21 @@ export function HelpModal({ onClose }: HelpModalProps) {
             </li>
             <li>
               Use <Label>Pause automatic alignment</Label> to stop background adjustments without changing the current
-              view. Manual adjustments to a target examination are kept until you choose <Label>Realign</Label>.
+              view. Manual slice, pan, zoom, rotation, brightness, and contrast adjustments stay linked: they are
+              applied on top of the automatic match as you browse.
             </li>
             <li>
-              <Label>Drag a rectangle</Label> on an image to <Label>Segment</Label> a region. Press <Kbd>Esc</Kbd>
-              to clear the selection; selections do not change automatic alignment. For an aligned panel, choose{' '}
-              <Label>View acquired</Label> first to annotate its original source image.
+              <Label>Realign</Label> recalculates the automatic match while keeping your adjustments. Choose{' '}
+              <Label>Reset adjustments</Label> in an examination’s controls to remove its corrections. You can undo or
+              redo adjustments without returning to an earlier slice.
+            </li>
+            <li>
+              Use the <Label>3D</Label> workspace for tumor segmentation. In the slice viewer, choose{' '}
+              <Label>Adjust</Label> to show <Label>Saved tumor</Label> overlays or draw a manual <Label>Outline</Label>.
+              Turn off <Label>Outline</Label> to return to panning. For an aligned panel, choose{' '}
+              <Label>View acquired</Label> first to annotate its original source image. This pauses only that
+              examination; choose <Label>Resume alignment</Label> below its image to rejoin the comparison with your
+              adjustments.
             </li>
             <li>
               Aligned images are derived presentations, not new acquired detail. Always review anatomical
@@ -110,7 +119,7 @@ export function HelpModal({ onClose }: HelpModalProps) {
             </li>
             <li>
               <Label>Brightness</Label> &amp; <Label>Contrast</Label> — display tone. Reset them without changing slice
-              position or alignment.
+              position or geometry. On an adjusted panel, reset returns to automatic tone matching.
             </li>
             <li>
               <Label>Reverse slice order</Label> — change navigation direction while keeping the same physical slice

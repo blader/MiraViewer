@@ -5,11 +5,25 @@ import type { SvrLabelVolume, SvrProgress, SvrResult, SvrVolume } from '../src/t
 import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
 import { useSvrImaging } from '../src/components/svrImagingContext';
 import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
+import type * as DerivedAlignmentFrames from '../src/utils/derivedAlignmentFrame';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
+import { retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
 
 const mocks = vi.hoisted(() => ({
   cacheInfo: vi.fn(),
+  cachedImages: [] as {
+    imageId: string;
+    sizeInBytes: number;
+    timeStamp: number;
+    loaded: boolean;
+    image?: { imageId: string };
+    imageLoadObject?: object;
+  }[],
+  removeCachedImage: vi.fn(),
+  cachedImageLoadObject: vi.fn(),
+  enabledElements: vi.fn(),
+  retainedAlignmentBytes: vi.fn(),
   manifests: vi.fn(),
   sortedSopUids: vi.fn(),
   run: vi.fn(),
@@ -50,6 +64,11 @@ vi.mock('../src/hooks/useSvrReconstruction', () => ({
 
 vi.mock('../src/utils/svr/reconstructVolume', () => ({ reconstructVolumeMultiPlane: mocks.reconstruct }));
 
+vi.mock('../src/utils/derivedAlignmentFrame', async (importOriginal) => ({
+  ...(await importOriginal<typeof DerivedAlignmentFrames>()),
+  retainedDerivedAlignmentBytes: mocks.retainedAlignmentBytes,
+}));
+
 vi.mock('../src/components/SvrVolume3DViewer', () => ({
   SvrVolume3DViewer: function MockSvrViewer({
     volumeIdentity,
@@ -79,7 +98,16 @@ vi.mock('../src/components/SvrVolume3DViewer', () => ({
 }));
 
 vi.mock('cornerstone-core', () => ({
-  default: { loadImage: vi.fn(), imageCache: { getCacheInfo: mocks.cacheInfo } },
+  default: {
+    loadImage: vi.fn(),
+    getEnabledElements: mocks.enabledElements,
+    imageCache: {
+      getCacheInfo: mocks.cacheInfo,
+      cachedImages: mocks.cachedImages,
+      removeImageLoadObject: mocks.removeCachedImage,
+      getImageLoadObject: mocks.cachedImageLoadObject,
+    },
+  },
 }));
 
 import { Svr3DView } from '../src/components/Svr3DView';
@@ -298,8 +326,21 @@ function openReconstructionSettings() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
+  mocks.reconstruct.mockReset();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
+  mocks.cachedImages.length = 0;
+  mocks.removeCachedImage.mockReset();
+  mocks.removeCachedImage.mockImplementation((imageId: string) => {
+    const index = mocks.cachedImages.findIndex((entry) => entry.imageId === imageId);
+    if (index < 0) throw new Error('Image is no longer cached');
+    mocks.cachedImages.splice(index, 1);
+  });
+  mocks.enabledElements.mockReturnValue([]);
+  mocks.cachedImageLoadObject.mockImplementation(
+    (imageId: string) => mocks.cachedImages.find((entry) => entry.imageId === imageId)?.imageLoadObject,
+  );
+  mocks.retainedAlignmentBytes.mockReturnValue(0);
   mocks.sortedSopUids.mockResolvedValue([]);
   mocks.manifests.mockImplementation(async (seriesUid: string) => manifest(seriesUid));
   mocks.hook.status = 'idle';
@@ -439,6 +480,7 @@ describe('SVR reconstruction workspace', () => {
     mocks.hook.result = previous;
     mocks.hook.resultIdentity = identity(comparisonData);
     mocks.hook.status = 'ready';
+    mocks.retainedAlignmentBytes.mockReturnValue(2048);
     const loaded = acceptedResult();
     mocks.reconstruct.mockResolvedValue(loaded);
     render(<Svr3DView data={comparisonData} />);
@@ -446,12 +488,15 @@ describe('SVR reconstruction workspace', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
     const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
     const before = previous.volume.data.slice();
-    const result = await load(labels, {});
+    const result = await load(labels, { retainedBytes: 1234 });
     expect(result).toBe(loaded.volume);
     expect(mocks.reconstruct).toHaveBeenCalledOnce();
     const request = mocks.reconstruct.mock.lastCall![0];
     expect(request.acceptedProvenance).toBe(previous.volume.sourceProvenance);
     expect(request.svrParams.roi.mode).toBe('box');
+    // Native decoding and enhancement worker allocations are sequential peaks,
+    // not simultaneous reservations charged against the native assembly phase.
+    expect(request.retainedBytes).toBe(retainedSvrVolumeBytes(previous.volume) + 1234 + 2048);
     expect(previous.volume.data).toEqual(before);
     expect(labels.data.reduce((total, value) => total + value, 0)).toBe(1);
   });
@@ -483,7 +528,7 @@ describe('SVR reconstruction workspace', () => {
   );
 
   it.each([false, true])(
-    'counts decoded cache and retained annotation/worker bytes before %s native preparation',
+    'reports non-reclaimable retained memory honestly before %s native preparation',
     async (reload) => {
       const comparisonData = nativeComparisonData();
       const { sourceManifest, previous, labels } = nativeEnhancementFixture(
@@ -501,8 +546,154 @@ describe('SVR reconstruction workspace', () => {
       await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeInTheDocument());
       await waitFor(() => expect(mocks.enhancementLoader.mock.lastCall![0]).toBeTypeOf('function'));
       const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
-      await expect(load(labels, { retainedBytes: 100 * 1024 * 1024 })).rejects.toThrow(/too large|memory budget/i);
+      await expect(load(labels, { retainedBytes: 100 * 1024 * 1024 })).rejects.toThrow(
+        /open volume and working data.*even a small enhancement/i,
+      );
       expect(mocks.reconstruct).not.toHaveBeenCalled();
+      expect(mocks.removeCachedImage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'reclaims only idle MRI and protects displayed loader aliases before %s native preparation',
+    async (reload) => {
+      const mib = 1024 * 1024;
+      const comparisonData = nativeComparisonData();
+      const { sourceManifest, previous, labels } = nativeEnhancementFixture(
+        reload ? [24, 64, 64] : [64, 64, 64],
+        reload ? [20, 0, 0] : [0, 0, 0],
+        reload ? [12, 32, 32] : [32, 32, 32],
+      );
+      const displayedImage = { imageId: 'dicomfile:0' };
+      mocks.cachedImages.push(
+        {
+          imageId: 'miradb:displayed',
+          sizeInBytes: 64 * mib,
+          timeStamp: 1,
+          loaded: true,
+          image: displayedImage,
+          imageLoadObject: {},
+        },
+        { imageId: 'miradb:loading', sizeInBytes: 80 * mib, timeStamp: 2, loaded: false, imageLoadObject: {} },
+        // Inner file-manager IDs can be reused; a different object with the
+        // same dicomfile ID must not be mistaken for the displayed frame.
+        {
+          imageId: 'miradb:idle-old',
+          sizeInBytes: 80 * mib,
+          timeStamp: 3,
+          loaded: true,
+          image: { imageId: 'dicomfile:0' },
+          imageLoadObject: {},
+        },
+        { imageId: 'miraderived:idle-recent', sizeInBytes: 176 * mib, timeStamp: 4, loaded: true, imageLoadObject: {} },
+      );
+      mocks.cacheInfo.mockImplementation(() => ({
+        cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
+        maximumSizeInBytes: 512 * mib,
+      }));
+      mocks.enabledElements.mockReturnValue([{ image: displayedImage }]);
+      mocks.manifests.mockResolvedValue(sourceManifest);
+      mocks.hook.result = previous;
+      mocks.hook.resultIdentity = identity(comparisonData);
+      mocks.hook.status = 'ready';
+      const loaded = nativeEnhancementFixture([33, 33, 33], [16, 16, 16], [16, 16, 16]).previous;
+      mocks.reconstruct.mockResolvedValue(loaded);
+      render(<Svr3DView data={comparisonData} />);
+      openSources();
+      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+      const before = previous.volume.data.slice();
+      const result = await load(labels, { retainedBytes: 100 * mib });
+      expect(result.dims.every((size) => size >= 32)).toBe(true);
+      expect(result.voxelSizeMm).toEqual([1, 1, 1]);
+      expect(mocks.removeCachedImage.mock.calls).toEqual([['miradb:idle-old']]);
+      expect(mocks.cachedImages.map((entry) => entry.imageId)).toEqual([
+        'miradb:displayed',
+        'miradb:loading',
+        'miraderived:idle-recent',
+      ]);
+      expect(previous.volume.data).toEqual(before);
+      expect(labels.data.reduce((total, value) => total + value, 0)).toBe(1);
+      if (reload) {
+        expect(mocks.reconstruct).toHaveBeenCalledOnce();
+        expect(mocks.reconstruct.mock.lastCall![0].retainedBytes).toBe(
+          retainedSvrVolumeBytes(previous.volume) + 100 * mib,
+        );
+      } else expect(mocks.reconstruct).not.toHaveBeenCalled();
+    },
+  );
+
+  it('counts the raw alignment-frame cache separately from decoded presentation images', async () => {
+    const mib = 1024 * 1024;
+    const comparisonData = nativeComparisonData();
+    const { sourceManifest, previous, labels } = nativeEnhancementFixture([64, 64, 64], [0, 0, 0], [32, 32, 32]);
+    mocks.retainedAlignmentBytes.mockReturnValue(64 * mib);
+    mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 380 * mib });
+    mocks.manifests.mockResolvedValue(sourceManifest);
+    mocks.hook.result = previous;
+    mocks.hook.resultIdentity = identity(comparisonData);
+    mocks.hook.status = 'ready';
+    render(<Svr3DView data={comparisonData} />);
+    openSources();
+    await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+    const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+    await expect(load(labels, {})).rejects.toThrow(/no room for even a small enhancement/i);
+    expect(mocks.reconstruct).not.toHaveBeenCalled();
+    expect(mocks.removeCachedImage).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'rechecks decoded cache after native source loading (new frames protected: %s)',
+    async (protectedFrame) => {
+      const mib = 1024 * 1024;
+      const comparisonData = nativeComparisonData();
+      const { sourceManifest, previous, labels } = nativeEnhancementFixture([24, 64, 64], [20, 0, 0], [12, 32, 32]);
+      mocks.cachedImages.push({
+        imageId: 'miradb:displayed',
+        sizeInBytes: 320 * mib,
+        timeStamp: 1,
+        loaded: true,
+        imageLoadObject: {},
+      });
+      mocks.cacheInfo.mockImplementation(() => ({
+        cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
+        maximumSizeInBytes: 512 * mib,
+      }));
+      mocks.enabledElements.mockReturnValue([{ image: { imageId: 'miradb:displayed' } }]);
+      mocks.manifests.mockResolvedValue(sourceManifest);
+      mocks.hook.result = previous;
+      mocks.hook.resultIdentity = identity(comparisonData);
+      mocks.hook.status = 'ready';
+      const loaded = nativeEnhancementFixture([33, 33, 33], [16, 16, 16], [16, 16, 16]).previous;
+      mocks.reconstruct.mockImplementation(async () => {
+        mocks.cachedImages.push({
+          imageId: 'miradb:new-frame',
+          sizeInBytes: 80 * mib,
+          timeStamp: 2,
+          loaded: true,
+          imageLoadObject: {},
+        });
+        if (protectedFrame)
+          mocks.enabledElements.mockReturnValue([
+            { image: { imageId: 'miradb:displayed' } },
+            { image: { imageId: 'miradb:new-frame' } },
+          ]);
+        return loaded;
+      });
+      render(<Svr3DView data={comparisonData} />);
+      openSources();
+      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
+      if (protectedFrame) {
+        await expect(load(labels, { retainedBytes: 100 * mib })).rejects.toThrow(
+          /no room for even a small enhancement/i,
+        );
+        expect(mocks.removeCachedImage).not.toHaveBeenCalled();
+      } else {
+        await expect(load(labels, { retainedBytes: 100 * mib })).resolves.toBe(loaded.volume);
+        expect(mocks.removeCachedImage.mock.calls).toEqual([['miradb:new-frame']]);
+      }
+      expect(mocks.reconstruct).toHaveBeenCalledOnce();
     },
   );
 
