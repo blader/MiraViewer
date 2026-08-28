@@ -69,22 +69,25 @@ export function HelpModal({ onClose }: HelpModalProps) {
           </h3>
           <ul className="space-y-2">
             <li>
-              <Label>Drag a rectangle</Label> on any image (Grid or Overlay), then choose an action:
-              <Label>Align All</Label> (exclude the selected region), <Label>Align Tumor</Label> (match its tumor
-              slice), or <Label>Segment</Label> (start a tumor segmentation).
+              Visible scans align automatically after you stop browsing. The first visible examination stays fixed; the
+              others follow its slice position and display adjustments. No tumor selection is required.
             </li>
             <li>
-              <Label>Align All</Label> ignores pixels inside the selected region when matching scans.
+              Alignment uses anatomical detail across neighboring slices, independently of the slice on screen. A cached
+              transform is reused as you browse; an empty slice does not trigger a new pose estimate.
             </li>
             <li>
-              <Label>Align Tumor</Label> still aligns pose using surrounding healthy anatomy, then uses pixels inside
-              the selected region only to match the tumor slice.
+              Use <Label>Pause automatic alignment</Label> to stop background adjustments without changing the current
+              view. Manual adjustments to a target examination are kept until you choose <Label>Realign</Label>.
             </li>
             <li>
-              Press <Kbd>Esc</Kbd> or the <Label>X</Label> button to clear the selection.
+              <Label>Drag a rectangle</Label> on an image to <Label>Segment</Label> a region. Press <Kbd>Esc</Kbd>
+              to clear the selection; selections do not change automatic alignment. For an aligned panel, choose{' '}
+              <Label>View acquired</Label> first to annotate its original source image.
             </li>
             <li>
-              Click <Label>Cancel</Label> to abort alignment while running.
+              Aligned images are derived presentations, not new acquired detail. Always review anatomical
+              correspondence; automatic alignment does not identify or diagnose a tumor.
             </li>
           </ul>
         </section>
@@ -94,7 +97,10 @@ export function HelpModal({ onClose }: HelpModalProps) {
           <h3 className="mb-3 font-[family-name:var(--font-mono)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--signal-metal)]">
             Image adjustments
           </h3>
-          <p className="mb-2">Hover over an image to reveal controls:</p>
+          <p className="mb-2">
+            Choose <Label>Adjust</Label> beside an examination date. Its controls open in an inspector while the image
+            stays visible.
+          </p>
           <ul className="space-y-1.5 ml-3">
             <li>
               <Label>Slice</Label> — per-date offset from the global position
@@ -103,10 +109,11 @@ export function HelpModal({ onClose }: HelpModalProps) {
               <Label>Zoom</Label>, <Label>Rotation</Label> — geometry
             </li>
             <li>
-              <Label>B</Label> (brightness) &amp; <Label>C</Label> (contrast) — window/level
+              <Label>Brightness</Label> &amp; <Label>Contrast</Label> — display tone. Reset them without changing slice
+              position or alignment.
             </li>
             <li>
-              <Label>Rev</Label> — reverse slice order for that date
+              <Label>Reverse slice order</Label> — change navigation direction while keeping the same physical slice
             </li>
           </ul>
           <p className="mt-2 text-xs italic">Hold arrow buttons for rapid adjustment.</p>
@@ -118,6 +125,10 @@ export function HelpModal({ onClose }: HelpModalProps) {
             Slice loop (bottom bar)
           </h3>
           <ul className="space-y-2">
+            <li>
+              Type a number in <Label>Slice</Label> and press <Kbd>Enter</Kbd> to jump to an exact slice. Press{' '}
+              <Kbd>Esc</Kbd> to discard an edit.
+            </li>
             <li>
               Press <Label>Play</Label> to ping-pong through slices within the loop window.
             </li>
@@ -136,7 +147,10 @@ export function HelpModal({ onClose }: HelpModalProps) {
             Tips
           </h3>
           <ul className="space-y-1.5 list-disc list-inside">
-            <li>The global slice slider syncs anatomical position across all dates.</li>
+            <li>
+              The global slice slider moves all selected examinations together. Align them first to establish anatomical
+              correspondence.
+            </li>
             <li>All settings persist automatically in your browser.</li>
           </ul>
         </section>

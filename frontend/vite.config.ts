@@ -8,6 +8,7 @@ import type { PluginOption } from 'vite';
 // https://vite.dev/config/
 export default defineConfig(() => {
   const isVitest = process.env.VITEST === 'true';
+  const usePolling = /^(1|true)$/i.test(process.env.CHOKIDAR_USEPOLLING ?? '');
   const plugins: PluginOption[] = [react(), tailwindcss()];
 
   if (!isVitest) {
@@ -59,6 +60,9 @@ export default defineConfig(() => {
       // Keep a stable dev URL and avoid Vite auto-incrementing to 43125/43126 if 43124 is already in use.
       port: 43124,
       strictPort: true,
+      // On macOS Chokidar chooses FSEvents before reading the polling env var.
+      // Set both options so opt-in polling actually refreshes edited worktrees.
+      watch: usePolling ? { usePolling: true, useFsEvents: false } : undefined,
       // Cross-origin isolation unlocks multithreaded WASM for ONNX inference (see
       // ortLoader.ts, which keys off crossOriginIsolated). Safe here because every runtime
       // asset (ORT, ITK pipelines, DICOM data) is same-origin. The offline launcher sends

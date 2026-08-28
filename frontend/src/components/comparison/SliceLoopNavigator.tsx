@@ -95,6 +95,62 @@ function LoopRangeHandles({
   });
 }
 
+function SliceNumberField({
+  value,
+  count,
+  disabled,
+  onSelect,
+  onStartEditing,
+}: {
+  value: number;
+  count: number;
+  disabled: boolean;
+  onSelect: (slice: number) => void;
+  onStartEditing: () => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <>
+      <span>Slice</span>
+      <input
+        type="number"
+        min={1}
+        max={count}
+        step={1}
+        inputMode="numeric"
+        className="slice-number-input"
+        aria-label="Go to slice"
+        title={`Enter a slice from 1 to ${count}, then press Enter`}
+        disabled={disabled}
+        value={draft ?? value}
+        onFocus={(event) => {
+          onStartEditing();
+          event.currentTarget.select();
+        }}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          if (!disabled && draft !== null && draft.trim() !== '') {
+            const slice = Number(draft);
+            if (Number.isInteger(slice) && slice >= 1 && slice <= count) onSelect(slice);
+          }
+          setDraft(null);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            event.currentTarget.blur();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            setDraft(null);
+          }
+        }}
+      />
+      <span>/ {count}</span>
+    </>
+  );
+}
+
 export function SliceLoopNavigator({
   selectedSeqId,
   playbackInstanceCount,
@@ -323,8 +379,19 @@ export function SliceLoopNavigator({
         </div>
       </div>
 
-      <div className="shrink-0 whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
-        {currentSlice === null ? 'No slices' : `Slice ${currentSlice} / ${playbackInstanceCount}`}
+      <div className="slice-number-control shrink-0 whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
+        {currentSlice === null ? (
+          'No slices'
+        ) : (
+          <SliceNumberField
+            key={selectedSeqId}
+            value={currentSlice}
+            count={playbackInstanceCount}
+            disabled={interactionBlocked}
+            onStartEditing={() => setIsLooping(false)}
+            onSelect={(slice) => setProgress(playbackInstanceCount > 1 ? (slice - 1) / (playbackInstanceCount - 1) : 0)}
+          />
+        )}
       </div>
 
       <div

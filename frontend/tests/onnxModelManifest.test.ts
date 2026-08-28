@@ -26,6 +26,12 @@ describe('verified ONNX tumor model contracts', () => {
     await expect(verifyTumorModelManifest(model, null)).rejects.toThrow(/unverified/i);
   });
 
+  it.each(['patient-lps', 'source-grid'])('retains the verified explicit %s spatial contract', async (spatialFrame) => {
+    await expect(
+      verifyTumorModelManifest(model, await manifest({ input: { channels: 1, axes: 'NCZYX', spatialFrame } })),
+    ).resolves.toMatchObject({ input: { spatialFrame } });
+  });
+
   it('rejects a manifest bound to another ONNX file', async () => {
     await expect(verifyTumorModelManifest(model, await manifest({ modelSha256: '0'.repeat(64) }))).rejects.toThrow(
       /does not match/i,
@@ -37,6 +43,7 @@ describe('verified ONNX tumor model contracts', () => {
     [{ normalization: 'z-score' }, /preprocessing/i],
     [{ input: { channels: 4, axes: 'NCZYX' } }, /one input channel/i],
     [{ input: { channels: 1, axes: 'NXYZC' } }, /NCZYX/i],
+    [{ input: { channels: 1, axes: 'NCZYX', spatialFrame: 'guessed-native' } }, /spatialFrame/i],
     [
       {
         classes: TUMOR_MODEL_MANIFEST_EXAMPLE.classes.map((item) =>

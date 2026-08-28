@@ -42,7 +42,11 @@ export function useGridLayout(itemCount: number) {
     const availableHeight = Math.max(0, height - 2 * margin);
 
     if (width <= 640) {
-      return { cols: 1, cellSize: Math.max(1, Math.floor(availableWidth)), gridSize };
+      return {
+        cols: 1,
+        cellSize: Math.max(1, Math.floor(Math.min(availableWidth, availableHeight - GRID_CELL_METADATA_HEIGHT))),
+        gridSize,
+      };
     }
 
     let bestCols = 1;

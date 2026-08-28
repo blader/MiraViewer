@@ -211,5 +211,28 @@ describe('cornerstoneInit', () => {
     Object.assign(nativeImage, { windowCenter: Number.NaN, windowWidth: 1 });
     const invalidCenter = await derivedLoader('miraderived:invalid-window-center').promise;
     expect(invalidCenter).toMatchObject({ windowCenter: 0.5, windowWidth: 3 });
+
+    const raw = Float32Array.from([0, 25, 50, 75, 100, -100]);
+    sources.derived.mockReturnValue({
+      rows: 2,
+      columns: 3,
+      pixels: raw,
+      valid: Uint8Array.from([1, 1, 1, 1, 1, 0]),
+      sourceImageId: 'miradb:native-frame',
+      displayTone: { windowCenter: 50, windowWidth: 100, source: [0.25, 0.5, 0.75], reference: [0.3, 0.55, 0.8] },
+    });
+    const calibrated = await derivedLoader('miraderived:calibrated').promise;
+    const calibratedLuminance = renderImageLuminance(calibrated, false);
+    expect(calibratedLuminance[0]).toBe(0);
+    expect(calibratedLuminance[5]).toBe(0);
+    for (const [index, value] of [
+      [1, 0.3],
+      [2, 0.55],
+      [3, 0.8],
+      [4, 1],
+    ]) {
+      expect(Math.abs(calibratedLuminance[index]! / 255 - value!)).toBeLessThan(1 / 255);
+    }
+    expect(Array.from(raw)).toEqual([0, 25, 50, 75, 100, -100]);
   });
 });

@@ -163,6 +163,8 @@ export interface AlignmentResult {
   slicesChecked: number; // For debugging/stats
   /** Immutable producing-operation and target identities. */
   runId?: string;
+  /** Visible-view identity for background results; stale navigation may not apply them. */
+  requestKey?: string;
   patientKey?: string;
   sequenceId?: string;
   referenceSeriesUid?: string;

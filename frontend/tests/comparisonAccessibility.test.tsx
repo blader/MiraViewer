@@ -51,7 +51,10 @@ describe('comparison accessibility', () => {
 
     const { rerender } = render(<ComparisonFiltersSidebar {...props} />);
     expect(screen.getByRole('complementary', { name: /scan filters/i })).toHaveAttribute('inert');
-    expect(screen.getByRole('button', { name: /show scan filters/i })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('complementary', { name: /scan filters/i })).toHaveAttribute(
+      'id',
+      'comparison-filters-panel',
+    );
 
     rerender(<ComparisonFiltersSidebar {...props} open />);
     const unclassified = screen.getByRole('button', { name: 'Unclassified' });
@@ -89,10 +92,10 @@ describe('comparison accessibility', () => {
     expect(contrastRatio('#ffffff', token('accent'))).toBeGreaterThanOrEqual(4.5);
 
     expect(stylesheet).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
-    expect(stylesheet).toMatch(/@media\s*\(hover:\s*none\)/);
-    expect(stylesheet).toMatch(/\.study-cell:focus-within\s+\.study-controls/);
+    expect(stylesheet).toMatch(/@media\s*\(pointer:\s*coarse\)/);
+    expect(stylesheet).toMatch(/\.study-tools-trigger\[aria-expanded=['"]true['"]\]/);
     expect(stylesheet).toMatch(/\.svr-generation-layout\[data-generation-open=['"]true['"]\]/);
-    expect(stylesheet).toMatch(/\.svr-volume-layout\[data-controls-open=['"]true['"]\]/);
+    expect(stylesheet).toMatch(/\.svr-scene-body\[data-settings-open=['"]true['"]\]/);
   });
 
   it('immediately cancels active slice playback and disables navigation while interaction is blocked', () => {

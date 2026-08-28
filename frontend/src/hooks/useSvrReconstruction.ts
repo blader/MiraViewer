@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SvrParams, SvrProgress, SvrResult, SvrSelectedSeries } from '../types/svr';
+import type { SvrLabelVolume, SvrParams, SvrProgress, SvrResult, SvrSelectedSeries, SvrVolume } from '../types/svr';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
+import { resampleSelectionForRefinement } from '../utils/svr/refineRegion';
+import { retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 
 export type UseSvrReconstructionState = {
   status: 'idle' | 'running' | 'canceling' | 'ready' | 'canceled' | 'failed';
@@ -31,12 +33,14 @@ export function useSvrReconstruction() {
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
   const lastProgressUpdateMsRef = useRef(0);
+  const acceptedResultRef = useRef<SvrResult | null>(null);
 
   useEffect(
     () => () => {
       runIdRef.current++;
       abortRef.current?.abort();
       abortRef.current = null;
+      acceptedResultRef.current = null;
     },
     [],
   );
@@ -59,6 +63,7 @@ export function useSvrReconstruction() {
     runIdRef.current++;
     abortRef.current?.abort();
     abortRef.current = null;
+    acceptedResultRef.current = null;
     setState({ status: 'idle', isRunning: false, progress: null, result: null, resultIdentity: null, error: null });
   }, []);
 
@@ -67,6 +72,7 @@ export function useSvrReconstruction() {
       selectedSeries: SvrSelectedSeries[],
       params?: Partial<SvrParams>,
       identity?: string,
+      selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume },
     ): Promise<SvrRunOutcome> => {
       abortRef.current?.abort();
 
@@ -95,9 +101,14 @@ export function useSvrReconstruction() {
       const started = performance.now();
 
       try {
-        const result = await reconstructVolumeMultiPlane({
+        const reconstruction = await reconstructVolumeMultiPlane({
           selectedSeries,
           svrParams,
+          acceptedProvenance: selectionToRefine?.volume.sourceProvenance,
+          retainedBytes: [...new Set([acceptedResultRef.current?.volume, selectionToRefine?.volume])].reduce(
+            (bytes, volume) => bytes + retainedSvrVolumeBytes(volume),
+            0,
+          ),
           signal: controller.signal,
           onProgress: (p) => {
             if (runIdRef.current !== runId || controller.signal.aborted) return;
@@ -128,6 +139,19 @@ export function useSvrReconstruction() {
           },
         });
 
+        const result =
+          selectionToRefine && !controller.signal.aborted && runIdRef.current === runId
+            ? {
+                ...reconstruction,
+                initialSelection: await resampleSelectionForRefinement(
+                  selectionToRefine.volume,
+                  selectionToRefine.labels,
+                  reconstruction.volume,
+                  controller.signal,
+                ),
+              }
+            : reconstruction;
+
         if (runIdRef.current !== runId || controller.signal.aborted) {
           return {
             result: null,
@@ -136,6 +160,7 @@ export function useSvrReconstruction() {
           };
         }
 
+        acceptedResultRef.current = result;
         setState({
           status: 'ready',
           isRunning: false,

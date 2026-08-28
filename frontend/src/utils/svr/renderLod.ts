@@ -219,6 +219,8 @@ function buildAxisFootprints(srcSize: number, dstSize: number): AxisFootprint[] 
 /** Integrate each destination footprint instead of point-sampling aliased anatomy. */
 async function resampleVolumeAreaAverage(params: {
   src: Float32Array;
+  intensityRange?: readonly [number, number];
+  invert?: boolean;
   srcObservedSupport?: Uint8Array;
   srcDims: RenderDims;
   dstDims: RenderDims;
@@ -226,6 +228,8 @@ async function resampleVolumeAreaAverage(params: {
   isCancelled: () => boolean;
 }): Promise<RenderVolumeTexData> {
   const { src, srcObservedSupport, srcDims, dstDims, kind, isCancelled } = params;
+  const [intensityLow, intensityHigh] = params.intensityRange ?? [0, 1];
+  const inverseRange = 1 / Math.max(Number.EPSILON, intensityHigh - intensityLow);
   const length = dstDims.nx * dstDims.ny * dstDims.nz;
   const out = kind === 'f32' ? new Float32Array(length) : new Uint8Array(length);
   const observedSupport = srcObservedSupport ? new Uint8Array(length) : undefined;
@@ -311,7 +315,8 @@ async function resampleVolumeAreaAverage(params: {
     for (let index = 0; index < dstStrideZ; index++) {
       const acquiredWeight = planeSupport ? planeSupport[index]! : fullFootprintWeight;
       if (!(acquiredWeight > 0)) continue;
-      const value = clamp(destination[index]! / acquiredWeight, 0, 1);
+      const normalized = clamp((destination[index]! / acquiredWeight - intensityLow) * inverseRange, 0, 1);
+      const value = params.invert ? 1 - normalized : normalized;
       const destinationIndex = destinationOffset + index;
       out[destinationIndex] = kind === 'u8' ? Math.round(value * 255) : value;
       if (observedSupport) {
@@ -333,12 +338,21 @@ async function resampleVolumeAreaAverage(params: {
 
 export async function buildRenderVolumeTexData(params: {
   src: Float32Array;
+  /** Display-only affine. Native signed modality values remain untouched in src. */
+  intensityRange?: readonly [number, number];
+  invert?: boolean;
   srcObservedSupport?: Uint8Array;
   srcDims: RenderDims;
   plan: Pick<RenderPlan, 'dims' | 'kind'>;
   isCancelled: () => boolean;
 }): Promise<RenderVolumeTexData> {
   const { src, srcObservedSupport, srcDims, plan, isCancelled } = params;
+  const [intensityLow, intensityHigh] = params.intensityRange ?? [0, 1];
+  if (!Number.isFinite(intensityLow) || !Number.isFinite(intensityHigh) || intensityHigh <= intensityLow) {
+    throw new Error('The display intensity range must be finite and increasing.');
+  }
+  const normalize = intensityLow !== 0 || intensityHigh !== 1 || params.invert;
+  const inverseRange = 1 / (intensityHigh - intensityLow);
 
   const sourceLength = srcDims.nx * srcDims.ny * srcDims.nz;
   if (src.length !== sourceLength) {
@@ -358,6 +372,8 @@ export async function buildRenderVolumeTexData(params: {
   if (!isSameDims) {
     return resampleVolumeAreaAverage({
       src,
+      intensityRange: params.intensityRange,
+      invert: params.invert,
       srcObservedSupport,
       srcDims,
       dstDims,
@@ -366,8 +382,9 @@ export async function buildRenderVolumeTexData(params: {
     });
   }
 
-  let data: Float32Array | Uint8Array = plan.kind === 'u8' ? new Uint8Array(src.length) : src;
-  if (plan.kind === 'u8' || srcObservedSupport) {
+  let data: Float32Array | Uint8Array =
+    plan.kind === 'u8' ? new Uint8Array(src.length) : normalize ? new Float32Array(src.length) : src;
+  if (plan.kind === 'u8' || srcObservedSupport || normalize) {
     let lastYield = performance.now();
     const chunkSize = 131_072;
 
@@ -378,7 +395,15 @@ export async function buildRenderVolumeTexData(params: {
       if (plan.kind === 'u8') {
         for (let index = start; index < end; index++) {
           if (!srcObservedSupport || srcObservedSupport[index]) {
-            data[index] = Math.round(clamp(src[index] ?? 0, 0, 1) * 255);
+            const value = clamp(((src[index] ?? 0) - intensityLow) * inverseRange, 0, 1);
+            data[index] = Math.round((params.invert ? 1 - value : value) * 255);
+          }
+        }
+      } else if (normalize) {
+        for (let index = start; index < end; index++) {
+          if ((!srcObservedSupport || srcObservedSupport[index]) && Number.isFinite(src[index])) {
+            const value = clamp((src[index]! - intensityLow) * inverseRange, 0, 1);
+            data[index] = params.invert ? 1 - value : value;
           }
         }
       } else if (srcObservedSupport) {
@@ -430,15 +455,12 @@ export function updateLabelsNearestRegion(params: {
 }): RegionBox | null {
   const { src, srcDims, dst, dstDims, srcBox } = params;
 
-  // Invert the dst->src nearest mapping (sx = round(dx * k), k = (srcN-1)/(dstN-1)) to a
-  // conservative dst range per axis: every dst index whose rounded source can land inside
-  // [s0, s1]. The ±0.5 accounts for round()'s half-open buckets; clamping handles edges.
+  // Invert the same pixel-center mapping used by the intensity footprint. Endpoint
+  // interpolation would displace categorical labels by up to half a coarse voxel.
   const mapAxisToDstRange = (s0: number, s1: number, srcN: number, dstN: number): [number, number] => {
-    if (dstN <= 1 || srcN <= 1) return [0, dstN - 1];
-    const k = (srcN - 1) / (dstN - 1);
-    if (!(k > 0)) return [0, dstN - 1];
-    const d0 = Math.max(0, Math.floor((s0 - 0.5) / k));
-    const d1 = Math.min(dstN - 1, Math.ceil((s1 + 0.5) / k));
+    const k = dstN / srcN;
+    const d0 = Math.max(0, Math.floor(s0 * k - 0.5));
+    const d1 = Math.min(dstN - 1, Math.ceil((s1 + 1) * k - 0.5));
     return [d0, d1];
   };
 
@@ -455,17 +477,16 @@ export function updateLabelsNearestRegion(params: {
   const dstStrideZ = dstDims.nx * dstDims.ny;
 
   for (let z = dz0; z <= dz1; z++) {
-    // Same nearest formula as downsampleLabelsNearest (see note above).
-    const sz = dstDims.nz > 1 ? Math.round((z / (dstDims.nz - 1)) * Math.max(0, srcDims.nz - 1)) : 0;
+    const sz = Math.min(srcDims.nz - 1, Math.floor(((z + 0.5) * srcDims.nz) / dstDims.nz));
 
     for (let y = dy0; y <= dy1; y++) {
-      const sy = dstDims.ny > 1 ? Math.round((y / (dstDims.ny - 1)) * Math.max(0, srcDims.ny - 1)) : 0;
+      const sy = Math.min(srcDims.ny - 1, Math.floor(((y + 0.5) * srcDims.ny) / dstDims.ny));
 
       const srcBase = sz * srcStrideZ + sy * srcStrideY;
       const dstBase = z * dstStrideZ + y * dstStrideY;
 
       for (let x = dx0; x <= dx1; x++) {
-        const sx = dstDims.nx > 1 ? Math.round((x / (dstDims.nx - 1)) * Math.max(0, srcDims.nx - 1)) : 0;
+        const sx = Math.min(srcDims.nx - 1, Math.floor(((x + 0.5) * srcDims.nx) / dstDims.nx));
         dst[dstBase + x] = src[srcBase + sx] ?? 0;
       }
     }
@@ -479,31 +500,14 @@ export function downsampleLabelsNearest(params: {
   srcDims: RenderDims;
   dstDims: RenderDims;
 }): Uint8Array {
-  const { src, srcDims, dstDims } = params;
+  const { srcDims, dstDims } = params;
 
   const out = new Uint8Array(dstDims.nx * dstDims.ny * dstDims.nz);
-
-  const srcStrideY = srcDims.nx;
-  const srcStrideZ = srcDims.nx * srcDims.ny;
-
-  const dstStrideY = dstDims.nx;
-  const dstStrideZ = dstDims.nx * dstDims.ny;
-
-  for (let z = 0; z < dstDims.nz; z++) {
-    const sz = dstDims.nz > 1 ? Math.round((z / (dstDims.nz - 1)) * Math.max(0, srcDims.nz - 1)) : 0;
-
-    for (let y = 0; y < dstDims.ny; y++) {
-      const sy = dstDims.ny > 1 ? Math.round((y / (dstDims.ny - 1)) * Math.max(0, srcDims.ny - 1)) : 0;
-
-      const srcBase = sz * srcStrideZ + sy * srcStrideY;
-      const dstBase = z * dstStrideZ + y * dstStrideY;
-
-      for (let x = 0; x < dstDims.nx; x++) {
-        const sx = dstDims.nx > 1 ? Math.round((x / (dstDims.nx - 1)) * Math.max(0, srcDims.nx - 1)) : 0;
-        out[dstBase + x] = src[srcBase + sx] ?? 0;
-      }
-    }
-  }
+  updateLabelsNearestRegion({
+    ...params,
+    dst: out,
+    srcBox: { min: { x: 0, y: 0, z: 0 }, max: { x: srcDims.nx - 1, y: srcDims.ny - 1, z: srcDims.nz - 1 } },
+  });
 
   return out;
 }

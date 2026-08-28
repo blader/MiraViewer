@@ -1,9 +1,10 @@
 import { Suspense, useMemo, useState, useRef, useSyncExternalStore } from 'react';
-import { Crosshair, Link2, Loader2, ScanLine } from 'lucide-react';
-import type { AlignmentProgress, AlignmentReference, ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
+import { ScanLine } from 'lucide-react';
+import type { ExclusionMask, PanelSettings, SeriesRef } from '../../types/api';
 import { formatDate } from '../../utils/format';
 import { getSliceIndex, getEffectiveInstanceIndex, getProgressFromSlice } from '../../utils/math';
-import { ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { AcquiredImageAction, ImageControls, StudyAnnotationControls, VerifiedAlignmentBadge } from '../ImageControls';
+import { StudyTools } from './StudyTools';
 import { StepControl } from '../StepControl';
 import { DragRectActionOverlay } from '../DragRectActionOverlay';
 import { DicomViewer, type DicomViewerHandle } from '../DicomViewer';
@@ -23,126 +24,39 @@ export type GridCellProps = {
   setProgress: (next: number) => void;
   updatePanelSetting: (date: string, update: Partial<PanelSettings>) => void;
 
-  isHovered: boolean;
-
-  overlayColumns: { date: string; ref?: SeriesRef }[];
-  isAligning: boolean;
-
-  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
+  onUseAcquired?: (date: string) => void;
 };
 
 type NormalizedRoi = { x0: number; y0: number; x1: number; y1: number };
 
-export function AlignmentProgressCard({ progress, onAbort }: { progress: AlignmentProgress; onAbort: () => void }) {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex items-center gap-3 rounded-[5px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3"
-    >
-      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--signal-metal)]" />
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-[var(--text-primary)]">
-          {progress.phase === 'capturing'
-            ? 'Preparing reference…'
-            : progress.currentDate
-              ? `Aligning ${formatDate(progress.currentDate)} (${progress.dateIndex + 1}/${progress.totalDates})`
-              : 'Aligning…'}
-        </div>
-        {progress.phase !== 'capturing' && progress.slicesChecked ? (
-          <div className="font-[family-name:var(--font-mono)] text-xs text-[var(--text-secondary)]">
-            {progress.slicesChecked} slices · Score {progress.bestMiSoFar.toFixed(3)}
-          </div>
-        ) : null}
-      </div>
-      <button
-        type="button"
-        onClick={onAbort}
-        className="min-h-9 shrink-0 rounded-[3px] border border-[var(--border-color)] px-2.5 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-        title="Cancel alignment"
-      >
-        Cancel
-      </button>
-    </div>
-  );
-}
-
 export function StudySelectionSurface({
   reference,
   presentation,
-  startAlignAll,
   onSegment,
   children,
 }: {
   reference: {
-    date: string;
-    series: SeriesRef;
-    sliceIndex: number;
     settings: PanelSettings;
     imageSize: { width: number; height: number };
-    surfaceRef: React.RefObject<HTMLDivElement | null>;
   };
   presentation: {
-    columnCount: number;
-    isAligning: boolean;
     isComparing: boolean;
     groundTruthOpen: boolean;
     nativeAnnotationsAvailable: boolean;
   };
-  startAlignAll: (reference: AlignmentReference, exclusion: ExclusionMask) => Promise<void>;
   onSegment: (selection: ExclusionMask) => void;
   children: React.ReactNode;
 }) {
-  const { date, series, sliceIndex, settings, imageSize, surfaceRef } = reference;
-  const { columnCount, isAligning, isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
-  const startAlignment = (exclusion: ExclusionMask, alignmentFocus?: 'tumor') => {
-    const bounds = surfaceRef.current?.getBoundingClientRect();
-    void startAlignAll(
-      {
-        date,
-        seriesUid: series.series_uid,
-        sliceIndex,
-        sliceCount: series.instance_count,
-        patientKey: series.patient_key,
-        studyUid: series.study_uid ?? series.study_id,
-        frameOfReferenceUid: series.frame_of_reference_uid,
-        imageSize,
-        viewportSize:
-          bounds && bounds.width > 0 && bounds.height > 0 ? { width: bounds.width, height: bounds.height } : undefined,
-        settings,
-        ...(alignmentFocus ? { alignmentFocus } : {}),
-      },
-      exclusion,
-    );
-  };
+  const { settings, imageSize } = reference;
+  const { isComparing, groundTruthOpen, nativeAnnotationsAvailable } = presentation;
 
   return (
     <DragRectActionOverlay
       className="absolute inset-0 cursor-crosshair"
       imageSize={imageSize}
       geometry={settings}
-      disabled={isAligning || isComparing || groundTruthOpen}
+      disabled={isComparing || groundTruthOpen}
       actions={[
-        {
-          key: 'align-all',
-          label: 'Align All',
-          title: `Align all other dates to ${formatDate(date)}`,
-          icon: <Link2 className="w-4 h-4" />,
-          variant: 'primary',
-          minSizeSpace: 'base',
-          disabled: columnCount < 2 || isAligning,
-          onConfirm: (masks) => startAlignment(masks.base),
-        },
-        {
-          key: 'align-tumor',
-          label: 'Align Tumor',
-          title: 'Match tumor across dates; uses pixels inside the selected region',
-          icon: <Crosshair className="w-4 h-4" />,
-          variant: 'secondary',
-          minSizeSpace: 'base',
-          disabled: columnCount < 2 || isAligning || isComparing || !nativeAnnotationsAvailable,
-          onConfirm: (masks) => startAlignment(masks.base, 'tumor'),
-        },
         {
           key: 'segment-tumor',
           label: 'Segment',
@@ -150,7 +64,7 @@ export function StudySelectionSurface({
           icon: <ScanLine className="w-4 h-4" />,
           variant: 'secondary',
           minSizeSpace: 'screen',
-          disabled: isAligning || isComparing || !nativeAnnotationsAvailable,
+          disabled: isComparing || !nativeAnnotationsAvailable,
           onConfirm: (masks) => onSegment(masks.screen),
         },
       ]}
@@ -168,17 +82,13 @@ export function GridCell({
   progress,
   setProgress,
   updatePanelSetting,
-  isHovered,
-  overlayColumns,
-  isAligning,
-  startAlignAll,
+  onUseAcquired,
 }: GridCellProps) {
   const [showSavedTumor, setShowSavedTumor] = useState(false);
   const [tumorToolOpen, setTumorToolOpen] = useState(false);
   const [tumorSeedBoxToStart, setTumorSeedBoxToStart] = useState<NormalizedRoi | null>(null);
   const [gtPolygonToolOpen, setGtPolygonToolOpen] = useState(false);
   const tumorViewerRef = useRef<DicomViewerHandle | null>(null);
-  const studyCellRef = useRef<HTMLDivElement | null>(null);
   const nativeImageSize = useMemo(
     () => ({ w: refData?.columns ?? 512, h: refData?.rows ?? 512 }),
     [refData?.columns, refData?.rows],
@@ -209,21 +119,15 @@ export function GridCell({
     <div
       data-grid-cell-date={date}
       data-alignment-state={derivedFrame ? 'aligned' : 'acquired'}
-      data-controls-visible={isHovered || tumorToolOpen || gtPolygonToolOpen}
       className="study-cell relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-primary)]"
     >
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-primary)]">
-            {formatDate(date)}
-          </span>
+      <div className="study-heading">
+        <div className="study-heading-identity">
+          <span className="study-date">{formatDate(date)}</span>
           {derivedFrame ? <VerifiedAlignmentBadge /> : null}
         </div>
 
-        <div
-          inert={isAligning}
-          className="study-controls ml-auto flex min-w-0 items-center gap-2 overflow-x-auto transition-opacity duration-100"
-        >
+        <StudyTools examinationLabel={formatDate(date)}>
           <StudyAnnotationControls
             showSavedTumor={showSavedTumor}
             tumorToolOpen={tumorToolOpen}
@@ -241,27 +145,20 @@ export function GridCell({
             onUpdate={(update) => updatePanelSetting(date, update)}
             showSliceControl={false}
           />
-        </div>
+        </StudyTools>
       </div>
 
-      <div ref={studyCellRef} data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
+      <div data-diagnostic-surface="true" className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
         <StudySelectionSurface
           reference={{
-            date,
-            series: refData,
-            sliceIndex: effectiveIdx,
             settings,
             imageSize: displayedImageSize,
-            surfaceRef: studyCellRef,
           }}
           presentation={{
-            columnCount: overlayColumns.length,
-            isAligning,
             isComparing: false,
             groundTruthOpen: gtPolygonToolOpen,
             nativeAnnotationsAvailable,
           }}
-          startAlignAll={startAlignAll}
           onSegment={(selection) => {
             setTumorToolOpen(true);
             setTumorSeedBoxToStart({
@@ -276,7 +173,6 @@ export function GridCell({
             ref={tumorViewerRef}
             studyId={refData.study_id}
             seriesUid={refData.series_uid}
-            interactionBlocked={isAligning}
             instanceIndex={idx}
             instanceCount={refData.instance_count}
             reverseSliceOrder={settings.reverseSliceOrder}
@@ -348,15 +244,22 @@ export function GridCell({
         </StudySelectionSurface>
       </div>
 
-      <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-3">
-        <span className="truncate text-xs text-[var(--text-secondary)]">
-          {derivedFrame ? 'Aligned presentation' : 'Acquired image'}
-        </span>
-        <div inert={isAligning}>
+      <div className="flex h-12 shrink-0 items-center justify-between gap-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-2">
+        {derivedFrame && onUseAcquired ? (
+          <AcquiredImageAction onClick={() => onUseAcquired(date)} />
+        ) : (
+          <span
+            className="truncate text-xs text-[var(--text-secondary)]"
+            title={derivedFrame ? 'Aligned presentation' : 'Acquired image'}
+          >
+            {derivedFrame ? 'Aligned' : 'Acquired'}
+          </span>
+        )}
+        <div>
           <StepControl
             title="Slice offset"
             value={`${idx + 1}/${refData.instance_count}`}
-            valueWidth="w-16"
+            valueWidth="w-14"
             tabular
             accent
             onDecrement={() => updatePanelSetting(date, { offset: settings.offset - 1 })}

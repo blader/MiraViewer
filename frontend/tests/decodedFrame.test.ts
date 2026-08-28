@@ -20,6 +20,7 @@ vi.mock('cornerstone-core', () => ({
 import {
   decodeImageWithValidity,
   getDecodedFrame,
+  getDecodedFrameBySopInstanceUid,
   loadCornerstoneImage,
   resampleDecodedImage,
 } from '../src/utils/decodedFrame';
@@ -130,5 +131,48 @@ describe('canonical decoded DICOM frames', () => {
 
     expect(Array.from(frame.validity)).toEqual([0, 1, 1]);
     expect(Array.from(frame.pixels)).toEqual([0, 0, -3]);
+  });
+
+  it('decodes accepted SOP identity with source VOI and inversion without altering signed pixels', async () => {
+    mocks.loadAndCacheImage.mockResolvedValue({
+      rows: 1,
+      columns: 3,
+      slope: 2,
+      intercept: -100,
+      windowCenter: 75,
+      windowWidth: 1,
+      invert: true,
+      getPixelData: () => Int16Array.of(-20, 0, 50),
+    });
+    const frame = await getDecodedFrameBySopInstanceUid('series-1', 'accepted-instance');
+    expect(mocks.getImageIdForInstance).not.toHaveBeenCalled();
+    expect(mocks.loadAndCacheImage).toHaveBeenCalledWith('miradb:accepted-instance');
+    expect(frame).toMatchObject({
+      sopInstanceUid: 'accepted-instance',
+      windowCenter: 75,
+      windowWidth: 1,
+      invert: true,
+    });
+    expect([...frame.pixels]).toEqual([-140, -100, 0]);
+  });
+
+  it.each(['area', 'lanczos3'] as const)(
+    'excludes nonfinite samples without declared padding in the %s path',
+    (kernel) => {
+      const image = { rows: 1, columns: 4, getPixelData: () => Float32Array.of(NaN, -6, Infinity, 0) };
+      const native = decodeImageWithValidity(image, 1, 4, kernel);
+      expect([...native.validity]).toEqual([0, 1, 0, 1]);
+      expect([...native.pixels]).toEqual([0, -6, 0, 0]);
+      const reduced = decodeImageWithValidity(image, 1, 2, kernel);
+      expect([...reduced.validity]).toEqual([0.5, 0.5]);
+      expect([...reduced.pixels]).toEqual([-6, 0]);
+    },
+  );
+
+  it('never uploads nonfinite values introduced by an unrepresentable modality transform', () => {
+    const image = { rows: 1, columns: 2, slope: 1e100, getPixelData: () => Int16Array.of(1, 0) };
+    const frame = decodeImageWithValidity(image, 1, 2);
+    expect([...frame.validity]).toEqual([0, 1]);
+    expect([...frame.pixels]).toEqual([0, 0]);
   });
 });

@@ -158,10 +158,10 @@ describe('Quiet Instrument visual system', () => {
   it('keeps every acquisition source visible on compact screens without shrinking 44px touch targets', () => {
     const compactIntake = stylesheet.slice(stylesheet.indexOf('@media (max-width: 560px)'));
 
-    expect(compactIntake).toMatch(
-      /\.intake-source-actions\s*\{\s*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
+    expect(stylesheet).toMatch(
+      /\.intake-source-actions\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/,
     );
-    expect(compactIntake).toMatch(/\.intake-backup-button\s*\{\s*grid-column:\s*1\s*\/\s*-1/);
+    expect(stylesheet).toMatch(/\.intake-backup-button\s*\{\s*grid-column:\s*1\s*\/\s*-1/);
     expect(compactIntake).toMatch(/\.intake-drop-target\s*\{\s*min-height:\s*6\.5rem/);
     expect(stylesheet).toMatch(/\.intake-source-button,\s*\.intake-button\s*\{[^}]*min-height:\s*44px/s);
   });
@@ -196,7 +196,9 @@ describe('Quiet Instrument visual system', () => {
     const contextRail = screen.getByLabelText('Selected examination and image context');
     const diagnosticStage = container.querySelector('.instrument-stage');
     const diagnosticImages = screen.getByText('Acquired comparison images');
-    const warning = screen.getByRole('status');
+    const warning = screen
+      .getByText('Some examinations could not be aligned safely.')
+      .closest<HTMLElement>('[role="status"]')!;
 
     expect(contextRail).toHaveAttribute('data-notices-visible', 'true');
     expect(contextRail).toContainElement(warning);
@@ -247,31 +249,31 @@ describe('Quiet Instrument visual system', () => {
     );
   });
 
-  it('locks every patient, examination, filter, mode, drawer, and modal entry point during alignment', () => {
+  it('keeps patient, examination, filter, mode, drawer, and modal entry points usable during background alignment', () => {
     alignmentPresentation.isAligning = true;
     alignmentPresentation.multiplePatients = true;
     const { rerender } = render(<ComparisonMatrix />);
 
-    expect(screen.getByRole('button', { name: 'Compare' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Overlay' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '3D' })).toBeDisabled();
-    expect(screen.getByRole('combobox', { name: 'Selected patient' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Import additional scans' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Help and keyboard shortcuts' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Application menu' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Hide scan filters' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Show examination dates' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Compare' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Overlay' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '3D' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Selected patient' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Import additional scans' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Help and keyboard shortcuts' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Application menu' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Hide scan filters' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Show examination dates' })).toBeEnabled();
 
     const filters = screen.getByRole('complementary', { name: 'Scan filters' });
-    expect(within(filters).getByRole('button', { name: 'Axial' })).toBeDisabled();
-    expect(within(filters).getByRole('button', { name: /T1/i })).toBeDisabled();
-    expect(screen.getByRole('combobox', { name: 'Alignment output resolution' })).toBeDisabled();
+    expect(within(filters).getByRole('button', { name: 'Axial' })).toBeEnabled();
+    expect(within(filters).getByRole('button', { name: /T1/i })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Alignment output resolution' })).toBeEnabled();
 
     const dates = screen.getByRole('complementary', { name: 'Examination dates' });
-    expect(within(dates).getByRole('button', { name: 'All' })).toBeDisabled();
-    expect(within(dates).getByRole('button', { name: 'None' })).toBeDisabled();
+    expect(within(dates).getByRole('button', { name: 'All' })).toBeEnabled();
+    expect(within(dates).getByRole('button', { name: 'None' })).toBeEnabled();
     for (const examination of within(dates).getAllByRole('button', { name: /2025/i })) {
-      expect(examination).toBeDisabled();
+      expect(examination).toBeEnabled();
     }
 
     alignmentPresentation.isAligning = false;
@@ -283,18 +285,18 @@ describe('Quiet Instrument visual system', () => {
     expect(within(dates).getByRole('button', { name: 'All' })).toBeEnabled();
   });
 
-  it('holds the active overlay examination and playback still until alignment completes', () => {
+  it('leaves overlay examination navigation and playback usable during background alignment', () => {
     const { rerender } = render(<ComparisonMatrix />);
     fireEvent.click(screen.getByRole('button', { name: 'Overlay' }));
 
     alignmentPresentation.isAligning = true;
     rerender(<ComparisonMatrix />);
 
-    expect(screen.getByRole('button', { name: 'Start comparison playback' })).toBeDisabled();
-    expect(screen.getByRole('combobox', { name: 'Comparison playback speed' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Start comparison playback' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Comparison playback speed' })).toBeEnabled();
     const chronology = screen.getByRole('navigation', { name: 'Available examinations' });
     for (const examination of within(chronology).getAllByRole('button')) {
-      expect(examination).toBeDisabled();
+      expect(examination).toBeEnabled();
     }
 
     alignmentPresentation.isAligning = false;

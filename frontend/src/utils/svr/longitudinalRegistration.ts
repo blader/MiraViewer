@@ -1,4 +1,5 @@
 import { outputGridPixelToWorld, validateOutputPlaneGrid, type OutputPlaneGrid } from '../outputPlaneGrid';
+import { prepareAlignmentContext } from '../contextualAlignment';
 import {
   minimumBilateralAnatomicalRetention,
   prepareAnatomicalPlaneLandmarks,
@@ -107,6 +108,19 @@ export type LongitudinalRegistrationResult = LongitudinalReslicedPlane & {
   };
 };
 
+/** Reusable physical pose evidence, independent of any displayed slice or pixel buffer. */
+export type LongitudinalRegistrationEstimate = Pick<
+  LongitudinalRegistrationResult,
+  | 'ok'
+  | 'targetToReference'
+  | 'centerMm'
+  | 'score'
+  | 'diagnostics'
+  | 'provenance'
+  | 'nativeRefinement'
+  | 'nativeCandidatePoses'
+>;
+
 export type RegisterLongitudinalOptions = {
   referenceSlices: readonly SvrReconstructionSlice[];
   targetSlices: readonly SvrReconstructionSlice[];
@@ -166,6 +180,15 @@ export type NativeRefinementDiagnostics = {
   translationStepMm: number;
   rotationStepRadians: number;
   evaluations: number;
+  contextualRefinement?: {
+    score: number;
+    initialScore: number;
+    heldOutScore: number;
+    heldOutInitialScore: number;
+    planeCount: number;
+    coverage: number;
+    evaluations: number;
+  };
   optimizedHypothesisCount?: number;
   optimizedAlternativeCount?: number;
   scoreMargin?: number;
@@ -966,6 +989,7 @@ function scoreNativeRefinementDirection(params: {
 
 function refineNativeLongitudinalPose(
   options: DenseLongitudinalResliceOptions,
+  optimize = true,
 ): { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics } | LongitudinalRegistrationFailure {
   const referenceSlices = options.nativeReferenceSlices;
   const selectedReference = referenceSlices?.[options.nativeReferenceSliceIndex ?? -1];
@@ -1071,7 +1095,7 @@ function refineNativeLongitudinalPose(
   let best = initialEvidence;
   let evaluations = 2;
   const keys: Array<keyof RigidParams> = ['tx', 'ty', 'tz', 'rx', 'ry', 'rz'];
-  for (const stage of stages) {
+  for (const stage of optimize ? stages : []) {
     for (let iteration = 0; iteration < 6; iteration++) {
       assertNotAborted(options.signal);
       let improved = false;
@@ -1142,6 +1166,99 @@ function refineNativeLongitudinalPose(
   };
 }
 
+function refineAnatomicalSlabPose(
+  options: DenseLongitudinalResliceOptions,
+  initial: { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics },
+): { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics } {
+  const index = options.nativeReferenceSliceIndex ?? -1;
+  const slices = options.nativeReferenceSlices;
+  const reference = slices?.[index];
+  if (!reference || !slices || slices.length < 3 || Math.min(reference.dsRows, reference.dsCols) < 32) return initial;
+  const indices = [
+    ...new Set([-4, -2, 0, 2, 4].map((offset) => Math.max(0, Math.min(slices.length - 1, index + offset)))),
+  ];
+  const targets = prepareScoringSlices(options.targetSlices, 64);
+  const prepareScore = (selected: readonly SvrReconstructionSlice[]) => {
+    const references = prepareScoringSlices(selected, 64);
+    const context = prepareAlignmentContext(
+      references.map((slice) => ({
+        pixels: slice.pixels,
+        valid: slice.valid,
+        rows: slice.dsRows,
+        cols: slice.dsCols,
+      })),
+    );
+    return (rigid: RigidParams) => {
+      assertNotAborted(options.signal);
+      return context.score(
+        (position) =>
+          resliceStackToReferencePlane({
+            referenceSlice: references[position]!,
+            targetSlices: targets,
+            targetToReference: rigid,
+            centerMm: options.centerMm,
+            signal: options.signal,
+          }),
+        Math.max(0.1, Math.min(1, options.minCoverage ?? 0.55)),
+      );
+    };
+  };
+  const evaluate = prepareScore(indices.map((position) => slices[position]!));
+  const trainingIndices = new Set(indices);
+  const heldOutSlices = slices.filter((_slice, position) => !trainingIndices.has(position));
+  if (!heldOutSlices.length) return initial;
+  const validate = prepareScore(heldOutSlices);
+  let current = { ...initial.rigid };
+  let best = evaluate(current);
+  const initialScore = best.score;
+  let evaluations = 1;
+  if (!Number.isFinite(initialScore)) return initial;
+  const heldOutInitialScore = validate(current).score;
+  const keys: Array<keyof RigidParams> = ['tx', 'ty', 'tz', 'rx', 'ry', 'rz'];
+  for (const translationStep of [1, 0.5, 0.25]) {
+    for (let iteration = 0; iteration < 3; iteration++) {
+      let improved = false;
+      for (const key of keys) {
+        const translational = key[0] === 't';
+        const step = translational ? translationStep : (translationStep * Math.PI) / 360;
+        const limit = translational ? 4 : (3 * Math.PI) / 180;
+        for (const direction of [-1, 1]) {
+          const value = Math.max(
+            initial.rigid[key] - limit,
+            Math.min(initial.rigid[key] + limit, current[key] + direction * step),
+          );
+          if (value === current[key]) continue;
+          const candidate = { ...current, [key]: value };
+          const evidence = evaluate(candidate);
+          evaluations++;
+          if (evidence.score > best.score + 1e-6) {
+            best = evidence;
+            current = candidate;
+            improved = true;
+          }
+        }
+      }
+      if (!improved) break;
+    }
+  }
+  const heldOutScore = validate(current).score;
+  if (!Number.isFinite(heldOutScore) || heldOutScore < heldOutInitialScore - 1e-6) return initial;
+  return {
+    rigid: current,
+    diagnostics: {
+      ...initial.diagnostics,
+      contextualRefinement: {
+        ...best,
+        initialScore,
+        heldOutScore,
+        heldOutInitialScore,
+        planeCount: indices.length,
+        evaluations,
+      },
+    },
+  };
+}
+
 function refineAnatomicalPlaneDepth(
   options: DenseLongitudinalResliceOptions,
   initial: { rigid: RigidParams; diagnostics: NativeRefinementDiagnostics },
@@ -1153,6 +1270,7 @@ function refineAnatomicalPlaneDepth(
   if (reference.frameOfReferenceUid && reference.frameOfReferenceUid === target.frameOfReferenceUid) return initial;
   const normal = reference.normalDir;
   const tumorFocused = options.alignmentFocus === 'tumor';
+  if (!tumorFocused && !options.referenceExclusionMask) return refineAnatomicalSlabPose(options, initial);
   if (!options.referenceExclusionMask || (!tumorFocused && Math.abs(normal.z) < 0.9)) return initial;
 
   const landmarkPlane = (slice: SvrReconstructionSlice) => ({
@@ -1517,6 +1635,20 @@ export function resliceDenseLongitudinalPlane(
             winner = anatomicalWinner;
           }
         }
+      }
+      if (
+        (['tx', 'ty', 'tz', 'rx', 'ry', 'rz'] as const).some((key) => winner.rigid[key] !== refinements[0]!.rigid[key])
+      ) {
+        // Every published native metric describes the final pose, not the pose
+        // before anatomical refinement. Re-evaluate without optimizing it again.
+        const evidence = refineNativeLongitudinalPose({ ...options, targetToReference: winner.rigid }, false);
+        winner =
+          'ok' in evidence
+            ? refinements[0]!
+            : {
+                rigid: winner.rigid,
+                diagnostics: { ...evidence.diagnostics, contextualRefinement: winner.diagnostics.contextualRefinement },
+              };
       }
       refinements[0] = winner;
       const nativeSpacing = Math.min(

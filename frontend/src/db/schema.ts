@@ -1,4 +1,6 @@
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
+import type { AlignmentDisplayTone } from '../utils/alignmentDisplayTone';
+import type { SvrDirection, SvrNativeSource, SvrPatientTransform, SvrSourceProvenance } from '../types/svr';
 
 export interface DicomStudy {
   studyInstanceUid: string;
@@ -205,6 +207,30 @@ export interface DicomSeries {
   sequenceType?: string; // FLAIR, etc.
 }
 
+/** Header provenance, distinct from the reconstructed image's displayed sampling grid. */
+export interface DicomAcquisitionMetadata {
+  version: 1;
+  imageType: string[];
+  mrAcquisitionType?: '2D' | '3D';
+  /** Frequency rows, frequency columns, phase rows, phase columns before reconstruction. */
+  acquisitionMatrix?: [number, number, number, number];
+  reconstructionDiameterMm?: number;
+  percentSampling?: number;
+  percentPhaseFieldOfView?: number;
+  acquisitionNumber?: number;
+  acquisitionDateTime?: string;
+  scanningSequence?: string[];
+  sequenceVariant?: string[];
+  echoTimeMs?: number;
+  repetitionTimeMs?: number;
+  inversionTimeMs?: number;
+  sourceSopInstanceUids: string[];
+  derivationSopInstanceUids: string[];
+  derivationDescription?: string;
+  /** A bounded legacy-header read was unavailable; never infer independent acquisitions from missing tags. */
+  unavailable?: true;
+}
+
 export interface DicomInstance {
   sopInstanceUid: string;
   seriesInstanceUid: string;
@@ -212,6 +238,7 @@ export interface DicomInstance {
   instanceNumber: number;
   frameOfReferenceUid?: string;
   acquisitionTime?: string;
+  acquisitionMetadata?: DicomAcquisitionMetadata;
   numberOfFrames?: number;
   /** Signed patient-space distance along this frame's validated slice normal. */
   physicalSlicePosition?: number;
@@ -255,6 +282,25 @@ export interface AppStateRow {
   value: unknown;
 }
 
+/** Enough accepted geometry to transfer annotations explicitly, without persisting MRI pixels. */
+export interface VolumeSegmentationGeometry {
+  version: 1;
+  originMm: [number, number, number];
+  direction: SvrDirection;
+  reconstructionFingerprint: string;
+  sourceProvenance: {
+    mode: SvrSourceProvenance['mode'];
+    primarySeriesUid: string;
+    sources: Array<{
+      seriesUid: string;
+      kind: SvrNativeSource['kind'];
+      transform: SvrPatientTransform;
+      /** Full canonical source identities, not only frames intersecting a focus region. */
+      sopInstanceUids: string[];
+    }>;
+  };
+}
+
 /** Durable voxel labels bound to the exact reconstruction geometry that created them. */
 export interface VolumeSegmentationRow {
   volumeKey: string;
@@ -264,14 +310,18 @@ export interface VolumeSegmentationRow {
   frameOfReferenceUid?: string;
   dims: [number, number, number];
   voxelSizeMm?: [number, number, number];
+  geometry?: VolumeSegmentationGeometry;
   labels: Uint8Array;
   classMetadata?: unknown;
   modelKey?: string;
+  reviewState?: 'draft' | 'reviewed';
+  seeds?: { foreground: Uint32Array; background: Uint32Array };
   datasetRevision?: number;
   updatedAt: number;
 }
 
 export interface DerivedAlignmentFramePresentation {
+  displayTone?: AlignmentDisplayTone;
   pixels: Float32Array;
   valid?: Uint8Array;
   rows: number;

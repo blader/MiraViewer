@@ -132,7 +132,9 @@ describe('sparse imaging-plane comparisons', () => {
     fireEvent.click(screen.getByTitle('Deselect all dates'));
 
     expect(screen.queryByTestId('acquired-diagnostic-image')).not.toBeInTheDocument();
-    expect(screen.getByText('Select dates to view')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Choose examinations to compare.' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Choose examinations' }));
+    expect(screen.getByRole('button', { name: 'Hide examination dates' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.queryAllByText('No series')).toHaveLength(0);
   });
 });

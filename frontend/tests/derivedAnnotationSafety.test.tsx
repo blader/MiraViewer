@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render as renderWithoutWorkspace, screen } from '@testing-library/react';
+import { StudyToolsWorkspace } from '../src/components/comparison/StudyTools';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentResult, SeriesRef } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
@@ -53,6 +54,10 @@ const series: SeriesRef = {
   columns: 256,
 };
 
+function render(ui: ReactNode) {
+  return renderWithoutWorkspace(ui, { wrapper: StudyToolsWorkspace });
+}
+
 function derivedResult(seriesUid = series.series_uid): AlignmentResult {
   return {
     date: '2025-01-01T00:00:00.000Z',
@@ -87,21 +92,18 @@ describe('native annotation coordinate-space safety', () => {
         progress={0}
         setProgress={vi.fn()}
         updatePanelSetting={vi.fn()}
-        isHovered
-        overlayColumns={[{ date: '2025-01-01T00:00:00.000Z', ref: series }]}
-        isAligning={false}
-        startAlignAll={vi.fn(async () => undefined)}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Tumor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Saved tumor' }));
     expect(await screen.findByTestId('native-saved-annotation')).toBeInTheDocument();
 
     act(() => setDerivedAlignmentFrame(derivedResult()));
 
     expect(screen.queryByTestId('native-saved-annotation')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Tumor' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'GT' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Outline' })).toBeDisabled();
     expect(screen.getByTestId('segment-action')).toBeDisabled();
 
     act(() => clearDerivedAlignmentFrames());
@@ -118,7 +120,6 @@ describe('native annotation coordinate-space safety', () => {
         overlayDisplayedDate="2025-01-01T00:00:00.000Z"
         overlayDisplayedSettings={DEFAULT_PANEL_SETTINGS}
         overlayDisplayedSliceIndex={0}
-        overlayDisplayedEffectiveSliceIndex={0}
         overlaySelectedRef={series}
         overlaySelectedDate="2025-01-01T00:00:00.000Z"
         overlaySelectedSettings={DEFAULT_PANEL_SETTINGS}
@@ -129,22 +130,19 @@ describe('native annotation coordinate-space safety', () => {
         overlayCompareSliceIndex={0}
         isOverlayComparing={false}
         hasOverlayCompareTarget={false}
-        isAligning={false}
-        alignmentProgress={null}
-        abortAlignment={vi.fn()}
         updatePanelSetting={vi.fn()}
-        startAlignAll={vi.fn(async () => undefined)}
         setProgress={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Tumor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust image' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Saved tumor' }));
     expect(await screen.findByTestId('native-saved-annotation')).toBeInTheDocument();
 
     act(() => setDerivedAlignmentFrame(derivedResult()));
 
     expect(screen.queryByTestId('native-saved-annotation')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Tumor' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Saved tumor' })).toBeDisabled();
     expect(screen.getByTestId('segment-action')).toBeDisabled();
   });
 });

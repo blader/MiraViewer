@@ -2,8 +2,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { regionGrow3D_v2 } from '../src/utils/segmentation/regionGrow3D_v2';
+import { segmentSeededVolume, voxelIndex } from '../src/utils/segmentation/seededVolume';
+import { normalizeSvrIntensities } from '../src/utils/svr/intensityNormalization';
 import { reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
+import { segmentationQuality as quality } from './helpers/segmentationQuality';
 
 type TumorPhantom = {
   dims: [number, number, number];
@@ -14,13 +16,6 @@ type TumorPhantom = {
 };
 
 type TumorContrast = 'heterogeneous' | 'weak-hyperintense' | 'hypointense' | 'cystic-hyperintense';
-
-const guideRegion = {
-  mode: 'guide' as const,
-  min: { x: 19, y: 15, z: 10 },
-  max: { x: 45, y: 41, z: 30 },
-  outsideToleranceScale: 0.65,
-};
 
 function heterogeneousTumorPhantom(): TumorPhantom {
   const dims: [number, number, number] = [64, 56, 40];
@@ -104,12 +99,6 @@ function offCenterTumorPhantom(contrast: 'hyperintense' | 'hypointense') {
   const truth = new Uint8Array(volume.length);
   const healthySeed = { x: 23, y: 25, z: 25 };
   const lesionSeed = { x: 31, y: 31, z: 25 };
-  const region = {
-    mode: 'guide' as const,
-    min: { x: 6, y: 6, z: 6 },
-    max: { x: 40, y: 45, z: 45 },
-    outsideToleranceScale: 0.6,
-  };
 
   for (let z = 0; z < depth; z++) {
     for (let y = 0; y < height; y++) {
@@ -133,7 +122,7 @@ function offCenterTumorPhantom(contrast: 'hyperintense' | 'hypointense') {
     }
   }
 
-  return { dims, volume, observedSupport, truth, healthySeed, lesionSeed, region };
+  return { dims, volume, observedSupport, truth, healthySeed, lesionSeed };
 }
 
 function heterogeneousAnatomicalTumorPhantom() {
@@ -170,272 +159,111 @@ function heterogeneousAnatomicalTumorPhantom() {
   return { ...phantom, lesionSeed };
 }
 
-function measureTumorQuality(
-  phantom: Pick<TumorPhantom, 'truth' | 'observedSupport'>,
-  result: Awaited<ReturnType<typeof regionGrow3D_v2>>,
-) {
-  let truePositive = 0;
-  let unsupported = 0;
-  for (const index of result.indices) {
-    truePositive += phantom.truth[index]!;
-    unsupported += phantom.observedSupport[index] === 0 ? 1 : 0;
-  }
-  const expected = phantom.truth.reduce((total, value) => total + value, 0);
-  return {
-    truePositive,
-    unsupported,
-    expected,
-    precision: truePositive / Math.max(1, result.count),
-    recall: truePositive / Math.max(1, expected),
-    dice: (2 * truePositive) / Math.max(1, result.count + expected),
-  };
-}
-
-async function evaluateTumorPhantom(contrast: TumorContrast) {
-  const phantom = contrastingTumorPhantom(contrast);
-  const band =
-    contrast === 'hypointense'
-      ? { min: 0.22, max: 0.45 }
-      : contrast === 'weak-hyperintense'
-        ? { min: 0.52, max: 0.73 }
-        : contrast === 'cystic-hyperintense'
-          ? { min: 0.64, max: 0.98 }
-          : { min: 0.61, max: 0.85 };
-  const started = performance.now();
-  const result = await regionGrow3D_v2({
-    volume: phantom.volume,
-    observedSupport: phantom.observedSupport,
-    dims: phantom.dims,
-    seed: phantom.seed,
-    ...band,
-    roi: guideRegion,
-    opts: { connectivity: 6, maxVoxels: 20_000, yieldEvery: 0 },
-  });
-
-  const { truePositive, unsupported, expected, precision, recall, dice } = measureTumorQuality(phantom, result);
-  const metrics = {
-    stage: 'tumor-segmentation-phantom',
-    contrast,
-    volumeVoxels: phantom.volume.length,
-    lesionVoxels: expected,
-    selectedVoxels: result.count,
-    truePositive,
-    falsePositive: result.count - truePositive,
-    falseNegative: expected - truePositive,
-    unsupported,
-    precision: Number(precision.toFixed(5)),
-    recall: Number(recall.toFixed(5)),
-    dice: Number(dice.toFixed(5)),
-    elapsedMs: Number((performance.now() - started).toFixed(2)),
-  };
-  console.log(JSON.stringify(metrics));
-  return { phantom, result, metrics, precision, recall, dice };
-}
-
-describe('tumor-only SVR segmentation fidelity', () => {
-  it('isolates a heterogeneous acquired lesion from connected anatomy and brighter distractors', async () => {
-    const { result, metrics, precision, recall, dice } = await evaluateTumorPhantom('heterogeneous');
-    expect(metrics.unsupported).toBe(0);
-    expect(result.hitMaxVoxels).toBe(false);
-    expect(precision).toBeGreaterThanOrEqual(0.97);
-    expect(recall).toBeGreaterThanOrEqual(0.9);
-    expect(dice).toBeGreaterThanOrEqual(0.93);
-  });
-
-  it.each(['weak-hyperintense', 'hypointense', 'cystic-hyperintense'] as const)(
-    'segments %s lesion tissue without using the user ROI as a tumor mask',
+describe('independent explicitly seeded tumor-shape phantoms', () => {
+  it.each(['heterogeneous', 'weak-hyperintense', 'hypointense', 'cystic-hyperintense'] as const)(
+    'retains %s anatomy without swallowing the attached distractor',
     async (contrast) => {
-      const { metrics, precision, recall, dice } = await evaluateTumorPhantom(contrast);
-      expect(metrics.unsupported).toBe(0);
-      expect(precision).toBeGreaterThanOrEqual(0.97);
-      expect(recall).toBeGreaterThanOrEqual(0.9);
-      expect(dice).toBeGreaterThanOrEqual(0.93);
-    },
-  );
-
-  it.each(['hyperintense', 'hypointense'] as const)(
-    'rejects a healthy rectangle-center seed but accurately segments an off-center %s lesion',
-    async (contrast) => {
-      const phantom = offCenterTumorPhantom(contrast);
-      const shared = {
-        volume: phantom.volume,
-        observedSupport: phantom.observedSupport,
-        dims: phantom.dims,
-        roi: phantom.region,
-        opts: { connectivity: 6 as const, maxVoxels: 224_000, yieldEvery: 0 },
-      };
-      const ambiguous = await regionGrow3D_v2({
-        ...shared,
-        seed: phantom.healthySeed,
-        min: 0.455,
-        max: 0.695,
-      });
-      const [width, height] = phantom.dims;
-      const lesionIndex = (phantom.lesionSeed.z * height + phantom.lesionSeed.y) * width + phantom.lesionSeed.x;
-      const lesionIntensity = phantom.volume[lesionIndex]!;
-      const localized = await regionGrow3D_v2({
-        ...shared,
-        seed: phantom.lesionSeed,
-        min: lesionIntensity - 0.12,
-        max: lesionIntensity + 0.12,
-      });
-
-      const { unsupported, expected: lesionVoxels, precision, recall, dice } = measureTumorQuality(phantom, localized);
-      console.log(
-        JSON.stringify({
-          stage: 'automatic-center-seed-tumor-segmentation',
-          contrast,
-          regionVoxels: 56_000,
-          healthySeedIntensity: Number(ambiguous.seedValue.toFixed(3)),
-          ambiguousVoxels: ambiguous.count,
-          ambiguousRegionFraction: Number((ambiguous.count / 56_000).toFixed(5)),
-          lesionSeedIntensity: Number(lesionIntensity.toFixed(3)),
-          lesionVoxels,
-          localizedVoxels: localized.count,
-          unsupported,
-          precision: Number(precision.toFixed(5)),
-          recall: Number(recall.toFixed(5)),
-          dice: Number(dice.toFixed(5)),
-        }),
+      const phantom = contrastingTumorPhantom(contrast);
+      const { seed, dims } = phantom;
+      const foreground = Uint32Array.from([seed, { ...seed, x: seed.x + 4 }].map((point) => voxelIndex(point, dims)));
+      const background = Uint32Array.from(
+        [
+          { ...seed, x: 44 },
+          { ...seed, x: seed.x - 10 },
+          { ...seed, y: seed.y - 9 },
+          { ...seed, y: seed.y + 9 },
+        ].map((point) => voxelIndex(point, dims)),
       );
-
-      expect(ambiguous.seedValue).toBeCloseTo(0.575, 5);
-      expect(ambiguous.count).toBe(0);
-      expect(unsupported).toBe(0);
-      expect(precision).toBeGreaterThanOrEqual(0.97);
-      expect(recall).toBeGreaterThanOrEqual(0.9);
-      expect(dice).toBeGreaterThanOrEqual(0.93);
+      const result = await segmentSeededVolume({ ...phantom, voxelSizeMm: [1, 1, 1], foreground, background });
+      const metrics = quality(phantom.truth, result.indices);
+      console.info('[independent-segmentation-phantom]', { contrast, ...metrics });
+      expect(metrics.dice).toBeGreaterThanOrEqual(0.93);
+      expect(metrics.precision).toBeGreaterThanOrEqual(0.97);
+      expect(metrics.recall).toBeGreaterThanOrEqual(0.9);
+      expect([...result.indices].every((index) => phantom.observedSupport[index])).toBe(true);
+      for (const index of foreground) expect(result.indices).toContain(index);
+      for (const index of background) expect(result.indices).not.toContain(index);
     },
   );
 
-  it('isolates a near-center dark lesion from heterogeneous anatomy and larger bilateral cavities', async () => {
+  it.each([
+    { contrast: 'hyperintense', outsideMarks: true },
+    { contrast: 'hypointense', outsideMarks: true },
+    { contrast: 'hyperintense', outsideMarks: false },
+    { contrast: 'hypointense', outsideMarks: false },
+  ] as const)(
+    'follows an explicit off-center $contrast mark with explicit outside marks: $outsideMarks',
+    async ({ contrast, outsideMarks }) => {
+      const phantom = offCenterTumorPhantom(contrast);
+      const result = await segmentSeededVolume({
+        ...phantom,
+        voxelSizeMm: [1, 1, 1],
+        foreground: Uint32Array.of(voxelIndex(phantom.lesionSeed, phantom.dims)),
+        background: outsideMarks ? Uint32Array.of(voxelIndex(phantom.healthySeed, phantom.dims)) : new Uint32Array(),
+      });
+      const metrics = quality(phantom.truth, result.indices);
+      expect(metrics.dice).toBeGreaterThan(0.97);
+      expect(metrics.precision).toBeGreaterThan(0.97);
+    },
+  );
+
+  it('isolates a small marked dark region while explicit background excludes larger bilateral cavities', async () => {
     const phantom = heterogeneousAnatomicalTumorPhantom();
-    const options = {
-      volume: phantom.volume,
-      observedSupport: phantom.observedSupport,
-      dims: phantom.dims,
-      roi: phantom.region,
-      opts: { connectivity: 6 as const, maxVoxels: 224_000, yieldEvery: 0 },
-    };
-    const ambiguous = await regionGrow3D_v2({
-      ...options,
-      seed: phantom.healthySeed,
-      min: 0.455,
-      max: 0.695,
+    const result = await segmentSeededVolume({
+      ...phantom,
+      voxelSizeMm: [1, 1, 1],
+      foreground: Uint32Array.of(voxelIndex(phantom.lesionSeed, phantom.dims)),
+      background: Uint32Array.from(
+        [phantom.healthySeed, { x: 13, y: 38, z: 25 }, { x: 33, y: 38, z: 25 }].map((point) =>
+          voxelIndex(point, phantom.dims),
+        ),
+      ),
     });
-    const result = await regionGrow3D_v2({
-      ...options,
-      seed: phantom.lesionSeed,
-      min: 0.268,
-      max: 0.508,
-    });
-
-    const { truePositive, expected, precision, recall, dice } = measureTumorQuality(phantom, result);
-    console.log(
-      JSON.stringify({
-        stage: 'anatomical-bilateral-cavity-tumor-segmentation',
-        regionVoxels: 56_000,
-        healthySeedIntensity: Number(ambiguous.seedValue.toFixed(3)),
-        healthySeedAcceptedVoxels: ambiguous.count,
-        lesionSeedIntensity: Number(result.seedValue.toFixed(3)),
-        lesionVoxels: expected,
-        selectedVoxels: result.count,
-        falsePositive: result.count - truePositive,
-        precision: Number(precision.toFixed(5)),
-        recall: Number(recall.toFixed(5)),
-        dice: Number(dice.toFixed(5)),
-      }),
-    );
-
-    expect(ambiguous.count).toBe(0);
-    expect(precision).toBeGreaterThanOrEqual(0.97);
-    expect(recall).toBeGreaterThanOrEqual(0.9);
-    expect(dice).toBeGreaterThanOrEqual(0.93);
+    expect(quality(phantom.truth, result.indices).dice).toBeGreaterThan(0.93);
   });
 
-  it('never crosses an unsupported bridge even when disconnected tissue has the same intensity', async () => {
-    const dims: [number, number, number] = [11, 3, 3];
-    const volume = new Float32Array(99).fill(0.71);
-    const observedSupport = new Uint8Array(99).fill(1);
-    for (let index = 0; index < observedSupport.length; index++) {
-      if (index % dims[0] === 5) observedSupport[index] = 0;
-    }
-
-    const result = await regionGrow3D_v2({
-      volume,
-      observedSupport,
-      dims,
-      seed: { x: 2, y: 1, z: 1 },
-      min: 0.55,
-      max: 0.85,
-      opts: { connectivity: 26, yieldEvery: 0 },
-    });
-
-    expect(result.count).toBeGreaterThan(0);
-    expect([...result.indices].every((index) => observedSupport[index] === 1 && index % dims[0] < 5)).toBe(true);
-  });
-
-  it('keeps hard ROI limits and configured voxel caps categorical', async () => {
-    const phantom = heterogeneousTumorPhantom();
-    const result = await regionGrow3D_v2({
-      volume: phantom.volume,
-      observedSupport: phantom.observedSupport,
-      dims: phantom.dims,
-      seed: phantom.seed,
-      min: 0.61,
-      max: 0.85,
-      roi: { mode: 'hard', min: { x: 28, y: 26, z: 18 }, max: { x: 32, y: 30, z: 22 } },
-      opts: { maxVoxels: 20, yieldEvery: 0 },
-    });
-
-    expect(result.count).toBe(20);
-    expect(result.hitMaxVoxels).toBe(true);
-    expect(
-      [...result.indices].every((index) => {
-        const x = index % phantom.dims[0];
-        const y = Math.floor(index / phantom.dims[0]) % phantom.dims[1];
-        const z = Math.floor(index / (phantom.dims[0] * phantom.dims[1]));
-        return x >= 28 && x <= 32 && y >= 26 && y <= 30 && z >= 18 && z <= 22;
-      }),
-    ).toBe(true);
-  });
-
-  it('honors cancellation before any acquired voxel is accepted', async () => {
-    const phantom = heterogeneousTumorPhantom();
-    const controller = new AbortController();
-    controller.abort();
-
-    const result = await regionGrow3D_v2({
-      volume: phantom.volume,
-      observedSupport: phantom.observedSupport,
-      dims: phantom.dims,
-      seed: phantom.seed,
-      min: 0.61,
-      max: 0.85,
-      roi: guideRegion,
-      opts: { signal: controller.signal, yieldEvery: 0 },
-    });
-
-    expect(result.count).toBe(0);
-    expect(result.hitMaxVoxels).toBe(false);
-  });
-
-  it('honors multiple explicit supported seeds without traversing unsupported tissue', async () => {
-    const observedSupport = new Uint8Array([1, 1, 1, 0, 1, 1, 1]);
-    const result = await regionGrow3D_v2({
-      volume: new Float32Array(7).fill(0.71),
-      observedSupport,
-      dims: [7, 1, 1],
-      seed: { x: 1, y: 0, z: 0 },
-      seedIndices: new Uint32Array([1, 5]),
-      min: 0.55,
-      max: 0.85,
-      opts: { connectivity: 6, yieldEvery: 0 },
-    });
-
-    expect([...result.indices].sort((left, right) => left - right)).toEqual([0, 1, 2, 4, 5, 6]);
-    expect(result.indices).not.toContain(3);
-  });
+  it.each([1, -1])(
+    'does not use the inside of a 32 mm lesion with polarity %i as an automatic outside boundary',
+    async (polarity) => {
+      const dims: [number, number, number] = [61, 61, 61];
+      const volume = new Float32Array(61 ** 3).fill(0.5);
+      const truth = new Uint8Array(volume.length);
+      for (let z = 0; z < 61; z++)
+        for (let y = 0; y < 61; y++)
+          for (let x = 0; x < 61; x++) {
+            if ((x - 30) ** 2 + (y - 30) ** 2 + (z - 30) ** 2 > 16 ** 2) continue;
+            const index = (z * 61 + y) * 61 + x;
+            truth[index] = 1;
+            volume[index] = 0.5 + polarity * 0.25;
+          }
+      const input = {
+        volume,
+        dims,
+        voxelSizeMm: [1, 1, 1] as [number, number, number],
+        foreground: Uint32Array.of((30 * 61 + 30) * 61 + 30),
+        background: new Uint32Array(),
+      };
+      const automatic = await segmentSeededVolume(input);
+      const fullContext = await segmentSeededVolume({
+        ...input,
+        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 60, y: 60, z: 60 } },
+      });
+      const automaticQuality = quality(truth, automatic.indices);
+      const fullContextQuality = quality(truth, fullContext.indices);
+      console.info('[large-lesion-search-context]', {
+        polarity,
+        truthVoxels: truth.reduce((sum, value) => sum + value, 0),
+        automatic: { ...automaticQuality, selectedVoxels: automatic.indices.length, bounds: automatic.bounds },
+        fullContext: { ...fullContextQuality, selectedVoxels: fullContext.indices.length, bounds: fullContext.bounds },
+      });
+      expect(automatic.indices).toContain(input.foreground[0]);
+      expect(fullContext.indices).toContain(input.foreground[0]);
+      expect(fullContextQuality.dice).toBeGreaterThan(0.97);
+      expect(fullContextQuality.recall).toBeGreaterThan(0.97);
+      expect(automaticQuality.dice).toBeGreaterThan(0.93);
+      expect(automaticQuality.recall).toBeGreaterThan(0.9);
+    },
+  );
 
   it('discovers preamble-verified extensionless MRI only when explicitly enabled', async () => {
     const { inspectAlignmentCorpus } = await import('./helpers/alignmentRealCorpus');
@@ -472,9 +300,9 @@ describe('tumor-only SVR segmentation fidelity', () => {
 const privateMriRoot = process.env.MIRAVIEWER_TUMOR_SEGMENTATION_MRI_ROOT?.trim();
 const runPrivateCorpus = privateMriRoot ? it : it.skip;
 
-describe('optional private real-MRI tumor segmentation', () => {
+describe('optional private unlabeled MRI support and workflow', () => {
   runPrivateCorpus(
-    'segments an acquired-support-preserving, same-study three-orientation reconstructed lesion',
+    'preserves support and marks with or without explicit outside marks across a same-study three-orientation reconstruction',
     async () => {
       const { decodeAlignmentRegistrationSlice, inspectAlignmentCorpus, loadAlignmentLosslessCodec } =
         await import('./helpers/alignmentRealCorpus');
@@ -524,16 +352,16 @@ describe('optional private real-MRI tumor segmentation', () => {
         for (let index = center - 5; index <= center + 5; index++) {
           stack.push(await decodeAlignmentRegistrationSlice(source!, index, codec, 96));
         }
-        const values = stack.flatMap((slice) => [...slice.pixels]).sort((left, right) => left - right);
-        const low = values[Math.floor(values.length * 0.02)]!;
-        const high = values[Math.floor(values.length * 0.98)]!;
-        for (const slice of stack) {
-          for (let index = 0; index < slice.pixels.length; index++) {
-            slice.pixels[index] = Math.max(0, Math.min(1, (slice.pixels[index]! - low) / Math.max(1e-6, high - low)));
-          }
-          allSlices.push(slice);
-        }
+        allSlices.push(...stack);
       }
+      normalizeSvrIntensities(
+        allSlices,
+        allSlices.flatMap((slice) =>
+          [...slice.pixels]
+            .filter((_, index) => !slice.valid || slice.valid[index])
+            .filter((_, index) => index % 97 === 0),
+        ),
+      );
 
       const reference = allSlices[5]!;
       const centerMm = {
@@ -578,83 +406,98 @@ describe('optional private real-MRI tumor segmentation', () => {
       });
       const reconstructionMs = performance.now() - reconstructionStarted;
 
-      let seedIndex = -1;
-      let seedScore = Number.NEGATIVE_INFINITY;
-      for (let z = 20; z <= 28; z++) {
-        for (let y = 20; y <= 28; y++) {
-          for (let x = 20; x <= 28; x++) {
-            const index = (z * dims[1] + y) * dims[0] + x;
-            if (!observedSupport[index]) continue;
-            const distance = Math.hypot(x - 24, y - 24, z - 24);
-            const score = volume[index]! - distance * 0.025;
-            if (score > seedScore) {
-              seedScore = score;
-              seedIndex = index;
+      // Geometric workflow marks, not tumor labels or an intensity-outlier oracle.
+      const closestSupported = (point: { x: number; y: number; z: number }, unavailable = new Set<number>()) => {
+        let chosen = -1,
+          distance = Infinity;
+        for (let z = 15; z <= 33; z++)
+          for (let y = 15; y <= 33; y++)
+            for (let x = 15; x <= 33; x++) {
+              const index = voxelIndex({ x, y, z }, dims);
+              const next = (x - point.x) ** 2 + (y - point.y) ** 2 + (z - point.z) ** 2;
+              if (
+                observedSupport[index] &&
+                Number.isFinite(volume[index]) &&
+                !unavailable.has(index) &&
+                next < distance
+              ) {
+                chosen = index;
+                distance = next;
+              }
             }
-          }
-        }
-      }
-      expect(seedIndex).toBeGreaterThanOrEqual(0);
-      const seed = {
-        x: seedIndex % dims[0],
-        y: Math.floor(seedIndex / dims[0]) % dims[1],
-        z: Math.floor(seedIndex / (dims[0] * dims[1])),
+        expect(chosen).toBeGreaterThanOrEqual(0);
+        return chosen;
       };
-      const segmentationStarted = performance.now();
-      const segmentation = await regionGrow3D_v2({
+      const seedIndex = closestSupported({ x: 24, y: 24, z: 24 });
+      const foreground = Uint32Array.of(seedIndex);
+      const background = Uint32Array.from(
+        [
+          { x: 18, y: 24, z: 24 },
+          { x: 30, y: 24, z: 24 },
+          { x: 24, y: 18, z: 24 },
+          { x: 24, y: 30, z: 24 },
+        ].map((point) => closestSupported(point, new Set(foreground))),
+      );
+      const input = {
         volume,
         observedSupport,
         dims,
-        seed,
-        min: Math.max(0, volume[seedIndex]! - 0.12),
-        max: Math.min(1, volume[seedIndex]! + 0.12),
-        roi: { mode: 'guide', min: { x: 15, y: 15, z: 15 }, max: { x: 33, y: 33, z: 33 }, outsideToleranceScale: 0.5 },
-        opts: { connectivity: 6, maxVoxels: 10_000, yieldEvery: 0 },
-      });
-      const segmentationMs = performance.now() - segmentationStarted;
-      const unsupported = [...segmentation.indices].filter((index) => observedSupport[index] !== 1).length;
-      const outsideUserRegion = [...segmentation.indices].filter((index) => {
-        const x = index % dims[0];
-        const y = Math.floor(index / dims[0]) % dims[1];
-        const z = Math.floor(index / (dims[0] * dims[1]));
-        return x < 15 || x > 33 || y < 15 || y > 33 || z < 15 || z > 33;
-      }).length;
+        voxelSizeMm: [2, 2, 2] as [number, number, number],
+        foreground,
+        background,
+        bounds: { min: { x: 15, y: 15, z: 15 }, max: { x: 33, y: 33, z: 33 } },
+      };
+      for (const outsideMarks of [true, false]) {
+        const segmentationInput = { ...input, background: outsideMarks ? background : new Uint32Array() };
+        const segmentationStarted = performance.now();
+        const segmentation = await segmentSeededVolume(segmentationInput);
+        const segmentationMs = performance.now() - segmentationStarted;
+        const repeated = await segmentSeededVolume(segmentationInput);
+        expect(repeated.indices).toEqual(segmentation.indices);
+        expect(segmentation.indices).toContain(seedIndex);
+        for (const index of segmentationInput.background) expect(segmentation.indices).not.toContain(index);
+        const unsupported = [...segmentation.indices].filter((index) => !observedSupport[index]).length;
+        const outsideUserRegion = [...segmentation.indices].filter((index) => {
+          const x = index % dims[0],
+            y = Math.floor(index / dims[0]) % dims[1],
+            z = Math.floor(index / (dims[0] * dims[1]));
+          return x < 15 || x > 33 || y < 15 || y > 33 || z < 15 || z > 33;
+        }).length;
 
-      console.log(
-        JSON.stringify({
-          stage: 'real-mri-tumor-segmentation',
-          examination: reviewedExamination,
-          selectedRootStudyOrdinal: examination,
-          reviewedAcquiredDisplayIndices: {
-            AX: reviewed!.AX + 1,
-            COR: reviewed!.COR + 1,
-            SAG: reviewed!.SAG + 1,
-          },
-          clinicallyLabeledTumorMask: false,
-          orientations: selected.map((source) => source!.plane),
-          samePatient: true,
-          sameStudy: true,
-          sameFrameOfReference: true,
-          sameContrast: true,
-          acquiredSlices: allSlices.length,
-          reconstructedVoxels: volume.length,
-          supportedVoxels: observedSupport.reduce((total, supported) => total + supported, 0),
-          seedIntensity: Number(volume[seedIndex]!.toFixed(5)),
-          segmentedVoxels: segmentation.count,
-          segmentedVolumeMl: Number(((segmentation.count * voxelSizeMm ** 3) / 1000).toFixed(3)),
-          unsupported,
-          outsideUserRegion,
-          hitMaxVoxels: segmentation.hitMaxVoxels,
-          indexingDecodingMs: Number((reconstructionStarted - indexedAt).toFixed(2)),
-          reconstructionMs: Number(reconstructionMs.toFixed(2)),
-          segmentationMs: Number(segmentationMs.toFixed(2)),
-        }),
-      );
+        console.log(
+          JSON.stringify({
+            stage: 'unlabeled-mri-selection-support-workflow',
+            examination: reviewedExamination,
+            selectedRootStudyOrdinal: examination,
+            reviewedAcquiredDisplayIndices: {
+              AX: reviewed!.AX + 1,
+              COR: reviewed!.COR + 1,
+              SAG: reviewed!.SAG + 1,
+            },
+            clinicallyLabeledTumorMask: false,
+            explicitOutsideMarks: outsideMarks,
+            orientations: selected.map((source) => source!.plane),
+            samePatient: true,
+            sameStudy: true,
+            sameFrameOfReference: true,
+            sameContrast: true,
+            acquiredSlices: allSlices.length,
+            reconstructedVoxels: volume.length,
+            supportedVoxels: observedSupport.reduce((total, supported) => total + supported, 0),
+            selectedVoxels: segmentation.indices.length,
+            unsupported,
+            outsideUserRegion,
+            domainVoxels: segmentation.domainVoxels,
+            indexingDecodingMs: Number((reconstructionStarted - indexedAt).toFixed(2)),
+            reconstructionMs: Number(reconstructionMs.toFixed(2)),
+            segmentationMs: Number(segmentationMs.toFixed(2)),
+          }),
+        );
 
-      expect(segmentation.count).toBeGreaterThan(0);
-      expect(segmentation.hitMaxVoxels).toBe(false);
-      expect(unsupported).toBe(0);
-      expect(outsideUserRegion / segmentation.count).toBeLessThan(0.15);
+        expect(segmentation.indices.length).toBeGreaterThan(0);
+        expect(unsupported).toBe(0);
+        expect(outsideUserRegion).toBe(0);
+      }
     },
     90_000,
   );

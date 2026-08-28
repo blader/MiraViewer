@@ -14,6 +14,9 @@ type DecodedCornerstoneImage = {
   columnPixelSpacing?: number;
   pixelPaddingValue?: number;
   pixelPaddingRangeLimit?: number;
+  windowCenter?: number;
+  windowWidth?: number;
+  invert?: boolean;
   getPixelData?: () => ArrayLike<number>;
 };
 
@@ -28,6 +31,10 @@ export type DecodedFrame = {
   sopInstanceUid: string;
   rowSpacingMm?: number;
   colSpacingMm?: number;
+  /** DICOM VOI in modality units; inversion is display-only, never applied to pixels. */
+  windowCenter?: number;
+  windowWidth?: number;
+  invert?: boolean;
 };
 
 export type DecodedFrameResampleKernel = 'area' | 'lanczos3';
@@ -74,14 +81,17 @@ export function decodeImageWithValidity(
   const hasPadding = Number.isFinite(paddingValue);
   let pixels: Float32Array;
   let validity: Float32Array;
-  if (hasPadding) {
-    const low = Math.min(paddingValue!, paddingLimit!);
-    const high = Math.max(paddingValue!, paddingLimit!);
-    const sourceValidity = new Uint8Array(rows * cols);
-    for (let index = 0; index < sourceValidity.length; index++) {
-      const value = source[index]!;
-      sourceValidity[index] = Number.isFinite(value) && (value < low || value > high) ? 1 : 0;
+  const low = Math.min(paddingValue!, paddingLimit!);
+  const high = Math.max(paddingValue!, paddingLimit!);
+  let sourceValidity: Uint8Array | undefined;
+  for (let index = 0; index < rows * cols; index++) {
+    const value = source[index]!;
+    if (!Number.isFinite(value) || (hasPadding && value >= low && value <= high)) {
+      sourceValidity ??= new Uint8Array(rows * cols).fill(1);
+      sourceValidity[index] = 0;
     }
+  }
+  if (sourceValidity) {
     ({ pixels, validity } = resample2dAreaAverageWithValidity(
       source,
       sourceValidity,
@@ -102,6 +112,12 @@ export function decodeImageWithValidity(
       if (validity[index]! > 0) pixels[index] = pixels[index]! * slope + intercept;
     }
   }
+  for (let index = 0; index < pixels.length; index++) {
+    if (!Number.isFinite(pixels[index])) {
+      pixels[index] = 0;
+      validity[index] = 0;
+    }
+  }
   return { pixels, validity };
 }
 
@@ -118,6 +134,15 @@ export function resampleDecodedImage(
 /** Return full-precision, modality-linear pixels for the exact physical frame displayed by a viewer. */
 export async function getDecodedFrame(seriesUid: string, instanceIndex: number): Promise<DecodedFrame> {
   const imageId = await getImageIdForInstance(seriesUid, instanceIndex);
+  return decodeFrameByImageId(seriesUid, imageId);
+}
+
+/** Decode the accepted source identity, independent of later series ordering changes. */
+export function getDecodedFrameBySopInstanceUid(seriesUid: string, sopInstanceUid: string): Promise<DecodedFrame> {
+  return decodeFrameByImageId(seriesUid, `miradb:${sopInstanceUid}`);
+}
+
+async function decodeFrameByImageId(seriesUid: string, imageId: string): Promise<DecodedFrame> {
   const image = (await loadCornerstoneImage(imageId)) as unknown as DecodedCornerstoneImage;
   const { rows, cols } = getImageDimensions(image);
   const decoded = decodeImageWithValidity(image, rows, cols);
@@ -131,5 +156,8 @@ export async function getDecodedFrame(seriesUid: string, instanceIndex: number):
     sopInstanceUid: imageId.startsWith('miradb:') ? imageId.slice('miradb:'.length) : imageId,
     rowSpacingMm: Number.isFinite(image.rowPixelSpacing) ? image.rowPixelSpacing : undefined,
     colSpacingMm: Number.isFinite(image.columnPixelSpacing) ? image.columnPixelSpacing : undefined,
+    windowCenter: Number.isFinite(image.windowCenter) ? image.windowCenter : undefined,
+    windowWidth: Number.isFinite(image.windowWidth) && image.windowWidth! >= 1 ? image.windowWidth : undefined,
+    invert: image.invert === true,
   };
 }

@@ -43,7 +43,7 @@ export function StepControl({
     .join(' ');
 
   return (
-    <div className="flex shrink-0 items-center gap-0.5" title={title}>
+    <div className="step-control flex shrink-0 items-center gap-0.5" title={title}>
       {label && <span className="text-xs text-[var(--text-secondary)]">{label}</span>}
       <RepeatButton
         onAction={onDecrement}

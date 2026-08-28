@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
 import type { SvrResult } from '../src/types/svr';
+import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 
 const mocks = vi.hoisted(() => ({
   manifests: vi.fn(),
@@ -24,6 +25,13 @@ vi.mock('../src/utils/localApi', () => ({
   deleteVolumeSegmentation: vi.fn(async () => undefined),
   getVolumeSegmentation: vi.fn(async () => null),
   saveVolumeSegmentation: vi.fn(async () => undefined),
+}));
+
+vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
+  ...(await importOriginal<typeof AcquisitionProvenance>()),
+  // This presentation fixture has no stored DICOM Blobs. Keep real source
+  // classification; metadata hydration/ownership has its own database tests.
+  hydrateSvrAcquisitionMetadata: vi.fn(async (manifests) => manifests),
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
@@ -114,6 +122,17 @@ function manifest(seriesUid: string) {
       pixelSpacing: '1\\1',
       frameOfReferenceUid: 'quiet-instrument-frame',
       physicalSlicePosition: index,
+      acquisitionMetadata: {
+        version: 1 as const,
+        imageType: ['ORIGINAL', 'PRIMARY'],
+        mrAcquisitionType: '2D' as const,
+        acquisitionNumber: coronal ? 2 : 1,
+        scanningSequence: ['SE'],
+        echoTimeMs: 100,
+        repetitionTimeMs: 5000,
+        sourceSopInstanceUids: [],
+        derivationSopInstanceUids: [],
+      },
     })),
   };
 }
@@ -142,19 +161,45 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Quiet Instrument reconstruction lightbox', () => {
+  it('keeps cancellation available when the source panel is collapsed during reconstruction', async () => {
+    mocks.hook.status = 'running';
+    mocks.hook.isRunning = true;
+    render(<Svr3DView data={comparisonData()} />);
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
+    fireEvent.click(await screen.findByText('Source details', { selector: 'summary' }));
+    expect(await screen.findByText(/2 independent acquisitions/)).toHaveTextContent('6 source slices');
+    fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel reconstruction' }));
+    expect(mocks.cancel).toHaveBeenCalledOnce();
+  });
   it('keeps patient identity, verified sources, a compact evidence rail, and exactly one primary action', async () => {
     render(<Svr3DView data={comparisonData()} />);
 
     await waitFor(() => expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled());
 
-    expect(screen.getByText('Synthetic quiet instrument')).not.toHaveClass('hidden');
+    expect(screen.getByLabelText('3D scan context for Synthetic quiet instrument')).not.toHaveClass('hidden');
+    expect(screen.getByLabelText(/^Displayed examination/)).toHaveAttribute('dateTime', EXAMINATION);
+    expect(screen.getByRole('heading', { name: 'Explore this MRI in 3D' })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: /reconstruction sources and quality/i })).toBeNull();
+    expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
     const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
     expect(sourceRail.parentElement?.className).toContain('minmax(240px,304px)');
-    expect(within(sourceRail).getByText('Verified acquired evidence')).toHaveClass('text-[var(--evidence)]');
+    fireEvent.click(within(sourceRail).getByText('Source details', { selector: 'summary' }));
+    expect(within(sourceRail).getByText('Verified source geometry')).toHaveClass('text-[var(--evidence)]');
+    expect(
+      within(sourceRail).getByText('Focus region (optional)', { selector: 'summary' }).parentElement,
+    ).not.toHaveAttribute('open');
+    expect(
+      within(sourceRail).getByText('Reconstruction settings', { selector: 'summary' }).parentElement,
+    ).not.toHaveAttribute('open');
+    expect(within(sourceRail).getByText(/2 independent acquisitions/)).toHaveTextContent('6 source slices');
     expect(screen.getAllByRole('button', { name: /reconstruct volume/i })).toHaveLength(1);
   });
 
-  it('uses one evidence owner and preserves the physical inspector while switching contextual rails', async () => {
+  it('keeps the linked physical workbench independent of the source and appearance rails', async () => {
     mocks.hook.status = 'ready';
     mocks.hook.resultIdentity = acceptedIdentity();
     mocks.hook.result = {
@@ -170,24 +215,31 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     };
 
     const { container } = render(<Svr3DView data={comparisonData()} />);
-    await waitFor(() => {
-      const sourceRail = screen.getByRole('complementary', { name: /reconstruction sources and quality/i });
-      expect(within(sourceRail).getByRole('combobox', { name: /plane/i })).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Select tissue' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute('data-editing', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    fireEvent.click(screen.getByText('Slice settings', { selector: 'summary' }));
+    const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
+      screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
+    );
 
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
-    expect(screen.queryByText('3D Controls')).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('No acquired support');
+    expect(screen.queryByRole('complementary', { name: '3D settings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
 
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
     fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
 
     expect(
       screen.queryByRole('complementary', { name: /reconstruction sources and quality/i }),
     ).not.toBeInTheDocument();
-    expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'true');
-    expect(screen.getByText('3D Controls')).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: /plane/i })).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('No acquired support');
+    expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
+    for (const canvas of planes) expect(canvas).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
+    expect(screen.getByRole('complementary', { name: '3D settings' })).toBeInTheDocument();
+    for (const canvas of planes) expect(canvas).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
   });
 
   it('marks a real selected focus boundary without tinting acquired image pixels', () => {
@@ -214,8 +266,10 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     mocks.hook.isRunning = true;
     render(<Svr3DView data={comparisonData()} />);
 
-    await waitFor(() => expect(screen.getByText('Verified acquired evidence')).toBeInTheDocument());
-    expect(screen.getByRole('heading', { name: /reconstructing supported anatomy/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
+    fireEvent.click(await screen.findByText('Source details', { selector: 'summary' }));
+    await waitFor(() => expect(screen.getByText('Verified source geometry')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Building your 3D view' })).toBeInTheDocument();
     expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });

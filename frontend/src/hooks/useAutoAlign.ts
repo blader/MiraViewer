@@ -60,6 +60,7 @@ import {
 } from '../utils/outputPlaneGrid';
 import {
   densifyLongitudinalRegistration,
+  decodeLongitudinalReferenceFrame,
   measureLongitudinalPlaneDrift,
   prepareLongitudinalReferenceInput,
   prepareLongitudinalRegistrationInput,
@@ -67,6 +68,7 @@ import {
   type PreparedLongitudinalReferenceInput,
 } from '../utils/svr/longitudinalFrames';
 import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
+import type { LongitudinalRegistrationEstimate } from '../utils/svr/longitudinalRegistration';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import {
   resample2dAreaAverage,
@@ -74,6 +76,11 @@ import {
   retainFullySupportedPixels,
 } from '../utils/svr/resample2d';
 import { yieldToMain } from '../utils/svr/svrUtils';
+import {
+  applyAlignmentDisplayTone,
+  createAlignmentDisplayTone,
+  type AlignmentDisplayTone,
+} from '../utils/alignmentDisplayTone';
 
 const COARSE_IMAGE_SIZE = 128;
 const PHASE_SAMPLE_SIZE = 128;
@@ -195,6 +202,7 @@ function composeReferencePanelGeometry(
 }
 
 export interface AutoAlignState {
+  requestKey?: string;
   isAligning: boolean;
   progress: AlignmentProgress | null;
   results: AlignmentResult[];
@@ -213,6 +221,17 @@ export function useAutoAlign() {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const physicalRegistrationsRef = useRef(
+    new Map<
+      string,
+      {
+        estimate: LongitudinalRegistrationEstimate;
+        affine?: StandardAffine2D;
+        tone?: AlignmentDisplayTone;
+      }
+    >(),
+  );
+  const clearRegistrationCache = useCallback(() => physicalRegistrationsRef.current.clear(), []);
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
 
@@ -236,7 +255,7 @@ export function useAutoAlign() {
       targetDates: string[],
       seriesMap: Record<string, SeriesRef>,
       currentProgress: number,
-      options: { outputMode?: OutputGridMode } = {},
+      options: { outputMode?: OutputGridMode; requestKey?: string; reuseRegistration?: boolean } = {},
     ): Promise<AlignmentResult[]> => {
       abortControllerRef.current?.abort();
       const alignmentAbortController = new AbortController();
@@ -261,6 +280,7 @@ export function useAutoAlign() {
       };
 
       setStateForCurrentRun({
+        requestKey: options.requestKey,
         isAligning: true,
         progress: {
           phase: 'capturing',
@@ -496,7 +516,11 @@ export function useAutoAlign() {
           referenceAnatomy?.manifest.frames[referenceAnatomy.sourceIndex] ??
           referenceManifest?.frames[reference.sliceIndex];
         const referenceWindowedPixels =
-          windowDisplayPixels(referencePixels, referenceDisplayFrame) ??
+          (displayedDerivedReference?.displayTone
+            ? Float32Array.from(referencePixels, (value) =>
+                applyAlignmentDisplayTone(value, displayedDerivedReference.displayTone!),
+              )
+            : windowDisplayPixels(referencePixels, referenceDisplayFrame)) ??
           (referencePixels.some((value) => value < 0 || value > 1) ? normalizedReferenceFine : referencePixels);
         const referenceDisplayedPixels = applyBrightnessContrastToPixels(
           referenceWindowedPixels,
@@ -533,6 +557,7 @@ export function useAutoAlign() {
           : undefined;
         const resultIdentity = {
           runId,
+          ...(options.requestKey ? { requestKey: options.requestKey } : {}),
           patientKey: reference.patientKey,
           sequenceId: reference.sequenceId,
           referenceSeriesUid: reference.seriesUid,
@@ -593,7 +618,9 @@ export function useAutoAlign() {
             referenceFrame?.sliceThickness ??
             1;
           const requiresReslice =
-            drift.frameRelationship !== 'same' || drift.maximumThroughPlaneDriftMm > Math.max(0.01, centerSpacing / 2);
+            options.reuseRegistration ||
+            drift.frameRelationship !== 'same' ||
+            drift.maximumThroughPlaneDriftMm > Math.max(0.01, centerSpacing / 2);
           if (!requiresReslice) return null;
           if (!operationOutputGrid) {
             return physicalFailure(
@@ -617,27 +644,61 @@ export function useAutoAlign() {
             outputGrid: operationOutputGrid,
             ...(referenceAnatomy ? { referenceAnatomy } : {}),
           };
-          preparedPhysicalReference ??= prepareLongitudinalReferenceInput(
-            referenceManifest,
-            reference.sliceIndex,
-            preparationOptions,
-          );
-          const preparedReference = await preparedPhysicalReference;
-          ensureNotAborted();
-          const prepared = await prepareLongitudinalRegistrationInput(
-            referenceManifest,
-            targetManifest,
-            reference.sliceIndex,
-            {
-              ...preparationOptions,
-              preparedReference,
-            },
-          );
-          let selectedReference = prepared.referenceSlices[prepared.referenceSliceIndex];
+          const registrationKey =
+            options.reuseRegistration && !reference.exclusionMask && !displayedDerivedReference
+              ? JSON.stringify([
+                  reference.patientKey,
+                  reference.sequenceId,
+                  reference.datasetRevision,
+                  reference.seriesUid,
+                  seriesRef.series_uid,
+                  referenceManifest.frames.length,
+                  targetManifest.frames.length,
+                  options.outputMode ?? 'native',
+                ])
+              : null;
+          const cached = registrationKey ? physicalRegistrationsRef.current.get(registrationKey) : undefined;
+          const prepared = cached
+            ? null
+            : await (async () => {
+                preparedPhysicalReference ??= prepareLongitudinalReferenceInput(
+                  referenceManifest,
+                  reference.sliceIndex,
+                  {
+                    ...preparationOptions,
+                    selectInformativeReference: Boolean(registrationKey),
+                  },
+                );
+                const preparedReference = await preparedPhysicalReference;
+                ensureNotAborted();
+                return prepareLongitudinalRegistrationInput(
+                  referenceManifest,
+                  targetManifest,
+                  preparedReference.referenceSourceIndex ?? reference.sliceIndex,
+                  {
+                    ...preparationOptions,
+                    outputGrid: preparedReference.outputGrid ?? operationOutputGrid,
+                    preparedReference,
+                  },
+                );
+              })();
+          const estimationSliceIndex =
+            prepared && registrationKey
+              ? prepared.referenceSourceIndices[prepared.referenceSliceIndex]!
+              : reference.sliceIndex;
+          const estimationGrid = prepared?.outputGrid ?? operationOutputGrid;
+          let selectedReference = cached
+            ? await decodeLongitudinalReferenceFrame(
+                referenceManifest,
+                reference.sliceIndex,
+                Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
+                alignmentAbortController.signal,
+              )
+            : prepared?.referenceSlices[prepared.referenceSliceIndex];
           if (!selectedReference) {
             return physicalFailure('incompatible-geometry', 'Selected physical reference frame is unavailable');
           }
-          let referenceSlices = prepared.referenceSlices;
+          let referenceSlices = prepared?.referenceSlices ?? [selectedReference];
           let referenceImage:
             | {
                 pixels: Float32Array;
@@ -677,8 +738,8 @@ export function useAutoAlign() {
               ...selectedReference,
               ...copyDisplayedReference(selectedReference.dsRows, selectedReference.dsCols),
             };
-            referenceSlices = [...prepared.referenceSlices];
-            referenceSlices[prepared.referenceSliceIndex] = selectedReference;
+            referenceSlices = [...referenceSlices];
+            referenceSlices[prepared!.referenceSliceIndex] = selectedReference;
             referenceImage = {
               ...copyDisplayedReference(operationOutputGrid.rows, operationOutputGrid.columns),
               rows: operationOutputGrid.rows,
@@ -693,21 +754,36 @@ export function useAutoAlign() {
           );
           // The coarse worker takes ownership of its mask; native refinement needs its own live copy.
           const nativeRefinementExclusion = exclusion ? Uint8Array.from(exclusion) : undefined;
-          const coarseRegistration = await runLongitudinalRegistration(
-            {
-              referenceSlices,
-              targetSlices: prepared.targetSlices,
-              referenceSliceIndex: prepared.referenceSliceIndex,
-              referenceExclusionMask: exclusion,
-              maxDimension: 96,
-              maxSamples: 12_000,
-              minCoverage: 0.55,
-              deferPresentationValidation: true,
-              outputGrid: operationOutputGrid,
-              signal: alignmentAbortController.signal,
-            },
-            alignmentAbortController.signal,
-          );
+          // Workers transfer their inputs. Keep a small independent calibration image
+          // from the informative plane, never from a blank browsing position.
+          const calibrationReference =
+            registrationKey && !cached
+              ? resample2dAreaAverageWithValidity(
+                  selectedReference.pixels,
+                  selectedReference.valid ?? new Uint8Array(selectedReference.pixels.length).fill(1),
+                  selectedReference.dsRows,
+                  selectedReference.dsCols,
+                  ALIGNMENT_IMAGE_SIZE,
+                  ALIGNMENT_IMAGE_SIZE,
+                )
+              : null;
+          const coarseRegistration =
+            cached?.estimate ??
+            (await runLongitudinalRegistration(
+              {
+                referenceSlices,
+                targetSlices: prepared!.targetSlices,
+                referenceSliceIndex: prepared!.referenceSliceIndex,
+                referenceExclusionMask: exclusion,
+                maxDimension: 96,
+                maxSamples: 12_000,
+                minCoverage: 0.55,
+                deferPresentationValidation: true,
+                outputGrid: estimationGrid,
+                signal: alignmentAbortController.signal,
+              },
+              alignmentAbortController.signal,
+            ));
           ensureNotAborted();
 
           const rejectRegistration = (failed: { reason: string; message: string }): AlignmentResult => {
@@ -728,7 +804,7 @@ export function useAutoAlign() {
           // The registration stack is intentionally sparse and bounded. Once pose is verified,
           // reconstruct the presentation from every acquired native slice intersecting the
           // oblique reference plane so small lesions are not blurred between 4-5 mm samples.
-          const registration = await densifyLongitudinalRegistration(
+          const estimatedRegistration = await densifyLongitudinalRegistration(
             targetManifest,
             selectedReference,
             coarseRegistration,
@@ -737,10 +813,11 @@ export function useAutoAlign() {
               maxSlices: 96,
               maxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
               minCoverage: 0.55,
-              outputGrid: operationOutputGrid,
+              outputGrid: estimationGrid,
               referenceManifest,
-              referenceSliceIndex: reference.sliceIndex,
+              referenceSliceIndex: estimationSliceIndex,
               referenceExclusionMask: nativeRefinementExclusion,
+              refinePose: !cached,
               ...(reference.alignmentFocus === 'tumor' && !displayedDerivedReference
                 ? { alignmentFocus: 'tumor' as const }
                 : {}),
@@ -748,6 +825,29 @@ export function useAutoAlign() {
               ...(referenceAnatomy ? { referenceAnatomy } : {}),
             },
           );
+          ensureNotAborted();
+          if (!estimatedRegistration.ok) return rejectRegistration(estimatedRegistration);
+          const registration =
+            estimationSliceIndex === reference.sliceIndex
+              ? estimatedRegistration
+              : await densifyLongitudinalRegistration(
+                  targetManifest,
+                  await decodeLongitudinalReferenceFrame(
+                    referenceManifest,
+                    reference.sliceIndex,
+                    Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
+                    alignmentAbortController.signal,
+                  ),
+                  estimatedRegistration,
+                  {
+                    signal: alignmentAbortController.signal,
+                    outputGrid: operationOutputGrid,
+                    maxSlices: 96,
+                    maxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
+                    minCoverage: 0.55,
+                    refinePose: false,
+                  },
+                );
           ensureNotAborted();
           if (!registration.ok) {
             return rejectRegistration(registration);
@@ -822,14 +922,43 @@ export function useAutoAlign() {
             imageWidth: ALIGNMENT_IMAGE_SIZE,
             imageHeight: ALIGNMENT_IMAGE_SIZE,
           });
+          const calibrationMoving = calibrationReference
+            ? resample2dAreaAverageWithValidity(
+                estimatedRegistration.pixels,
+                estimatedRegistration.valid ?? new Uint8Array(estimatedRegistration.pixels.length).fill(1),
+                estimatedRegistration.rows,
+                estimatedRegistration.cols,
+                ALIGNMENT_IMAGE_SIZE,
+                ALIGNMENT_IMAGE_SIZE,
+              )
+            : resampled;
+          const calibrationNormalizedReference = calibrationReference
+            ? normalizePerceptualSource(calibrationReference.pixels, ALIGNMENT_IMAGE_SIZE, {
+                validity: calibrationReference.validity,
+              })
+            : normalizedReferenceFine;
+          const calibrationNormalizedMoving = calibrationReference
+            ? normalizePerceptualSource(calibrationMoving.pixels, ALIGNMENT_IMAGE_SIZE, {
+                validity: calibrationMoving.validity,
+              })
+            : normalized;
           let displayGeometry: Parameters<typeof computeAlignedSettings>[5] = reference.settings;
-          if (reference.exclusionMask && Math.min(nativeFrame.rows, nativeFrame.columns, rows, cols) >= 64) {
+          let displayAffine = cached?.affine;
+          if (displayAffine) {
+            displayGeometry = composeReferencePanelGeometry(
+              reference,
+              { width: cols, height: rows },
+              displayAffine,
+            ).geometry;
+          } else if (!cached && Math.min(nativeFrame.rows, nativeFrame.columns, rows, cols) >= 64) {
             try {
               const { registerAffine2DWithElastix } = await import('../utils/elastixRegistration');
               ensureNotAborted();
-              const movingStructure = protectedStructure(normalized, fineNormalizationExclusion);
+              const movingStructure = protectedStructure(calibrationNormalizedMoving, fineNormalizationExclusion);
               const residual = await registerAffine2DWithElastix(
-                getReferenceStructure(),
+                calibrationReference
+                  ? protectedStructure(calibrationNormalizedReference, undefined)
+                  : getReferenceStructure(),
                 movingStructure,
                 ALIGNMENT_IMAGE_SIZE,
                 {
@@ -848,10 +977,10 @@ export function useAutoAlign() {
               ensureNotAborted();
               sharedWebWorker = residual.webWorker;
               const selection = selectFinalAffineProposal({
-                normalizedReference: normalizedReferenceFine,
-                referenceValidity: referenceRender.validity,
-                movingPixels: resampled.pixels,
-                movingValidity: resampled.validity,
+                normalizedReference: calibrationNormalizedReference,
+                referenceValidity: calibrationReference?.validity ?? referenceRender.validity,
+                movingPixels: calibrationMoving.pixels,
+                movingValidity: calibrationMoving.validity,
                 size: ALIGNMENT_IMAGE_SIZE,
                 scales: FINE_PERCEPTUAL_SCALES,
                 winningWarp: {
@@ -863,6 +992,7 @@ export function useAutoAlign() {
                 optimizerProposals: [{ kind: 'structure-elastix', residualMovingToFixed: residual.movingToFixed }],
               });
               if (selection.selected.kind !== 'seed-only') {
+                displayAffine = selection.selected.totalMovingToFixed;
                 displayGeometry = composeReferencePanelGeometry(
                   reference,
                   { width: cols, height: rows },
@@ -891,6 +1021,64 @@ export function useAutoAlign() {
             }
           }
           const movingDisplayPixels = windowDisplayPixels(resampled.pixels, nativeFrame);
+          let displayTone = cached?.tone;
+          if (calibrationReference) {
+            const calibrationTargetIndex = selectPhysicalTargetSlice(
+              referenceManifest,
+              targetManifest,
+              estimationSliceIndex,
+              {
+                rigid: targetToReference,
+                centerMm,
+                outputGrid: estimationGrid,
+              },
+            );
+            const calibrationWindow = targetManifest.frames[calibrationTargetIndex]!;
+            const fixedDisplay = windowDisplayPixels(
+              calibrationReference.pixels,
+              referenceManifest.frames[estimationSliceIndex],
+            );
+            let movingDisplay = windowDisplayPixels(calibrationMoving.pixels, calibrationWindow);
+            let validity = calibrationMoving.validity;
+            if (movingDisplay && displayAffine) {
+              const center = { x: (ALIGNMENT_IMAGE_SIZE - 1) / 2, y: (ALIGNMENT_IMAGE_SIZE - 1) / 2 };
+              const centered = standardToAffineAboutOrigin(displayAffine.A, displayAffine.b, center);
+              const warped = warpPerceptualCandidateWithValidity(
+                movingDisplay,
+                ALIGNMENT_IMAGE_SIZE,
+                {
+                  A: centered.A,
+                  translateX: centered.t.x,
+                  translateY: centered.t.y,
+                },
+                validity,
+              );
+              // Exclude partially supported interpolation samples from calibration.
+              movingDisplay = warped.pixels;
+              validity = Float32Array.from(warped.validity, (value) => (value >= 0.999 ? 1 : 0));
+            }
+            const stats =
+              fixedDisplay && movingDisplay
+                ? computeCorrespondingDisplayStats(fixedDisplay, movingDisplay, {
+                    referenceValidity: calibrationReference.validity,
+                    movingValidity: validity,
+                    columns: ALIGNMENT_IMAGE_SIZE,
+                  })
+                : null;
+            if (stats) displayTone = createAlignmentDisplayTone(stats.reference, stats.moving, calibrationWindow);
+          }
+          if (registrationKey) {
+            const { ok, targetToReference, centerMm, score, diagnostics, provenance, nativeRefinement } = registration;
+            physicalRegistrationsRef.current.delete(registrationKey);
+            physicalRegistrationsRef.current.set(registrationKey, {
+              estimate: { ok, targetToReference, centerMm, score, diagnostics, provenance, nativeRefinement },
+              affine: displayAffine,
+              tone: displayTone,
+            });
+            if (physicalRegistrationsRef.current.size > 16) {
+              physicalRegistrationsRef.current.delete(physicalRegistrationsRef.current.keys().next().value!);
+            }
+          }
           const displayStats = pairedDisplayStats(movingDisplayPixels, resampled.validity);
           const computedSettings = computeAlignedSettings(
             displayStats?.reference ?? referenceDisplayedStats,
@@ -900,6 +1088,12 @@ export function useAutoAlign() {
             currentProgress,
             displayGeometry,
           );
+          if (registrationKey) {
+            // The cached calibration matches tissue before the user's display controls.
+            // Share those controls without recalibrating on each newly browsed slice.
+            computedSettings.brightness = reference.settings.brightness;
+            computedSettings.contrast = reference.settings.contrast;
+          }
           const nativeRivalEvidence = nativeRefinement?.optimizedAlternativeCount ? nativeRefinement : undefined;
 
           return {
@@ -908,7 +1102,7 @@ export function useAutoAlign() {
             bestSliceIndex,
             nmiScore: quality.nmi,
             computedSettings,
-            slicesChecked: diagnostics.presentationSourceFrameCount ?? prepared.targetSourceIndices.length,
+            slicesChecked: diagnostics.presentationSourceFrameCount ?? prepared?.targetSourceIndices.length ?? 0,
             ...resultIdentity,
             patientKey: referenceManifest.patientKey,
             outcome: 'aligned',
@@ -938,6 +1132,7 @@ export function useAutoAlign() {
               rotationDegrees: [(rx * 180) / Math.PI, (ry * 180) / Math.PI, (rz * 180) / Math.PI],
             },
             derivedFrame: {
+              ...(displayTone ? { displayTone } : {}),
               pixels,
               ...(valid ? { valid } : {}),
               rows,
@@ -1964,12 +2159,13 @@ export function useAutoAlign() {
         return results;
       } catch (err) {
         const cancelled = err instanceof AlignmentCancelledError || alignmentAbortController.signal.aborted;
-        const errorMsg = cancelled ? 'Alignment cancelled' : err instanceof Error ? err.message : 'Alignment failed';
+        const errorMsg = err instanceof Error ? err.message : 'Alignment failed';
         setStateForCurrentRun((s) => ({
           ...s,
           isAligning: false,
           progress: null,
-          error: errorMsg,
+          // A requested cancellation keeps completed results; it is not an alignment failure.
+          error: cancelled ? null : errorMsg,
         }));
         if (cancelled) return results;
         throw err;
@@ -1999,5 +2195,6 @@ export function useAutoAlign() {
     alignAllDates,
     abort,
     clearState,
+    clearRegistrationCache,
   };
 }

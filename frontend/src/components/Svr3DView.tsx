@@ -4,8 +4,16 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
 import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
-import type { SvrParams, SvrRoi, SvrRoiPlane, SvrSelectedSeries } from '../types/svr';
-import { formatSequenceLabel } from '../utils/clinicalData';
+import type {
+  SvrLabelVolume,
+  SvrParams,
+  SvrRoi,
+  SvrRoiPlane,
+  SvrSelectedSeries,
+  SvrSourceProvenance,
+  SvrVolume,
+} from '../types/svr';
+import { formatPatientName, formatSequenceLabel } from '../utils/clinicalData';
 import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
@@ -14,8 +22,7 @@ import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../ut
 import type { SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
-import { computeSvrDownsampleSize } from '../utils/svr/downsample';
-import { filterSvrManifestFramesForRoi } from '../utils/svr/sliceRoiCrop';
+import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from '../utils/svr/sourceMemory';
 import {
   estimateSvrPeakMemoryBytes,
   estimateSvrRegistrationBytes,
@@ -24,6 +31,31 @@ import {
 import { quantileSorted } from '../utils/svr/svrUtils';
 import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
+import { SvrImagingContext } from './svrImagingContext';
+import { regionalRefinementParameters, selectionFocusRoi } from '../utils/svr/refineRegion';
+import {
+  classifySvrAcquisitions,
+  hydrateSvrAcquisitionMetadata,
+  nativeReferenceSources,
+  type SvrAcquisitionClassification,
+} from '../utils/svr/acquisitionProvenance';
+import {
+  nativeDecodedCacheBudgetBytes,
+  nativePlaneMemoryBytes,
+  planNativeVolume,
+  retainedSvrVolumeBytes,
+} from '../utils/svr/nativeVolume';
+import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
+import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
+import {
+  assertEnhancementFits,
+  cropEnhancementSource,
+  enhancementContextFits,
+  enhancementSelectionRoi,
+  enhancementWorkingBytes,
+  type EnhancementSourceLoader,
+} from '../utils/svr/superResolutionRegion';
+import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
@@ -409,6 +441,7 @@ type SvrSourceReadiness = {
   identity: string;
   manifests: SeriesFrameManifest[];
   independentOrientationCount: number;
+  acquisition: SvrAcquisitionClassification | null;
   error: string | null;
 };
 
@@ -510,57 +543,6 @@ function countIndependentOrientations(manifests: SeriesFrameManifest[]): number 
   return normals.length;
 }
 
-/** Native Cornerstone-decoded source pixels coexist with the transferred SVR slice copies. */
-function estimateSourceMemory(
-  manifests: SeriesFrameManifest[],
-  params: SvrParams,
-  roi: SvrRoi | null,
-): { sourceBytes: number; decodedSourceCacheBytes: number } {
-  let sourceBytes = 0;
-  let selectedNativeBytes = 0;
-
-  for (const manifest of manifests) {
-    const frame = manifest.frames[0];
-    if (!frame) continue;
-
-    const geometry = getSliceGeometryFromInstance(frame);
-    const sampled = computeSvrDownsampleSize({
-      rows: geometry.rows,
-      cols: geometry.cols,
-      maxSize: params.sliceDownsampleMaxSize,
-      mode: params.sliceDownsampleMode,
-      rowSpacingMm: geometry.rowSpacingMm,
-      colSpacingMm: geometry.colSpacingMm,
-      targetVoxelSizeMm: params.targetVoxelSizeMm,
-    });
-
-    // Float32 intensity and the authoritative byte-per-pixel acquired mask.
-    const admittedFrames = filterSvrManifestFramesForRoi(manifest, roi, params).frames;
-    sourceBytes += sampled.dsRows * sampled.dsCols * admittedFrames.length * 5;
-
-    for (const admittedFrame of admittedFrames) {
-      // Some source modalities promote signed values or modality-scaled pixels
-      // to Float32. Count that worst-case resident representation explicitly.
-      selectedNativeBytes += admittedFrame.rows * admittedFrame.columns * Float32Array.BYTES_PER_ELEMENT;
-    }
-  }
-
-  try {
-    const cache = cornerstone.imageCache?.getCacheInfo?.();
-    const existingBytes = Math.max(0, Number(cache?.cacheSizeInBytes) || 0);
-    const maximumBytes = Number(cache?.maximumSizeInBytes);
-    const projectedBytes = existingBytes + selectedNativeBytes;
-    return {
-      sourceBytes,
-      decodedSourceCacheBytes:
-        Number.isFinite(maximumBytes) && maximumBytes > 0 ? Math.min(maximumBytes, projectedBytes) : projectedBytes,
-    };
-  } catch {
-    // Missing cache telemetry never makes the selected native frames free.
-    return { sourceBytes, decodedSourceCacheBytes: selectedNativeBytes };
-  }
-}
-
 /** Mirror the solver's physical output grid instead of budgeting a fictional max-dimension cube. */
 function estimateReconstructionGrid(
   manifests: SeriesFrameManifest[],
@@ -616,6 +598,105 @@ function estimateReconstructionGrid(
   };
 }
 
+function planReconstruction(
+  manifests: SeriesFrameManifest[],
+  params: SvrParams,
+  roi: SvrRoi | null,
+  retainedVolume?: SvrVolume,
+  nativeManifest?: SeriesFrameManifest | null,
+  acceptedProvenance?: SvrSourceProvenance,
+) {
+  // Recomputing deliberately preserves the prior Float32 result and its
+  // support evidence while both independent 3D GPU textures stay visible.
+  const retainedBytes = retainedVolume ? retainedSvrVolumeBytes(retainedVolume) : 0;
+  let cacheInfo: SvrDecodedCacheInfo | undefined;
+  try {
+    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
+  } catch {
+    /* Reserve the default cache if telemetry is unavailable. */
+  }
+  const acceptedSourceTransforms = acceptedProvenance
+    ? Object.fromEntries(acceptedProvenance.sources.map((source) => [source.seriesUid, source.transform]))
+    : undefined;
+
+  if (nativeManifest) {
+    const native = planNativeVolume(
+      nativeManifest,
+      { ...params, roi },
+      {
+        retainedBytes,
+        decodedCacheBytes: nativeDecodedCacheBudgetBytes(cacheInfo),
+        nativePlaneBytes: nativePlaneMemoryBytes(nativeReferenceSources(manifests, nativeManifest)),
+        transform: acceptedProvenance?.sources.find((source) => source.seriesUid === nativeManifest.seriesUid)
+          ?.transform,
+      },
+    );
+    return {
+      effectiveParams: params,
+      effectiveVoxelSizeMm: Math.max(...native.voxelSizeMm),
+      sourceBytes: native.sourceBytes,
+      memoryPlan: native.memoryPlan,
+    };
+  }
+
+  const evaluate = (targetVoxelSizeMm: number) => {
+    const effectiveParams = { ...params, targetVoxelSizeMm };
+    const { sourceBytes, decodedSourceCacheBytes } = estimateSvrSourceMemory(manifests, effectiveParams, {
+      roi,
+      cacheInfo,
+      acceptedSourceTransforms,
+    });
+    const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(manifests, effectiveParams, roi);
+
+    return {
+      effectiveParams,
+      effectiveVoxelSizeMm,
+      sourceBytes,
+      memoryPlan: estimateSvrPeakMemoryBytes({
+        voxelCount,
+        sourceBytes,
+        iterations: effectiveParams.iterations,
+        retainedBytes: retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests),
+        // Reserve independently owned CPU/GPU labels for both the incoming
+        // result and any already-annotated retained reconstruction.
+        labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
+        registrationBytes:
+          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
+            ? estimateSvrRegistrationBytes(voxelCount)
+            : 0,
+      }),
+    };
+  };
+
+  const requested = evaluate(params.targetVoxelSizeMm);
+  if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
+
+  let lower = Math.floor(params.targetVoxelSizeMm * 100);
+  let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
+  let nearestSafe = evaluate(upper / 100);
+
+  while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
+    lower = upper;
+    upper = Math.min(1000, Math.ceil(upper * 1.5));
+    nearestSafe = evaluate(upper / 100);
+  }
+
+  if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
+
+  while (upper - lower > 1) {
+    const midpoint = Math.floor((lower + upper) / 2);
+    const candidate = evaluate(midpoint / 100);
+    if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
+      lower = midpoint;
+    } else {
+      upper = midpoint;
+      nearestSafe = candidate;
+    }
+  }
+
+  return nearestSafe;
+}
+
 export type Svr3DViewProps = {
   data: ComparisonData;
   defaultDateIso?: string | null;
@@ -644,12 +725,7 @@ function useSvrReconstructionWorkspace({
     sliceDownsampleMode: 'voxel-aware',
     seriesRegistrationMode: 'roi-rigid',
   }));
-  const [generationCollapsed, setGenerationCollapsed] = useState(false);
-
-  const [sliceInspectorPortalTarget, setSliceInspectorPortalTarget] = useState<Element | null>(null);
-  const sliceInspectorPortalRef = useCallback((el: HTMLElement | null) => {
-    setSliceInspectorPortalTarget(el);
-  }, []);
+  const [generationCollapsed, setGenerationCollapsed] = useState(true);
 
   const { status, isRunning, progress, result, resultIdentity, error, run, cancel, clear } = useSvrReconstruction();
 
@@ -815,9 +891,17 @@ function useSvrReconstructionWorkspace({
     }
 
     let current = true;
+    const controller = new AbortController();
     setSourceReadiness(null);
 
     void Promise.all(selectedSeries.map((series) => getSeriesFrameManifest(series.seriesUid)))
+      .then((manifests) =>
+        hydrateSvrAcquisitionMetadata(manifests, {
+          signal: controller.signal,
+          datasetRevision: volumeIdentity?.datasetRevision,
+          selectedPatientKey: volumeIdentity?.patientKey,
+        }),
+      )
       .then((manifests) => {
         if (!current) return;
 
@@ -851,10 +935,13 @@ function useSvrReconstructionWorkspace({
           throw new Error('These acquisitions use incompatible spatial coordinate frames.');
         }
 
+        const acquisition = classifySvrAcquisitions(manifests);
+        if (acquisition.mode === 'conflicting') throw new Error(acquisition.explanation);
         setSourceReadiness({
           identity: workspaceIdentity,
           manifests,
           independentOrientationCount: countIndependentOrientations(manifests),
+          acquisition,
           error: null,
         });
       })
@@ -864,14 +951,16 @@ function useSvrReconstructionWorkspace({
           identity: workspaceIdentity,
           manifests: [],
           independentOrientationCount: 0,
+          acquisition: null,
           error: reason instanceof Error ? reason.message : 'The acquisition could not be verified.',
         });
       });
 
     return () => {
       current = false;
+      controller.abort();
     };
-  }, [selectedSeries, volumeIdentity?.patientKey, workspaceIdentity]);
+  }, [selectedSeries, volumeIdentity?.patientKey, volumeIdentity?.datasetRevision, workspaceIdentity]);
 
   // ROI-first flow: pick a ROI on an input slice, then run SVR restricted to that cube.
   const preferredRoiSeriesUid = useMemo(() => {
@@ -1061,81 +1150,35 @@ function useSvrReconstructionWorkspace({
   }, [roiWorld]);
 
   const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
+  const nativeSource =
+    currentReadiness?.acquisition?.mode === 'independent-2d'
+      ? null
+      : (currentReadiness?.acquisition?.primaryOriginal3d ?? currentReadiness?.manifests[0] ?? null);
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
-  const plannedReconstruction = useMemo(() => {
-    if (!currentReadiness?.manifests.length) return null;
-
-    const retainedVolume = acceptedResult?.volume;
-    const retainedVoxelCount = retainedVolume?.data.length ?? 0;
-    // Recomputing deliberately preserves the prior Float32 result and its
-    // support evidence while both independent 3D GPU textures stay visible.
-    const retainedBytes = retainedVolume
-      ? retainedVolume.data.byteLength +
-        (retainedVolume.observedSupport?.byteLength ?? 0) +
-        retainedVoxelCount * (Uint16Array.BYTES_PER_ELEMENT + Uint8Array.BYTES_PER_ELEMENT)
-      : 0;
-
-    const evaluate = (targetVoxelSizeMm: number) => {
-      const effectiveParams = { ...params, targetVoxelSizeMm };
-      const { sourceBytes, decodedSourceCacheBytes } = estimateSourceMemory(
-        currentReadiness.manifests,
-        effectiveParams,
-        roiWorld,
-      );
-      const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(
-        currentReadiness.manifests,
-        effectiveParams,
-        roiWorld,
-      );
-
+  const planning = useMemo(() => {
+    try {
       return {
-        effectiveParams,
-        effectiveVoxelSizeMm,
-        sourceBytes,
-        memoryPlan: estimateSvrPeakMemoryBytes({
-          voxelCount,
-          sourceBytes,
-          iterations: effectiveParams.iterations,
-          retainedBytes: retainedBytes + decodedSourceCacheBytes,
-          // Reserve independently owned CPU/GPU labels for both the incoming
-          // result and any already-annotated retained reconstruction.
-          labelBytes: (voxelCount + retainedVoxelCount) * Uint8Array.BYTES_PER_ELEMENT * 2,
-          registrationBytes:
-            roiWorld && effectiveParams.seriesRegistrationMode === 'roi-rigid'
-              ? estimateSvrRegistrationBytes(voxelCount)
-              : 0,
-        }),
+        result: currentReadiness?.manifests.length
+          ? planReconstruction(
+              nativeSource
+                ? currentReadiness.manifests
+                : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
+              params,
+              roiWorld,
+              acceptedResult?.volume,
+              nativeSource,
+            )
+          : null,
+        error: null,
       };
-    };
-
-    const requested = evaluate(params.targetVoxelSizeMm);
-    if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
-
-    let lower = Math.floor(params.targetVoxelSizeMm * 100);
-    let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
-    let nearestSafe = evaluate(upper / 100);
-
-    while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
-      lower = upper;
-      upper = Math.min(1000, Math.ceil(upper * 1.5));
-      nearestSafe = evaluate(upper / 100);
+    } catch (reason) {
+      return {
+        result: null,
+        error: reason instanceof Error ? reason.message : 'The volume geometry could not be planned.',
+      };
     }
-
-    if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
-
-    while (upper - lower > 1) {
-      const midpoint = Math.floor((lower + upper) / 2);
-      const candidate = evaluate(midpoint / 100);
-      if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
-        lower = midpoint;
-      } else {
-        upper = midpoint;
-        nearestSafe = candidate;
-      }
-    }
-
-    return nearestSafe;
-  }, [acceptedResult, currentReadiness, params, roiWorld]);
+  }, [acceptedResult, currentReadiness, nativeSource, params, roiWorld]);
+  const plannedReconstruction = planning.result;
   const memoryPlan = plannedReconstruction?.memoryPlan ?? null;
   const sourceMemoryBytes = plannedReconstruction?.sourceBytes ?? 0;
   const effectiveVoxelSizeMm = plannedReconstruction?.effectiveVoxelSizeMm ?? params.targetVoxelSizeMm;
@@ -1148,16 +1191,18 @@ function useSvrReconstructionWorkspace({
     ? 'Select an examination and sequence to inspect its acquired source images.'
     : currentReadiness?.error
       ? currentReadiness.error
-      : !currentReadiness
-        ? 'Verifying acquired frames and physical source geometry…'
-        : currentReadiness.independentOrientationCount < 2
-          ? 'A second independent acquisition orientation is required for multiplane reconstruction.'
-          : !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
+      : planning.error
+        ? planning.error
+        : !currentReadiness
+          ? 'Verifying acquired frames and physical source geometry…'
+          : !nativeSource && !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
             ? 'The selected acquisitions have no verified shared contrast or sequence and cannot be fused safely.'
             : exceedsMemoryBudget
-              ? acceptedResult
-                ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
-                : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
+              ? nativeSource
+                ? 'This native-detail region exceeds the 512 MiB processing budget. Draw a smaller focus box or clear the previous volume; original detail will not be silently reduced.'
+                : acceptedResult
+                  ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
+                  : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
               : null;
 
   const canRun =
@@ -1165,12 +1210,16 @@ function useSvrReconstructionWorkspace({
     Boolean(workspaceIdentity) &&
     Boolean(currentReadiness) &&
     !sourceReadinessMessage &&
-    selectedSeries.length >= 2 &&
-    selectedPlaneCount >= 2;
+    selectedSeries.length >= 1;
   const percent = progress ? Math.round((progress.current / Math.max(1, progress.total)) * 100) : 0;
   const progressMessage = progress ? progress.message : '';
   const sourceFrameCount =
-    currentReadiness?.manifests.reduce((count, manifest) => count + manifest.frames.length, 0) ?? 0;
+    nativeSource?.frames.length ??
+    currentReadiness?.acquisition?.eligibleIndependentSources.reduce(
+      (count, manifest) => count + manifest.frames.length,
+      0,
+    ) ??
+    0;
   const sourceMemoryMiB = sourceMemoryBytes / (1024 * 1024);
   const estimatedPeakMemoryMiB = memoryPlan ? memoryPlan.totalBytes / (1024 * 1024) : null;
   const displayedPatient = data.patients?.find((patient) => patient.key === data.selected_patient_key)?.patient_name;
@@ -1179,8 +1228,127 @@ function useSvrReconstructionWorkspace({
   const startReconstruction = useCallback(() => {
     if (!canRun || !workspaceIdentity) return;
     const paramsToRun: SvrParams = { ...(plannedReconstruction?.effectiveParams ?? params), roi: roiWorld ?? null };
-    void run(selectedSeries, paramsToRun, workspaceIdentity);
+    void run(selectedSeries, paramsToRun, workspaceIdentity).then((outcome) => {
+      if (outcome.result) setGenerationCollapsed(true);
+    });
   }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
+
+  const refineRegion = useCallback(
+    (labels: SvrLabelVolume) => {
+      if (!canRun || !workspaceIdentity || !acceptedResult || !currentReadiness) return;
+      const volume = acceptedResult.volume;
+      const requested = regionalRefinementParameters(
+        acceptedResult.parameters ?? params,
+        selectionFocusRoi(volume, labels, effectiveRoiSeriesUid ?? undefined),
+      );
+      const roi = requested.roi!;
+      const planned = planReconstruction(
+        nativeSource
+          ? currentReadiness.manifests
+          : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
+        requested,
+        roi,
+        volume,
+        nativeSource,
+        volume.sourceProvenance,
+      );
+      setRoiWorld(roi);
+      setRoiRect(null);
+      setParams(requested);
+      void run(selectedSeries, { ...planned.effectiveParams, roi }, workspaceIdentity, { volume, labels }).then(
+        (outcome) => {
+          if (outcome.result) setGenerationCollapsed(true);
+        },
+      );
+    },
+    [
+      acceptedResult,
+      canRun,
+      currentReadiness,
+      nativeSource,
+      effectiveRoiSeriesUid,
+      params,
+      run,
+      selectedSeries,
+      setRoiRect,
+      setRoiWorld,
+      workspaceIdentity,
+    ],
+  );
+
+  // Enhancement borrows the accepted source pose; it never publishes a new
+  // reconstruction or transfers/replaces the user's authoritative selection.
+  const loadEnhancementSource = useCallback<EnhancementSourceLoader>(
+    async (labels, options) => {
+      if (!acceptedResult || isRunning) throw new Error('Wait for reconstruction to finish before enhancing a region.');
+      const volume = acceptedResult.volume;
+      let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
+      try {
+        decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
+      } catch {
+        // Optional telemetry may be unavailable; retain the conservative cache reservation.
+      }
+      const nativePlaneBytes = nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []);
+      const cropAccepted = () =>
+        cropEnhancementSource(volume, labels, {
+          ...options,
+          retainedBytes: (options.retainedBytes ?? 0) + decodedCacheBytes + nativePlaneBytes,
+        });
+      if (!volume.nativeVoxelSizeMm) return cropAccepted();
+      if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
+        if (hasNativeDetail(volume)) return cropAccepted();
+        throw new Error('The original source is unavailable. Reopen this examination before enhancing it.');
+      }
+      const retainedBytes = retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0);
+      const sourceTransform = volume.sourceProvenance.sources.find(
+        (source) => source.seriesUid === nativeSource.seriesUid,
+      )?.transform;
+      if (!sourceTransform)
+        throw new Error('The accepted original source pose is unavailable. Reopen this examination.');
+      const planning = {
+        retainedBytes,
+        decodedCacheBytes,
+        nativePlaneBytes,
+        transform: sourceTransform,
+      };
+      // Metadata only: derive the complete acquired grid even when the accepted
+      // native volume is a small focus crop. This never allocates source pixels.
+      const extent = planNativeVolume(
+        nativeSource,
+        {
+          roi: { mode: 'box', sourcePlane: 'axial', boundsMm: volume.boundsMm },
+        },
+        planning,
+      );
+      const offsets = extent.sourceAxes.map((axis, outputAxis) =>
+        extent.sourceFlips[outputAxis] === 1
+          ? -extent.cropMin[axis]!
+          : -(extent.sourceDims[axis]! - 1 - extent.cropMax[axis]!),
+      ) as [number, number, number];
+      const sourceGrid = {
+        dims: extent.sourceAxes.map((axis) => extent.sourceDims[axis]!) as [number, number, number],
+        voxelSizeMm: extent.nativeVoxelSizeMm,
+        direction: extent.direction,
+        originMm: volumeVoxelToPatient(extent, offsets),
+      };
+      const roi = await enhancementSelectionRoi(volume, labels, options.signal, sourceGrid);
+      const requested: SvrParams = { ...(acceptedResult.parameters ?? params), roi };
+      const plan = planNativeVolume(nativeSource, requested, planning);
+      if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
+      const count = plan.dims.reduce((product, axis) => product * axis, 1);
+      assertEnhancementFits(count, retainedBytes + decodedCacheBytes + nativePlaneBytes);
+      const result = await reconstructVolumeMultiPlane({
+        selectedSeries,
+        svrParams: requested,
+        acceptedProvenance: volume.sourceProvenance,
+        retainedBytes: retainedBytes + enhancementWorkingBytes(count),
+        signal: options.signal,
+        onProgress: options.onProgress,
+      });
+      return result.volume;
+    },
+    [acceptedResult, isRunning, nativeSource, currentReadiness, params, selectedSeries],
+  );
 
   return {
     acceptedResult,
@@ -1188,6 +1356,7 @@ function useSvrReconstructionWorkspace({
     cancel,
     clear,
     currentReadiness,
+    nativeSource,
     displayedDate,
     displayedPatient,
     effectiveVoxelSizeMm,
@@ -1225,12 +1394,12 @@ function useSvrReconstructionWorkspace({
     setSelectedSequenceKey,
     setShowAcquiredStack,
     showAcquiredStack,
-    sliceInspectorPortalRef,
-    sliceInspectorPortalTarget,
     sourceFrameCount,
     sourceMemoryMiB,
     sourceReadinessMessage,
     startReconstruction,
+    refineRegion,
+    loadEnhancementSource,
     status,
     stepRoiSlice,
     automaticallyAdjustedVoxelSpacing,
@@ -1255,15 +1424,15 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
     selectedSeries,
     sequenceGroupsForDate,
     setSelectedSequenceKey,
+    sourceFrameCount,
     sourceMemoryMiB,
+    nativeSource,
   } = workspace;
 
   return (
     <>
       <div className="space-y-3">
-        <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">
-          Acquired source sequences
-        </div>
+        <div className="text-xs font-medium tracking-[0.08em] text-[var(--text-secondary)]">MRI sequences</div>
         <div className="max-h-[260px] overflow-auto">
           {sequenceGroupsForDate.length === 0 ? (
             <div className="py-2 text-xs text-[var(--text-tertiary)]">No series found for this date.</div>
@@ -1304,21 +1473,40 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
       </div>
 
       {currentReadiness?.manifests.length ? (
-        <div className="border-t border-[var(--border-color)] pt-4">
-          <div className="flex items-center gap-2 text-xs font-medium text-[var(--evidence)]">
-            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[var(--evidence)]" />
-            Verified acquired evidence
-          </div>
+        <details className="svr-sampling-details border-t border-[var(--border-color)] pt-2 text-xs text-[var(--text-secondary)]">
+          <summary>Source details</summary>
           <div className="mt-3 space-y-2.5 text-xs">
+            <div className="text-[var(--evidence)]">Verified source geometry</div>
+            <p className="tabular-nums text-[var(--text-secondary)]">
+              {nativeSource
+                ? currentReadiness.acquisition?.mode === 'native-3d'
+                  ? 'Original 3D acquisition'
+                  : 'Single source stack'
+                : `${currentReadiness.acquisition?.eligibleIndependentSources.length ?? 0} independent acquisitions`}
+              {' · '}
+              {sourceFrameCount} source slices
+            </p>
             {currentReadiness.manifests.map((manifest, index) => {
               const frame = manifest.frames[0]!;
               const geometry = getSliceGeometryFromInstance(frame);
               const series = selectedSeries[index];
+              const kind = currentReadiness.acquisition?.sources.find(
+                (source) => source.seriesUid === manifest.seriesUid,
+              )?.kind;
 
               return (
                 <div key={manifest.seriesUid} className="flex flex-col gap-1">
                   <span className="min-w-0 truncate text-[var(--text-primary)]">
                     {series?.plane ?? 'Acquired'} · {manifest.frames.length} slices
+                  </span>
+                  <span className={kind === 'original-3d' ? 'text-[var(--evidence)]' : 'text-[var(--text-tertiary)]'}>
+                    {kind === 'original-3d'
+                      ? 'Original 3D acquisition'
+                      : kind === 'derived'
+                        ? 'Derived view · not fused'
+                        : kind === 'original-2d'
+                          ? 'Original 2D acquisition'
+                          : 'Acquisition provenance unknown'}
                   </span>
                   <span className="shrink-0 tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
                     {geometry.rowSpacingMm.toFixed(2)} × {geometry.colSpacingMm.toFixed(2)} mm
@@ -1326,7 +1514,7 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 </div>
               );
             })}
-            <div className="border-t border-[var(--border-color)] pt-2 text-[var(--text-secondary)]">
+            <div className="border-t border-[var(--border-color)] pt-3 text-[var(--text-secondary)]">
               <div className="flex items-center justify-between gap-2">
                 <span>{acceptedResult ? 'Next source data' : 'Acquired source data'}</span>
                 <span className="tabular-nums">{sourceMemoryMiB.toFixed(1)} MiB</span>
@@ -1341,12 +1529,20 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                   </span>
                 </div>
               ) : null}
+              {!nativeSource ? (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span>Requested voxel spacing</span>
+                  <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
+                </div>
+              ) : null}
               <div className="mt-1 flex items-center justify-between gap-2">
-                <span>Requested voxel spacing</span>
-                <span className="tabular-nums">{params.targetVoxelSizeMm.toFixed(2)} mm</span>
-              </div>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span>{acceptedResult ? 'Next effective spacing' : 'Effective voxel spacing'}</span>
+                <span>
+                  {nativeSource
+                    ? 'Largest stored-grid step'
+                    : acceptedResult
+                      ? 'Next effective spacing'
+                      : 'Effective voxel spacing'}
+                </span>
                 <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
               </div>
               {automaticallyAdjustedVoxelSpacing ? (
@@ -1355,8 +1551,38 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 </div>
               ) : null}
             </div>
+            {currentReadiness.acquisition ? (
+              <p className="leading-relaxed text-[var(--text-secondary)]">{currentReadiness.acquisition.explanation}</p>
+            ) : null}
+            {nativeSource ? (
+              <p className="leading-relaxed text-[var(--text-tertiary)]">
+                Original MRI values are preserved. The overview adapts to available memory; a focus region loads at the
+                original stored spacing. No reconstruction or reformat fusion is applied.
+              </p>
+            ) : null}
+            <p className="leading-relaxed text-[var(--text-tertiary)]">
+              Stored sample spacing is not a measurement of acquired resolution.
+            </p>
+            {acceptedResult ? (
+              <div className="border-t border-[var(--border-color)] pt-3 text-[var(--text-secondary)]">
+                <div className="font-medium text-[var(--text-primary)]">
+                  {acceptedResult.volume.nativeVoxelSizeMm ? 'Original-source volume' : 'Accepted reconstruction'}
+                </div>
+                <div className="mt-1 tabular-nums">
+                  {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]}{' '}
+                  voxels · {volumeSamplingLabel(acceptedResult.volume)}
+                </div>
+                {acceptedResult.volume.observedSupport ? (
+                  <div className="mt-1 text-[var(--evidence)]">
+                    {typeof acceptedResult.volume.supportedVoxelCount === 'number'
+                      ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
+                      : 'Acquired-voxel support preserved'}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-        </div>
+        </details>
       ) : null}
     </>
   );
@@ -1365,10 +1591,12 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
 function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const { isRunning, params, setParams } = workspace;
 
+  if (workspace.nativeSource) return null;
+
   return (
     <details className="border-t border-[var(--border-color)] pt-3">
       <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        Advanced SVR settings
+        Reconstruction settings
       </summary>
 
       <div className="mt-2 space-y-3">
@@ -1439,30 +1667,12 @@ function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorksp
           </label>
         </div>
 
-        <div className="space-y-1 text-xs text-[var(--text-tertiary)] leading-snug">
-          <div>
-            <span className="text-[var(--text-secondary)]">Voxel size</span>: Target isotropic output spacing. Smaller =
-            more detail but slower/heavier. The voxel size may be increased automatically to respect{' '}
-            <span className="text-[var(--text-secondary)]">Max volume dim</span>.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Iterations</span>: How many SVR refinement passes to run. 0 =
-            quick “splat/average only”; higher can reduce slice-to-slice inconsistency but costs time.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Slice downsample max</span>: Each input slice may be
-            downsampled before reconstruction, but we won't downsample so far that in-plane spacing becomes worse than
-            the target voxel size.
-          </div>
-          <div>
-            <span className="text-[var(--text-secondary)]">Max volume dim</span>: Caps each output grid dimension (in
-            voxels) by increasing voxel size if needed. Lower = faster/smaller; higher = more memory/time.
-          </div>
-          <div>
-            Tip: draw a box on an input slice and run{' '}
-            <span className="text-[var(--text-secondary)]">Run SVR (box)</span> to keep the volume smaller + faster.
-          </div>
-        </div>
+        <p className="text-xs leading-relaxed text-[var(--text-tertiary)]">
+          Smaller voxels and more iterations take longer and use more memory. Zero iterations uses only the initial
+          average. Slice size caps input sampling; maximum volume size caps the output grid. Input downsampling respects
+          the requested voxel spacing, and output spacing adjusts when needed to fit the memory budget. A focus box
+          limits processing to the area you need.
+        </p>
       </div>
     </details>
   );
@@ -1493,9 +1703,12 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   return (
     <details className="border-t border-[var(--border-color)] pt-3">
       <summary className="min-h-9 cursor-pointer select-none py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        Focus box (optional)
+        Focus region (optional)
       </summary>
       <div className="mt-2 space-y-2">
+        <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+          Draw a box to load a smaller region. This crops the volume; it does not select tumor tissue.
+        </p>
         <div className="flex items-center gap-2">
           <label htmlFor={roiSeriesSelectId} className="text-xs text-[var(--text-secondary)] w-16">
             Draw on
@@ -1519,13 +1732,9 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
           </select>
         </div>
 
-        {roiSeriesSopUidsError ? (
+        {roiSeriesSopUidsError || roiSliceGeomError ? (
           <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-            {roiSeriesSopUidsError}
-          </div>
-        ) : roiSliceGeomError ? (
-          <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]">
-            {roiSliceGeomError}
+            {roiSeriesSopUidsError || roiSliceGeomError}
           </div>
         ) : null}
 
@@ -1569,9 +1778,7 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
           setRoiRect={setRoiRect}
           roiDragRef={roiDragRef}
           onSliceDelta={stepRoiSlice}
-          onRoiFinalized={(roi) => {
-            setRoiWorld(roi);
-          }}
+          onRoiFinalized={setRoiWorld}
           disabled={isRunning}
         />
 
@@ -1591,27 +1798,75 @@ function SvrFocusBox({ workspace }: { workspace: SvrReconstructionWorkspace }) {
 
           {roiWorld && roiSideMm ? (
             <div className="text-xs text-[var(--text-tertiary)]">
-              Box: ~{roiSideMm.toFixed(1)}mm cube ({roiWorld.sourcePlane})
+              {roiWorld.mode === 'box'
+                ? `${roiWorld.boundsMm.min.map((lower, axis) => (roiWorld.boundsMm.max[axis]! - lower).toFixed(1)).join(' × ')} mm region`
+                : `Box: ~${roiSideMm.toFixed(1)} mm cube (${roiWorld.sourcePlane})`}
             </div>
           ) : null}
-        </div>
-
-        <div className="text-xs text-[var(--text-tertiary)]">
-          Drag to draw a box on an input slice. When a box is set,{' '}
-          <span className="text-[var(--text-secondary)]">Run SVR</span> will reconstruct only that box. Starting with a
-          smaller box lets you decrease voxel size for more detail without making the volume huge.
         </div>
       </div>
     </details>
   );
 }
 
+function SvrReconstructButton({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  return (
+    <button
+      type="button"
+      disabled={!workspace.canRun}
+      onClick={workspace.startReconstruction}
+      aria-describedby={workspace.error || workspace.sourceReadinessMessage ? 'svr-source-readiness' : undefined}
+      className="svr-reconstruct-button"
+    >
+      {workspace.nativeSource
+        ? workspace.roiWorld
+          ? 'Load native region'
+          : 'Open 3D volume'
+        : workspace.roiWorld
+          ? 'Reconstruct focus box'
+          : 'Reconstruct volume'}
+    </button>
+  );
+}
+
 function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const {
     acceptedResult,
-    canRun,
-    cancel,
     clear,
+    isRunning,
+    roiDragRef,
+    setRoiRect,
+    setRoiSeriesUid,
+    setRoiWorld,
+    setSelectedSequenceKey,
+  } = workspace;
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
+      <button
+        type="button"
+        disabled={isRunning}
+        onClick={() => {
+          setSelectedSequenceKey(null);
+          setRoiSeriesUid(null);
+          setRoiRect(null);
+          roiDragRef.current = null;
+          setRoiWorld(null);
+          clear();
+        }}
+        className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
+      >
+        Reset setup
+      </button>
+      {acceptedResult ? <SvrReconstructButton workspace={workspace} /> : null}
+    </div>
+  );
+}
+
+function SvrReconstructionStatus({ workspace }: { workspace: SvrReconstructionWorkspace }) {
+  const {
+    acceptedResult,
+    cancel,
     currentReadiness,
     error,
     exceedsMemoryBudget,
@@ -1619,126 +1874,72 @@ function SvrReconstructionActions({ workspace }: { workspace: SvrReconstructionW
     percent,
     progress,
     progressMessage,
-    roiDragRef,
-    roiWorld,
-    setRoiRect,
-    setRoiSeriesUid,
-    setRoiWorld,
-    setSelectedSequenceKey,
-    sliceInspectorPortalRef,
     sourceReadinessMessage,
-    startReconstruction,
     status,
   } = workspace;
 
-  return (
-    <>
-      <div className="flex items-center justify-between gap-2 border-t border-[var(--border-color)] pt-4">
-        <button
-          type="button"
-          disabled={isRunning}
-          onClick={() => {
-            setSelectedSequenceKey(null);
-            setRoiSeriesUid(null);
-            setRoiRect(null);
-            roiDragRef.current = null;
-            setRoiWorld(null);
-            clear();
-          }}
-          className="min-h-9 rounded-[4px] px-2 py-2 text-xs text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50"
-        >
-          Clear
-        </button>
-
-        <div className="flex items-center gap-2">
-          {isRunning ? (
-            <button
-              type="button"
-              onClick={cancel}
-              className="min-h-9 rounded-[4px] border border-[var(--border-color)] px-2 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-tertiary)]"
-            >
-              Cancel
-            </button>
-          ) : null}
-
-          <button
-            type="button"
-            disabled={!canRun}
-            onClick={startReconstruction}
-            aria-describedby={sourceReadinessMessage ? 'svr-source-readiness' : undefined}
-            className="min-h-9 rounded-[4px] bg-[var(--accent)] px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {roiWorld ? 'Reconstruct focus box' : 'Reconstruct volume'}
-          </button>
-        </div>
-      </div>
-
-      {sourceReadinessMessage && !isRunning ? (
+  if (isRunning) {
+    return (
+      <div className="flex items-center gap-4 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 sm:px-6">
         <div
-          id="svr-source-readiness"
-          role={currentReadiness?.error ? 'alert' : 'status'}
-          className={`border-l-2 px-3 py-2 text-xs leading-relaxed ${
-            currentReadiness?.error || exceedsMemoryBudget
-              ? 'border-l-[var(--warning)] bg-[var(--bg-tertiary)] text-[var(--warning)]'
-              : 'border-l-[var(--border-color)] text-[var(--text-secondary)]'
-          }`}
-        >
-          {sourceReadinessMessage}
-        </div>
-      ) : null}
-
-      {isRunning && progress ? (
-        <div
-          role="progressbar"
-          aria-label={progressMessage}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-          className="border-t border-[var(--border-color)] pt-3"
+          role={progress ? 'progressbar' : 'status'}
+          aria-label={progress ? progressMessage : undefined}
+          aria-valuemin={progress ? 0 : undefined}
+          aria-valuemax={progress ? 100 : undefined}
+          aria-valuenow={progress ? percent : undefined}
+          className="min-w-0 flex-1"
         >
           <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-            <span className="truncate">{progressMessage}</span>
-            <span className="ml-auto tabular-nums">{percent}%</span>
+            <span>{progressMessage || 'Preparing MRI source images…'}</span>
+            {progress ? <span className="ml-auto shrink-0 tabular-nums">{percent}%</span> : null}
           </div>
-          <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
-            <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
-          </div>
-        </div>
-      ) : null}
-
-      {error ? (
-        <div
-          role="alert"
-          className="border-l-2 border-l-[var(--danger)] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--danger)]"
-        >
-          {error}
-        </div>
-      ) : null}
-
-      {acceptedResult ? (
-        <div className="border-t border-[var(--border-color)] pt-3 text-xs text-[var(--text-secondary)]">
-          <div className="font-medium text-[var(--text-primary)]">Accepted reconstruction</div>
-          <div className="mt-1 tabular-nums">
-            {acceptedResult.volume.dims[0]} × {acceptedResult.volume.dims[1]} × {acceptedResult.volume.dims[2]} voxels ·{' '}
-            {acceptedResult.volume.voxelSizeMm[0].toFixed(2)} mm
-          </div>
-          {acceptedResult.volume.observedSupport ? (
-            <div className="mt-1 text-[var(--evidence)]">
-              {typeof acceptedResult.volume.supportedVoxelCount === 'number'
-                ? `${Math.round((acceptedResult.volume.supportedVoxelCount / Math.max(1, acceptedResult.volume.data.length)) * 100)}% acquired-voxel support`
-                : 'Acquired-voxel support preserved'}
+          {progress ? (
+            <div className="mt-2 h-px overflow-hidden bg-[var(--border-color)]">
+              <div className="h-px bg-[var(--signal-metal)]" style={{ width: `${percent}%` }} />
             </div>
           ) : null}
         </div>
-      ) : status === 'canceled' ? (
-        <div role="status" className="text-xs text-[var(--text-secondary)]">
-          Reconstruction canceled. Verified source images remain available.
-        </div>
-      ) : null}
+        <button
+          type="button"
+          onClick={cancel}
+          disabled={status === 'canceling'}
+          className="min-h-11 shrink-0 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] disabled:opacity-50"
+        >
+          {status === 'canceling' ? 'Canceling…' : 'Cancel reconstruction'}
+        </button>
+      </div>
+    );
+  }
 
-      <div ref={sliceInspectorPortalRef} className="border-t border-[var(--border-color)] pt-4" />
-    </>
-  );
+  if (error || sourceReadinessMessage) {
+    return (
+      <div
+        id="svr-source-readiness"
+        role={error || currentReadiness?.error ? 'alert' : 'status'}
+        className={`border-b border-[var(--border-color)] px-4 py-3 text-xs leading-relaxed sm:px-6 ${
+          error
+            ? 'text-[var(--danger)]'
+            : currentReadiness?.error || exceedsMemoryBudget
+              ? 'text-[var(--warning)]'
+              : 'text-[var(--text-secondary)]'
+        }`}
+      >
+        {acceptedResult && !error ? 'Next reconstruction: ' : null}
+        {error ?? sourceReadinessMessage}
+      </div>
+    );
+  }
+
+  return status === 'canceled' ? (
+    <div
+      role="status"
+      className="border-b border-[var(--border-color)] px-4 py-3 text-xs text-[var(--text-secondary)] sm:px-6"
+    >
+      {acceptedResult
+        ? 'Reconstruction canceled. Your volume and selection are unchanged.'
+        : 'Reconstruction canceled. Source images remain available.'}
+    </div>
+  ) : null;
 }
 
 export function Svr3DView(props: Svr3DViewProps) {
@@ -1753,63 +1954,73 @@ export function Svr3DView(props: Svr3DViewProps) {
     exceedsMemoryBudget,
     generationCollapsed,
     isRunning,
-    params,
-    percent,
-    progress,
-    progressMessage,
     roiDragRef,
     roiPreviewSliceStable,
     roiRect,
     selectedGroup,
     selectedPlaneCount,
-    selectedSeries,
     setGenerationCollapsed,
     setRoiRect,
     setRoiWorld,
     setShowAcquiredStack,
     showAcquiredStack,
-    sliceInspectorPortalTarget,
-    sourceFrameCount,
-    sourceReadinessMessage,
-    startReconstruction,
     stepRoiSlice,
     volumeIdentity,
     workspaceIdentity,
   }: SvrReconstructionWorkspace = workspace;
+
+  const imaging = useMemo(
+    () => ({
+      volume: acceptedResult?.volume ?? null,
+      initialSelection: acceptedResult?.initialSelection,
+      busy: isRunning,
+      refineRegion: workspace.refineRegion,
+      loadEnhancementSource: workspace.loadEnhancementSource,
+    }),
+    [acceptedResult, isRunning, workspace.refineRegion, workspace.loadEnhancementSource],
+  );
+  const SourcesIcon = generationCollapsed ? ChevronRight : ChevronLeft;
 
   return (
     <section
       aria-label="MRI reconstruction workspace"
       className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg-primary)]"
     >
-      <header className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="shrink-0 text-xs font-medium tracking-[0.12em] text-[var(--text-tertiary)]">
-            RECONSTRUCTION
-          </span>
-          {displayedPatient ? (
-            <span className="truncate text-xs text-[var(--text-primary)]">{displayedPatient}</span>
+      <header
+        aria-label={displayedPatient ? `3D scan context for ${formatPatientName(displayedPatient)}` : '3D scan context'}
+        className="svr-source-header flex shrink-0 items-center gap-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-1.5 sm:px-6"
+      >
+        <div className="svr-source-context min-w-0 flex-1 text-xs leading-5">
+          {displayedDate ? (
+            <time
+              dateTime={displayedDate}
+              aria-label={`Displayed examination ${formatDate(displayedDate)}`}
+              title={formatDate(displayedDate)}
+              className="block truncate tabular-nums text-[var(--text-primary)] [font-family:var(--font-mono)]"
+            >
+              {formatDate(displayedDate)}
+            </time>
           ) : null}
-        </div>
-        {displayedDate ? (
-          <span className="text-xs tabular-nums text-[var(--text-secondary)] [font-family:var(--font-mono)]">
-            Examination {formatDate(displayedDate)}
+          <span className="block truncate text-[var(--text-secondary)]" title={selectedGroup?.label}>
+            {selectedGroup?.label ?? 'Choose a sequence'}
           </span>
-        ) : null}
-        {selectedGroup ? <span className="text-xs text-[var(--text-secondary)]">{selectedGroup.label}</span> : null}
-        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs tabular-nums text-[var(--text-secondary)]">
-          {currentReadiness?.manifests.length ? (
-            <>
-              <span>
-                {currentReadiness.independentOrientationCount}{' '}
-                {currentReadiness.independentOrientationCount === 1 ? 'orientation' : 'orientations'}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>{sourceFrameCount} acquired slices</span>
-            </>
-          ) : null}
         </div>
+        <button
+          type="button"
+          onClick={() => setGenerationCollapsed((value) => !value)}
+          aria-label={
+            generationCollapsed
+              ? 'Show reconstruction sources and controls'
+              : 'Hide reconstruction sources and controls'
+          }
+          aria-expanded={!generationCollapsed}
+          className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-[4px] border border-[var(--border-color)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+        >
+          <SourcesIcon className="h-4 w-4" aria-hidden="true" />
+          Sources
+        </button>
       </header>
+      <SvrReconstructionStatus workspace={workspace} />
       <div
         data-generation-open={!generationCollapsed}
         className={`svr-generation-layout grid min-h-0 flex-1 overflow-hidden ${generationCollapsed ? 'grid-cols-1' : 'grid-cols-[minmax(240px,304px)_minmax(0,1fr)]'}`}
@@ -1820,103 +2031,56 @@ export function Svr3DView(props: Svr3DViewProps) {
             className="space-y-5 overflow-auto border-r border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-5"
           >
             <SvrSourceEvidence workspace={workspace} />
-            <SvrAdvancedSettings workspace={workspace} />
             <SvrFocusBox workspace={workspace} />
+            <SvrAdvancedSettings workspace={workspace} />
             <SvrReconstructionActions workspace={workspace} />
           </aside>
         )}
 
         <div className="relative min-h-0 overflow-hidden bg-[var(--bg-primary)]">
-          <button
-            type="button"
-            onClick={() => setGenerationCollapsed((v) => !v)}
-            aria-label={
-              generationCollapsed
-                ? 'Show reconstruction sources and controls'
-                : 'Hide reconstruction sources and controls'
-            }
-            aria-expanded={!generationCollapsed}
-            className="absolute left-3 top-3 z-30 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
-            title={generationCollapsed ? 'Show SVR controls' : 'Hide SVR controls'}
-          >
-            {generationCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-          </button>
-
           {acceptedResult ? (
-            <SvrVolume3DViewer
-              key={workspaceIdentity ?? 'unselected-reconstruction'}
-              volume={acceptedResult.volume}
-              volumeIdentity={volumeIdentity}
-              sliceInspectorPortalTarget={generationCollapsed ? undefined : sliceInspectorPortalTarget}
-            />
+            <SvrImagingContext.Provider value={imaging}>
+              <SvrVolume3DViewer
+                key={workspaceIdentity ?? 'unselected-reconstruction'}
+                volumeIdentity={volumeIdentity}
+              />
+            </SvrImagingContext.Provider>
           ) : (
             <div className="flex h-full min-h-0 items-center justify-center bg-[var(--bg-primary)] px-6 py-10">
               <div className="w-full max-w-lg text-center">
                 {isRunning ? (
                   <>
-                    <div className="text-xs tracking-[0.14em] text-[var(--signal-metal)]">ACQUIRED EVIDENCE</div>
-                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      Reconstructing supported anatomy
+                    <h2 className="text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
+                      {workspace.nativeSource ? 'Opening MRI in 3D' : 'Building your 3D view'}
                     </h2>
-                    <p aria-live="polite" className="mt-2 text-sm text-[var(--text-secondary)]">
-                      {progressMessage || 'Validating acquired MRI source images…'}
-                    </p>
-                    <p className="mt-2 text-xs tabular-nums text-[var(--text-tertiary)]">
-                      {progress ? `${percent}% · ` : ''}
-                      {sourceFrameCount} acquired slices
-                    </p>
+                    <p className="mt-2 text-sm text-[var(--text-secondary)]">Your source images stay unchanged.</p>
                   </>
                 ) : (
                   <>
-                    <div
-                      className={`text-xs tracking-[0.14em] ${
-                        currentReadiness?.error || exceedsMemoryBudget
-                          ? 'text-[var(--warning)]'
-                          : canRun
-                            ? 'text-[var(--evidence)]'
-                            : 'text-[var(--text-tertiary)]'
-                      }`}
-                    >
+                    <h2 className="text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
                       {currentReadiness?.error || exceedsMemoryBudget
-                        ? 'SOURCE REVIEW REQUIRED'
-                        : canRun
-                          ? 'VERIFIED SOURCE EVIDENCE'
-                          : 'ACQUIRED SOURCE EVIDENCE'}
-                    </div>
-                    <h2 className="mt-4 text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      {currentReadiness?.error || exceedsMemoryBudget
-                        ? 'This acquisition cannot be reconstructed safely'
-                        : selectedSeries.length === 1
-                          ? 'This examination has one acquired orientation'
-                          : canRun
-                            ? 'Ready to reconstruct supported anatomy'
-                            : 'Verify acquired MRI source images'}
+                        ? 'Check the source images'
+                        : selectedGroup
+                          ? 'Explore this MRI in 3D'
+                          : 'Choose an MRI sequence'}
                     </h2>
                     <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[var(--text-secondary)]">
-                      {sourceReadinessMessage ??
-                        'Independent acquired orientations are ready for a physically supported reconstruction.'}
+                      {canRun
+                        ? 'Explore the volume, or select tissue to isolate and inspect it.'
+                        : selectedGroup
+                          ? 'Review the source status above. Open Sources to adjust this view.'
+                          : 'Open Sources and choose the sequence you want to explore.'}
                     </p>
-                    {currentReadiness?.manifests.length ? (
-                      <p className="mt-3 text-xs tabular-nums text-[var(--text-tertiary)]">
-                        {selectedPlaneCount} {selectedPlaneCount === 1 ? 'orientation' : 'orientations'} ·{' '}
-                        {sourceFrameCount} acquired slices · {params.targetVoxelSizeMm.toFixed(2)} mm requested voxels
-                      </p>
-                    ) : null}
+                    <div className="mt-6">
+                      <SvrReconstructButton workspace={workspace} />
+                    </div>
                     {selectedPlaneCount === 1 && roiPreviewSliceStable ? (
                       <button
                         type="button"
                         onClick={() => setShowAcquiredStack((current) => !current)}
-                        className="mt-6 min-h-10 rounded-[4px] border border-[var(--border-color)] px-4 py-2 text-xs font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--signal-metal)]"
+                        className="mt-3 min-h-10 px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                       >
                         {showAcquiredStack ? 'Hide acquired stack' : 'Inspect acquired stack'}
-                      </button>
-                    ) : canRun && generationCollapsed ? (
-                      <button
-                        type="button"
-                        onClick={startReconstruction}
-                        className="mt-6 min-h-10 rounded-[4px] bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--accent-hover)]"
-                      >
-                        Reconstruct volume
                       </button>
                     ) : null}
                     {showAcquiredStack && roiPreviewSliceStable ? (

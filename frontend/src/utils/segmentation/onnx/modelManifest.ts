@@ -11,7 +11,12 @@ export type TumorModelManifest = {
   version: 1;
   modality: 'MR';
   normalization: 'svr-normalized-0-1';
-  input: { channels: 1; axes: 'NCZYX' };
+  input: {
+    channels: 1;
+    axes: 'NCZYX';
+    /** Legacy manifests use isotropic patient LPS; native input requires explicit acceptance of its axes and pitch. */
+    spatialFrame?: 'patient-lps' | 'source-grid';
+  };
   classes: ReadonlyArray<{ index: number; labelId: number; anatomy: string }>;
   modelSha256: string;
 };
@@ -57,6 +62,8 @@ export async function verifyTumorModelManifest(
   if (!input || input.channels !== 1 || input.axes !== 'NCZYX') {
     throw new Error('The model manifest must declare one input channel with NCZYX spatial axes.');
   }
+  if (input.spatialFrame !== undefined && input.spatialFrame !== 'patient-lps' && input.spatialFrame !== 'source-grid')
+    throw new Error('The model manifest spatialFrame must be patient-lps or source-grid.');
 
   if (!Array.isArray(manifest.classes) || manifest.classes.length !== REQUIRED_CLASSES.length) {
     throw new Error('The model manifest must declare all four tumor class semantics.');
@@ -91,7 +98,11 @@ export async function verifyTumorModelManifest(
     version: 1,
     modality: 'MR',
     normalization: 'svr-normalized-0-1',
-    input: { channels: 1, axes: 'NCZYX' },
+    input: {
+      channels: 1,
+      axes: 'NCZYX',
+      ...(input.spatialFrame === undefined ? {} : { spatialFrame: input.spatialFrame }),
+    },
     classes: REQUIRED_CLASSES,
     modelSha256: actualHash,
   };

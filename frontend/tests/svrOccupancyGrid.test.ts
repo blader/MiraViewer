@@ -191,6 +191,8 @@ function createSupportTextureGl(error = 0) {
 }
 
 describe('svr/acquired-support texture', () => {
+  const march = RAYMARCH_FRAGMENT_SHADER.slice(RAYMARCH_FRAGMENT_SHADER.indexOf('for (int i = 0; i < MAX_STEPS; i++)'));
+
   it('uploads authoritative raw 0/1 evidence as an independent nearest-filtered R8 texture', () => {
     const { gl, texture } = createSupportTextureGl();
     const support = new Uint8Array([1, 0, 1, 0]);
@@ -256,29 +258,29 @@ describe('svr/acquired-support texture', () => {
   });
 
   it('skips unsupported empty space before fetching support while still rejecting it before anatomical sampling', () => {
-    const supportGate = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_support, tc).r <= 0.0');
-    const occupancyLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texelFetch(u_occ, cell, 0)');
-    const intensityLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_vol, tc).r');
+    const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
+    const occupancyLookup = march.indexOf('texelFetch(u_occ, cell, 0)');
+    const intensityLookup = march.indexOf('displayedIntensity(tc, resolutionScale)');
 
     expect(supportGate).toBeGreaterThan(0);
     expect(occupancyLookup).toBeGreaterThan(0);
     expect(occupancyLookup).toBeLessThan(supportGate);
     expect(supportGate).toBeLessThan(intensityLookup);
-    expect(RAYMARCH_FRAGMENT_SHADER.slice(supportGate, supportGate + 90)).toContain('continue;');
+    expect(march.slice(supportGate, supportGate + 90)).toContain('continue;');
   });
 
   it('isolates acquired lesion labels before paying for anatomy and gradient sampling', () => {
-    const supportGate = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_support, tc).r <= 0.0');
-    const lesionLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('labelCoverage = lesionCoverage(tc, lid)');
-    const lesionGate = RAYMARCH_FRAGMENT_SHADER.indexOf('labelCoverage <= 0.08');
-    const intensityLookup = RAYMARCH_FRAGMENT_SHADER.indexOf('texture(u_vol, tc).r');
+    const supportGate = march.indexOf('texture(u_support, tc).r <= 0.0');
+    const lesionLookup = march.indexOf('labelCoverage = lesionCoverage(tc, lid)');
+    const lesionGate = march.indexOf('if (labelCoverage <=');
+    const intensityLookup = march.indexOf('displayedIntensity(tc, resolutionScale)');
 
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_tumorOnly;');
     expect(supportGate).toBeGreaterThan(0);
     expect(lesionLookup).toBeGreaterThan(supportGate);
     expect(lesionGate).toBeGreaterThan(lesionLookup);
     expect(lesionGate).toBeLessThan(intensityLookup);
-    expect(RAYMARCH_FRAGMENT_SHADER.slice(lesionGate, lesionGate + 90)).toContain('continue;');
+    expect(march.slice(lesionGate, lesionGate + 90)).toContain('continue;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('u_tumorOnly != 0 ? 0.0 : saturate(u_thr)');
   });
 
@@ -290,23 +292,44 @@ describe('svr/acquired-support texture', () => {
     expect(supportGate).toBeGreaterThan(0);
     expect(lesionLookup).toBeGreaterThan(supportGate);
     expect(visibilityGate).toBeGreaterThan(lesionLookup);
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('? max(v, 0.48)');
+    // Opacity may keep a dark annotation visible; its color must still come
+    // from the actual MRI value rather than the previous synthetic solid fill.
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('float tissue = v *');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('sampleColor = mix(vec3(tissue), labelRgb * tissue');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('max(0.48, val) * dt * 12.0 * boundary');
   });
 
   it('clips focused rays to the complete lesion domain and smoothly samples categorical boundaries', () => {
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform int u_focusEnabled;');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_cameraCenter;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMin;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('uniform vec3 u_focusMax;');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('ro += u_focusCenter;');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('vec3 ro = u_invRot * roW + u_cameraCenter;');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmin = max(bmin, u_focusMin);');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('bmax = min(bmax, u_focusMax);');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('smoothstep(0.12, 0.78, labelCoverage)');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('pos - u_focusCenter');
-    expect(RAYMARCH_FRAGMENT_SHADER).toContain('normalize(mix(radial, nrm, 0.16))');
+    expect(RAYMARCH_FRAGMENT_SHADER).not.toContain('normalize(mix(radial, nrm');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('lesionAccum += (1.0 - lesionAlpha)');
     expect(RAYMARCH_FRAGMENT_SHADER).toContain('accum = mix(accum, visibleLesion');
+  });
+
+  it('samples the exact cut plane through categorical support and selected-region isolation before display shading', () => {
+    const section = RAYMARCH_FRAGMENT_SHADER.slice(
+      RAYMARCH_FRAGMENT_SHADER.indexOf('vec4 cutSurface'),
+      RAYMARCH_FRAGMENT_SHADER.indexOf('bool intersectBox'),
+    );
+    const support = section.indexOf('texture(u_support, tc)');
+    const labels = section.indexOf('if (u_tumorOnly != 0)');
+    const intensity = section.indexOf('displayedIntensity(tc)');
+    expect(support).toBeGreaterThan(0);
+    expect(labels).toBeGreaterThan(support);
+    expect(intensity).toBeGreaterThan(labels);
+    expect(section).toContain('else if (label == 0u) return vec4(0.0)');
+    expect(section).toContain('lesionCoverage(tc, label)');
+    expect(section).toContain('vec3 color = vec3(value)');
+    expect(section).not.toMatch(/u_opacity|u_thr|u_gamma|shade/);
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t0, cutPixelWidth)');
+    expect(RAYMARCH_FRAGMENT_SHADER).toContain('cutSurface(ro + rd * t1, cutPixelWidth)');
   });
 
   it('restores conservative cell skipping through sparse acquired MRI support without changing visible anatomy', () => {

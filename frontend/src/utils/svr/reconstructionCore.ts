@@ -18,6 +18,8 @@ export type SvrReconstructionOptions = {
   robustLoss: SvrRobustLoss;
   robustDelta: number;
   laplacianWeight: number;
+  /** Edge scale in normalized units; Infinity reproduces uniform Laplacian smoothing. */
+  regularizationEdgeScale?: number;
 };
 
 export type SvrReconstructionGrid = {
@@ -344,12 +346,13 @@ export async function buildObservedSupportFromSlices(params: {
   return observedSupport;
 }
 
-function laplacianSmoothInPlace(
+function regularizeInPlace(
   volume: Float32Array,
   dims: VolumeDims,
   lambda: number,
   scratch: Float32Array,
   occupancy?: Uint8Array,
+  edgeScale = Infinity,
 ): void {
   if (!(lambda > 0)) return;
   const { nx, ny, nz } = dims;
@@ -357,6 +360,10 @@ function laplacianSmoothInPlace(
 
   const strideY = nx;
   const strideZ = nx * ny;
+  const inverseEdgeScaleSquared = Number.isFinite(edgeScale) && edgeScale > 0 ? 1 / (edgeScale * edgeScale) : 0;
+  // Charbonnier diffusion: bounded flux at a tissue boundary, ordinary smoothing in flat tissue.
+  const flux = (difference: number) => difference / Math.sqrt(1 + difference * difference * inverseEdgeScaleSquared);
+  const stableWeight = Math.min(1 / 6, lambda);
 
   // Compute Laplacian into scratch (interior only).
   for (let z = 1; z < nz - 1; z++) {
@@ -368,12 +375,12 @@ function laplacianSmoothInPlace(
         if (occupancy && !occupancy[idx]) continue;
         const c = volume[idx] ?? 0;
         let laplacian = 0;
-        if (!occupancy || occupancy[idx - 1]) laplacian += (volume[idx - 1] ?? 0) - c;
-        if (!occupancy || occupancy[idx + 1]) laplacian += (volume[idx + 1] ?? 0) - c;
-        if (!occupancy || occupancy[idx - strideY]) laplacian += (volume[idx - strideY] ?? 0) - c;
-        if (!occupancy || occupancy[idx + strideY]) laplacian += (volume[idx + strideY] ?? 0) - c;
-        if (!occupancy || occupancy[idx - strideZ]) laplacian += (volume[idx - strideZ] ?? 0) - c;
-        if (!occupancy || occupancy[idx + strideZ]) laplacian += (volume[idx + strideZ] ?? 0) - c;
+        if (!occupancy || occupancy[idx - 1]) laplacian += flux((volume[idx - 1] ?? 0) - c);
+        if (!occupancy || occupancy[idx + 1]) laplacian += flux((volume[idx + 1] ?? 0) - c);
+        if (!occupancy || occupancy[idx - strideY]) laplacian += flux((volume[idx - strideY] ?? 0) - c);
+        if (!occupancy || occupancy[idx + strideY]) laplacian += flux((volume[idx + strideY] ?? 0) - c);
+        if (!occupancy || occupancy[idx - strideZ]) laplacian += flux((volume[idx - strideZ] ?? 0) - c);
+        if (!occupancy || occupancy[idx + strideZ]) laplacian += flux((volume[idx + strideZ] ?? 0) - c);
 
         scratch[idx] = laplacian;
       }
@@ -389,7 +396,7 @@ function laplacianSmoothInPlace(
         const idx = base + x;
         if (occupancy && !occupancy[idx]) continue;
         const lap = scratch[idx] ?? 0;
-        volume[idx] = (volume[idx] ?? 0) + lambda * lap;
+        volume[idx] = (volume[idx] ?? 0) + stableWeight * lap;
       }
     }
   }
@@ -693,7 +700,7 @@ export async function refineVolumeInPlace(params: {
     // Light regularization to suppress noise without erasing edges.
     if (options.laplacianWeight > 0) {
       update.fill(0);
-      laplacianSmoothInPlace(volume, dims, options.laplacianWeight, update, occupancy);
+      regularizeInPlace(volume, dims, options.laplacianWeight, update, occupancy, options.regularizationEdgeScale);
       if (options.clampOutput) {
         for (let i = 0; i < nvox; i++) {
           volume[i] = clamp01(volume[i] ?? 0);

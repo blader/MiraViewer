@@ -1,12 +1,13 @@
 /**
  * WebGL2 ray-marching shader + helpers for the SVR 3D viewer.
  *
- * The camera constants (CAM_Z / FOCAL_Z) must match `projectWorldToCanvas` in the 2D axes
- * overlay or the overlay will drift relative to the rendered volume.
+ * Camera distance, center, and focal length must match the 2D overlay projection or
+ * the overlay will drift relative to the rendered volume.
  */
 
 import { clamp } from '../math';
 import { yieldToMain } from './svrUtils';
+import type { NativePlaneData } from './nativePlane';
 
 export const SVR3D_CAMERA_Z = 1.6;
 export const SVR3D_FOCAL_Z = 1.2;
@@ -151,8 +152,8 @@ async function runCooperatively<T>(work: Generator<void, T, void>, isCancelled: 
   }
 }
 
-export function float32ToFloat16Bits(src: Float32Array): Uint16Array {
-  const out = new Uint16Array(src.length);
+export function float32ToFloat16Bits(src: Float32Array, out = new Uint16Array(src.length)): Uint16Array {
+  if (out.length !== src.length) throw new Error('Half-float output dimensions do not match the input.');
   // Float32Array is always 4-byte aligned, so reinterpreting its buffer is safe.
   const words = new Uint32Array(src.buffer, src.byteOffset, src.length);
   writeFloat16Range(words, out, 0, src.length);
@@ -374,6 +375,152 @@ export function buildOccupancyMaxGridAsync(
   return runCooperatively(prepareOccupancyMaxGrid(params), isCancelled);
 }
 
+export type NativePlaneDisplay = {
+  enabled: boolean;
+  selectionOnly?: boolean;
+  contour?: boolean;
+  windowRange?: readonly [number, number];
+  invert?: boolean;
+  interpolate?: boolean;
+  cutaway?: boolean;
+};
+
+export type NativePlaneBinding = {
+  setPlane: (plane: NativePlaneData | null, mask?: Uint8Array | null) => void;
+  /** Call with this program active, on every draw (including when no native plane is visible). */
+  bind: (display: NativePlaneDisplay) => void;
+  dispose: () => void;
+};
+
+/** R32F preserves original samples; NEAREST + explicit interpolation needs no float-linear extension. */
+export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: WebGLProgram): NativePlaneBinding {
+  const textures: WebGLTexture[] = [];
+  const uniforms = Object.fromEntries(
+    [
+      'Image',
+      'Validity',
+      'Mask',
+      'Enabled',
+      'MaskEnabled',
+      'SelectionOnly',
+      'Contour',
+      'WindowLow',
+      'WindowWidth',
+      'Invert',
+      'Interpolate',
+      'Cutaway',
+      'Origin',
+      'ColumnStep',
+      'RowStep',
+    ].map((name) => [name, gl.getUniformLocation(program, `u_native${name}`)]),
+  );
+  let current: NativePlaneData | null = null;
+  let currentMask: Uint8Array | null = null;
+  let uploadedImage: NativePlaneData['image'] | null = null;
+  let disposed = false;
+  const upload = (slot: number, width: number, height: number, data: Float32Array | Uint8Array) => {
+    gl.activeTexture(gl.TEXTURE0 + 5 + slot);
+    gl.bindTexture(gl.TEXTURE_2D, textures[slot]!);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      slot === 0 ? gl.R32F : gl.R8,
+      width,
+      height,
+      0,
+      gl.RED,
+      slot === 0 ? gl.FLOAT : gl.UNSIGNED_BYTE,
+      data,
+    );
+    if (gl.getError() !== gl.NO_ERROR)
+      throw new Error('The GPU could not preserve the original MRI plane at its native resolution.');
+  };
+  try {
+    for (let slot = 0; slot < 3; slot++) {
+      const texture = gl.createTexture();
+      if (!texture) throw new Error('The GPU could not allocate the original MRI plane.');
+      textures.push(texture);
+      upload(slot, 1, 1, slot === 0 ? new Float32Array(1) : new Uint8Array(1));
+    }
+  } catch (error) {
+    for (const texture of textures) gl.deleteTexture(texture);
+    throw error;
+  } finally {
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  return {
+    setPlane(plane, mask = null) {
+      if (disposed) return;
+      current = null;
+      if (!plane) return;
+      const { image } = plane;
+      const length = image.rows * image.cols;
+      if (image.pixels.length !== length || image.validity.length !== length || (mask && mask.length !== length))
+        throw new Error('The original MRI plane and projected selection have different dimensions.');
+      const maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+      if (image.rows > maxSize || image.cols > maxSize)
+        throw new Error('The original MRI plane exceeds this GPU’s native texture size; it has not been downsampled.');
+      try {
+        const changedImage = uploadedImage !== image;
+        if (changedImage) {
+          upload(0, image.cols, image.rows, image.pixels);
+          upload(
+            1,
+            image.cols,
+            image.rows,
+            Uint8Array.from(image.validity, (value) => (value > 0 ? 255 : 0)),
+          );
+        }
+        if (changedImage || currentMask !== mask)
+          upload(2, mask ? image.cols : 1, mask ? image.rows : 1, mask ?? new Uint8Array(1));
+        uploadedImage = image;
+        currentMask = mask;
+        current = plane;
+      } finally {
+        gl.activeTexture(gl.TEXTURE0);
+      }
+    },
+    bind(display) {
+      if (disposed) return;
+      for (let slot = 0; slot < 3; slot++) {
+        gl.activeTexture(gl.TEXTURE0 + 5 + slot);
+        gl.bindTexture(gl.TEXTURE_2D, textures[slot]!);
+        gl.uniform1i(uniforms[['Image', 'Validity', 'Mask'][slot]!]!, 5 + slot);
+      }
+      gl.uniform1i(uniforms.Enabled!, display.enabled && current ? 1 : 0);
+      gl.uniform1i(uniforms.MaskEnabled!, currentMask ? 1 : 0);
+      if (current) {
+        const range = display.windowRange ?? current.windowRange;
+        gl.uniform1i(uniforms.SelectionOnly!, display.selectionOnly ? 1 : 0);
+        gl.uniform1i(uniforms.Contour!, display.contour === false ? 0 : 1);
+        gl.uniform1i(uniforms.Invert!, (display.invert ?? current.invert) ? 1 : 0);
+        gl.uniform1i(uniforms.Interpolate!, display.interpolate ? 1 : 0);
+        gl.uniform1i(uniforms.Cutaway!, display.cutaway ? 1 : 0);
+        gl.uniform1f(uniforms.WindowLow!, range[0]);
+        gl.uniform1f(uniforms.WindowWidth!, Math.max(0, range[1] - range[0]));
+        gl.uniform3f(uniforms.Origin!, ...current.origin);
+        gl.uniform3f(uniforms.ColumnStep!, ...current.columnStep);
+        gl.uniform3f(uniforms.RowStep!, ...current.rowStep);
+      }
+      gl.activeTexture(gl.TEXTURE0);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const texture of textures) gl.deleteTexture(texture);
+      current = null;
+      uploadedImage = null;
+      currentMask = null;
+    },
+  };
+}
+
 export const RAYMARCH_VERTEX_SHADER = `#version 300 es
 in vec2 a_pos;
 out vec2 v_uv;
@@ -398,11 +545,43 @@ uniform usampler3D u_labels;
 uniform sampler2D u_palette;
 uniform int u_labelsEnabled;
 uniform int u_tumorOnly;
+uniform float u_windowLow;
+uniform float u_windowWidth;
+uniform int u_clipEnabled;
+uniform float u_clipZ;
 uniform int u_focusEnabled;
-uniform vec3 u_focusCenter;
 uniform vec3 u_focusMin;
 uniform vec3 u_focusMax;
 uniform float u_labelMix;
+
+// Optional inferred intensities are a separate physical crop, never the base MRI or labels.
+uniform sampler3D u_enhancedVolume;
+uniform sampler3D u_enhancedSupport;
+uniform sampler3D u_enhancedOriginal;
+uniform int u_enhancedOriginalAvailable;
+uniform int u_enhancedEnabled;
+uniform int u_enhancedAllSupported;
+uniform int u_enhancedSmoothSurface;
+uniform float u_enhancedStrength;
+uniform mat4 u_enhancedFromBase;
+uniform vec3 u_enhancedDims;
+uniform vec3 u_enhancedTexel;
+
+uniform sampler2D u_nativeImage;
+uniform sampler2D u_nativeValidity;
+uniform sampler2D u_nativeMask;
+uniform int u_nativeEnabled;
+uniform int u_nativeMaskEnabled;
+uniform int u_nativeSelectionOnly;
+uniform int u_nativeContour;
+uniform float u_nativeWindowLow;
+uniform float u_nativeWindowWidth;
+uniform int u_nativeInvert;
+uniform int u_nativeInterpolate;
+uniform int u_nativeCutaway;
+uniform vec3 u_nativeOrigin;
+uniform vec3 u_nativeColumnStep;
+uniform vec3 u_nativeRowStep;
 
 // Empty-space skipping: a coarse per-block conservative max of the volume (see
 // buildOccupancyMaxGrid). u_occMaxCell clamps texelFetch coords at the grid edge.
@@ -415,6 +594,8 @@ uniform ivec3 u_occMaxCell;
 // A rotation's inverse is its transpose, so the JS side uploads the transpose of the
 // rotation matrix instead of paying for a per-fragment transpose() here.
 uniform mat3 u_invRot;
+uniform float u_cameraZ;
+uniform vec3 u_cameraCenter;
 uniform vec3 u_box;
 uniform float u_aspect;
 uniform float u_zoom;
@@ -427,11 +608,51 @@ uniform vec3 u_texel;
 // the banding from a reduced interaction-time step count into imperceptible noise.
 uniform float u_jitter;
 
-const float CAM_Z = ${SVR3D_CAMERA_Z};
 const float FOCAL_Z = ${SVR3D_FOCAL_Z};
 
 float saturate(float x) {
   return clamp(x, 0.0, 1.0);
+}
+
+float windowed(float intensity) {
+  return u_windowWidth > 0.0 ? saturate((intensity - u_windowLow) / u_windowWidth) : (intensity > u_windowLow ? 1.0 : 0.0);
+}
+
+bool enhancedFootprintValid(vec3 tc, int stride) {
+  if (u_enhancedAllSupported != 0) return true;
+  if (texture(u_enhancedSupport, tc).r <= 0.0) return false;
+  // Original and 2x child grids share cell-edge FOV and exact source-footprint validity.
+  // Each sampler checks its own interpolation footprint, never bridging invalid tissue.
+  ivec3 size = textureSize(u_enhancedSupport, 0) / stride;
+  vec3 coordinates = tc * vec3(size) - 0.5;
+  ivec3 lower = ivec3(floor(coordinates));
+  vec3 fraction = fract(coordinates);
+  for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
+    float weight = (x == 0 ? 1.0 - fraction.x : fraction.x) * (y == 0 ? 1.0 - fraction.y : fraction.y) * (z == 0 ? 1.0 - fraction.z : fraction.z);
+    ivec3 pixel = clamp(lower + ivec3(x, y, z), ivec3(0), size - 1) * stride;
+    if (weight > 0.0 && texelFetch(u_enhancedSupport, pixel, 0).r <= 0.0) return false;
+  }
+  return true;
+}
+
+float displayedIntensity(vec3 tc, out float resolutionScale) {
+  resolutionScale = 0.0;
+  float original = texture(u_vol, tc).r;
+  if (u_enhancedEnabled == 0 && u_enhancedOriginalAvailable == 0) return original;
+  vec3 enhancedTc = (u_enhancedFromBase * vec4(tc, 1.0)).xyz;
+  if (any(lessThan(enhancedTc, vec3(0.0))) || any(greaterThan(enhancedTc, vec3(1.0)))) return original;
+  if (u_enhancedOriginalAvailable != 0 && enhancedFootprintValid(enhancedTc, 2)) {
+    original = texture(u_enhancedOriginal, enhancedTc).r;
+    resolutionScale = 2.0;
+  }
+  if (u_enhancedEnabled == 0 || u_enhancedStrength <= 0.0 || !enhancedFootprintValid(enhancedTc, 1)) return original;
+  resolutionScale = 1.0;
+  return mix(original, texture(u_enhancedVolume, enhancedTc).r, u_enhancedStrength);
+}
+
+float displayedIntensity(vec3 tc) {
+  float resolutionScale;
+  return displayedIntensity(tc, resolutionScale);
 }
 
 void addLesionSample(
@@ -476,6 +697,49 @@ float lesionCoverage(vec3 tc, out uint label) {
   return coverage;
 }
 
+// Analytic derivative of binary coverage, used only for cut-edge antialiasing.
+vec3 lesionGradient(vec3 tc) {
+  ivec3 size = textureSize(u_labels, 0);
+  vec3 coordinates = tc * vec3(size) - 0.5;
+  ivec3 lower = ivec3(floor(coordinates));
+  vec3 fraction = fract(coordinates);
+  vec3 gradient = vec3(0.0);
+  for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
+    if (texelFetch(u_labels, clamp(lower + ivec3(x, y, z), ivec3(0), size - 1), 0).r == 0u) continue;
+    vec3 weight = vec3(x == 0 ? 1.0 - fraction.x : fraction.x, y == 0 ? 1.0 - fraction.y : fraction.y, z == 0 ? 1.0 - fraction.z : fraction.z);
+    vec3 sign = vec3(x == 0 ? -1.0 : 1.0, y == 0 ? -1.0 : 1.0, z == 0 ? -1.0 : 1.0);
+    gradient += sign * vec3(weight.y * weight.z, weight.x * weight.z, weight.x * weight.y);
+  }
+  return gradient * vec3(size) / u_box;
+}
+
+// A cut surface is an MRI section, not a shaded or accumulated density sample.
+// Sample the exact crosshair plane with the same window as the orthogonal views.
+// Acquired support remains categorical. The optional continuous selection iso is
+// presentation only; original MRI planes and authoritative labels remain untouched.
+vec4 cutSurface(vec3 position, vec3 pixelWidth) {
+  vec3 tc = position / u_box + 0.5;
+  if (u_supportEnabled != 0 && texture(u_support, tc).r <= 0.0) return vec4(0.0);
+  uint label = 0u;
+  if (u_labelsEnabled != 0 || u_tumorOnly != 0) label = texture(u_labels, tc).r;
+  float alpha = 1.0;
+  if (u_tumorOnly != 0) {
+    if (u_enhancedSmoothSurface != 0) {
+      float coverage = lesionCoverage(tc, label);
+      float width = max(1e-4, dot(abs(lesionGradient(tc) * u_box), pixelWidth));
+      alpha = smoothstep(0.5 - 0.5 * width, 0.5 + 0.5 * width, coverage);
+      if (alpha <= 0.0) return vec4(0.0);
+    } else if (label == 0u) return vec4(0.0);
+  }
+  bool selected = label != 0u;
+  float value = windowed(selected ? displayedIntensity(tc) : texture(u_vol, tc).r);
+  vec3 color = vec3(value);
+  if (u_labelsEnabled != 0 && label != 0u) {
+    color = mix(color, texelFetch(u_palette, ivec2(int(label), 0), 0).rgb * value, 0.08);
+  }
+  return vec4(color, alpha);
+}
+
 bool intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1) {
   vec3 invD = 1.0 / rd;
   vec3 tbot = (bmin - ro) * invD;
@@ -487,6 +751,60 @@ bool intersectBox(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out floa
   return t1 >= max(t0, 0.0);
 }
 
+float nativeMaskAt(ivec2 pixel) {
+  if (u_nativeMaskEnabled == 0 || any(lessThan(pixel, ivec2(0))) || any(greaterThanEqual(pixel, textureSize(u_nativeMask, 0)))) return 0.0;
+  return texelFetch(u_nativeMask, pixel, 0).r;
+}
+
+// Intersect a patient-positioned native image, including portions outside a cropped reconstruction.
+// Image samples remain unlit, source-windowed and independent of the raymarch volume's quantization.
+vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
+  planeT = -1.0;
+  if (u_nativeEnabled == 0) return vec4(0.0);
+  vec3 normal = cross(u_nativeColumnStep, u_nativeRowStep);
+  float denominator = dot(rd, normal);
+  bool parallel = abs(denominator) < 1e-12;
+  planeT = dot(u_nativeOrigin - ro, normal) / (parallel ? 1e-12 : denominator);
+  vec3 offset = ro + rd * planeT - u_nativeOrigin;
+  vec2 coordinates = vec2(dot(offset, u_nativeColumnStep) / dot(u_nativeColumnStep, u_nativeColumnStep), dot(offset, u_nativeRowStep) / dot(u_nativeRowStep, u_nativeRowStep));
+  // Derivatives precede every per-fragment return, including validity/mask clipping.
+  vec2 coordinateWidth = max(fwidth(coordinates), vec2(1e-6));
+  if (parallel || planeT < 0.0) return vec4(0.0);
+  ivec2 size = textureSize(u_nativeImage, 0);
+  if (any(lessThan(coordinates, vec2(-0.5))) || any(greaterThanEqual(coordinates, vec2(size) - 0.5))) return vec4(0.0);
+  ivec2 pixel = ivec2(floor(coordinates + 0.5));
+  if (texelFetch(u_nativeValidity, pixel, 0).r <= 0.0) return vec4(0.0);
+  float mask = nativeMaskAt(pixel);
+  if (u_nativeSelectionOnly != 0 && mask <= 0.0) return vec4(0.0);
+  float value = texelFetch(u_nativeImage, pixel, 0).r;
+  if (u_nativeInterpolate != 0) {
+    ivec2 lower = ivec2(floor(coordinates));
+    vec2 fraction = fract(coordinates);
+    float weighted = 0.0, weight = 0.0;
+    for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) {
+      ivec2 neighbor = clamp(lower + ivec2(x, y), ivec2(0), size - 1);
+      float contribution = (x == 0 ? 1.0 - fraction.x : fraction.x) * (y == 0 ? 1.0 - fraction.y : fraction.y);
+      if (texelFetch(u_nativeValidity, neighbor, 0).r > 0.0) { weighted += texelFetch(u_nativeImage, neighbor, 0).r * contribution; weight += contribution; }
+    }
+    if (weight > 0.0) value = weighted / weight;
+  }
+  value = u_nativeWindowWidth > 0.0 ? saturate((value - u_nativeWindowLow) / u_nativeWindowWidth) : (value > u_nativeWindowLow ? 1.0 : 0.0);
+  if (u_nativeInvert != 0) value = 1.0 - value;
+  vec3 color = vec3(value);
+  if (u_nativeContour != 0 && mask > 0.0) {
+    // Categorical boundaries stay exact; only their display stroke is screen-sized.
+    vec2 local = coordinates - vec2(pixel);
+    vec4 edges = vec4(0.5 - local.x, 0.5 + local.x, 0.5 - local.y, 0.5 + local.y) / coordinateWidth.xxyy;
+    float boundaryDistance = 1e6;
+    if (nativeMaskAt(pixel + ivec2(1, 0)) != mask) boundaryDistance = min(boundaryDistance, edges.x);
+    if (nativeMaskAt(pixel + ivec2(-1, 0)) != mask) boundaryDistance = min(boundaryDistance, edges.y);
+    if (nativeMaskAt(pixel + ivec2(0, 1)) != mask) boundaryDistance = min(boundaryDistance, edges.z);
+    if (nativeMaskAt(pixel + ivec2(0, -1)) != mask) boundaryDistance = min(boundaryDistance, edges.w);
+    color = mix(color, vec3(0.404, 0.812, 0.757), 0.8 * (1.0 - smoothstep(0.75, 1.5, boundaryDistance)));
+  }
+  return vec4(color, 1.0);
+}
+
 void main() {
   // NDC in [-1, 1]
   vec2 p = v_uv * 2.0 - 1.0;
@@ -494,15 +812,27 @@ void main() {
   p /= max(1e-3, u_zoom);
 
   // World/view ray
-  vec3 roW = vec3(0.0, 0.0, CAM_Z);
+  vec3 roW = vec3(0.0, 0.0, u_cameraZ);
   vec3 rdW = normalize(vec3(p, -FOCAL_Z));
 
   // Rotate ray into volume/object space (the volume is rotated; rays go the other way).
-  vec3 ro = u_invRot * roW;
-  if (u_focusEnabled != 0) {
-    ro += u_focusCenter;
-  }
+  vec3 ro = u_invRot * roW + u_cameraCenter;
   vec3 rd = u_invRot * rdW;
+
+  float cutZ = (u_clipZ - 0.5) * u_box.z;
+  vec3 cutPixelWidth = vec3(0.0);
+  if (u_clipEnabled != 0 && u_enhancedSmoothSurface != 0) {
+    float denominator = abs(rd.z) < 1e-8 ? (rd.z < 0.0 ? -1e-8 : 1e-8) : rd.z;
+    vec3 cutPoint = ro + rd * ((cutZ - ro.z) / denominator);
+    // Derivatives precede all ray/selection-dependent returns, including box misses.
+    cutPixelWidth = fwidth(cutPoint / u_box + 0.5);
+  }
+
+  float nativeT;
+  vec4 nativeSection = nativeSurface(ro, rd, nativeT);
+  bool nativeHit = nativeSection.a > 0.0;
+  // An explicit camera-facing cut removes only foreground anatomy over valid image pixels.
+  if (nativeHit && u_nativeCutaway != 0) { outColor = nativeSection; return; }
 
   vec3 bmin = -0.5 * u_box;
   vec3 bmax =  0.5 * u_box;
@@ -513,16 +843,36 @@ void main() {
     bmax = min(bmax, u_focusMax);
   }
 
+  if (u_clipEnabled != 0) bmax.z = min(bmax.z, cutZ);
+
   float t0;
   float t1;
-  if (!intersectBox(ro, rd, bmin, bmax, t0, t1)) {
-    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+  if (bmax.z < bmin.z || !intersectBox(ro, rd, bmin, bmax, t0, t1)) {
+    outColor = nativeHit ? nativeSection : vec4(0.0, 0.0, 0.0, 1.0);
     return;
+  }
+  t0 = max(t0, 0.0);
+  if (nativeHit && nativeT <= t0) { outColor = nativeSection; return; }
+  // An opaque MRI plane ends this ray: only anatomy in FRONT of it may contribute.
+  if (nativeHit) t1 = min(t1, nativeT);
+
+  // When looking into the cut, preserve its acquired grayscale exactly. Fog
+  // integration behind it otherwise washes out texture even at high resolution.
+  if (u_clipEnabled != 0 && rd.z < -1e-6 && abs((ro + rd * t0).z - cutZ) < 1e-5) {
+    vec4 section = cutSurface(ro + rd * t0, cutPixelWidth);
+    if (section.a > 0.0) { outColor = vec4(section.rgb * section.a, 1.0); return; }
   }
 
   // Raymarch (front-to-back compositing)
-  const int MAX_STEPS = 256;
-  int n = clamp(u_steps, 8, MAX_STEPS);
+  const int MAX_STEPS = 1536;
+  // Settled sampling follows physical voxel traversal, not a fixed count across every grid.
+  float traversedVoxels = length(((t1 - t0) * rd / u_box) / u_texel);
+  if ((u_enhancedEnabled != 0 && u_enhancedStrength > 0.0) || u_enhancedOriginalAvailable != 0) {
+    vec3 enhancedTraversal = mat3(u_enhancedFromBase) * ((t1 - t0) * rd / u_box);
+    float resolutionScale = u_enhancedEnabled != 0 && u_enhancedStrength > 0.0 ? 1.0 : 0.5;
+    traversedVoxels = max(traversedVoxels, length(enhancedTraversal * u_enhancedDims) * resolutionScale);
+  }
+  int n = clamp(u_jitter > 0.0 ? u_steps : max(u_steps, int(ceil(traversedVoxels * 1.5))), 8, MAX_STEPS);
   float dt = (t1 - t0) / float(n);
 
   // The transfer function is spatially neutral: equal acquired intensities and
@@ -560,7 +910,7 @@ void main() {
     // Map object-space box to texture coords [0,1]
     vec3 tc = pos / u_box + 0.5;
 
-    if (u_occEnabled != 0) {
+    if (u_occEnabled != 0 && u_enhancedEnabled == 0 && u_enhancedOriginalAvailable == 0) {
       // Empty-space skipping: if even the lowest threshold anywhere in this occupancy
       // cell exceeds the cell's conservative max, no sample in the cell can pass the
       // visibility test below — leap the ray to the cell exit instead of sampling the
@@ -569,7 +919,7 @@ void main() {
       ivec3 vox = ivec3(clamp(tc, 0.0, 1.0) / u_texel);
       ivec3 cell = clamp(vox / u_occBlock, ivec3(0), u_occMaxCell);
       float occMax = texelFetch(u_occ, cell, 0).r;
-      if (thr > 0.0 && occMax < thr) {
+      if (u_labelsEnabled == 0 && thr > 0.0 && occMax < u_windowLow + thr * u_windowWidth) {
         // Distance (in ray-parameter units) to this cell's exit, via per-axis positive
         // distances — formulated to avoid div-by-zero/NaN for axis-aligned rays. The eps
         // in aRdTc only shrinks the leap, never overshoots.
@@ -594,10 +944,11 @@ void main() {
     // Labels are categorical annotations, never evidence of acquired support.
     uint lid = 0u;
     float labelCoverage = 0.0;
+    bool smoothSurface = u_enhancedSmoothSurface != 0 && u_tumorOnly != 0;
     if (u_labelsEnabled != 0 || u_tumorOnly != 0) {
       if (u_tumorOnly != 0) {
         labelCoverage = lesionCoverage(tc, lid);
-        if (labelCoverage <= 0.08) {
+        if (labelCoverage <= (smoothSurface ? 0.45 : 0.08)) {
           continue;
         }
       } else {
@@ -608,24 +959,30 @@ void main() {
       }
     }
 
-    float v = saturate(texture(u_vol, tc).r);
+    float resolutionScale = 0.0;
+    bool selected = lid != 0u || ((u_enhancedEnabled != 0 || u_enhancedOriginalAvailable != 0) && texture(u_labels, tc).r != 0u);
+    float v = windowed(selected ? displayedIntensity(tc, resolutionScale) : texture(u_vol, tc).r);
+    bool refined = resolutionScale > 0.0;
 
     if (v >= thr || (u_labelsEnabled != 0 && lid != 0u)) {
       float val = u_tumorOnly != 0
-        ? max(v, 0.48)
+        ? max(v, 0.18)
         : saturate((v - thr) / max(1e-6, 1.0 - thr));
 
       // Gradient in object/texture space (central differences).
-      vec3 d = u_texel;
-      float vx1 = saturate(texture(u_vol, clamp(tc + vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
-      float vx0 = saturate(texture(u_vol, clamp(tc - vec3(d.x, 0.0, 0.0), 0.0, 1.0)).r);
-      float vy1 = saturate(texture(u_vol, clamp(tc + vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
-      float vy0 = saturate(texture(u_vol, clamp(tc - vec3(0.0, d.y, 0.0), 0.0, 1.0)).r);
-      float vz1 = saturate(texture(u_vol, clamp(tc + vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
-      float vz0 = saturate(texture(u_vol, clamp(tc - vec3(0.0, 0.0, d.z), 0.0, 1.0)).r);
+      vec3 d = refined ? min(u_texel, u_enhancedTexel * resolutionScale) : u_texel;
+      vec3 xp = clamp(tc + vec3(d.x, 0.0, 0.0), 0.0, 1.0), xm = clamp(tc - vec3(d.x, 0.0, 0.0), 0.0, 1.0);
+      vec3 yp = clamp(tc + vec3(0.0, d.y, 0.0), 0.0, 1.0), ym = clamp(tc - vec3(0.0, d.y, 0.0), 0.0, 1.0);
+      vec3 zp = clamp(tc + vec3(0.0, 0.0, d.z), 0.0, 1.0), zm = clamp(tc - vec3(0.0, 0.0, d.z), 0.0, 1.0);
+      float vx1 = windowed(selected ? displayedIntensity(xp) : texture(u_vol, xp).r);
+      float vx0 = windowed(selected ? displayedIntensity(xm) : texture(u_vol, xm).r);
+      float vy1 = windowed(selected ? displayedIntensity(yp) : texture(u_vol, yp).r);
+      float vy0 = windowed(selected ? displayedIntensity(ym) : texture(u_vol, ym).r);
+      float vz1 = windowed(selected ? displayedIntensity(zp) : texture(u_vol, zp).r);
+      float vz0 = windowed(selected ? displayedIntensity(zm) : texture(u_vol, zm).r);
 
       vec3 grad = vec3(vx1 - vx0, vy1 - vy0, vz1 - vz0);
-      float gmag = length(grad);
+      float gmag = length(refined ? grad * (u_texel / d) : grad);
 
       // Edge factor, applied uniformly throughout the physical volume.
       // IMPORTANT: use an exponential mapping so the "Edge strength" slider stays responsive
@@ -635,8 +992,10 @@ void main() {
       edge = saturate(edge);
       edge = edge * edge;
 
-      // Simple shading using the gradient as a normal (view-aligned light).
-      vec3 nrm = normalize(grad + vec3(1e-6));
+      // Light MRI texture with its own gradient. Binary coverage derivatives jump
+      // at coarse annotation-cell faces and would imprint that grid onto tissue.
+      vec3 normalGradient = refined ? grad / max(d * u_box, vec3(1e-12)) : grad;
+      vec3 nrm = normalize(normalGradient + vec3(1e-6));
       float diff = abs(dot(nrm, vDir));
       float shade = 0.25 + 0.75 * diff;
 
@@ -645,7 +1004,7 @@ void main() {
         ? 0.55 + 0.45 * edge
         : 0.15 + 0.85 * edge));
       if (u_tumorOnly != 0) {
-        a *= smoothstep(0.12, 0.78, labelCoverage);
+        a *= smoothSurface ? smoothstep(0.45, 0.55, labelCoverage) : smoothstep(0.12, 0.78, labelCoverage);
       }
 
       // Convert to per-step opacity; dt keeps opacity roughly stable as step count changes.
@@ -660,24 +1019,18 @@ void main() {
       if (u_labelsEnabled != 0 && lid != 0u) {
         vec3 labelRgb = texelFetch(u_palette, ivec2(int(lid), 0), 0).rgb;
         if (u_tumorOnly != 0) {
-          // Categorical gradients jump at every voxel boundary. Blend the
-          // continuous acquired-intensity normal with the lesion-centered
-          // physical position instead, preserving depth without tiled facets.
-          vec3 radial = normalize(pos - u_focusCenter + vec3(0.0, 0.0, 0.08));
-          vec3 surfaceNormal = normalize(mix(radial, nrm, 0.16));
-          vec3 keyLight = normalize(vDir + vec3(0.38, 0.52, 0.22));
-          float diffuse = 0.50 + 0.50 * abs(dot(surfaceNormal, keyLight));
-          float rim = 0.08 * pow(1.0 - abs(dot(surfaceNormal, vDir)), 2.0);
-          sampleColor = labelRgb * (diffuse * (0.90 + 0.10 * v) + rim);
+          // The mask gates anatomy; it must not replace MRI texture with a synthetic surface.
+          float tissue = v * (0.65 + 0.35 * diff);
+          sampleColor = mix(vec3(tissue), labelRgb * tissue, 0.10);
         } else {
-          float mixK = clamp(u_labelMix * smoothstep(0.35, 0.9, labelCoverage), 0.0, 0.62);
-          sampleColor = mix(sampleColor, labelRgb, mixK);
+          float mixK = clamp(u_labelMix * smoothstep(0.35, 0.9, labelCoverage), 0.0, 0.22);
+          sampleColor = mix(sampleColor, labelRgb * v, mixK);
           // A separate categorical channel survives foreground tissue. Its
           // final composition shows the selected lesion in anatomical context
           // without making normal MRI opacity authoritative for annotations.
           float boundary = smoothstep(0.35, 0.9, labelCoverage);
           float lesionStep = 1.0 - exp(-u_opacity * max(0.48, val) * dt * 12.0 * boundary);
-          lesionAccum += (1.0 - lesionAlpha) * labelRgb * lesionStep;
+          lesionAccum += (1.0 - lesionAlpha) * mix(vec3(v), labelRgb * v, 0.35) * lesionStep;
           lesionAlpha += (1.0 - lesionAlpha) * lesionStep;
         }
       }
@@ -691,10 +1044,19 @@ void main() {
     }
   }
 
-  if (u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
+  if (!nativeHit && u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
     vec3 visibleLesion = lesionAccum / max(lesionAlpha, 1e-6);
     accum = mix(accum, visibleLesion, clamp(lesionAlpha * 1.15, 0.0, 0.58));
   }
+
+  // The same plane remains visible through transparent tissue from the reverse
+  // side, in the correct depth order rather than drawn over nearer anatomy.
+  if (u_clipEnabled != 0 && rd.z > 1e-6 && (!nativeHit || nativeT > t1 + 1e-6) && abs((ro + rd * t1).z - cutZ) < 1e-5) {
+    vec4 section = cutSurface(ro + rd * t1, cutPixelWidth);
+    accum += (1.0 - aAccum) * section.rgb * section.a;
+    aAccum += (1.0 - aAccum) * section.a;
+  }
+  if (nativeHit) accum += (1.0 - aAccum) * nativeSection.rgb;
 
   outColor = vec4(clamp(accum, 0.0, 1.0), 1.0);
 }`;

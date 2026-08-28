@@ -6,6 +6,7 @@ import {
   downsampleLabelsNearest,
   toUint8Volume,
   updateLabelsNearestRegion,
+  type RenderDims,
 } from '../src/utils/svr/renderLod';
 
 describe('svr/renderLod', () => {
@@ -95,15 +96,43 @@ describe('svr/renderLod', () => {
     expect(plan.dims).toEqual({ nx: 64, ny: 32, nz: 1 });
   });
 
-  it('downsampleLabelsNearest maps endpoints as expected', () => {
-    const src = new Uint8Array([0, 1, 2, 3]);
-    const out = downsampleLabelsNearest({
+  it.each<[RenderDims, RenderDims, number[]]>([
+    [{ nx: 4, ny: 1, nz: 1 }, { nx: 2, ny: 1, nz: 1 }, [1, 3]],
+    [{ nx: 1, ny: 2, nz: 2 }, { nx: 2, ny: 1, nz: 3 }, [1, 1, 3, 3, 3, 3]],
+    [{ nx: 2, ny: 2, nz: 1 }, { nx: 2, ny: 2, nz: 1 }, [0, 1, 2, 3]],
+    [{ nx: 6, ny: 1, nz: 1 }, { nx: 3, ny: 1, nz: 1 }, [1, 3, 0]],
+  ])(
+    'downsampleLabelsNearest matches the intensity footprint centers, not stretched endpoints',
+    (srcDims, dstDims, expected) => {
+      const src = new Uint8Array([0, 1, 2, 3]);
+      const out = downsampleLabelsNearest({ src, srcDims, dstDims });
+      expect(Array.from(out)).toEqual(expected);
+      expect(Array.from(src)).toEqual([0, 1, 2, 3]);
+    },
+  );
+
+  it('normalizes only the display copy of signed native MRI samples', async () => {
+    const src = new Float32Array([-1024, -256, 512, 2048]);
+    const before = src.slice();
+    const result = await buildRenderVolumeTexData({
       src,
       srcDims: { nx: 4, ny: 1, nz: 1 },
-      dstDims: { nx: 2, ny: 1, nz: 1 },
+      intensityRange: [-1024, 2048],
+      plan: { dims: { nx: 4, ny: 1, nz: 1 }, kind: 'f32' },
+      isCancelled: () => false,
     });
-
-    expect(Array.from(out)).toEqual([0, 3]);
+    expect(result.data).not.toBe(src);
+    expect(Array.from(result.data)).toEqual([0, 0.25, 0.5, 1]);
+    expect(src).toEqual(before);
+    const reduced = await buildRenderVolumeTexData({
+      src,
+      srcDims: { nx: 4, ny: 1, nz: 1 },
+      intensityRange: [-1024, 2048],
+      plan: { dims: { nx: 2, ny: 1, nz: 1 }, kind: 'f32' },
+      isCancelled: () => false,
+    });
+    expect(Array.from(reduced.data)).toEqual([0.125, 0.75]);
+    expect(src).toEqual(before);
   });
 
   // The interactive grow preview patches the GPU label texture through a persistent
@@ -123,6 +152,9 @@ describe('svr/renderLod', () => {
     }
 
     const cache = downsampleLabelsNearest({ src, srcDims, dstDims });
+    const expected = () =>
+      [1, 3, 5].flatMap((z) => [1, 3, 5, 7].flatMap((y) => [1, 3, 6, 9, 11].map((x) => src[(z * 9 + y) * 13 + x])));
+    expect(Array.from(cache)).toEqual(expected());
 
     // Mutate a sub-box of the source, refresh only the mapped cache region, and compare
     // against a from-scratch rebuild of the whole downsample.
@@ -139,6 +171,7 @@ describe('svr/renderLod', () => {
 
     expect(dstBox).not.toBeNull();
     expect(Array.from(cache)).toEqual(Array.from(downsampleLabelsNearest({ src, srcDims, dstDims })));
+    expect(Array.from(cache)).toEqual(expected());
   });
 
   it('updateLabelsNearestRegion handles single-voxel edits and degenerate (size-1) axes', () => {
@@ -161,6 +194,7 @@ describe('svr/renderLod', () => {
 
     expect(dstBox).not.toBeNull();
     expect(Array.from(cache)).toEqual(Array.from(downsampleLabelsNearest({ src, srcDims, dstDims })));
+    expect(Array.from(cache)).toEqual(Array(12).fill(1));
   });
 
   it('buildRenderVolumeTexData: f32 + same dims returns the original Float32Array', async () => {

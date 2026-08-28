@@ -10,8 +10,8 @@ export type SvrProgress = {
 export type SvrRoiPlane = 'axial' | 'coronal' | 'sagittal';
 
 export type SvrRoi = {
-  /** For now we only support cube ROIs (square in-plane + equal extent through-plane). */
-  mode: 'cube';
+  /** Drawn focus cubes or tight patient-space boxes around native-source annotations. */
+  mode: 'cube' | 'box';
   /** Which preview plane the user drew the ROI on (used for metadata / debugging). */
   sourcePlane: SvrRoiPlane;
   /**
@@ -72,7 +72,7 @@ export type SvrParams = {
   robustDelta?: number;
 
   /**
-   * Light 3D Laplacian smoothing between iterations.
+   * Light edge-preserving 3D regularization between iterations.
    * 0 disables regularization.
    */
   laplacianWeight?: number;
@@ -100,7 +100,7 @@ export const DEFAULT_SVR_PARAMS: SvrParams = {
   robustLoss: 'huber',
   robustDelta: 0.1,
   laplacianWeight: 0.02,
-  multiResolution: true,
+  multiResolution: false,
   multiResolutionFactor: 2,
   multiResolutionCoarseIterations: 1,
 
@@ -109,13 +109,63 @@ export const DEFAULT_SVR_PARAMS: SvrParams = {
   clampOutput: true,
 };
 
+/** Row-major orthonormal matrix: columns are the grid axes in patient LPS millimeters. */
+export type SvrDirection = readonly [number, number, number, number, number, number, number, number, number];
+
+/** Absolute patient-space transform; crop/downsample offsets are not registration. */
+export type SvrPatientTransform = {
+  rotation: SvrDirection;
+  translationMm: readonly [number, number, number];
+};
+
+/** Canonical full DICOM frame geometry, never the cropped or reduced sampling grid. */
+export type SvrSourceFrame = {
+  sopInstanceUid: string;
+  rows: number;
+  columns: number;
+  originMm: readonly [number, number, number];
+  columnDirection: readonly [number, number, number];
+  rowDirection: readonly [number, number, number];
+  pixelSpacingMm: readonly [number, number];
+  windowCenter?: number;
+  windowWidth?: number;
+};
+
+export type SvrNativeSource = {
+  seriesUid: string;
+  label: string;
+  kind: 'original-3d' | 'original-2d' | 'derived' | 'unknown';
+  /** Native patient mm -> accepted volume patient mm. Identity must be explicit. */
+  transform: SvrPatientTransform;
+  frames: readonly SvrSourceFrame[];
+  contributingSopInstanceUids: readonly string[];
+};
+
+export type SvrSourceProvenance = {
+  mode: 'native-3d' | 'independent-2d' | 'source-stack';
+  datasetRevision: number;
+  patientKey: string;
+  studyUid: string;
+  frameOfReferenceUid: string;
+  fingerprint: string;
+  primarySeriesUid: string;
+  sources: readonly SvrNativeSource[];
+  explanation: string;
+};
+
 export type SvrVolume = {
   data: Float32Array;
+  /** Suggested display-only window in data units; native stacks retain signed modality values. */
+  displayWindow?: [number, number];
+  /** Display/GPU normalization range only. CPU source values are never windowed or clipped. */
+  intensityRange?: [number, number];
+  /** MONOCHROME1 display convention; never changes stored modality values. */
+  displayInvert?: boolean;
   /** Acquired-observation support in the same voxel order as `data`; zero means no physical evidence. */
   observedSupport?: Uint8Array;
   /** Number of acquired-supported voxels, counted when `observedSupport` is produced. */
   supportedVoxelCount?: number;
-  /** Number of physically independent source-slice orientation families. */
+  /** Orientation diversity, not proof of acquisition independence. See sourceProvenance. */
   acquiredOrientationCount?: number;
   /** Conservative source-derived patient-axis resolution estimate; absent when an axis cannot be verified. */
   effectiveResolutionMm?: [number, number, number];
@@ -123,8 +173,13 @@ export type SvrVolume = {
   sliceProfileSource?: 'declared' | 'mixed' | 'unknown';
   /** Metadata-only fingerprint binding accepted source identity, geometry, settings, and output evidence. */
   reconstructionFingerprint?: string;
+  sourceProvenance?: SvrSourceProvenance;
+  /** Original stored grid pitch, not measured acquired resolution. Present on native-source volumes. */
+  nativeVoxelSizeMm?: [number, number, number];
   dims: [number, number, number];
   voxelSizeMm: [number, number, number];
+  /** Omitted only for legacy patient-axis-aligned reconstruction grids (identity). */
+  direction?: SvrDirection;
   originMm: [number, number, number];
   boundsMm: {
     min: [number, number, number];
@@ -152,10 +207,18 @@ export type SvrLabelVolume = {
   /** Must exactly match `SvrVolume.dims`. */
   dims: [number, number, number];
   meta: SvrLabelMeta[];
+  /** Explicit user review, not algorithmic confidence or a clinical diagnosis. Missing legacy state is draft. */
+  reviewState?: 'draft' | 'reviewed';
+  /** Explicit editing constraints, retained so saved drafts can be grown and corrected again. */
+  seeds?: { foreground: Uint32Array; background: Uint32Array };
 };
 
 export type SvrResult = {
   volume: SvrVolume;
+  /** Settings that produced this accepted reconstruction, independent of pending UI changes. */
+  parameters?: SvrParams;
+  /** A transferred draft published atomically with a finer regional reconstruction. Saved edits take precedence. */
+  initialSelection?: SvrLabelVolume;
 };
 
 export type SvrSelectedSeries = {

@@ -777,6 +777,65 @@ function useUploadIntake(onUploadComplete: UploadModalProps['onUploadComplete'])
   };
 }
 
+function IntakeSourceActions({
+  busy,
+  onChooseFolder,
+  onChooseFiles,
+  onChooseBackup,
+}: {
+  busy: boolean;
+  onChooseFolder: () => void;
+  onChooseFiles: () => void;
+  onChooseBackup: () => void;
+}) {
+  const folderSupported =
+    typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function' ||
+    (typeof HTMLInputElement !== 'undefined' && 'webkitdirectory' in HTMLInputElement.prototype);
+
+  return (
+    <div className="intake-source-actions" aria-label="Choose an imaging source">
+      <button
+        type="button"
+        onClick={onChooseFolder}
+        disabled={!folderSupported || busy}
+        className="intake-source-button intake-folder-button"
+        aria-label="Choose folder"
+        data-dialog-autofocus={folderSupported || undefined}
+        title={folderSupported ? undefined : 'Folder selection is unavailable in this browser; choose files instead.'}
+      >
+        <FolderOpen className="h-4 w-4" aria-hidden="true" />
+        <span>
+          <strong>Choose folder</strong>
+          <small>Includes all subfolders</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onChooseFiles}
+        disabled={busy}
+        className="intake-source-button"
+        aria-label="Choose files"
+        data-dialog-autofocus={!folderSupported || undefined}
+      >
+        <Files className="h-4 w-4" aria-hidden="true" />
+        <span>
+          <strong>Choose files</strong>
+          <small>With or without .dcm extensions</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onChooseBackup}
+        disabled={busy}
+        className="intake-source-button intake-backup-button"
+      >
+        <ArchiveRestore className="h-4 w-4" aria-hidden="true" />
+        Choose backup / ZIP
+      </button>
+    </div>
+  );
+}
+
 export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
   const {
     intake,
@@ -806,14 +865,11 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     source?.kind === 'complete-backup' &&
     typeof source.restoreBytes === 'number' &&
     source.restoreBytes > MAX_SNAPSHOT_RESTORE_BYTES;
-  const folderSupported =
-    typeof (window as Window & { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function' ||
-    (typeof HTMLInputElement !== 'undefined' && 'webkitdirectory' in HTMLInputElement.prototype);
 
   return (
     <AccessibleDialog
       title="Import scans"
-      description="Choose images from this device or restore a complete MiraViewer backup."
+      description="Choose a folder or files to review before importing."
       onClose={() => {
         if (busy) cancelOperation();
         else onClose();
@@ -826,12 +882,6 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       <IntakePrivacyRail availableBytes={availableBytes} />
 
       <div className="intake-content overflow-y-auto">
-        <div className="intake-intro">
-          <span className="intake-eyebrow">ACQUISITION</span>
-          <h3>Bring scans into Mira</h3>
-          <p>Your images stay on this device. Folders, extensionless DICOM files, and ZIP archives are supported.</p>
-        </div>
-
         {storageHealth.checked && !storageHealth.persisted && (
           <div className="intake-notice intake-notice-warning" role="status">
             <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -870,7 +920,6 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         {!terminal && (
           <button
             type="button"
-            data-dialog-autofocus
             disabled={busy}
             onClick={() => openInput(fileInputRef.current)}
             onDragEnter={(event) => {
@@ -890,44 +939,18 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
             <span className="intake-scan-icon">
               <FolderOpen className="h-5 w-5" aria-hidden="true" />
             </span>
-            <span className="intake-drop-title">Drop a folder or imaging files</span>
-            <span className="intake-drop-help">or choose a local source below</span>
+            <span className="intake-drop-title">Drop your MRI scans here</span>
+            <span className="intake-drop-help">Folders, DICOM files, and ZIP archives</span>
           </button>
         )}
 
         {phase !== 'complete' && (
-          <div className="intake-source-actions" aria-label="Choose an imaging source">
-            <button
-              type="button"
-              onClick={() => void openFolderPicker()}
-              disabled={!folderSupported || busy}
-              className="intake-source-button"
-              title={
-                folderSupported ? undefined : 'Folder selection is unavailable in this browser; choose files instead.'
-              }
-            >
-              <FolderOpen className="h-4 w-4" aria-hidden="true" />
-              Choose folder
-            </button>
-            <button
-              type="button"
-              onClick={() => openInput(fileInputRef.current)}
-              disabled={busy}
-              className="intake-source-button"
-            >
-              <Files className="h-4 w-4" aria-hidden="true" />
-              Choose files
-            </button>
-            <button
-              type="button"
-              onClick={() => openInput(backupInputRef.current)}
-              disabled={busy}
-              className="intake-source-button intake-backup-button"
-            >
-              <ArchiveRestore className="h-4 w-4" aria-hidden="true" />
-              Choose backup / ZIP
-            </button>
-          </div>
+          <IntakeSourceActions
+            busy={busy}
+            onChooseFolder={() => void openFolderPicker()}
+            onChooseFiles={() => openInput(fileInputRef.current)}
+            onChooseBackup={() => openInput(backupInputRef.current)}
+          />
         )}
 
         {source && (
@@ -1041,7 +1064,11 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
       </div>
 
       <div className="intake-footer">
-        <span className="intake-footer-private">Your scans remain on this device</span>
+        <span className="intake-footer-private">
+          {source?.kind === 'complete-backup'
+            ? 'Replacement requires confirmation'
+            : 'Duplicates are skipped automatically'}
+        </span>
         <div className="intake-footer-actions">
           <button
             type="button"

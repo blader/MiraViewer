@@ -978,7 +978,7 @@ describe('useAutoAlign perceptual production path', { timeout: 20_000 }, () => {
 
     expect(aligned).toEqual([]);
     expect(result.current.results).toEqual([]);
-    expect(result.current.error).toBe('Alignment cancelled');
+    expect(result.current.error).toBeNull();
     expect(result.current.isAligning).toBe(false);
     expect(mocks.registerAffine2DWithElastix).toHaveBeenCalledTimes(2);
   });
