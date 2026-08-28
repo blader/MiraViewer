@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DecodedFrame } from '../src/utils/decodedFrame';
 import type { SvrLabelVolume, SvrNativeSource, SvrVolume } from '../src/types/svr';
 import { deferred } from './helpers/deferred';
+import { runSvrSliceGpuProbe } from './svrNativeCompositing.gpu';
 
 const mocks = vi.hoisted(() => ({ decode: vi.fn(), revision: vi.fn(), patient: vi.fn() }));
 vi.mock('../src/utils/decodedFrame', () => ({ getDecodedFrameBySopInstanceUid: mocks.decode }));
@@ -380,6 +381,11 @@ function textureGl() {
 }
 
 describe('source-faithful native-plane GL resources', () => {
+  it('refuses GPU validation without WebGL instead of reporting an unrendered pass', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    expect(() => runSvrSliceGpuProbe()).toThrow('The native-cutaway pixel tests require WebGL2.');
+  });
+
   it('uploads original Float32 pixels and categorical validity/mask without a float-linear dependency', () => {
     const gl = textureGl();
     const binding = createNativePlaneBinding(gl as unknown as WebGL2RenderingContext, {} as WebGLProgram);
@@ -455,10 +461,16 @@ describe('source-faithful native-plane GL resources', () => {
     expect(gl.deleteTexture).toHaveBeenCalledTimes(4);
   });
 
-  it('inserts native images in ray depth, preserves whole slices outside the volume, and scales settled samples to voxel distance', () => {
+  it('bounds native cross-sections by the volume before composition and scales settled samples to voxel distance', () => {
     const shader = RAYMARCH_FRAGMENT_SHADER;
+    // Derivatives must run before divergent ray/bounds rejection. GPU readback
+    // coverage in svrNativeCompositing.gpu.ts exercises the resulting pixels.
     expect(shader.indexOf('nativeSurface(ro, rd, nativeT)')).toBeLessThan(shader.indexOf('!intersectBox(ro, rd'));
-    expect(shader).toContain('outColor = nativeHit ? nativeSection');
+    expect(shader).not.toContain('outColor = nativeHit ? nativeSection');
+    expect(shader.indexOf('bool nativeHit =')).toBeGreaterThan(shader.indexOf('!intersectBox(ro, rd'));
+    expect(shader).toContain('u_tumorOnly != 0 || u_nativeSelectionOnly != 0');
+    expect(shader).toContain('if (slope > 0.0) t0 = max(t0, boundary)');
+    expect(shader).toContain('else t1 = min(t1, boundary)');
     expect(shader).toContain('if (nativeHit) t1 = min(t1, nativeT)');
     expect(shader).toContain('if (nativeHit) accum += (1.0 - aAccum) * nativeSection.rgb');
     expect(shader).toContain('if (!nativeHit && u_labelsEnabled');

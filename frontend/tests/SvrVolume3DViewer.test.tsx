@@ -8,7 +8,7 @@ import type { DecodedFrame } from '../src/utils/decodedFrame';
 import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../src/utils/localApi';
 import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
-import { SVR3D_CAMERA_Z, SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
+import { SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
 import { makeNativePlaneData, nativeDisplayWindow } from '../src/utils/svr/nativePlane';
 import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
@@ -133,6 +133,7 @@ function createViewportRecorder(
   const axisText = vi.fn<(text: string, x: number, y: number) => void>();
   const axisOutline = vi.fn<(text: string, x: number, y: number) => void>();
   const matrices = new Map<string, number[]>();
+  const vectors = new Map<string, number[]>();
   const axesContext = new Proxy(
     { fillText: axisText, strokeText: axisOutline },
     { get: (target, key) => (key in target ? target[key as keyof typeof target] : () => undefined) },
@@ -177,6 +178,7 @@ function createViewportRecorder(
     texImage2D,
     drawArrays,
     uniformMatrix3fv: (name: string, _transpose: boolean, value: Float32Array) => matrices.set(name, [...value]),
+    uniform3f: (name: string, x: number, y: number, z: number) => vectors.set(name, [x, y, z]),
   };
   const gl = new Proxy(methods, {
     get(target, property: string) {
@@ -206,10 +208,38 @@ function createViewportRecorder(
     axisText,
     axisOutline,
     latestMatrix: (name: string) => matrices.get(name),
+    latestVector: (name: string) => vectors.get(name),
     uniform1f,
+    latestFloat: (name: string) => uniform1f.mock.calls.filter(([location]) => location === name).at(-1)?.[1],
     latestInteger: (name: string) => uniform1i.mock.calls.filter(([location]) => location === name).at(-1)?.[1],
     latestZoom: () => uniform1f.mock.calls.filter(([location]) => location === 'u_zoom').at(-1)?.[1],
   };
+}
+
+/** Project using the actual shader uniforms, not the camera-fitting implementation. */
+function projectBoxCorners(
+  recorder: ReturnType<typeof createViewportRecorder>,
+  min: readonly number[],
+  max: readonly number[],
+  aspect: number,
+) {
+  const inverse = recorder.latestMatrix('u_invRot')!;
+  const center = recorder.latestVector('u_cameraCenter')!;
+  const distance = recorder.latestFloat('u_cameraZ')!;
+  const zoom = recorder.latestZoom()!;
+  return [min[0]!, max[0]!].flatMap((x) =>
+    [min[1]!, max[1]!].flatMap((y) =>
+      [min[2]!, max[2]!].map((z) => {
+        const offset = [x - center[0]!, y - center[1]!, z - center[2]!];
+        const view = [0, 3, 6].map(
+          (start) => inverse[start]! * offset[0]! + inverse[start + 1]! * offset[1]! + inverse[start + 2]! * offset[2]!,
+        );
+        const depth = distance - view[2]!;
+        expect(depth).toBeGreaterThan(0);
+        return [(view[0]! * SVR3D_FOCAL_Z * zoom) / (depth * aspect), (view[1]! * SVR3D_FOCAL_Z * zoom) / depth];
+      }),
+    ),
+  );
 }
 
 function syntheticVolume(boxScale: readonly [number, number, number]): SvrVolume {
@@ -259,11 +289,11 @@ function enhancedFixture(source: SvrVolume): SvrEnhancedVolume {
     },
   };
 }
-function nativeViewerFixture() {
+function nativeViewerFixture(orientation: 'sagittal' | 'axial' | 'oblique' = 'sagittal') {
   const volume = editingVolume(4);
   const source: SvrNativeSource = {
     seriesUid: 'native-source',
-    label: 'Original sagittal source',
+    label: `Original ${orientation} source`,
     kind: 'original-3d',
     transform: { rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1], translationMm: [0, 0, 0] },
     contributingSopInstanceUids: ['native-0', 'native-1', 'native-2', 'native-3'],
@@ -271,9 +301,15 @@ function nativeViewerFixture() {
       sopInstanceUid: `native-${slice}`,
       rows: 4,
       columns: 4,
-      originMm: [slice, 0, 3],
-      columnDirection: [0, 1, 0],
-      rowDirection: [0, 0, -1],
+      originMm:
+        orientation === 'axial'
+          ? [0, 3, slice]
+          : orientation === 'oblique'
+            ? [-slice * Math.SQRT1_2, slice * Math.SQRT1_2, 3]
+            : [slice, 0, 3],
+      columnDirection:
+        orientation === 'axial' ? [1, 0, 0] : orientation === 'oblique' ? [Math.SQRT1_2, Math.SQRT1_2, 0] : [0, 1, 0],
+      rowDirection: orientation === 'axial' ? [0, -1, 0] : [0, 0, -1],
       pixelSpacingMm: [1, 1],
     })),
   };
@@ -500,14 +536,15 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       recorder.uniform1f.mockClear();
       view.rerender(<SvrVolume3DViewer volume={syntheticVolume(boxScale)} />);
       await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
-      const zoom = recorder.latestZoom()!;
-      const nearestDepth = SVR3D_CAMERA_Z - boxScale[2] / 2;
-      const projectedWidth = (boxScale[0] * SVR3D_FOCAL_Z * zoom) / (2 * nearestDepth * (width / height));
-      const projectedHeight = (boxScale[1] * SVR3D_FOCAL_Z * zoom) / (2 * nearestDepth);
-
-      expect(projectedWidth).toBeLessThanOrEqual(0.9 + Number.EPSILON);
-      expect(projectedHeight).toBeLessThanOrEqual(0.9 + Number.EPSILON);
-      expect(Math.max(projectedWidth, projectedHeight)).toBeCloseTo(0.9);
+      const corners = projectBoxCorners(
+        recorder,
+        boxScale.map((size) => -size / 2),
+        boxScale.map((size) => size / 2),
+        width / height,
+      );
+      const extent = Math.max(...corners.flat().map(Math.abs));
+      expect(extent).toBeLessThanOrEqual(0.9 + 1e-6);
+      expect(extent).toBeCloseTo(0.9);
     }
   });
 
@@ -536,9 +573,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     const viewport = { width: 1472, height: 972 };
     const recorder = createViewportRecorder(viewport);
     const view = render(<SvrVolume3DViewer volume={createPaddedVolume()} />);
-    const visibleHalfX = (24 / dims[0]) * (dims[0] / dims[2]);
-    const visibleHalfY = (20 / dims[1]) * (dims[1] / dims[2]);
-    const nearestVisibleDepth = SVR3D_CAMERA_Z - (84 / dims[2] - 0.5);
+    const visibleMin = [24, 20, 28].map((value, axis) => (value - dims[axis]! / 2) / dims[2]);
+    const visibleMax = [72, 60, 84].map((value, axis) => (value - dims[axis]! / 2) / dims[2]);
 
     for (const [width, height] of [
       [1472, 972],
@@ -550,13 +586,10 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       view.rerender(<SvrVolume3DViewer volume={createPaddedVolume()} />);
       await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
 
-      const zoom = recorder.latestZoom()!;
-      const projectedWidth = (visibleHalfX * SVR3D_FOCAL_Z * zoom) / (nearestVisibleDepth * (width / height));
-      const projectedHeight = (visibleHalfY * SVR3D_FOCAL_Z * zoom) / nearestVisibleDepth;
-
-      expect(projectedWidth).toBeLessThanOrEqual(0.9 + Number.EPSILON);
-      expect(projectedHeight).toBeLessThanOrEqual(0.9 + Number.EPSILON);
-      expect(Math.max(projectedWidth, projectedHeight)).toBeGreaterThanOrEqual(0.8);
+      const corners = projectBoxCorners(recorder, visibleMin, visibleMax, width / height);
+      const extent = Math.max(...corners.flat().map(Math.abs));
+      expect(extent).toBeLessThanOrEqual(0.9 + 1e-6);
+      expect(extent).toBeGreaterThanOrEqual(0.8);
     }
   });
 
@@ -565,7 +598,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     render(<SvrVolume3DViewer volume={syntheticVolume([1, 0.75, 0.5])} />);
     await waitFor(() => expect(recorder.latestZoom()).toBeDefined());
     const fittedZoom = recorder.latestZoom()!;
-    expect(fittedZoom).toBeGreaterThan(2);
+    const corners = projectBoxCorners(recorder, [-0.5, -0.375, -0.25], [0.5, 0.375, 0.25], 1440 / 900);
+    expect(Math.max(...corners.flat().map(Math.abs))).toBeCloseTo(0.9);
 
     const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
     fireEvent.keyDown(viewer, { key: '+' });
@@ -854,44 +888,212 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(value('Axial slice')).toBe(3);
   });
 
-  it('fits the selection without box-clipping anatomy, and isolates native context by labels only on request', async () => {
+  it('fits selection without clipping anatomy, and uses one selection-only mode for the volume and native MRI', async () => {
     const recorder = createViewportRecorder({ width: 800, height: 600 });
-    const { volume, plane } = nativeViewerFixture();
+    const { volume, plane, pixels } = nativeViewerFixture();
     vi.mocked(useSvrNativePlane).mockReturnValue({ plane, loading: false, error: null });
     const data = new Uint8Array(volume.data.length);
     data[42] = 1;
+    const originalPixels = pixels.slice();
     render(<SvrVolume3DViewer volume={volume} labels={{ data, dims: volume.dims, meta: SELECTION_LABEL_META }} />);
     await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
+    await waitFor(() => expect(recorder.texImage3D.mock.calls.some((call) => call[9] === data)).toBe(true));
+    const projectedMask = recorder.texImage2D.mock.calls.find(
+      (call) => call[3] === 4 && call[4] === 4 && call[8] instanceof Uint8Array && call[8].some((value) => value === 1),
+    )?.[8] as Uint8Array;
+    expect(projectedMask).toHaveLength(plane.image.pixels.length);
+    expect([...projectedMask]).toEqual([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const original2DAllocations = recorder.texImage2D.mock.calls.length;
+    const original3DAllocations = recorder.texImage3D.mock.calls.length;
     const controls = screen.getByRole('group', { name: /region visualization/i });
     open3DSettings('Source image');
-    const coverage = screen.getByRole('group', { name: 'MRI plane coverage' });
+    expect(screen.queryByRole('group', { name: 'MRI plane coverage' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Fit selection' }));
     await waitFor(() => expect(recorder.latestInteger('u_focusEnabled')).toBe(0));
     expect(recorder.latestInteger('u_tumorOnly')).toBe(0);
-    fireEvent.click(within(coverage).getByRole('button', { name: 'Within selection' }));
-    await waitFor(() => expect(recorder.latestInteger('u_tumorOnly')).toBe(1));
+    expect(recorder.latestInteger('u_nativeSelectionOnly')).toBe(0);
+
+    fireEvent.click(within(controls).getByRole('button', { name: 'Selection only' }));
+    await waitFor(() => {
+      expect(recorder.latestInteger('u_tumorOnly')).toBe(1);
+      expect(recorder.latestInteger('u_nativeSelectionOnly')).toBe(1);
+    });
     expect(recorder.latestInteger('u_focusEnabled')).toBe(1);
-    expect(within(controls).getByRole('button', { name: 'Overlay' })).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(within(coverage).getByRole('button', { name: 'Whole slice' }));
-    await waitFor(() => expect(recorder.latestInteger('u_tumorOnly')).toBe(0));
+    expect(recorder.latestInteger('u_nativeMaskEnabled')).toBe(1);
+    expect(recorder.latestInteger('u_nativeEnabled')).toBe(1);
+
+    fireEvent.click(within(controls).getByRole('button', { name: 'Anatomy' }));
+    await waitFor(() => {
+      expect(recorder.latestInteger('u_tumorOnly')).toBe(0);
+      expect(recorder.latestInteger('u_nativeSelectionOnly')).toBe(0);
+    });
     expect(recorder.latestInteger('u_focusEnabled')).toBe(0);
+    expect(recorder.latestInteger('u_labelsEnabled')).toBe(0);
+
+    fireEvent.click(within(controls).getByRole('button', { name: 'Overlay' }));
+    await waitFor(() => expect(recorder.latestInteger('u_labelsEnabled')).toBe(1));
+    expect(within(controls).getByRole('button', { name: 'Overlay' })).toHaveAttribute('aria-pressed', 'true');
+    expect(recorder.latestInteger('u_tumorOnly')).toBe(0);
+    expect(recorder.latestInteger('u_nativeSelectionOnly')).toBe(0);
+    expect(recorder.texImage2D).toHaveBeenCalledTimes(original2DAllocations);
+    expect(recorder.texImage3D).toHaveBeenCalledTimes(original3DAllocations);
+    expect(recorder.texImage2D.mock.calls.some((call) => call[8] === pixels)).toBe(true);
+    expect(pixels).toEqual(originalPixels);
     expect(data[42]).toBe(1);
   });
 
-  it('resets to a readable native slice rather than turning a sagittal source edge-on', async () => {
-    const recorder = createViewportRecorder({ width: 800, height: 600 });
-    const { volume, plane } = nativeViewerFixture();
-    vi.mocked(useSvrNativePlane).mockReturnValue({ plane, loading: false, error: null });
-    render(<SvrVolume3DViewer volume={volume} />);
-    await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
-    const facing = recorder.latestMatrix('u_invRot');
-    expect(facing).not.toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-    const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
-    fireEvent.keyDown(viewer, { key: 'ArrowRight' });
-    await waitFor(() => expect(recorder.latestMatrix('u_invRot')).not.toEqual(facing));
-    fireEvent.keyDown(viewer, { key: '0' });
-    await waitFor(() => expect(recorder.latestMatrix('u_invRot')).toEqual(facing));
-  });
+  it.each([
+    { nativeEnabled: true, selected: false },
+    { nativeEnabled: true, selected: true },
+    { nativeEnabled: false, selected: false },
+    { nativeEnabled: false, selected: true },
+  ])(
+    'preserves MRI slice visibility=$nativeEnabled when returning to 3D with selected tissue=$selected',
+    async ({ nativeEnabled, selected }) => {
+      const recorder = createViewportRecorder({ width: 800, height: 600 });
+      const { volume, plane } = nativeViewerFixture();
+      vi.mocked(useSvrNativePlane).mockImplementation(({ volume: requestedVolume }) => ({
+        plane: requestedVolume ? plane : null,
+        loading: false,
+        error: null,
+      }));
+      const data = new Uint8Array(volume.data.length);
+      data[42] = 1;
+      render(
+        <SvrVolume3DViewer
+          volume={volume}
+          initialSelection={selected ? { data, dims: volume.dims, meta: SELECTION_LABEL_META } : undefined}
+        />,
+      );
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
+      if (selected) await screen.findByRole('button', { name: 'Selection only' });
+      if (!nativeEnabled) fireEvent.click(screen.getByRole('button', { name: 'MRI slice', exact: true }));
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled)));
+
+      for (let visit = 0; visit < 2; visit++) {
+        openSelectionEditor();
+        expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute(
+          'data-editing',
+          'true',
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'View in 3D' }));
+        expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute(
+          'data-editing',
+          'false',
+        );
+        expect(screen.getByRole('button', { name: 'MRI slice', exact: true })).toHaveAttribute(
+          'aria-pressed',
+          String(nativeEnabled),
+        );
+        await waitFor(() => {
+          expect(recorder.latestInteger('u_tumorOnly')).toBe(Number(selected));
+          expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled));
+        });
+        if (selected && nativeEnabled) expect(recorder.latestInteger('u_nativeSelectionOnly')).toBe(1);
+      }
+      expect(data[42]).toBe(1);
+    },
+  );
+
+  it.each(['sagittal', 'axial', 'oblique'] as const)(
+    'opens and resets to a depth-revealing %s view, reserving face-on source inspection for Face slice',
+    async (orientation) => {
+      const recorder = createViewportRecorder({ width: 800, height: 600 });
+      const { volume, plane } = nativeViewerFixture(orientation);
+      vi.mocked(useSvrNativePlane).mockReturnValue({ plane, loading: false, error: null });
+      render(<SvrVolume3DViewer volume={volume} />);
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
+      const initial = recorder.latestMatrix('u_invRot')!;
+      const toViewDirection = (direction: number[]) => {
+        const inverse = recorder.latestMatrix('u_invRot')!;
+        const length = Math.hypot(...direction);
+        return [0, 3, 6].map(
+          (start) =>
+            (inverse[start]! * direction[0]! +
+              inverse[start + 1]! * direction[1]! +
+              inverse[start + 2]! * direction[2]!) /
+            length,
+        );
+      };
+      const normal = [
+        plane.columnStep[1] * plane.rowStep[2] - plane.columnStep[2] * plane.rowStep[1],
+        plane.columnStep[2] * plane.rowStep[0] - plane.columnStep[0] * plane.rowStep[2],
+        plane.columnStep[0] * plane.rowStep[1] - plane.columnStep[1] * plane.rowStep[0],
+      ];
+      // The default reveals depth without turning the source edge-on or upside down.
+      expect(Math.abs(toViewDirection(normal)[2]!)).toBeGreaterThan(0.3);
+      expect(Math.abs(toViewDirection(normal)[2]!)).toBeLessThan(0.95);
+      expect(toViewDirection(plane.columnStep)[0]).toBeGreaterThan(0.3);
+      expect(toViewDirection(plane.rowStep)[1]).toBeLessThan(-0.3);
+
+      open3DSettings();
+      fireEvent.click(screen.getByRole('button', { name: 'Face slice' }));
+      await waitFor(() => expect(Math.abs(toViewDirection(normal)[2]!)).toBeCloseTo(1));
+      expect(toViewDirection(plane.columnStep)[0]).toBeCloseTo(1);
+      expect(toViewDirection(plane.columnStep)[1]).toBeCloseTo(0);
+      expect(toViewDirection(plane.rowStep)[0]).toBeCloseTo(0);
+      expect(toViewDirection(plane.rowStep)[1]).toBeCloseTo(-1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reset view' }));
+      await waitFor(() => expect(recorder.latestMatrix('u_invRot')).toEqual(initial));
+      const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
+      fireEvent.keyDown(viewer, { key: 'ArrowRight' });
+      await waitFor(() => expect(recorder.latestMatrix('u_invRot')).not.toEqual(initial));
+      fireEvent.keyDown(viewer, { key: '0' });
+      await waitFor(() => expect(recorder.latestMatrix('u_invRot')).toEqual(initial));
+    },
+  );
+
+  it.each(['anatomy', 'selection'] as const)(
+    'keeps the 3D %s camera fixed while the original MRI plane moves through the volume',
+    async (mode) => {
+      const recorder = createViewportRecorder({ width: 800, height: 600 });
+      const { volume, plane } = nativeViewerFixture();
+      const planes = plane.source.frames.map((frame, frameIndex) =>
+        makeNativePlaneData(volume, plane.source, frameIndex, {
+          ...plane.image,
+          imageId: `miradb:${frame.sopInstanceUid}`,
+          sopInstanceUid: frame.sopInstanceUid,
+        }),
+      );
+      vi.mocked(useSvrNativePlane).mockImplementation(({ frameIndex }) => ({
+        plane: planes[frameIndex]!,
+        loading: false,
+        error: null,
+      }));
+      const data = new Uint8Array(volume.data.length);
+      data[42] = 1;
+      render(<SvrVolume3DViewer volume={volume} labels={{ data, dims: volume.dims, meta: SELECTION_LABEL_META }} />);
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
+      if (mode === 'selection') {
+        fireEvent.click(screen.getByRole('button', { name: 'Selection only' }));
+        await waitFor(() => expect(recorder.latestInteger('u_tumorOnly')).toBe(1));
+      }
+      const camera = () => ({
+        center: recorder.latestVector('u_cameraCenter'),
+        distance: recorder.latestFloat('u_cameraZ'),
+        zoom: recorder.latestZoom(),
+        rotation: recorder.latestMatrix('u_invRot'),
+      });
+      const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });
+      const original = camera();
+      fireEvent.keyDown(viewer, { key: '+' });
+      fireEvent.keyDown(viewer, { key: 'ArrowRight' });
+      await waitFor(() => {
+        expect(camera().zoom).not.toBe(original.zoom);
+        expect(camera().rotation).not.toEqual(original.rotation);
+      });
+      const chosenCamera = camera();
+      for (const frameIndex of [0, 3, 1, 2]) {
+        fireEvent.change(screen.getByRole('slider', { name: 'Original MRI slice position' }), {
+          target: { value: String(frameIndex) },
+        });
+        await waitFor(() => expect(recorder.latestVector('u_nativeOrigin')).toEqual(planes[frameIndex]!.origin));
+        expect(vi.mocked(useSvrNativePlane).mock.lastCall?.[0].frameIndex).toBe(frameIndex);
+        expect(camera()).toEqual(chosenCamera);
+      }
+    },
+  );
 
   it('keeps outlined orientation letters above the dimension readout while rotating', async () => {
     const recorder = createViewportRecorder({ width: 800, height: 600 });
@@ -1237,6 +1439,117 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(screen.queryByRole('group', { name: 'Volume detail comparison' })).not.toBeInTheDocument();
     unchanged();
   });
+
+  it('prepares enhancement from the editor on click, releasing only the idle suggestion copy', async () => {
+    const volume = editingVolume();
+    const source = volume.data.slice();
+    const at = (x: number, y: number) => (6 * 12 + y) * 12 + x;
+    const dispose = vi.spyOn(SeededVolumeWorker.prototype, 'dispose');
+    vi.spyOn(SeededVolumeWorker.prototype, 'residentSourceBytes', 'get').mockReturnValue(
+      volume.data.byteLength + volume.observedSupport!.byteLength,
+    );
+    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
+      indices: Uint32Array.of(at(5, 6), at(6, 6)),
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+      boundaryCount: 0,
+      domainVoxels: volume.data.length,
+    });
+    vi.mocked(runSuperResolution).mockImplementation(async (crop) => {
+      expect(dispose).toHaveBeenCalledOnce();
+      return enhancedFixture(crop);
+    });
+    createViewportRecorder({ width: 400, height: 320 });
+    render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
+    openSelectionEditor();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+    paint(5, 6);
+    paint(8, 6, 'Mark outside');
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
+    const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
+    const writes = vi.mocked(saveVolumeSegmentation).mock.calls.length;
+    expect(dispose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Enhance selection/ }));
+    await screen.findByRole('group', { name: 'Volume detail comparison' });
+    expect(runSuperResolution).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(vi.mocked(saveVolumeSegmentation).mock.calls).toHaveLength(writes);
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0]).toBe(saved);
+    expect(volume.data).toEqual(source);
+
+    open3DSettings('Enhanced detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard enhancement' }));
+    expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.calls.length).toBeGreaterThan(writes));
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds).toEqual(saved.seeds);
+    expect(screen.getByRole('button', { name: 'Redo selection edit' })).toBeEnabled();
+  });
+
+  it.each([true, false])(
+    'preserves MRI slice visibility=%s when enhancement completes and detail is toggled',
+    async (nativeEnabled) => {
+      const recorder = createViewportRecorder({ width: 800, height: 600 });
+      const { volume, plane, pixels } = nativeViewerFixture();
+      const sourceValues = volume.data.slice();
+      const originalPixels = pixels.slice();
+      vi.mocked(useSvrNativePlane).mockImplementation(({ volume: requestedVolume }) => ({
+        plane: requestedVolume ? plane : null,
+        loading: false,
+        error: null,
+      }));
+      const data = new Uint8Array(volume.data.length);
+      data[42] = 1;
+      const completion = deferred<SvrEnhancedVolume>();
+      vi.mocked(runSuperResolution).mockReturnValue(completion.promise);
+      render(
+        <SvrVolume3DViewer
+          volume={volume}
+          initialSelection={{ data, dims: volume.dims, meta: SELECTION_LABEL_META }}
+        />,
+      );
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(1));
+      await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
+      if (!nativeEnabled) fireEvent.click(screen.getByRole('button', { name: 'MRI slice', exact: true }));
+      await waitFor(() => expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled)));
+      fireEvent.click(screen.getByRole('button', { name: /Enhance selection/ }));
+      await waitFor(() => expect(runSuperResolution).toHaveBeenCalledOnce());
+      expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled));
+      const enhancementInput = vi.mocked(runSuperResolution).mock.lastCall![0];
+      await act(async () => completion.resolve(enhancedFixture(enhancementInput)));
+      const comparison = await screen.findByRole('group', { name: 'Volume detail comparison' });
+      await waitFor(() => {
+        expect(recorder.latestInteger('u_enhancedEnabled')).toBe(1);
+        expect(recorder.latestInteger('u_tumorOnly')).toBe(1);
+        expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled));
+      });
+      expect(screen.getByRole('button', { name: 'MRI slice', exact: true })).toHaveAttribute(
+        'aria-pressed',
+        String(nativeEnabled),
+      );
+      expect(screen.getByText(/Inferred detail—not acquired/)).toHaveTextContent(
+        nativeEnabled ? 'MRI plane shows original pixels' : 'Saved selection unchanged',
+      );
+      for (const [label, enabled] of [
+        ['Original', 0],
+        ['Enhanced · 2×', 1],
+      ] as const) {
+        fireEvent.click(within(comparison).getByRole('button', { name: label }));
+        await waitFor(() => expect(recorder.latestInteger('u_enhancedEnabled')).toBe(enabled));
+        expect(recorder.latestInteger('u_nativeEnabled')).toBe(Number(nativeEnabled));
+        expect(screen.getByRole('button', { name: 'MRI slice', exact: true })).toHaveAttribute(
+          'aria-pressed',
+          String(nativeEnabled),
+        );
+      }
+      expect(pixels).toEqual(originalPixels);
+      expect(volume.data).toEqual(sourceValues);
+      expect(data[42]).toBe(1);
+      expect(saveVolumeSegmentation).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['slice', 'tool', 'escape'] as const)('discards an unfinished stroke after a %s change', (kind) => {
     render(<SvrVolume3DViewer volume={editingVolume()} />);

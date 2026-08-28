@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getDB, resetDbForTests } from '../src/db/db';
+import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { alignmentDisplayBaseline, DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 import {
   getComparisonData,
   getImageIdForInstance,
@@ -136,6 +138,38 @@ describe('localApi', () => {
     });
     const settings = await getPanelSettings('combo-1');
     expect(settings['2024-01-01T00:00:00']?.zoom).toBe(1.5);
+  });
+
+  it('round-trips correction intent and unclipped baseline in patient-scoped storage, including explicit clearing', async () => {
+    const date = '2035-01-10T12:00:00';
+    const baseline = { ...DEFAULT_PANEL_SETTINGS, brightness: 199, affine01: 0.02 };
+    const settings = {
+      ...baseline,
+      brightness: 200,
+      alignmentAdjustment: { ...DEFAULT_ALIGNMENT_ADJUSTMENT, brightness: 10, sliceOffset: -2 },
+      alignmentBaseline: alignmentDisplayBaseline(baseline),
+      alignmentPaused: true,
+    };
+    await savePanelSettings('shared-sequence', date, settings, 'patient-a');
+    expect((await getPanelSettings('shared-sequence', 'patient-a'))[date]).toEqual(settings);
+    expect(await getPanelSettings('shared-sequence', 'patient-b')).toEqual({});
+
+    await savePanelSettings(
+      'shared-sequence',
+      date,
+      {
+        ...baseline,
+        alignmentAdjustment: undefined,
+        alignmentBaseline: undefined,
+        alignmentPaused: false,
+      },
+      'patient-a',
+    );
+    const reset = (await getPanelSettings('shared-sequence', 'patient-a'))[date]!;
+    expect(reset.alignmentAdjustment).toBeUndefined();
+    expect(reset.alignmentBaseline).toBeUndefined();
+    expect(reset.alignmentPaused).toBe(false);
+    expect(reset.brightness).toBe(199);
   });
 
   it('resolves imageId for instance index', async () => {

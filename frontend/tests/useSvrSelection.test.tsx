@@ -3,7 +3,11 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { useSvrSelection } from '../src/hooks/useSvrSelection';
-import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
+import {
+  SeededVolumeWorker,
+  type SeededWorkerRequest,
+  type SeededWorkerResponse,
+} from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 
 function volume(size = 12): SvrVolume {
@@ -25,12 +29,140 @@ function setup(source = volume(), saved: SvrLabelVolume | null = null) {
     { initialProps: { source } },
   );
 }
+function selectionWorkers() {
+  const workers: MockWorker[] = [];
+  class MockWorker {
+    onmessage: ((event: MessageEvent<SeededWorkerResponse>) => void) | null = null;
+    postMessage = vi.fn<(message: SeededWorkerRequest) => void>();
+    terminate = vi.fn();
+    constructor() {
+      workers.push(this);
+    }
+    complete(indices: number[]) {
+      const run = this.postMessage.mock.calls.at(-1)?.[0];
+      if (run?.type !== 'run') throw new Error('No pending suggestion.');
+      this.onmessage?.({
+        data: {
+          type: 'done',
+          id: run.id,
+          result: {
+            indices: Uint32Array.from(indices),
+            bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+            boundaryCount: 0,
+            domainVoxels: 1728,
+          },
+        },
+      } as MessageEvent<SeededWorkerResponse>);
+    }
+  }
+  vi.stubGlobal('Worker', MockWorker);
+  return workers;
+}
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('SVR selection publication and editing history', () => {
+  it('releases the idle suggestion copy before enhancement, preserving labels, marks, history and later suggestions', async () => {
+    const workers = selectionWorkers();
+    const source = volume();
+    const sourceData = source.data.slice();
+    const sourceSupport = source.observedSupport!.slice();
+    const { result, rerender } = setup(source);
+    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+    act(() => result.current.selection.stroke(Uint32Array.of(31), 'exclude'));
+    await act(async () => {
+      const pending = result.current.selection.grow();
+      workers[0]!.complete([30, 31, 32]);
+      await pending;
+    });
+    const worker = workers[0]!;
+    expect(worker.postMessage.mock.calls[0]![0]).toMatchObject({
+      type: 'init',
+      volume: source.data,
+      observedSupport: source.observedSupport,
+    });
+    const labels = result.current.labels;
+    const values = labels!.data.slice();
+    const marks = result.current.selection.marks;
+    const retainedBefore = result.current.selection.retainedBytes;
+    const sourceBytes = source.data.buffer.byteLength + source.observedSupport!.buffer.byteLength;
+    expect(retainedBefore).toBeGreaterThan(sourceBytes);
+    let retainedAfter = 0;
+    act(() => {
+      retainedAfter = result.current.selection.prepareEnhancement();
+    });
+    expect(retainedAfter).toBe(retainedBefore - sourceBytes);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(result.current.selection.prepareEnhancement()).toBe(retainedAfter);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(result.current.labels).toBe(labels);
+    expect(result.current.labels!.data).toEqual(values);
+    expect(result.current.selection.marks).toBe(marks);
+    expect(source.data).toEqual(sourceData);
+    expect(source.observedSupport).toEqual(sourceSupport);
+    rerender({ source });
+    expect(result.current.selection.retainedBytes).toBe(retainedAfter);
+
+    act(() => result.current.selection.travel('undo'));
+    expect(result.current.labels!.data[30]).toBe(1);
+    expect(result.current.labels!.data[31]).toBe(0);
+    expect(result.current.labels!.data[32]).toBe(0);
+    expect(result.current.labels!.seeds).toEqual(labels!.seeds);
+    expect(result.current.selection.canRedo).toBe(true);
+    act(() => result.current.selection.travel('redo'));
+    expect(result.current.labels!.data).toEqual(values);
+    expect(result.current.labels!.seeds).toEqual(labels!.seeds);
+    expect(result.current.selection.retainedBytes).toBe(retainedAfter);
+
+    await act(async () => {
+      const pending = result.current.selection.grow();
+      expect(workers).toHaveLength(2);
+      expect(workers[1]!.postMessage.mock.calls[0]![0]).toMatchObject({
+        type: 'init',
+        volume: source.data,
+        observedSupport: source.observedSupport,
+      });
+      expect(workers[1]!.postMessage.mock.calls[1]![0]).toMatchObject({ type: 'run', ...labels!.seeds });
+      workers[1]!.complete([31, 33]);
+      await pending;
+    });
+    expect(result.current.labels!.data[30]).toBe(1);
+    expect(result.current.labels!.data[31]).toBe(0);
+    expect(result.current.labels!.data[33]).toBe(1);
+    expect(result.current.labels!.seeds).toEqual(labels!.seeds);
+    expect(source.data).toEqual(sourceData);
+    expect(source.observedSupport).toEqual(sourceSupport);
+  });
+
+  it('refuses enhancement preparation during a suggestion without canceling it or touching edits', async () => {
+    const workers = selectionWorkers();
+    const { result } = setup();
+    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+    const before = result.current.labels;
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.selection.grow();
+    });
+    const worker = workers[0]!;
+    expect(result.current.selection.status.running).toBe(true);
+    expect(() => result.current.selection.prepareEnhancement()).toThrow(/wait for the boundary suggestion/i);
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(worker.postMessage.mock.calls.map(([message]) => message.type)).toEqual(['init', 'run']);
+    expect(result.current.labels).toBe(before);
+    expect(result.current.selection.status.running).toBe(true);
+    await act(async () => {
+      worker.complete([30, 32]);
+      await pending;
+    });
+    expect(result.current.labels!.data[32]).toBe(1);
+    expect(result.current.selection.status.running).toBe(false);
+    expect(result.current.selection.prepareEnhancement()).toBeGreaterThan(0);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
   it('counts unique history and hard-mark buffers plus the live worker source, releasing replaced history', async () => {
     vi.spyOn(SeededVolumeWorker.prototype, 'residentSourceBytes', 'get').mockReturnValue(8192);
     vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({

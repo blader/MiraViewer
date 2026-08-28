@@ -1,6 +1,7 @@
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
 import type { AlignmentDisplayTone } from '../utils/alignmentDisplayTone';
 import type { SvrDirection, SvrNativeSource, SvrPatientTransform, SvrSourceProvenance } from '../types/svr';
+import type { AlignmentAdjustment, AlignmentDisplayBaseline } from '../types/api';
 
 export interface DicomStudy {
   studyInstanceUid: string;
@@ -273,6 +274,9 @@ export interface PanelSettingsRow {
       brightness: number;
       contrast: number;
       progress: number;
+      alignmentAdjustment?: AlignmentAdjustment;
+      alignmentBaseline?: AlignmentDisplayBaseline;
+      alignmentPaused?: boolean;
     }
   >;
 }

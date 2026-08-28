@@ -683,7 +683,7 @@ export function SvrSegmentationEditor({
   setCutaway: (enabled: boolean) => void;
   onShow3D?: () => void;
   selectionNotice?: ReactNode;
-  children: ReactNode | ((selectionRunning: boolean, retainedBytes: number) => ReactNode);
+  children: ReactNode | ((selectionRunning: boolean, prepareEnhancement: () => number) => ReactNode);
 }) {
   const { volume, labels = null } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
@@ -935,7 +935,9 @@ export function SvrSegmentationEditor({
             </div>
           </header>
           <div className="svr-selection-volume-content">
-            {typeof children === 'function' ? children(selection.status.running, selection.retainedBytes) : children}
+            {typeof children === 'function'
+              ? children(selection.status.running, selection.prepareEnhancement)
+              : children}
           </div>
         </section>
       </div>

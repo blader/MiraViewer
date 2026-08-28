@@ -57,6 +57,24 @@ export interface ComparisonData {
   examinations?: Record<string, ComparisonExamination>;
 }
 
+/** User corrections relative to automatic alignment, not a replacement registration. */
+export interface AlignmentAdjustment {
+  /** Signed displacement in acquired target slices; independent of reverse display order. */
+  sliceOffset: number;
+  panX: number;
+  panY: number;
+  rotation: number;
+  /** Multiplicative zoom relative to the automatic presentation. */
+  zoom: number;
+  brightness: number;
+  contrast: number;
+}
+
+export type AlignmentDisplayBaseline = Pick<
+  PanelSettings,
+  'zoom' | 'rotation' | 'panX' | 'panY' | 'brightness' | 'contrast' | 'affine00' | 'affine01' | 'affine10' | 'affine11'
+>;
+
 // Persisted per-date viewer settings for a specific sequence combo.
 export interface PanelSettings {
   offset: number;
@@ -81,6 +99,12 @@ export interface PanelSettings {
   affine11: number;
 
   progress: number; // normalized 0..1, last viewed global slice position for this date
+  /** Durable manual intent, reapplied to each new automatic presentation. */
+  alignmentAdjustment?: AlignmentAdjustment;
+  /** Last uncorrected display, needed to restore clipped corrections or an acquired pause after reload. */
+  alignmentBaseline?: AlignmentDisplayBaseline;
+  /** Only an explicit acquired-image action opts a panel out of automatic alignment. */
+  alignmentPaused?: boolean;
 }
 
 /**
@@ -163,6 +187,10 @@ export interface AlignmentResult {
   slicesChecked: number; // For debugging/stats
   /** Immutable producing-operation and target identities. */
   runId?: string;
+  /** Accepted scan-pair model shared by its independently resliced browsing planes. */
+  registrationId?: string;
+  /** Target-space slice correction used to sample this presentation; never refits the cached pose. */
+  manualSliceOffset?: number;
   /** Visible-view identity for background results; stale navigation may not apply them. */
   requestKey?: string;
   patientKey?: string;

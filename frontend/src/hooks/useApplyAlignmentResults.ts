@@ -128,6 +128,8 @@ export function useApplyAlignmentResults(opts: {
       }
 
       const existing = panelSettings.get(r.date) || DEFAULT_PANEL_SETTINGS;
+      if (existing.alignmentPaused) continue;
+      if (r.requestKey && (r.manualSliceOffset ?? 0) !== (existing.alignmentAdjustment?.sliceOffset ?? 0)) continue;
       const reverseSliceOrder = !!existing.reverseSliceOrder;
 
       // If slice order is reversed for this date, adjust the computed offset so the

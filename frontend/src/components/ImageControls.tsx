@@ -5,6 +5,7 @@ import { StepControl } from './StepControl';
 import { CONTROL_LIMITS, DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import { normalizeRotation } from '../utils/math';
 import { formatRotation } from '../utils/format';
+import { DEFAULT_ALIGNMENT_ADJUSTMENT } from '../utils/alignmentAdjustment';
 
 interface ImageControlsProps {
   settings: PanelSettings;
@@ -13,16 +14,23 @@ interface ImageControlsProps {
   onUpdate: (update: Partial<PanelSettings>) => void;
   /** If false, omit the slice selector control (useful when rendering it on a separate row). */
   showSliceControl?: boolean;
+  /** An accepted derived presentation uses automatic matching as its reset baseline. */
+  isAligned?: boolean;
 }
 
-export const VerifiedAlignmentBadge = () => (
+export const AlignmentBadge = ({ adjusted = false }: { adjusted?: boolean }) => (
   <span
-    data-registration-datum="verified"
-    aria-label="Verified aligned presentation"
-    className="flex items-center gap-1.5 text-xs text-[var(--signal-metal)]"
+    data-registration-datum={adjusted ? 'adjusted' : 'verified'}
+    aria-label={adjusted ? 'Aligned with manual adjustments' : 'Verified aligned presentation'}
+    title={
+      adjusted
+        ? 'Automatic alignment with your adjustments. Review anatomical correspondence.'
+        : 'Automatically aligned presentation'
+    }
+    className="flex shrink-0 items-center gap-1.5 text-xs text-[var(--signal-metal)]"
   >
     <span aria-hidden="true" className="h-3 w-px bg-[var(--signal-metal)]" />
-    <span className="hidden lg:inline">Aligned</span>
+    <span className={adjusted ? undefined : 'hidden lg:inline'}>{adjusted ? 'Adjusted' : 'Aligned'}</span>
   </span>
 );
 
@@ -40,21 +48,31 @@ export function AcquiredImageAction({ onClick }: { onClick: () => void }) {
   );
 }
 
+export function ResumeAlignmentAction({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="study-acquired-action min-h-9 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      title="This examination is showing acquired images. Resume automatic alignment with your saved adjustments."
+      aria-label="Resume alignment"
+    >
+      Acquired · Resume alignment
+    </button>
+  );
+}
+
 export function StudyAnnotationControls({
   showSavedTumor,
-  tumorToolOpen,
   gtPolygonToolOpen,
   nativeAnnotationsAvailable,
   setShowSavedTumor,
-  setTumorToolOpen,
   setGtPolygonToolOpen,
 }: {
   showSavedTumor: boolean;
-  tumorToolOpen: boolean;
   gtPolygonToolOpen: boolean;
   nativeAnnotationsAvailable: boolean;
   setShowSavedTumor: Dispatch<SetStateAction<boolean>>;
-  setTumorToolOpen: Dispatch<SetStateAction<boolean>>;
   setGtPolygonToolOpen: Dispatch<SetStateAction<boolean>>;
 }) {
   return (
@@ -62,10 +80,10 @@ export function StudyAnnotationControls({
       <button
         type="button"
         onClick={() => setShowSavedTumor((value) => !value)}
-        disabled={tumorToolOpen || !nativeAnnotationsAvailable}
+        disabled={!nativeAnnotationsAvailable}
         aria-pressed={showSavedTumor}
         className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
-          tumorToolOpen || !nativeAnnotationsAvailable
+          !nativeAnnotationsAvailable
             ? 'text-[var(--text-tertiary)]'
             : showSavedTumor
               ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
@@ -74,9 +92,7 @@ export function StudyAnnotationControls({
         title={
           !nativeAnnotationsAvailable
             ? 'Native annotations are unavailable on a derived alignment plane'
-            : tumorToolOpen
-              ? 'Close segmentation tool to view saved tumor overlay'
-              : 'Toggle saved tumor segmentation overlay'
+            : 'Toggle saved tumor segmentation overlay'
         }
       >
         <ScanLine className="h-3.5 w-3.5" />
@@ -87,13 +103,7 @@ export function StudyAnnotationControls({
         type="button"
         aria-pressed={gtPolygonToolOpen}
         disabled={!nativeAnnotationsAvailable}
-        onClick={() => {
-          setGtPolygonToolOpen((value) => {
-            const next = !value;
-            if (next) setTumorToolOpen(false);
-            return next;
-          });
-        }}
+        onClick={() => setGtPolygonToolOpen((value) => !value)}
         className={`flex min-h-8 shrink-0 items-center gap-1 rounded-[3px] px-1.5 text-xs transition-colors ${
           gtPolygonToolOpen
             ? 'bg-[var(--bg-tertiary)] text-[var(--signal-metal)]'
@@ -118,9 +128,11 @@ export function ImageControls({
   instanceCount,
   onUpdate,
   showSliceControl = true,
+  isAligned = false,
 }: ImageControlsProps) {
   const canReverse = instanceCount > 1;
   const isReversed = !!settings.reverseSliceOrder;
+  const resetToAutomaticTone = !settings.alignmentPaused && (isAligned || Boolean(settings.alignmentAdjustment));
 
   const toggleReverseSliceOrder = () => {
     if (!canReverse) return;
@@ -235,13 +247,40 @@ export function ImageControls({
       <button
         type="button"
         className="study-reset-tone"
+        title={
+          resetToAutomaticTone
+            ? 'Return to automatic tone matching while keeping your geometry corrections'
+            : 'Reset brightness and contrast without changing alignment'
+        }
         onClick={() =>
-          onUpdate({ brightness: DEFAULT_PANEL_SETTINGS.brightness, contrast: DEFAULT_PANEL_SETTINGS.contrast })
+          onUpdate(
+            resetToAutomaticTone
+              ? {
+                  alignmentAdjustment: {
+                    ...DEFAULT_ALIGNMENT_ADJUSTMENT,
+                    ...settings.alignmentAdjustment,
+                    brightness: 0,
+                    contrast: 0,
+                  },
+                }
+              : { brightness: DEFAULT_PANEL_SETTINGS.brightness, contrast: DEFAULT_PANEL_SETTINGS.contrast },
+          )
         }
       >
         <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
         Reset brightness &amp; contrast
       </button>
+      {settings.alignmentAdjustment && !settings.alignmentPaused ? (
+        <button
+          type="button"
+          className="study-reset-tone"
+          title="Clear your alignment corrections while keeping the automatic match and slice order"
+          onClick={() => onUpdate({ alignmentAdjustment: undefined })}
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          Reset adjustments
+        </button>
+      ) : null}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { useApplyAlignmentResults } from '../src/hooks/useApplyAlignmentResults';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 import type { AlignmentResult, ComparisonData, PanelSettings } from '../src/types/api';
 import * as localApi from '../src/utils/localApi';
 import {
@@ -104,6 +105,29 @@ function alignmentFixture({
 }
 
 describe('useApplyAlignmentResults', () => {
+  it.each(['pause', 'slice correction'] as const)('rejects an in-flight result superseded by a manual %s', (change) => {
+    const { result, frame, applyResults, seriesUid, date } = alignmentFixture();
+    clearDerivedAlignmentFrames();
+    const batchUpdateSettings = vi.fn();
+    applyResults([result({ requestKey: 'same-view', derivedFrame: frame() })], {
+      activeRequestKey: 'same-view',
+      panelSettings: new Map([
+        [
+          date,
+          {
+            ...DEFAULT_PANEL_SETTINGS,
+            ...(change === 'pause'
+              ? { alignmentPaused: true }
+              : { alignmentAdjustment: { ...DEFAULT_ALIGNMENT_ADJUSTMENT, sliceOffset: 1 } }),
+          },
+        ],
+      ]),
+      batchUpdateSettings,
+    });
+    expect(batchUpdateSettings).not.toHaveBeenCalled();
+    expect(getDerivedAlignmentFrame(seriesUid, 1)).toBeNull();
+  });
+
   it('ignores late background results for a different visible view', () => {
     const { result, frame, applyResults, seriesUid } = alignmentFixture();
     clearDerivedAlignmentFrames();

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComparisonMatrix } from '../src/components/ComparisonMatrix';
 
@@ -75,8 +76,10 @@ vi.mock('../src/hooks/useAutoAlign', () => ({ useAutoAlign: () => alignmentState
 vi.mock('../src/hooks/useApplyAlignmentResults', () => ({ useApplyAlignmentResults: vi.fn() }));
 vi.mock('../src/hooks/useGlobalSliceWheelNavigation', () => ({ useGlobalSliceWheelNavigation: vi.fn() }));
 vi.mock('../src/components/DicomViewer', () => ({
-  DicomViewer: ({ seriesUid }: { seriesUid: string }) => (
-    <div data-testid="acquired-diagnostic-image" data-series-uid={seriesUid} />
+  DicomViewer: ({ seriesUid, children }: { seriesUid: string; children?: ReactNode }) => (
+    <div data-testid="acquired-diagnostic-image" data-series-uid={seriesUid}>
+      {children}
+    </div>
   ),
 }));
 

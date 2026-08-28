@@ -24,9 +24,11 @@ export function AutomaticAlignmentStatus({
     : busy
       ? 'Aligning scans…'
       : complete
-        ? 'Scans aligned'
+        ? manual
+          ? 'Aligned with adjustments'
+          : 'Scans aligned'
         : manual
-          ? 'Manual adjustments kept'
+          ? 'Adjustments stay linked'
           : 'Automatic alignment';
   return (
     <div className="instrument-alignment-status" aria-label="Automatic alignment controls">
@@ -34,7 +36,7 @@ export function AutomaticAlignmentStatus({
         role="status"
         aria-live="polite"
         aria-label="Automatic alignment status"
-        title="Scans align to the first visible examination using anatomy-rich neighboring slices. No region selection is needed."
+        title="Scans follow the first visible examination. Your adjustments stay linked as you browse; no region selection is needed."
       >
         {busy && enabled ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -56,7 +58,7 @@ export function AutomaticAlignmentStatus({
         type="button"
         className="instrument-icon-button"
         onClick={onRealign}
-        title="Realign visible scans, replacing manual overrides"
+        title="Recalculate alignment for visible scans, keeping your adjustments"
         aria-label="Realign visible scans"
       >
         <RotateCw className="h-3.5 w-3.5" aria-hidden="true" />

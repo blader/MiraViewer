@@ -48,14 +48,14 @@ import {
 import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
 import {
-  assertEnhancementFits,
   cropEnhancementSource,
   enhancementContextFits,
   enhancementSelectionRoi,
-  enhancementWorkingBytes,
+  prepareEnhancementMemory,
   type EnhancementSourceLoader,
 } from '../utils/svr/superResolutionRegion';
 import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
+import { retainedDerivedAlignmentBytes } from '../utils/derivedAlignmentFrame';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
 function sortedDatesDesc(dates: string[]): string[] {
@@ -1289,17 +1289,37 @@ function useSvrReconstructionWorkspace({
         // Optional telemetry may be unavailable; retain the conservative cache reservation.
       }
       const nativePlaneBytes = nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []);
+      // Raw aligned frames survive compare → 3D navigation independently of
+      // Cornerstone's decoded presentation cache, and must remain reusable.
+      const additionalRetainedBytes = (options.retainedBytes ?? 0) + retainedDerivedAlignmentBytes();
+      const imageCache = cornerstone.imageCache ?? {};
+      const protectedImageIds = () => {
+        const displayed = new Set<{ imageId?: string }>(
+          (cornerstone.getEnabledElements?.() ?? []).flatMap((element: { image?: { imageId?: string } }) =>
+            element.image ? [element.image] : [],
+          ),
+        );
+        const ids = new Set<string>();
+        for (const image of displayed) if (image.imageId) ids.add(image.imageId);
+        // miradb cache keys wrap images whose own ID is still dicomfile:N.
+        // Match the actual displayed object, not that recyclable inner loader ID.
+        for (const entry of imageCache.cachedImages ?? [])
+          if (entry.image && displayed.has(entry.image)) ids.add(entry.imageId);
+        return ids;
+      };
       const cropAccepted = () =>
         cropEnhancementSource(volume, labels, {
           ...options,
-          retainedBytes: (options.retainedBytes ?? 0) + decodedCacheBytes + nativePlaneBytes,
+          retainedBytes: additionalRetainedBytes + nativePlaneBytes,
+          imageCache,
+          protectedImageIds,
         });
       if (!volume.nativeVoxelSizeMm) return cropAccepted();
       if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
         if (hasNativeDetail(volume)) return cropAccepted();
         throw new Error('The original source is unavailable. Reopen this examination before enhancing it.');
       }
-      const retainedBytes = retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0);
+      const retainedBytes = retainedSvrVolumeBytes(volume) + additionalRetainedBytes;
       const sourceTransform = volume.sourceProvenance.sources.find(
         (source) => source.seriesUid === nativeSource.seriesUid,
       )?.transform;
@@ -1336,15 +1356,32 @@ function useSvrReconstructionWorkspace({
       const plan = planNativeVolume(nativeSource, requested, planning);
       if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
       const count = plan.dims.reduce((product, axis) => product * axis, 1);
-      assertEnhancementFits(count, retainedBytes + decodedCacheBytes + nativePlaneBytes);
+      await prepareEnhancementMemory(
+        count,
+        retainedBytes + nativePlaneBytes,
+        imageCache,
+        protectedImageIds,
+        options.signal,
+      );
       const result = await reconstructVolumeMultiPlane({
         selectedSeries,
         svrParams: requested,
         acceptedProvenance: volume.sourceProvenance,
-        retainedBytes: retainedBytes + enhancementWorkingBytes(count),
+        // Native assembly finishes before enhancement begins. Each phase admits
+        // its own peak; future worker/output buffers are not resident during decoding.
+        retainedBytes,
         signal: options.signal,
         onProgress: options.onProgress,
       });
+      // Browsing may have populated decoded frames while the native source loaded.
+      // Re-admit the actual source and current cache before worker allocations.
+      await prepareEnhancementMemory(
+        result.volume.data.length,
+        retainedBytes + nativePlaneBytes,
+        imageCache,
+        protectedImageIds,
+        options.signal,
+      );
       return result.volume;
     },
     [acceptedResult, isRunning, nativeSource, currentReadiness, params, selectedSeries],

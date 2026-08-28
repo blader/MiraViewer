@@ -1,5 +1,5 @@
 import type { SvrLabelVolume, SvrRoi, SvrVolume } from '../../types/svr';
-import { retainedSvrVolumeBytes } from './nativeVolume';
+import { nativeDecodedCacheBudgetBytes, retainedSvrVolumeBytes } from './nativeVolume';
 import { SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { MAX_SR_OUTPUT_VOXELS, MIN_SR_CONTEXT_DIM } from './superResolutionTypes';
@@ -37,6 +37,21 @@ export type EnhancementSourceOptions = {
 };
 export type EnhancementSourceLoader = (labels: SvrLabelVolume, options: EnhancementSourceOptions) => Promise<SvrVolume>;
 
+/** Only completed, reproducible MRI images may be reclaimed; no persistent data or cache limits are changed. */
+export type EnhancementImageCache = {
+  getCacheInfo?: () => { cacheSizeInBytes?: number; maximumSizeInBytes?: number };
+  cachedImages?: readonly {
+    loaded: boolean;
+    imageId: string;
+    timeStamp: number;
+    sizeInBytes: number;
+    imageLoadObject?: object;
+  }[];
+  getImageLoadObject?: (imageId: string) => unknown;
+  removeImageLoadObject?: (imageId: string) => void;
+};
+export type EnhancementProtectedImageIds = ReadonlySet<string> | (() => ReadonlySet<string>);
+
 /** Includes worker copies, training scratch, output, normalization staging and GPU ownership. */
 export function enhancementWorkingBytes(sourceVoxels: number): number {
   if (!Number.isSafeInteger(sourceVoxels) || sourceVoxels < 1) return Infinity;
@@ -44,15 +59,97 @@ export function enhancementWorkingBytes(sourceVoxels: number): number {
 }
 
 export function assertEnhancementFits(sourceVoxels: number, retainedBytes = 0): void {
-  if (
-    !Number.isFinite(retainedBytes) ||
-    retainedBytes < 0 ||
-    sourceVoxels * 8 > MAX_SR_OUTPUT_VOXELS ||
-    enhancementWorkingBytes(sourceVoxels) + retainedBytes > SVR_MEMORY_BUDGET_BYTES
-  )
+  if (!Number.isSafeInteger(sourceVoxels) || sourceVoxels < 1 || !Number.isFinite(retainedBytes) || retainedBytes < 0)
+    throw new Error(
+      'Enhancement requires a valid source size and a finite, nonnegative retained-memory estimate. Original detail will not be reduced.',
+    );
+  if (sourceVoxels * 8 > MAX_SR_OUTPUT_VOXELS)
     throw new Error(
       'This region is too large for 2× enhancement in the browser. Select a smaller region; original detail will not be reduced.',
     );
+  const totalBytes = enhancementWorkingBytes(sourceVoxels) + retainedBytes;
+  if (totalBytes <= SVR_MEMORY_BUDGET_BYTES) return;
+  const budgetMiB = Math.floor(SVR_MEMORY_BUDGET_BYTES / (1024 * 1024));
+  if (retainedBytes + enhancementWorkingBytes(MIN_SR_CONTEXT_DIM ** 3) > SVR_MEMORY_BUDGET_BYTES)
+    throw new Error(
+      `The open volume and working data leave no room for even a small enhancement (${Math.ceil(retainedBytes / (1024 * 1024))} MiB retained; ${budgetMiB} MiB budget). Load native detail for this selection, then try again. Original detail will not be reduced.`,
+    );
+  throw new Error(
+    `This region is too large for 2× enhancement with the currently open data (estimated ${Math.ceil(totalBytes / (1024 * 1024))} MiB; ${budgetMiB} MiB budget). Select a smaller region; original detail will not be reduced.`,
+  );
+}
+
+/** Reclaim only enough idle decoded MRI cache to admit this region, using measured residency after every removal. */
+export async function prepareEnhancementMemory(
+  sourceVoxels: number,
+  retainedBytes: number,
+  cache: EnhancementImageCache,
+  protectedImageIds?: EnhancementProtectedImageIds,
+  signal?: AbortSignal,
+): Promise<number> {
+  assertNotAborted(signal);
+  // A larger-than-supported region or an irreducible resident floor cannot be fixed by discarding cache entries.
+  assertEnhancementFits(sourceVoxels, retainedBytes);
+  const measure = () => {
+    try {
+      const info = cache.getCacheInfo?.();
+      return {
+        bytes: nativeDecodedCacheBudgetBytes(info),
+        measured: Number.isFinite(info?.cacheSizeInBytes) && info!.cacheSizeInBytes! >= 0,
+      };
+    } catch {
+      return { bytes: nativeDecodedCacheBudgetBytes(), measured: false };
+    }
+  };
+  const availableBytes = SVR_MEMORY_BUDGET_BYTES - retainedBytes - enhancementWorkingBytes(sourceVoxels);
+  let residency = measure();
+  let removed = false;
+  if (
+    residency.bytes > availableBytes &&
+    residency.measured &&
+    cache.removeImageLoadObject &&
+    cache.getImageLoadObject
+  ) {
+    const reclaimable = (entry: NonNullable<EnhancementImageCache['cachedImages']>[number]) =>
+      entry.loaded &&
+      Number.isFinite(entry.sizeInBytes) &&
+      entry.sizeInBytes > 0 &&
+      Number.isFinite(entry.timeStamp) &&
+      entry.imageLoadObject !== undefined &&
+      /^(miradb|miraderived):/.test(entry.imageId);
+    // The public cache owns an ID dictionary. Check its current loader identity instead of rescanning its array.
+    const candidates = (cache.cachedImages ?? []).filter(reclaimable);
+    candidates.sort((a, b) => a.timeStamp - b.timeStamp);
+    try {
+      for (const candidate of candidates) {
+        assertNotAborted(signal);
+        if (residency.bytes <= availableBytes) break;
+        if (!reclaimable(candidate)) continue;
+        const protectedIds = typeof protectedImageIds === 'function' ? protectedImageIds() : protectedImageIds;
+        if (protectedIds?.has(candidate.imageId)) continue;
+        const before = residency.bytes;
+        try {
+          // A synchronous cache event may replace this ID with a pending load. Never cancel the replacement.
+          if (cache.getImageLoadObject(candidate.imageId) !== candidate.imageLoadObject) continue;
+          cache.removeImageLoadObject(candidate.imageId);
+          removed = true;
+        } catch {
+          // Another cache owner may have removed it. Fresh totals, never the advertised entry size, decide.
+        }
+        residency = measure();
+        // Missing or unchanged accounting cannot justify blindly discarding the rest of the cache.
+        if (!residency.measured || residency.bytes >= before) break;
+      }
+    } finally {
+      // Drop every loader/pixel reference before yielding or allocating the source/enhancement buffers.
+      candidates.length = 0;
+    }
+  }
+  if (removed) await yieldToMain();
+  assertNotAborted(signal);
+  residency = measure();
+  assertEnhancementFits(sourceVoxels, retainedBytes + residency.bytes);
+  return residency.bytes;
 }
 
 /** Native-context bounds, without stretching a long narrow selection into a cube. */
@@ -178,7 +275,10 @@ export async function enhancementSelectionRoi(
 export async function cropEnhancementSource(
   volume: SvrVolume,
   labels: SvrLabelVolume,
-  options: EnhancementSourceOptions = {},
+  options: EnhancementSourceOptions & {
+    imageCache?: EnhancementImageCache;
+    protectedImageIds?: EnhancementProtectedImageIds;
+  } = {},
 ): Promise<SvrVolume> {
   const { min, max } = await selectionBounds(volume, labels, options.signal);
   for (let axis = 0; axis < 3; axis++) {
@@ -194,7 +294,10 @@ export async function cropEnhancementSource(
   }
   const dims = min.map((value, axis) => max[axis]! - value + 1) as Triple;
   const count = dims[0] * dims[1] * dims[2];
-  assertEnhancementFits(count, retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0));
+  const retainedBytes = retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0);
+  if (options.imageCache)
+    await prepareEnhancementMemory(count, retainedBytes, options.imageCache, options.protectedImageIds, options.signal);
+  else assertEnhancementFits(count, retainedBytes);
   const data = new Float32Array(count),
     observedSupport = new Uint8Array(count);
   let supportedVoxelCount = 0;
@@ -214,6 +317,9 @@ export async function cropEnhancementSource(
     if (z % 8 === 0) await yieldToMain();
   }
   assertNotAborted(options.signal);
+  // Decoding/browsing can refill the cache during cooperative copying; admit the next phase against current owners.
+  if (options.imageCache)
+    await prepareEnhancementMemory(count, retainedBytes, options.imageCache, options.protectedImageIds, options.signal);
   const cropped: SvrVolume = {
     ...volume,
     data,

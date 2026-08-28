@@ -262,7 +262,7 @@ export function useSvrSelection(
     if (mark === 1) included++;
     else excluded++;
   }
-  // These existing owners stay resident while enhancement borrows the volume.
+  // Editing history and marks stay resident while enhancement borrows the volume.
   // Count backing buffers once: seed snapshots often share storage with history.
   const buffers = new Set<ArrayBufferLike>();
   const addSeeds = (seeds: SvrLabelVolume['seeds']) => {
@@ -277,10 +277,16 @@ export function useSvrSelection(
     addSeeds(edit.before.seeds);
     addSeeds(edit.after.seeds);
   }
-  const retainedBytes = [...buffers].reduce(
-    (bytes, buffer) => bytes + buffer.byteLength,
-    runner.current?.residentSourceBytes ?? 0,
-  );
+  const editingBytes = [...buffers].reduce((bytes, buffer) => bytes + buffer.byteLength, 0);
+  const prepareEnhancement = useCallback(() => {
+    if (request.current) throw new Error('Wait for the boundary suggestion to finish before enhancing this region.');
+    // The solver can recreate this private MRI copy on the next suggestion.
+    // Release it before enhancement admission, without touching user-owned edits.
+    runner.current?.dispose();
+    runner.current = null;
+    return editingBytes;
+  }, [editingBytes]);
+  const retainedBytes = editingBytes + (runner.current?.residentSourceBytes ?? 0);
   return {
     marks,
     included,
@@ -289,6 +295,7 @@ export function useSvrSelection(
     canRedo: state.redo.length > 0,
     status,
     retainedBytes,
+    prepareEnhancement,
     stroke,
     grow,
     cancel,

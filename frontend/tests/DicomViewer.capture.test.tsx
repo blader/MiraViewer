@@ -1,4 +1,4 @@
-import { render, fireEvent, screen, waitFor } from '@testing-library/react';
+import { render, fireEvent, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
 import { DicomViewer, type DicomViewerHandle } from '../src/components/DicomViewer';
@@ -29,7 +29,9 @@ describe('DicomViewer interactions', () => {
       save: vi.fn(),
       restore: vi.fn(),
       set filter(_v: string) {},
-      get filter() { return ''; },
+      get filter() {
+        return '';
+      },
     });
     HTMLCanvasElement.prototype.toBlob = vi.fn((cb: BlobCallback) => {
       cb(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }));
@@ -47,11 +49,11 @@ describe('DicomViewer interactions', () => {
         instanceCount={1}
         onInstanceChange={() => {}}
         imageUrlOverride="test.png"
-      />
+      />,
     );
 
     const img = await screen.findByRole('img');
-    const viewport = document.querySelector('.cursor-crosshair') as HTMLElement;
+    const viewport = screen.getByRole('button', { name: 'Pan MRI slice 1' });
     Object.defineProperty(viewport, 'clientWidth', { value: 200 });
     Object.defineProperty(viewport, 'clientHeight', { value: 200 });
     Object.defineProperty(img, 'complete', { value: true });
@@ -62,9 +64,9 @@ describe('DicomViewer interactions', () => {
     expect(blob).toBeInstanceOf(Blob);
   });
 
-  it('click sets pan and double-click resets pan', async () => {
+  it('keeps the image still on click and resets pan on double-click', () => {
     const onPanChange = vi.fn();
-    const { container } = render(
+    render(
       <DicomViewer
         studyId="s"
         seriesUid="u"
@@ -75,18 +77,16 @@ describe('DicomViewer interactions', () => {
         panX={0}
         panY={0}
         imageUrlOverride="test.png"
-      />
+      />,
     );
 
-    const viewport = container.querySelector('.cursor-crosshair') as HTMLElement;
+    const viewport = screen.getByRole('button', { name: 'Pan MRI slice 1' });
     Object.defineProperty(viewport, 'getBoundingClientRect', {
       value: () => ({ left: 0, top: 0, width: 200, height: 100 }),
     });
 
     fireEvent.click(viewport, { clientX: 50, clientY: 50 });
-    await waitFor(() => {
-      expect(onPanChange).toHaveBeenCalled();
-    });
+    expect(onPanChange).not.toHaveBeenCalled();
 
     fireEvent.doubleClick(viewport);
     expect(onPanChange).toHaveBeenCalledWith(0, 0);

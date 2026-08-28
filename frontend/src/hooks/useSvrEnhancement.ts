@@ -73,7 +73,7 @@ export function useSvrEnhancement({
     setStored(EMPTY);
   }, []);
   const run = useCallback(
-    async (additionalRetainedBytes = 0) => {
+    async (prepareMemory: number | (() => number) = 0) => {
       if (!volume || !labels || blocked) return false;
       operation.current?.abort();
       const controller = new AbortController();
@@ -94,6 +94,9 @@ export function useSvrEnhancement({
         }));
       };
       try {
+        // The selection owner can release its idle worker's reproducible MRI copy
+        // before reporting the marks/history that genuinely remain resident.
+        const additionalRetainedBytes = typeof prepareMemory === 'function' ? prepareMemory() : prepareMemory;
         if (!Number.isSafeInteger(additionalRetainedBytes) || additionalRetainedBytes < 0)
           throw new Error('Enhancement requires a valid retained-memory estimate. Original data is unchanged.');
         const options = {

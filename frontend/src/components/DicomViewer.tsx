@@ -19,7 +19,8 @@ import {
 } from '../utils/debugAlignment';
 import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
 import { getDecodedFrame as loadDecodedFrame, loadCornerstoneImage, type DecodedFrame } from '../utils/decodedFrame';
-import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
+import type { DerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
+import { useAlignedFrame } from '../hooks/useAlignedFrame';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -67,6 +68,130 @@ function formatDebugRank(rank: number | undefined, active: boolean | undefined):
   return rank.toFixed(4);
 }
 
+function useViewportPan({
+  contentKey,
+  panX,
+  panY,
+  onPanChange,
+  interactionBlocked,
+}: {
+  contentKey: string;
+  panX: number;
+  panY: number;
+  onPanChange?: (panX: number, panY: number) => void;
+  interactionBlocked: boolean;
+}) {
+  const [drag, setDrag] = useState<{
+    origin: {
+      contentKey: string;
+      element: HTMLDivElement;
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      width: number;
+      height: number;
+      panX: number;
+      panY: number;
+    };
+    panX: number;
+    panY: number;
+  } | null>(null);
+  const canPan = !interactionBlocked && !!onPanChange;
+  const origin = drag?.origin;
+
+  // A gesture belongs to one image and one starting transform, not the next slice or tool.
+  if (origin && (!canPan || origin.contentKey !== contentKey || origin.panX !== panX || origin.panY !== panY)) {
+    setDrag(null);
+  }
+
+  useEffect(() => {
+    if (!origin) return;
+    const cancel = () => setDrag(null);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('blur', cancel);
+      if (origin.element.hasPointerCapture?.(origin.pointerId)) {
+        origin.element.releasePointerCapture(origin.pointerId);
+      }
+    };
+  }, [origin]);
+
+  const moveOrFinish = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!origin || !canPan || event.pointerId !== origin.pointerId) return;
+    const nextX = origin.panX + (event.clientX - origin.clientX) / origin.width;
+    const nextY = origin.panY + (event.clientY - origin.clientY) / origin.height;
+    if (event.type === 'pointerup') {
+      setDrag(null);
+      // Preview locally while dragging; persist and record one undo entry on release.
+      if (nextX !== panX || nextY !== panY) onPanChange?.(nextX, nextY);
+    } else if (nextX !== drag?.panX || nextY !== drag?.panY) {
+      setDrag({ origin, panX: nextX, panY: nextY });
+    }
+  };
+
+  const cancelPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerId === origin?.pointerId) setDrag(null);
+  };
+
+  const resetPan = () => {
+    if (!canPan) return;
+    setDrag(null);
+    onPanChange?.(0, 0);
+  };
+
+  return {
+    panX: drag?.panX ?? panX,
+    panY: drag?.panY ?? panY,
+    canPan,
+    isPanning: !!drag,
+    handlers: {
+      onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!canPan || origin || event.defaultPrevented || !event.isPrimary || event.button !== 0) return;
+        const element = event.currentTarget;
+        const { width, height } = element.getBoundingClientRect();
+        if (width <= 0 || height <= 0) return;
+        event.preventDefault();
+        element.focus({ preventScroll: true });
+        element.setPointerCapture?.(event.pointerId);
+        setDrag({
+          origin: {
+            contentKey,
+            element,
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            width,
+            height,
+            panX,
+            panY,
+          },
+          panX,
+          panY,
+        });
+      },
+      onPointerMove: moveOrFinish,
+      onPointerUp: moveOrFinish,
+      onPointerCancel: cancelPointer,
+      onLostPointerCapture: cancelPointer,
+      onDoubleClick: (event: React.MouseEvent<HTMLDivElement>) => {
+        if (!canPan) return;
+        event.stopPropagation();
+        resetPan();
+      },
+      onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === 'Escape' && drag) {
+          event.preventDefault();
+          event.stopPropagation();
+          setDrag(null);
+        } else if (canPan && event.key === 'Enter') {
+          event.preventDefault();
+          resetPan();
+        }
+      },
+    },
+  };
+}
+
 interface DicomViewerProps {
   studyId: string;
   seriesUid: string;
@@ -93,6 +218,8 @@ interface DicomViewerProps {
   affine11?: number;
   onPanChange?: (panX: number, panY: number) => void;
   onZoomChange?: (zoom: number) => void;
+  /** Image-space annotations use committed settings and follow the live pan preview together. */
+  children?: React.ReactNode;
 }
 
 interface ImageContentProps {
@@ -140,7 +267,7 @@ type DicomViewerHandleOptions = {
   containerRef: React.RefObject<HTMLDivElement | null>;
   imgRef: React.RefObject<HTMLImageElement | null>;
   displayedContentKeyRef: React.RefObject<string | null>;
-  derivedFrame: ReturnType<typeof getDerivedAlignmentFrame>;
+  derivedFrame: DerivedAlignmentFrame | null;
   seriesUid: string;
   effectiveInstanceIndex: number;
   affine00: number;
@@ -438,23 +565,41 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     interactionBlocked = false,
     reverseSliceOrder = false,
     imageUrlOverride,
-    brightness = 100,
-    contrast = 100,
-    zoom = 1,
-    rotation = 0,
-    panX = 0,
-    panY = 0,
-    affine00 = 1,
-    affine01 = 0,
-    affine10 = 0,
-    affine11 = 1,
+    brightness: requestedBrightness = 100,
+    contrast: requestedContrast = 100,
+    zoom: requestedZoom = 1,
+    rotation: requestedRotation = 0,
+    panX: requestedPanX = 0,
+    panY: requestedPanY = 0,
+    affine00: requestedAffine00 = 1,
+    affine01: requestedAffine01 = 0,
+    affine10: requestedAffine10 = 0,
+    affine11: requestedAffine11 = 1,
     onPanChange,
     onZoomChange,
+    children,
   }: DicomViewerProps,
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
+  const {
+    frame: derivedFrame,
+    pending: alignmentPending,
+    status: alignmentStatus,
+    settings: acceptedSettings,
+  } = useAlignedFrame(seriesUid, effectiveInstanceIndex);
+  const brightness = acceptedSettings?.brightness ?? requestedBrightness;
+  const contrast = acceptedSettings?.contrast ?? requestedContrast;
+  const zoom = acceptedSettings?.zoom ?? requestedZoom;
+  const rotation = acceptedSettings?.rotation ?? requestedRotation;
+  const panX = acceptedSettings?.panX ?? requestedPanX;
+  const panY = acceptedSettings?.panY ?? requestedPanY;
+  const affine00 = acceptedSettings?.affine00 ?? requestedAffine00;
+  const affine01 = acceptedSettings?.affine01 ?? requestedAffine01;
+  const affine10 = acceptedSettings?.affine10 ?? requestedAffine10;
+  const affine11 = acceptedSettings?.affine11 ?? requestedAffine11;
 
   // Mouse wheel behavior:
   // - Plain wheel events advance slices, matching the center-pane global wheel behavior.
@@ -466,8 +611,9 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     const handleWheel = (e: WheelEvent) => {
       if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
 
-      if (e.metaKey && onZoomChange) {
+      if (e.metaKey) {
         e.preventDefault();
+        if (!onZoomChange || alignmentPending) return;
 
         const speed = (() => {
           // deltaMode: 0=pixels, 1=lines, 2=pages
@@ -504,14 +650,15 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
-  }, [instanceCount, instanceIndex, interactionBlocked, onInstanceChange, onZoomChange, zoom]);
+  }, [alignmentPending, instanceCount, instanceIndex, interactionBlocked, onInstanceChange, onZoomChange, zoom]);
 
-  const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
-  const derivedFrame = useSyncExternalStore(
-    subscribeToDerivedAlignmentFrames,
-    () => getDerivedAlignmentFrame(seriesUid, effectiveInstanceIndex),
-    () => null,
-  );
+  const viewportPan = useViewportPan({
+    contentKey: `${studyId}:${seriesUid}:${effectiveInstanceIndex}:${imageUrlOverride ?? derivedFrame?.imageId ?? ''}`,
+    panX,
+    panY,
+    onPanChange: alignmentPending ? undefined : onPanChange,
+    interactionBlocked,
+  });
 
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
   const [imageId, setImageId] = useState<string | null>(null);
@@ -586,8 +733,8 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   }, []);
 
   // Convert normalized pan to pixels
-  const panXPx = panX * viewportSize.width;
-  const panYPx = panY * viewportSize.height;
+  const panXPx = viewportPan.panX * viewportSize.width;
+  const panYPx = viewportPan.panY * viewportSize.height;
 
   // Combined transform
   //
@@ -609,76 +756,26 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     affine11,
     brightness,
     contrast,
-    panX,
-    panY,
+    panX: viewportPan.panX,
+    panY: viewportPan.panY,
     rotation,
     zoom,
   });
 
-  // Click to set center - calculates offset to move clicked point to viewport center
-  const handleClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (interactionBlocked || !containerRef.current || !onPanChange) return;
-
-      const rect = containerRef.current.getBoundingClientRect();
-      const viewportCenterX = rect.width / 2;
-      const viewportCenterY = rect.height / 2;
-
-      // Where user clicked relative to viewport
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
-
-      // Current pan in pixels
-      const currentPanXPx = panX * rect.width;
-      const currentPanYPx = panY * rect.height;
-
-      // Calculate offset needed to move clicked point to center (in pixels)
-      const offsetXPx = viewportCenterX - clickX + currentPanXPx;
-      const offsetYPx = viewportCenterY - clickY + currentPanYPx;
-
-      // Convert back to normalized values
-      const normalizedX = offsetXPx / rect.width;
-      const normalizedY = offsetYPx / rect.height;
-
-      onPanChange(normalizedX, normalizedY);
-    },
-    [interactionBlocked, onPanChange, panX, panY],
-  );
-
-  // Double-click to reset pan
-  const handleDoubleClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (interactionBlocked) return;
-      e.stopPropagation();
-      if (onPanChange) {
-        onPanChange(0, 0);
-      }
-    },
-    [interactionBlocked, onPanChange],
-  );
-
-  const handleViewportKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (interactionBlocked || !onPanChange || (event.key !== 'Enter' && event.key !== ' ')) return;
-      event.preventDefault();
-      onPanChange(0, 0);
-    },
-    [interactionBlocked, onPanChange],
-  );
-
   return (
-    <div className="h-full bg-black">
+    <div className="relative h-full overflow-hidden bg-black">
       {/* Viewport */}
       <div
         ref={containerRef}
-        className="h-full overflow-hidden relative cursor-crosshair"
+        className={`h-full overflow-hidden relative select-none ${viewportPan.canPan ? 'touch-none' : ''}`}
+        style={{ cursor: viewportPan.canPan ? (viewportPan.isPanning ? 'grabbing' : 'grab') : 'inherit' }}
         role="button"
-        tabIndex={interactionBlocked || !onPanChange ? -1 : 0}
-        aria-label={`Recenter MRI slice ${instanceIndex + 1}`}
-        aria-disabled={interactionBlocked || !onPanChange}
-        onClick={handleClick}
-        onDoubleClick={handleDoubleClick}
-        onKeyDown={handleViewportKeyDown}
+        tabIndex={viewportPan.canPan ? 0 : -1}
+        aria-label={`Pan MRI slice ${instanceIndex + 1}`}
+        aria-description="Drag to pan. Double-click or press Enter to reset pan."
+        aria-disabled={!viewportPan.canPan}
+        aria-busy={alignmentStatus === 'updating' || undefined}
+        {...viewportPan.handlers}
       >
         {imageUrlOverride ? (
           <ImageContent
@@ -692,10 +789,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         ) : imageId ? (
           <CornerstoneImage
             imageId={imageId}
-            contentKey={`${studyId}:${seriesUid}:${effectiveInstanceIndex}`}
+            contentKey={`${studyId}:${seriesUid}:${derivedFrame?.instanceIndex ?? effectiveInstanceIndex}`}
+            presentationKey={derivedFrame?.imageId ?? `${studyId}:${seriesUid}:${effectiveInstanceIndex}:native`}
             imageFilter={imageFilter}
             imageTransform={imageTransform}
-            alt={`Slice ${instanceIndex + 1}`}
+            alt={`Slice ${(derivedFrame?.instanceIndex ?? effectiveInstanceIndex) + 1}`}
             onDisplayedContentKey={setDisplayedContentKey}
           />
         ) : (
@@ -706,7 +804,9 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
         {derivedFrame && !imageUrlOverride ? (
           <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-1rem)] rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11px] text-[var(--signal-metal)]">
-            Derived 3D-aligned plane
+            {alignmentPending
+              ? `Showing aligned slice ${derivedFrame.instanceIndex + 1} · ${alignmentStatus === 'unavailable' ? 'Aligned slice unavailable' : alignmentStatus === 'paused' ? 'Alignment paused' : 'Updating aligned slice…'}`
+              : 'Derived 3D-aligned plane'}
             {derivedFrame.nativeSliceSpacingMm
               ? ` · ${derivedFrame.nativeSliceSpacingMm.toFixed(1)} mm native slices`
               : ''}
@@ -720,12 +820,24 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
         {debugSliceScores && isZHeld ? <DicomAlignmentDiagnostics sliceScore={sliceScore} /> : null}
       </div>
+      {children ? (
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            transform: `translate(${panXPx - panX * viewportSize.width}px, ${panYPx - panY * viewportSize.height}px)`,
+          }}
+        >
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 });
 
 interface CornerstoneImageProps {
   imageId: string;
+  /** Known before asynchronous ID resolution, so new settings never reach old pixels. */
+  presentationKey?: string;
   /**
    * Identity for the requested content (e.g. series+instance).
    *
@@ -781,6 +893,7 @@ function ErrorOverlay({ message }: { message: string }) {
 function CornerstoneImage({
   imageId,
   contentKey,
+  presentationKey = contentKey,
   imageFilter,
   imageTransform,
   alt,
@@ -807,14 +920,14 @@ function CornerstoneImage({
   // Track which contentKey the currently-loaded image corresponds to.
   // This lets us avoid applying the *new* settings/transform to the *old* image
   // during async navigation (e.g. switching overlay dates).
-  const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
+  const [loadedContent, setLoadedContent] = useState<{ contentKey: string; presentationKey: string } | null>(null);
 
   // Keep a ref of the latest requested key so the imageId load effect can associate
   // a loaded imageId with the correct contentKey without re-running on every key change.
-  const contentKeyRef = useRef(contentKey);
+  const contentKeyRef = useRef({ contentKey, presentationKey });
   useEffect(() => {
-    contentKeyRef.current = contentKey;
-  }, [contentKey]);
+    contentKeyRef.current = { contentKey, presentationKey };
+  }, [contentKey, presentationKey]);
 
   const onDisplayedContentKeyRef = useRef(onDisplayedContentKey);
   useEffect(() => {
@@ -825,7 +938,10 @@ function CornerstoneImage({
   const status: 'loading' | 'loaded' | 'error' =
     errorImageId === imageId ? 'error' : loadedImageId === imageId ? 'loaded' : 'loading';
 
-  const isContentInSync = loadedImageId === imageId && loadedContentKey === contentKey;
+  const isContentInSync =
+    loadedImageId === imageId &&
+    loadedContent?.contentKey === contentKey &&
+    loadedContent.presentationKey === presentationKey;
 
   // While navigating, keep rendering the previous image with the previous in-sync settings.
   // We snapshot the latest in-sync filter/transform so they only update once the new image is
@@ -889,9 +1005,9 @@ function CornerstoneImage({
         const viewport = cornerstone.getDefaultViewportForImage(element, image);
         cornerstone.displayImage(element, image, viewport);
         setLoadedImageId(imageId);
-        setLoadedContentKey(keyForThisLoad);
+        setLoadedContent(keyForThisLoad);
         setErrorImageId(null);
-        onDisplayedContentKeyRef.current?.(keyForThisLoad);
+        onDisplayedContentKeyRef.current?.(keyForThisLoad.contentKey);
       } catch (err) {
         console.error('Failed to load DICOM image:', err);
         if (!cancelled) {
@@ -934,6 +1050,7 @@ function CornerstoneImage({
         className="w-full h-full"
         style={{ minWidth: '100px', minHeight: '100px' }}
         aria-label={alt}
+        data-image-id={loadedImageId ?? undefined}
       />
       {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
       {status === 'error' && <ErrorOverlay message="Failed to load image" />}

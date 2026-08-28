@@ -1,7 +1,16 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import type { PanelSettings, PanelSettingsPartial } from '../types/api';
+import type { PanelSettings, PanelSettingsPartial, SeriesRef } from '../types/api';
 import { getPanelSettings, savePanelSettings } from '../utils/localApi';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
+import {
+  adjustAlignment,
+  alignmentDisplayBaseline,
+  applyAlignmentAdjustment,
+  normalizeAlignmentAdjustment,
+  normalizeAlignmentBaseline,
+  removeAlignmentAdjustment,
+} from '../utils/alignmentAdjustment';
+import { getSliceIndex } from '../utils/math';
 
 function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): PanelSettings {
   const out = { ...DEFAULT_PANEL_SETTINGS } as Record<string, unknown>;
@@ -9,9 +18,25 @@ function normalizePanelSettingsPartial(s: PanelSettingsPartial | undefined): Pan
 
   for (const [k, def] of Object.entries(DEFAULT_PANEL_SETTINGS) as [keyof PanelSettings, unknown][]) {
     const v = (s as Record<string, unknown>)[k];
-    if (typeof v === typeof def && v !== null) out[k] = v;
+    if (typeof v === typeof def && v !== null && (typeof v !== 'number' || Number.isFinite(v))) out[k] = v;
   }
+  out.alignmentAdjustment = normalizeAlignmentAdjustment(s.alignmentAdjustment);
+  out.alignmentBaseline = normalizeAlignmentBaseline(s.alignmentBaseline);
+  out.alignmentPaused = s.alignmentPaused === true;
   return out as unknown as PanelSettings;
+}
+
+function changedSettings(before: PanelSettings, after: PanelSettings): Partial<PanelSettings> {
+  const changes: Record<string, unknown> = {};
+  for (const key of Object.keys({ ...before, ...after }) as (keyof PanelSettings)[]) {
+    if (key === 'progress' || key === 'alignmentBaseline') continue;
+    const changed =
+      key === 'alignmentPaused'
+        ? !!before.alignmentPaused !== !!after.alignmentPaused
+        : JSON.stringify(before[key]) !== JSON.stringify(after[key]);
+    if (changed) changes[key] = after[key];
+  }
+  return changes as Partial<PanelSettings>;
 }
 
 type PanelSettingsHistoryEntry = {
@@ -33,6 +58,7 @@ export function usePanelSettings(
   enabledDatesKey: string,
   patientKey: string | null = null,
   interactionBlocked = false,
+  seriesByDate?: Record<string, SeriesRef>,
 ) {
   // Per-panel settings: Map<date, PanelSettings>
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
@@ -41,12 +67,6 @@ export function usePanelSettings(
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
   const [settingsOwner, setSettingsOwner] = useState({ patientKey, sequenceId: null as string | null });
   const settingsBelongToPatient = settingsOwner.patientKey === patientKey && settingsOwner.sequenceId === selectedSeqId;
-  const [manuallyAdjustedDates, setManuallyAdjustedDates] = useState<Set<string>>(() => new Set());
-  const clearManualAdjustments = useCallback(() => setManuallyAdjustedDates(new Set()), []);
-  const holdAlignment = useCallback(
-    (date: string) => setManuallyAdjustedDates((dates) => new Set(dates).add(date)),
-    [],
-  );
 
   const reportPersistenceFailure = useCallback((error: unknown) => {
     setPersistenceError(error instanceof Error ? error.message : 'Viewer settings could not be saved locally');
@@ -65,6 +85,9 @@ export function usePanelSettings(
   const panelSettingsRef = useRef(panelSettings);
   const selectedSeqIdRef = useRef(selectedSeqId);
   const prevDatesRef = useRef<Set<string>>(new Set());
+  // The latest uncorrected presentation is disposable computation. Manual intent
+  // lives with persisted panel settings and is never replaced by an async result.
+  const baselineSettingsRef = useRef(new Map<string, PanelSettings>());
 
   // Undo/redo stacks for panel settings changes (pan/zoom/rotation/etc).
   // Stored in refs to avoid re-rendering on every adjustment.
@@ -84,20 +107,62 @@ export function usePanelSettings(
   }, [patientKey, selectedSeqId]);
 
   const applyPanelSettings = useCallback(
-    (date: string, settings: PanelSettings) => {
+    (date: string, saved: PanelSettings, opposite: PanelSettings) => {
       const seqId = selectedSeqIdRef.current;
       if (!seqId || !settingsBelongToPatient) return;
+
+      const current = panelSettingsRef.current.get(date) ?? DEFAULT_PANEL_SETTINGS;
+      const changes = changedSettings(opposite, saved);
+      const reverseSliceOrder = changes.reverseSliceOrder ?? current.reverseSliceOrder;
+      let settings = { ...current, ...changes, progress: current.progress };
+      const intentChanged = 'alignmentAdjustment' in changes;
+      const modeChanged = !!saved.alignmentPaused !== !!opposite.alignmentPaused;
+      if (modeChanged && saved.alignmentPaused) {
+        // An acquired presentation is a complete mode transition, including fields
+        // that happened to equal native defaults when the action was first made.
+        settings = {
+          ...saved,
+          alignmentBaseline: alignmentDisplayBaseline(
+            baselineSettingsRef.current.get(date) ?? removeAlignmentAdjustment(current),
+          ),
+          offset: current.offset,
+          reverseSliceOrder,
+          progress: current.progress,
+        };
+      } else if (!settings.alignmentPaused && (intentChanged || modeChanged)) {
+        const baseline = baselineSettingsRef.current.get(date) ?? removeAlignmentAdjustment(current);
+        settings = {
+          ...applyAlignmentAdjustment(baseline, saved.alignmentAdjustment),
+          offset: current.offset,
+          reverseSliceOrder,
+          progress: current.progress,
+          alignmentPaused: false,
+        };
+      }
+      if (intentChanged && !settings.alignmentPaused) {
+        settings.offset =
+          current.offset +
+          ((saved.alignmentAdjustment?.sliceOffset ?? 0) - (current.alignmentAdjustment?.sliceOffset ?? 0)) *
+            (reverseSliceOrder ? -1 : 1);
+      }
+      if (reverseSliceOrder !== current.reverseSliceOrder) {
+        const count = seriesByDate?.[date]?.instance_count;
+        const logical = count ? getSliceIndex(count, progress, current.offset) : null;
+        settings.offset =
+          logical !== null && count
+            ? current.offset + count - 1 - 2 * logical
+            : current.offset + saved.offset - opposite.offset;
+      }
 
       const next = new Map(panelSettingsRef.current);
       next.set(date, settings);
       panelSettingsRef.current = next;
       setPanelSettings(next);
-      setManuallyAdjustedDates((dates) => new Set(dates).add(date));
 
       // Persist to local storage (fire-and-forget)
       savePanelSettings(seqId, date, settings, patientKey).catch(reportPersistenceFailure);
     },
-    [patientKey, reportPersistenceFailure, settingsBelongToPatient],
+    [patientKey, progress, reportPersistenceFailure, seriesByDate, settingsBelongToPatient],
   );
 
   const undoLastPanelSetting = useCallback(() => {
@@ -120,14 +185,14 @@ export function usePanelSettings(
 
       for (const e of batch) {
         redoStackRef.current.push(e);
-        applyPanelSettings(e.date, e.before);
+        applyPanelSettings(e.date, e.before, e.after);
       }
 
       return;
     }
 
     redoStackRef.current.push(entry);
-    applyPanelSettings(entry.date, entry.before);
+    applyPanelSettings(entry.date, entry.before, entry.after);
   }, [applyPanelSettings]);
 
   const redoLastPanelSetting = useCallback(() => {
@@ -150,14 +215,14 @@ export function usePanelSettings(
 
       for (const e of batch) {
         undoStackRef.current.push(e);
-        applyPanelSettings(e.date, e.after);
+        applyPanelSettings(e.date, e.after, e.before);
       }
 
       return;
     }
 
     undoStackRef.current.push(entry);
-    applyPanelSettings(entry.date, entry.after);
+    applyPanelSettings(entry.date, entry.after, entry.before);
   }, [applyPanelSettings]);
 
   // Keyboard shortcuts: Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redo.
@@ -227,24 +292,22 @@ export function usePanelSettings(
         const stored = await getPanelSettings(selectedSeqId, patientKey);
         if (cancelled) return;
 
-        setPanelSettings((prev) => {
-          // Keep existing settings only when the same patient and sequence still own them.
-          const next = new Map<string, PanelSettings>(scopeChanged ? [] : prev);
-
-          // Hydrate all stored settings (not just enabled dates) so toggling dates later preserves saved values.
-          for (const [date, s] of Object.entries(stored)) {
-            if (!next.has(date)) next.set(date, normalizePanelSettingsPartial(s));
+        const next = new Map<string, PanelSettings>(scopeChanged ? [] : panelSettingsRef.current);
+        if (scopeChanged) baselineSettingsRef.current.clear();
+        // Hydrate hidden dates too; their corrections survive hide/show without a second authority.
+        for (const [date, saved] of Object.entries(stored)) {
+          if (!next.has(date)) next.set(date, normalizePanelSettingsPartial(saved));
+        }
+        for (const date of currentDates) {
+          if (!next.has(date)) next.set(date, { ...DEFAULT_PANEL_SETTINGS });
+        }
+        for (const [date, settings] of next) {
+          if (!baselineSettingsRef.current.has(date)) {
+            baselineSettingsRef.current.set(date, removeAlignmentAdjustment(settings));
           }
-
-          // Ensure enabled dates not present in storage still get defaults.
-          for (const date of currentDates) {
-            if (!next.has(date)) {
-              next.set(date, { ...DEFAULT_PANEL_SETTINGS });
-            }
-          }
-
-          return next;
-        });
+        }
+        panelSettingsRef.current = next;
+        setPanelSettings(next);
         setPersistenceError(null);
 
         // Restore slice position only from settings belonging to the current owner.
@@ -254,26 +317,25 @@ export function usePanelSettings(
           if (initial) {
             setActivePanel(initial);
             const s = stored[initial] || {};
-            setProgress(typeof s.progress === 'number' ? Math.max(0, Math.min(1, s.progress)) : 0);
+            setProgress(
+              typeof s.progress === 'number' && Number.isFinite(s.progress) ? Math.max(0, Math.min(1, s.progress)) : 0,
+            );
           }
         }
       } catch (error) {
         if (cancelled) return;
         reportPersistenceFailure(error);
         // A failed patient-scoped read must never inherit another patient's settings.
-        setPanelSettings((prev) => {
-          const next = new Map<string, PanelSettings>(scopeChanged ? [] : prev);
-          for (const date of newDates) {
-            if (!next.has(date)) {
-              next.set(date, { ...DEFAULT_PANEL_SETTINGS });
-            }
-          }
-          return next;
-        });
+        const next = new Map<string, PanelSettings>(scopeChanged ? [] : panelSettingsRef.current);
+        if (scopeChanged) baselineSettingsRef.current.clear();
+        for (const date of newDates) {
+          if (!next.has(date)) next.set(date, { ...DEFAULT_PANEL_SETTINGS });
+        }
+        panelSettingsRef.current = next;
+        setPanelSettings(next);
         if (scopeChanged) setProgress(0);
       }
       setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
-      if (scopeChanged) setManuallyAdjustedDates(new Set());
     })();
     return () => {
       cancelled = true;
@@ -289,15 +351,46 @@ export function usePanelSettings(
       const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
 
       const current = panelSettingsRef.current.get(date) || { ...DEFAULT_PANEL_SETTINGS };
-      const updated = { ...current, ...update };
+      const baseline = baselineSettingsRef.current.get(date) ?? removeAlignmentAdjustment(current);
+      baselineSettingsRef.current.set(date, baseline);
+      let updated = { ...current, ...update };
+      if (update.alignmentPaused !== undefined && update.alignmentPaused !== !!current.alignmentPaused) {
+        // Entering acquired mode changes presentation only. Keep the linked correction
+        // so Resume (or undo) can restore it without reconstructing manual intent.
+        updated.alignmentAdjustment = current.alignmentAdjustment;
+        updated.alignmentBaseline = alignmentDisplayBaseline(baseline);
+        if (!update.alignmentPaused) {
+          updated = {
+            ...applyAlignmentAdjustment(baseline, current.alignmentAdjustment),
+            offset: current.offset,
+            reverseSliceOrder: current.reverseSliceOrder,
+            progress: current.progress,
+            alignmentPaused: false,
+          };
+        }
+      } else if ('alignmentAdjustment' in update) {
+        const adjustment = normalizeAlignmentAdjustment(update.alignmentAdjustment);
+        updated = current.alignmentPaused
+          ? { ...updated, alignmentAdjustment: adjustment }
+          : {
+              ...applyAlignmentAdjustment(baseline, adjustment),
+              offset:
+                current.offset +
+                ((adjustment?.sliceOffset ?? 0) - (current.alignmentAdjustment?.sliceOffset ?? 0)) *
+                  (current.reverseSliceOrder ? -1 : 1),
+              reverseSliceOrder: current.reverseSliceOrder,
+              progress: current.progress,
+              alignmentPaused: false,
+            };
+      } else if (!current.alignmentPaused) {
+        updated.alignmentAdjustment = adjustAlignment(current, update, baseline);
+        updated.alignmentBaseline = updated.alignmentAdjustment ? alignmentDisplayBaseline(baseline) : undefined;
+      }
 
       // Avoid pushing no-ops into history (e.g., clamped buttons).
-      const updatedAny = updated as unknown as Record<string, unknown>;
-      const currentAny = current as unknown as Record<string, unknown>;
-      const isMeaningfulChange = updateKeys.some((k) => updatedAny[k] !== currentAny[k]);
+      const isMeaningfulChange = Object.keys(changedSettings(current, updated)).length > 0;
 
       if (shouldRecordHistory && isMeaningfulChange) {
-        setManuallyAdjustedDates((dates) => new Set(dates).add(date));
         undoStackRef.current.push({
           date,
           before: { ...current },
@@ -336,10 +429,19 @@ export function usePanelSettings(
 
       for (const [date, newSettings] of updates) {
         const current = panelSettingsRef.current.get(date) || { ...DEFAULT_PANEL_SETTINGS };
+        if (automatic && current.alignmentPaused) continue;
+        baselineSettingsRef.current.set(date, {
+          ...newSettings,
+          alignmentAdjustment: undefined,
+          alignmentPaused: false,
+        });
         historyEntries.push({
           date,
           before: { ...current },
-          after: { ...current, ...newSettings },
+          after: {
+            ...applyAlignmentAdjustment(newSettings, current.alignmentAdjustment),
+            alignmentPaused: current.alignmentPaused,
+          },
           batchId,
         });
       }
@@ -395,9 +497,9 @@ export function usePanelSettings(
   return {
     panelSettings: scopedPanelSettings,
     settingsReady: settingsBelongToPatient,
-    manuallyAdjustedDates,
-    holdAlignment,
-    clearManualAdjustments,
+    manuallyAdjustedDates: new Set(
+      [...scopedPanelSettings].flatMap(([date, settings]) => (settings.alignmentAdjustment ? [date] : [])),
+    ),
     activePanel: settingsBelongToPatient ? effectiveActivePanel : null,
     setActivePanel,
     progress: settingsBelongToPatient ? progress : 0,

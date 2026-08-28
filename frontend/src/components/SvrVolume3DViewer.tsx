@@ -25,8 +25,6 @@ import {
 import {
   RAYMARCH_FRAGMENT_SHADER,
   RAYMARCH_VERTEX_SHADER,
-  SVR3D_CAMERA_Z,
-  SVR3D_FOCAL_Z,
   SVR3D_OCC_BLOCK,
   buildOccupancyMaxGrid,
   buildOccupancyMaxGridAsync,
@@ -48,7 +46,7 @@ import { useSvrNativePlane } from '../hooks/useSvrNativePlane';
 import { useSvrEnhancement } from '../hooks/useSvrEnhancement';
 import { createEnhancedVolumeBinding, type EnhancedVolumeBinding } from '../utils/svr/enhancedVolumeBinding';
 import { nativeFrameCursor, nearestNativeFrame, projectNativePlaneMask } from '../utils/svr/nativePlane';
-import { nativePlaneCamera } from '../utils/svr/nativePlaneCamera';
+import { volumeCamera } from '../utils/svr/volumeCamera';
 import {
   captureSelectionGeometry,
   findTransferableSelection,
@@ -68,7 +66,6 @@ const COARSE_POINTER_CONTROL_TARGETS =
 
 const LABEL_PLACEHOLDER_DIMS: RenderDims = { nx: 1, ny: 1, nz: 1 };
 const LABEL_PLACEHOLDER_DATA = new Uint8Array([0]);
-const INITIAL_VOLUME_VIEWPORT_FILL = 0.9;
 const INITIAL_VOLUME_VISIBILITY_THRESHOLD = 0.05;
 type GlLabelState = {
   gl: WebGL2RenderingContext;
@@ -100,37 +97,6 @@ function quatFromRotationRows(a: Vec3, b: Vec3, c: Vec3): Quat {
   }
   const s = Math.sqrt(1 + c.z - a.x - b.y) * 2;
   return quatNormalize([(a.z + c.x) / s, (b.z + c.y) / s, s / 4, (b.x - a.y) / s]);
-}
-
-/** Fit the nearest physical box face inside the raymarch camera's current viewport. */
-function computeVolumeViewportZoom(
-  boxScale: readonly [number, number, number],
-  viewportWidth: number,
-  viewportHeight: number,
-  relativeZoom = 1,
-  visibleBounds?: OccupancyMaxGrid['visibleBounds'],
-  volumeDims?: RenderDims,
-): number {
-  const aspect = Math.max(1, viewportWidth) / Math.max(1, viewportHeight);
-  let nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - boxScale[2] * 0.5);
-  let limitingExtent = Math.max(1e-6, boxScale[1], boxScale[0] / aspect);
-
-  if (visibleBounds && volumeDims) {
-    const xMin = (visibleBounds.min[0] / volumeDims.nx - 0.5) * boxScale[0];
-    const xMax = ((visibleBounds.max[0] + 1) / volumeDims.nx - 0.5) * boxScale[0];
-    const yMin = (visibleBounds.min[1] / volumeDims.ny - 0.5) * boxScale[1];
-    const yMax = ((visibleBounds.max[1] + 1) / volumeDims.ny - 0.5) * boxScale[1];
-    const nearestVisibleZ = ((visibleBounds.max[2] + 1) / volumeDims.nz - 0.5) * boxScale[2];
-
-    nearestDepth = Math.max(1e-3, SVR3D_CAMERA_Z - nearestVisibleZ);
-    limitingExtent = Math.max(
-      1e-6,
-      2 * Math.max(Math.abs(yMin), Math.abs(yMax)),
-      (2 * Math.max(Math.abs(xMin), Math.abs(xMax))) / aspect,
-    );
-  }
-
-  return (2 * nearestDepth * INITIAL_VOLUME_VIEWPORT_FILL * relativeZoom) / (SVR3D_FOCAL_Z * limitingExtent);
 }
 
 function v3ApplyMat3(m: Float32Array, v: Vec3): Vec3 {
@@ -280,6 +246,15 @@ function quatFromAxisAngle(axis: Vec3, angleRad: number): Quat {
   const c = Math.cos(half);
   return quatNormalize([a.x * s, a.y * s, a.z * s, c]);
 }
+
+/** Reveal both the source-textured cut and the retained tissue; Face slice is explicit. */
+function obliqueVolumeRotation(facing: Quat = [0, 0, 0, 1]): Quat {
+  const yaw = quatFromAxisAngle({ x: 0, y: 1, z: 0 }, Math.PI / 3);
+  const pitch = quatFromAxisAngle({ x: 1, y: 0, z: 0 }, -Math.PI / 9);
+  return quatNormalize(quatMultiply(quatMultiply(pitch, yaw), facing));
+}
+
+const DEFAULT_VOLUME_ROTATION = obliqueVolumeRotation();
 
 function mat3FromQuat(q: Quat, out: Float32Array): void {
   const x = q[0];
@@ -779,7 +754,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     sourceIndex: nativeSourceIndex,
     frameIndex: nativeFrameIndex,
   });
-  const [nativeSelectionOnly, setNativeSelectionOnly] = useState(false);
   const [nativeContour, setNativeContour] = useState(true);
   const [nativeCutaway, setNativeCutaway] = useState(true);
   const [nativeInterpolate, setNativeInterpolate] = useState(false);
@@ -837,7 +811,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     plane: nativeImage.plane,
     mask: nativeMask,
     enabled: nativePlaneEnabled,
-    selectionOnly: nativeSelectionOnly,
     contour: nativeContour,
     cutaway: nativeCutaway,
     windowRange: nativeWindowRange,
@@ -1003,10 +976,10 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     };
   }, []);
 
-  const rotationRef = useRef<Quat>([0, 0, 0, 1]);
-  const faceNativePlane = useCallback(() => {
+  const rotationRef = useRef<Quat>(DEFAULT_VOLUME_ROTATION);
+  const nativeFacingRotation = useMemo<Quat>(() => {
     const plane = nativeImage.plane;
-    if (!plane) return;
+    if (!plane) return [0, 0, 0, 1];
     const a = plane.columnStep,
       b = plane.rowStep;
     // Map native image columns right and rows down. The resulting quaternion
@@ -1018,21 +991,25 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       y: right.z * up.x - right.x * up.z,
       z: right.x * up.y - right.y * up.x,
     };
-    rotationRef.current = quatFromRotationRows(right, up, forward);
-    requestRenderRef.current?.();
+    return quatFromRotationRows(right, up, forward);
   }, [nativeImage.plane]);
+  const faceNativePlane = useCallback(() => {
+    if (!nativeImage.plane) return;
+    rotationRef.current = nativeFacingRotation;
+    requestRenderRef.current?.();
+  }, [nativeFacingRotation, nativeImage.plane]);
   const nativeOrientedVolumeRef = useRef<SvrVolume | null>(null);
   useEffect(() => {
     if (!volume || !nativeImage.plane || nativeOrientedVolumeRef.current === volume) return;
     nativeOrientedVolumeRef.current = volume;
-    faceNativePlane();
-  }, [volume, nativeImage.plane, faceNativePlane]);
+    rotationRef.current = obliqueVolumeRotation(nativeFacingRotation);
+    requestRenderRef.current?.();
+  }, [volume, nativeImage.plane, nativeFacingRotation]);
   useLayoutEffect(() => {
     nativeDisplayRef.current = {
       plane: nativeImage.plane,
       mask: nativeMask,
       enabled: nativePlaneEnabled,
-      selectionOnly: nativeSelectionOnly && hasTumorLabels,
       contour: nativeContour,
       cutaway: nativeCutaway,
       windowRange: nativeWindowRange,
@@ -1043,8 +1020,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     nativeImage.plane,
     nativeMask,
     nativePlaneEnabled,
-    nativeSelectionOnly,
-    hasTumorLabels,
     nativeContour,
     nativeCutaway,
     nativeWindowRange,
@@ -1069,12 +1044,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
 
   const selectedBounds = labelMetrics?.bounds ?? null;
   const tumorFocus = useMemo(() => {
-    if (
-      !(tumorOnly || selectionFocusEnabled || (nativePlaneEnabled && nativeSelectionOnly)) ||
-      !volume ||
-      !selectedBounds
-    )
-      return null;
+    if (!(tumorOnly || selectionFocusEnabled) || !volume || !selectedBounds) return null;
 
     const axes = ['x', 'y', 'z'] as const;
     const spans = axes.map((axis) => selectedBounds.max[axis] - selectedBounds.min[axis] + 1);
@@ -1098,7 +1068,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       number,
     ];
     return { center, min, max, boxScale: focusedBoxScale };
-  }, [boxScale, selectedBounds, tumorOnly, selectionFocusEnabled, nativePlaneEnabled, nativeSelectionOnly, volume]);
+  }, [boxScale, selectedBounds, tumorOnly, selectionFocusEnabled, volume]);
 
   const focusAdjustment = cameraZoom.focused?.bounds === selectedBounds ? cameraZoom.focused.factor : 1;
   const zoom = tumorFocus ? focusAdjustment : cameraZoom.anatomy;
@@ -1275,14 +1245,13 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   }, [renderBuildKey, renderPlan, volume, volDims]);
 
   const resetView = useCallback(() => {
-    if (nativePlaneEnabled && nativeImage.plane) faceNativePlane();
-    else rotationRef.current = [0, 0, 0, 1];
+    rotationRef.current = obliqueVolumeRotation(nativeFacingRotation);
     setSelectionFocusEnabled(false);
     setCameraZoom({ anatomy: 1, focused: null });
     // If zoom was already 1.0 the params effect won't fire, so the rotation reset needs its
     // own explicit frame request.
     requestRenderRef.current?.();
-  }, [faceNativePlane, nativeImage.plane, nativePlaneEnabled]);
+  }, [nativeFacingRotation]);
 
   const fitSelection = useCallback(() => {
     if (!selectedBounds) return;
@@ -1596,6 +1565,23 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           visibilityThreshold: INITIAL_VOLUME_VISIBILITY_THRESHOLD,
         });
       occMaxCell = [occGrid.dims.nx - 1, occGrid.dims.ny - 1, occGrid.dims.nz - 1];
+      // Frame acquired anatomy once per volume upload. Neither a browsed plane
+      // nor its loading/visibility state can move this camera target.
+      const visibleBounds = occGrid.visibleBounds;
+      const renderDimensions = [texDims.nx, texDims.ny, texDims.nz];
+      const anatomyFocus = visibleBounds
+        ? {
+            center: boxScale.map(
+              (extent, axis) =>
+                ((visibleBounds.min[axis]! + visibleBounds.max[axis]! + 1) / (2 * renderDimensions[axis]!) - 0.5) *
+                extent,
+            ) as [number, number, number],
+            boxScale: boxScale.map(
+              (extent, axis) =>
+                ((visibleBounds.max[axis]! - visibleBounds.min[axis]! + 1) / renderDimensions[axis]!) * extent,
+            ) as [number, number, number],
+          }
+        : undefined;
 
       texOcc = gl.createTexture();
       if (!texOcc) throw new Error('Failed to allocate occupancy 3D texture');
@@ -1792,7 +1778,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         glNativeRef.current?.setPlane(native.enabled ? native.plane : null, native.enabled ? native.mask : null);
         glNativeRef.current?.bind({
           enabled: native.enabled && Boolean(native.plane),
-          selectionOnly: native.selectionOnly,
+          selectionOnly: hasLabels && tumorOnly,
           contour: native.contour,
           cutaway: native.cutaway,
           windowRange: native.windowRange,
@@ -1837,12 +1823,9 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         gl.uniform1i(u.support, 4);
         gl.uniform1i(u.supportEnabled, supportEnabled ? 1 : 0);
 
-        // Plane isolation applies to the accompanying 3D tissue as well. It
-        // must not leave a rectangular crop of unrelated fog behind the slice.
-        // Other MPR views retain the user's global anatomy/overlay preference.
-        const isolatedNativeSelection = native.enabled && native.selectionOnly && hasLabels;
-        const labelsOn = (labelsEnabled || isolatedNativeSelection) && hasLabels ? 1 : 0;
-        const isolatedVolume = labelsOn && (tumorOnly || isolatedNativeSelection);
+        // One visualization mode owns both the object and its MRI cross-section.
+        const labelsOn = labelsEnabled && hasLabels ? 1 : 0;
+        const isolatedVolume = labelsOn && tumorOnly;
         gl.uniform1i(u.labelsEnabled, labelsOn);
         gl.uniform1i(u.tumorOnly, isolatedVolume ? 1 : 0);
         gl.uniform1f(u.windowLow, windowRange[0]);
@@ -1872,20 +1855,10 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         gl.uniformMatrix3fv(u.invRot, false, invRotMat);
         gl.uniform3f(u.box, boxScale[0], boxScale[1], boxScale[2]);
         gl.uniform1f(u.aspect, canvas.width / Math.max(1, canvas.height));
-        const sourceCamera =
-          native.enabled && native.plane
-            ? nativePlaneCamera(native.plane, rotMat, canvas.width, canvas.height, tumorFocus ?? undefined, zoom)
-            : null;
-        gl.uniform1f(u.cameraZ, sourceCamera?.distance ?? SVR3D_CAMERA_Z);
-        gl.uniform3f(u.cameraCenter, ...(sourceCamera?.center ?? tumorFocus?.center ?? [0, 0, 0]));
-        gl.uniform1f(
-          u.zoom,
-          sourceCamera
-            ? sourceCamera.zoom
-            : tumorFocus
-              ? computeVolumeViewportZoom(tumorFocus.boxScale, canvas.width, canvas.height, zoom)
-              : computeVolumeViewportZoom(boxScale, canvas.width, canvas.height, zoom, occGrid.visibleBounds, texDims),
-        );
+        const camera = volumeCamera(boxScale, rotMat, canvas.width, canvas.height, tumorFocus ?? anatomyFocus, zoom);
+        gl.uniform1f(u.cameraZ, camera.distance);
+        gl.uniform3f(u.cameraCenter, ...camera.center);
+        gl.uniform1f(u.zoom, camera.zoom);
         gl.uniform1f(u.thr, clamp(threshold, 0, THRESHOLD_MAX));
         // Fewer steps while interacting (banding hidden by the jittered ray start); the
         // settled frame always marches the full configured step count.
@@ -2241,8 +2214,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     setNativeFrameIndex,
     nativePlaneEnabled,
     setNativePlaneEnabled,
-    nativeSelectionOnly: nativeSelectionOnly && hasTumorLabels,
-    setNativeSelectionOnly,
     nativeContour,
     setNativeContour,
     nativeCutaway,
@@ -2326,10 +2297,10 @@ function useViewerControls() {
 
 function SvrEnhancementControls({
   selectionRunning,
-  retainedBytes,
+  prepareEnhancement,
 }: {
   selectionRunning: boolean;
-  retainedBytes: number;
+  prepareEnhancement: number | (() => number);
 }) {
   const model = useViewerControls();
   const detail = model.enhancement;
@@ -2367,8 +2338,7 @@ function SvrEnhancementControls({
                   : 'Mark a region to enhance its detail.'
             }
             onClick={async () => {
-              if (await detail.run(retainedBytes)) {
-                model.setNativePlaneEnabled(false);
+              if (await detail.run(prepareEnhancement)) {
                 model.setVisualizationMode('tumor');
                 model.fitSelection();
               }
@@ -2383,7 +2353,9 @@ function SvrEnhancementControls({
       ) : detail.result ? (
         <p className="svr-enhancement-provenance" role="status">
           {detail.enabled ? 'Inferred detail—not acquired' : 'Original source detail'}
-          {model.nativePlaneEnabled ? ' · MRI plane shows original pixels' : ' · Saved selection unchanged'}
+          {model.nativePlaneEnabled && model.nativeImage.plane
+            ? ' · MRI plane shows original pixels'
+            : ' · Saved selection unchanged'}
         </p>
       ) : detail.message ? (
         <p role="status">{detail.message}</p>
@@ -2458,7 +2430,7 @@ function SvrNativePlaneControls() {
         type="button"
         aria-pressed={model.nativePlaneEnabled}
         onClick={() => model.setNativePlaneEnabled(!model.nativePlaneEnabled)}
-        title="Show the source MRI slice inside the 3D volume"
+        title="Reveal original MRI texture on a cross-section of the 3D volume"
       >
         MRI slice
       </button>
@@ -2556,23 +2528,6 @@ function SvrNativePlaneSettings() {
         {model.nativePlaneEnabled ? (
           <>
             <div className="svr-native-view-options">
-              <div role="group" aria-label="MRI plane coverage">
-                <button
-                  type="button"
-                  aria-pressed={!model.nativeSelectionOnly}
-                  onClick={() => model.setNativeSelectionOnly(false)}
-                >
-                  Whole slice
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={model.nativeSelectionOnly}
-                  disabled={!model.hasTumorLabels}
-                  onClick={() => model.setNativeSelectionOnly(true)}
-                >
-                  Within selection
-                </button>
-              </div>
               <div className="svr-native-display-settings">
                 <label>
                   <input
@@ -2631,7 +2586,10 @@ function SvrNativePlaneSettings() {
                 <button type="button" onClick={model.resetNativeWindow}>
                   Reset source contrast
                 </button>
-                <p>Source window / level is independent of the 3D overview. Original pixel values stay unchanged.</p>
+                <p>
+                  The MRI cross-section follows the volume or selection view. Source contrast is independent of 3D
+                  shading; original pixels stay unchanged.
+                </p>
               </div>
               <span role="status" aria-live="off">
                 {nativeImage.loading
@@ -2948,12 +2906,12 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
     setControlsCollapsed(true);
     controlsButtonRef.current?.focus({ preventScroll: true });
   };
-  const scene = (selectionRunning = false, retainedBytes = 0) => (
+  const scene = (selectionRunning = false, prepareEnhancement: number | (() => number) = 0) => (
     <div className="svr-scene">
       {volume ? (
         <div className="svr-scene-toolbar">
           <SvrNativePlaneControls />
-          <SvrEnhancementControls selectionRunning={selectionRunning} retainedBytes={retainedBytes} />
+          <SvrEnhancementControls selectionRunning={selectionRunning} prepareEnhancement={prepareEnhancement} />
           <button
             ref={controlsButtonRef}
             type="button"
@@ -3160,7 +3118,6 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
               onShow3D={() => {
                 model.setVisualizationMode(model.hasTumorLabels ? 'tumor' : 'anatomy');
                 if (model.hasTumorLabels) {
-                  model.setNativePlaneEnabled(false);
                   model.fitSelection();
                 }
               }}
