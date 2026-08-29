@@ -344,6 +344,7 @@ async function decodeManifestSlices(
   signal?: AbortSignal,
   highResolutionIndex?: number,
   highResolutionDimension = maxDimension,
+  onSourceLoad?: (load: Promise<unknown>) => void,
 ): Promise<SvrReconstructionSlice[]> {
   const output: SvrReconstructionSlice[] = [];
   const inferredSpacing = medianPhysicalSpacing(manifest);
@@ -356,10 +357,9 @@ async function decodeManifestSlices(
 
     const sliceDimension = sourceIndex === highResolutionIndex ? highResolutionDimension : maxDimension;
     const plane = referencePlaneFromFrame(frame, sliceDimension, inferredSpacing, manifest.frameOfReferenceUid);
-    const image = await waitForNativeFrame<Parameters<typeof decodeImageWithValidity>[0]>(
-      loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`),
-      signal,
-    );
+    const load = loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`);
+    onSourceLoad?.(load);
+    const image = await waitForNativeFrame<Parameters<typeof decodeImageWithValidity>[0]>(load, signal);
     assertNotAborted(signal);
     const decodedImage =
       frame.pixelPaddingValue === undefined
@@ -392,8 +392,18 @@ export async function decodeLongitudinalReferenceFrame(
   index: number,
   maxDimension: number,
   signal?: AbortSignal,
+  /** Observe the uncancelable source load separately from this consumer's bounded wait. */
+  onSourceLoad?: (load: Promise<unknown>) => void,
 ): Promise<SvrReconstructionSlice> {
-  const [slice] = await decodeManifestSlices(manifest, [index], maxDimension, signal);
+  const [slice] = await decodeManifestSlices(
+    manifest,
+    [index],
+    maxDimension,
+    signal,
+    undefined,
+    maxDimension,
+    onSourceLoad,
+  );
   if (!slice) throw new Error('The selected physical reference frame is unavailable');
   return slice;
 }

@@ -3,6 +3,7 @@ import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({
   frame: null as DerivedAlignmentFrame | null,
@@ -30,14 +31,6 @@ vi.mock('cornerstone-core', () => ({
 import cornerstone from 'cornerstone-core';
 import { DicomViewer } from '../src/components/DicomViewer';
 import { SharpSliceDisplayContext } from '../src/hooks/useSharpSliceDisplay';
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
 
 const replacement = {
   pixels: Float32Array.from([1, 2.2, 2.8, 4]),

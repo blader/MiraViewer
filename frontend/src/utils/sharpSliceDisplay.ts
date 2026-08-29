@@ -19,7 +19,7 @@ const TIMEOUT_MS = 60_000;
 let active = false;
 const waiting = new Set<() => void>();
 // Cornerstone's source load cannot be cancelled. An abandoned waiter may not start a second native decode.
-let nativeDecodeInFlight: Promise<SvrReconstructionSlice> | null = null;
+let nativeLoadInFlight: Promise<unknown> | null = null;
 
 function cancelled() {
   return new DOMException('Sharp-slice reconstruction cancelled.', 'AbortError');
@@ -157,9 +157,9 @@ async function decode(
   }
   const slices: SvrReconstructionSlice[] = [];
   for (const index of indices) {
-    if (nativeDecodeInFlight)
+    if (nativeLoadInFlight)
       await bounded(
-        nativeDecodeInFlight.catch(() => undefined),
+        nativeLoadInFlight.catch(() => undefined),
         options.signal,
       );
     assertNotAborted(options.signal);
@@ -168,12 +168,14 @@ async function decode(
       index,
       Math.max(frame.rows, frame.columns),
       options.signal,
+      (load) => {
+        nativeLoadInFlight = load;
+        const settled = () => {
+          if (nativeLoadInFlight === load) nativeLoadInFlight = null;
+        };
+        void load.then(settled, settled);
+      },
     );
-    nativeDecodeInFlight = pending;
-    const settled = () => {
-      if (nativeDecodeInFlight === pending) nativeDecodeInFlight = null;
-    };
-    void pending.then(settled, settled);
     slices.push(await bounded(pending, options.signal));
     await yieldToMain();
   }

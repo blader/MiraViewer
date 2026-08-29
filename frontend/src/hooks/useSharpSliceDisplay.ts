@@ -1,7 +1,6 @@
 import { createContext, useLayoutEffect, useState } from 'react';
 import type { DerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
-import { createDerivedImagePresentation } from '../utils/derivedImagePresentation';
-import type { DerivedImagePresentation } from '../utils/derivedImagePresentation';
+import { createDerivedImagePresentation, type DerivedImagePresentation } from '../utils/derivedImagePresentation';
 import { requestSharpSliceDisplay } from '../utils/sharpSliceDisplay';
 
 export const SharpSliceDisplayContext = createContext({ enabled: false, suspended: false });
@@ -22,10 +21,9 @@ type StoredDisplay = {
 
 /** Own only the current display replacement; registration and acquired pixels remain untouched. */
 export function useSharpSliceDisplay(
-  frame: DerivedAlignmentFrame | null,
+  source: DerivedAlignmentFrame | null,
   { enabled, suspended }: { enabled: boolean; suspended: boolean },
 ): SharpSliceDisplay {
-  const source = frame;
   const [stored, setStored] = useState<StoredDisplay>({ source, status: 'loading' });
   // A rerun can reuse an image ID. Source-object identity prevents reusing its predecessor's prediction.
   if (stored.source !== source || (!enabled && stored.status === 'error')) setStored({ source, status: 'loading' });

@@ -350,6 +350,7 @@ describe('source-first segmentation golden evaluator', () => {
 });
 
 const privateCorpus = process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DIR;
+const privateArtifactUrl = (name: string) => pathToFileURL(resolve('tmp/segmentation-golden', name)).href;
 
 describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', () => {
   it('prepares or evaluates explicitly requested pinned native MRI artifacts', async () => {
@@ -375,9 +376,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
           'Use scoped binary regression for user-approved examples; anatomy evaluation requires separately reviewed authority.',
       );
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_TINY512_TRACKING === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/medsam2-pilot/trackingReadback.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('medsam2-pilot/trackingReadback.ts'));
       const result = producer.reviewTiny512Tracking();
       expect(result.invariants.endorsedAnchorByteIdentical).toBe(true);
       expect(result.invariants.missingOriginalForeground).toBe(0);
@@ -390,18 +389,13 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_TINY512_ANCHOR === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/medsam2-pilot/scorePointAnchor.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('medsam2-pilot/scorePointAnchor.ts'));
       const result = producer.scoreTiny512PointAnchor();
       expect(result.failures).toEqual([]);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_MVS_THRESHOLD_DIAGNOSTIC === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/multiverseg-pilot/thresholdDiagnostic.ts'))
-          .href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('multiverseg-pilot/thresholdDiagnostic.ts'));
       const result = producer.diagnoseMvsThresholds();
       expect(result.halfIdentical).toBe(true);
       expect(result.sourceAndProbabilityUnchanged).toBe(true);
@@ -410,9 +404,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_BASELINE_RECHECK === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/rescoreBaselines.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('rescoreBaselines.ts'));
       const result = producer.rescoreAcceptedNativeBaselines();
       expect(result.allInformative).toBe(true);
       expect(result.allOverlapUnchanged).toBe(true);
@@ -420,9 +412,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_FASTSAM_SOURCE_EXPORT === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/fastsamSourceExport.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('fastsamSourceExport.ts'));
       const result = await producer.exportFastSamFullSource(privateCorpus);
       expect(result.allFullSourcePlanesMatchIndependentDecodedHashes).toBe(true);
       expect(result.foregroundComponents).toHaveLength(2);
@@ -433,9 +423,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DERIVED_DOMAIN === '1' ||
       process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DERIVED_RESULTS
     ) {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/derivedAxialDomain.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('derivedAxialDomain.ts'));
       if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DERIVED_RESULTS) {
         const result = producer.scoreDerivedAxialMaskReceipt(
           process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DERIVED_RESULTS,
@@ -456,9 +444,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_VOLUME_RESULTS ||
       process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_CORRECTION_DRAFT === '1'
     ) {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/volumePromptScore.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('volumePromptScore.ts'));
       if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_CORRECTION_DRAFT === '1') {
         const draft = producer.prepareCoronalCorrectionDraft();
         expect(draft.originalVariantsPreserved).toBe(true);
@@ -473,9 +459,7 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_ORTHOGONAL_RESULTS) {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/orthogonalPromptScore.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('orthogonalPromptScore.ts'));
       if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_ORTHOGONAL_AGGREGATE === '1') {
         const result = producer.scoreOrthogonalAggregateReceipt(
           process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_ORTHOGONAL_RESULTS,
@@ -491,17 +475,13 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_VOLUME_EXPORT === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/scribblePromptVolumeExport.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('scribblePromptVolumeExport.ts'));
       const result = await producer.exportScribblePromptVolumes(privateCorpus);
       expect(result.outputs).toHaveLength(2);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_SCRIBBLE_RESULTS) {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/scribblePromptScore.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('scribblePromptScore.ts'));
       const results = producer.scoreScribblePromptReceipt(
         process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_SCRIBBLE_RESULTS,
         process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_VARIANTS?.split(','),
@@ -510,18 +490,14 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_SCRIBBLE_EXPORT === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/scribblePromptExport.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('scribblePromptExport.ts'));
       const outputs = await producer.exportScribblePromptPilot(privateCorpus);
       expect(outputs).toHaveLength(2);
       expect(outputs.every((output: { sourceUnchanged: boolean }) => output.sourceUnchanged)).toBe(true);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_BOUNDARY === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/boundaryDiagnostic.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('boundaryDiagnostic.ts'));
       const result = producer.diagnoseNativeBoundaryDistances();
       expect(
         result.reports.every(
@@ -532,24 +508,18 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_SOLVER) {
       if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_ORIGINAL_EXPERIMENT === '1') {
-        const producer = await import(
-          /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/originalExperiment.ts')).href
-        );
+        const producer = await import(/* @vite-ignore */ privateArtifactUrl('originalExperiment.ts'));
         const result = await producer.runOriginalGoldenExperiment(privateCorpus);
         expect(result.failures).toEqual([]);
         return;
       }
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/experiment.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('experiment.ts'));
       const result = await producer.runStoredGoldenExperiment(privateCorpus);
       expect(result.failures).toEqual([]);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_DOMAINS === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/nativeDomains.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('nativeDomains.ts'));
       const result = await producer.prepareNativeMarkedDomains(privateCorpus);
       expect(result.variants.every((variant: { domainVoxels: number }) => variant.domainVoxels <= 2_000_000)).toBe(
         true,
@@ -557,45 +527,35 @@ describe.skipIf(!privateCorpus)('private source-first segmentation benchmark', (
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_OVERLAYS === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/overlays.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('overlays.ts'));
       expect(producer.renderUpdatedDevelopmentDrafts().length).toBeGreaterThan(0);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_AUDIT === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/evaluate.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('evaluate.ts'));
       const result = producer.auditDevelopmentGolden();
       expect(result.sections.length).toBeGreaterThan(0);
       expect(result.conflicts).toEqual([]);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_SCORE === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/evaluate.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('evaluate.ts'));
       const result = producer.scoreFrozenBaselineGolden();
       expect(result.outcomes.length).toBeGreaterThan(0);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_METADATA === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/metadata.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('metadata.ts'));
       expect(producer.inspectGoldenSourceMetadata(privateCorpus)).toHaveLength(4);
       return;
     }
     if (process.env.MIRAVIEWER_SEGMENTATION_GOLDEN_ORIGINAL === '1') {
-      const producer = await import(
-        /* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/original.ts')).href
-      );
+      const producer = await import(/* @vite-ignore */ privateArtifactUrl('original.ts'));
       const results = await producer.prepareOriginalGoldenReview(privateCorpus);
       expect(results[0].originalSourceUnchanged).toBe(true);
       return;
     }
-    const producer = await import(/* @vite-ignore */ pathToFileURL(resolve('tmp/segmentation-golden/prepare.ts')).href);
+    const producer = await import(/* @vite-ignore */ privateArtifactUrl('prepare.ts'));
     const results = await producer.prepareGoldenSourceReview(privateCorpus);
     expect(results.length).toBeGreaterThan(0);
     expect(results.every((result: { originalSourceUnchanged: boolean }) => result.originalSourceUnchanged)).toBe(true);

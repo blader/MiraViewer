@@ -390,9 +390,8 @@ export function useOnnxTumorSession(
       return;
     }
 
-    const currentPreflight = measurePreflight();
-    if (currentPreflight?.blockedByDefault) {
-      const preflight = currentPreflight;
+    const preflight = measurePreflight();
+    if (preflight?.blockedByDefault) {
       const dims = `${preflight.nx}×${preflight.ny}×${preflight.nz}`;
       const msg =
         `ONNX exceeds the shared ${formatMiB(preflight.budgetBytes)} memory budget ` +

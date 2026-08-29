@@ -2,22 +2,13 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
 import type { DerivedImagePresentation } from '../src/utils/derivedImagePresentation';
+import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), present: vi.fn() }));
 vi.mock('../src/utils/sharpSliceDisplay', () => ({ requestSharpSliceDisplay: mocks.request }));
 vi.mock('../src/utils/derivedImagePresentation', () => ({ createDerivedImagePresentation: mocks.present }));
 
 import { useSharpSliceDisplay } from '../src/hooks/useSharpSliceDisplay';
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
 
 function frame(): DerivedAlignmentFrame {
   return {

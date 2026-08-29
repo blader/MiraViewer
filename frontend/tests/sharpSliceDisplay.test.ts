@@ -1,20 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
+import type * as DecodedFrameUtilities from '../src/utils/decodedFrame';
 import type { SeriesFrameManifest } from '../src/utils/localApi';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import type { SharpSliceWorkerRequest, SharpSliceWorkerResponse } from '../src/utils/sharpSliceDisplay.worker';
 import type { requestSharpSliceDisplay as RequestSharpSliceDisplay } from '../src/utils/sharpSliceDisplay';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
 import type { SvrReconstructionSlice } from '../src/utils/svr/reconstructionCore';
+import type * as LongitudinalFrames from '../src/utils/svr/longitudinalFrames';
 import type * as SvrUtilities from '../src/utils/svr/svrUtils';
+import { deferred } from './helpers/deferred';
 
 const deps = vi.hoisted(() => ({
   revision: vi.fn(),
   manifest: vi.fn(),
   decode: vi.fn(),
+  load: vi.fn(),
   envelope: vi.fn(),
 }));
 vi.mock('../src/utils/localApi', () => ({ getDatasetRevision: deps.revision, getSeriesFrameManifest: deps.manifest }));
+vi.mock('../src/utils/decodedFrame', async (original) => ({
+  ...(await original<typeof DecodedFrameUtilities>()),
+  loadCornerstoneImage: deps.load,
+}));
 vi.mock('../src/utils/svr/longitudinalFrames', () => ({
   decodeLongitudinalReferenceFrame: deps.decode,
   selectDenseLongitudinalSourceEnvelope: deps.envelope,
@@ -159,7 +167,24 @@ beforeEach(async () => {
   reference = manifest(true);
   deps.revision.mockResolvedValue(7);
   deps.manifest.mockImplementation(async (uid: string) => (uid === target.seriesUid ? target : reference));
-  deps.decode.mockImplementation(async (source: SeriesFrameManifest, index: number) => decoded(source, index));
+  deps.decode.mockImplementation(
+    (
+      source: SeriesFrameManifest,
+      index: number,
+      _dimension,
+      _signal,
+      onSourceLoad?: (load: Promise<unknown>) => void,
+    ) => {
+      const load = Promise.resolve(decoded(source, index));
+      onSourceLoad?.(load);
+      return load;
+    },
+  );
+  deps.load.mockImplementation(async () => ({
+    rows: size,
+    columns: size,
+    getPixelData: () => new Float32Array(size * size).fill(1),
+  }));
   deps.envelope.mockReturnValue({ sourceIndices: [2, 3, 4, 5] });
   MockWorker.instances = [];
   MockWorker.handle = (worker, request) => worker.reply(response(request));
@@ -246,13 +271,11 @@ describe('bounded sharp-slice display worker lifecycle', () => {
   });
 
   it('does not start another native decode while an abandoned uncancellable source load is still running', async () => {
-    let resolveLoad!: (value: SvrReconstructionSlice) => void;
-    deps.decode.mockImplementationOnce(
-      () =>
-        new Promise<SvrReconstructionSlice>((resolve) => {
-          resolveLoad = resolve;
-        }),
-    );
+    const load = deferred<SvrReconstructionSlice>();
+    deps.decode.mockImplementationOnce((_source, _index, _dimension, _signal, onSourceLoad) => {
+      onSourceLoad?.(load.promise);
+      return load.promise;
+    });
     const controller = new AbortController();
     const pending = requestSharpSliceDisplay(frame(), { signal: controller.signal });
     const rejected = expect(pending).rejects.toThrow(/cancelled/i);
@@ -262,10 +285,64 @@ describe('bounded sharp-slice display worker lifecycle', () => {
     const next = requestSharpSliceDisplay(frame());
     for (let i = 0; i < 50; i++) await Promise.resolve();
     expect(deps.decode).toHaveBeenCalledTimes(1);
-    resolveLoad(decoded(target, 0));
+    load.resolve(decoded(target, 0));
     await next;
     expect(MockWorker.instances).toHaveLength(1);
   });
+
+  it.each([
+    ['abort', 'resolve'],
+    ['abort', 'reject'],
+    ['timeout', 'resolve'],
+    ['timeout', 'reject'],
+  ] as const)(
+    'keeps the actual source-load slot after consumer %s until raw load %s, without converting stale pixels',
+    async (stop, settlement) => {
+      vi.useFakeTimers();
+      const actual = await vi.importActual<typeof LongitudinalFrames>('../src/utils/svr/longitudinalFrames');
+      deps.decode.mockImplementation(actual.decodeLongitudinalReferenceFrame);
+      const getPixelData = vi.fn(() => new Float32Array(size * size).fill(9));
+      const source = { rows: size, columns: size, getPixelData };
+      const load = deferred<typeof source>();
+      deps.load.mockImplementationOnce(() =>
+        load.promise.then((image) => {
+          if (settlement === 'reject') throw new Error('Late raw source failure');
+          return image;
+        }),
+      );
+      const controller = new AbortController();
+      const pending = requestSharpSliceDisplay(frame(), { signal: controller.signal });
+      const rejected = expect(pending).rejects.toThrow(stop === 'abort' ? /cancelled/i : '30 seconds');
+      await until(() => deps.load.mock.calls.length === 1);
+      if (stop === 'abort') controller.abort();
+      else await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+
+      const waitingController = new AbortController();
+      const waiting = requestSharpSliceDisplay(frame(), { signal: waitingController.signal });
+      const waitingOutcome = waiting.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+      const waitingLoads = deps.load.mock.calls.length;
+      const waitingWorkers = MockWorker.instances.length;
+      waitingController.abort();
+      const waitingError = await waitingOutcome;
+      const next = requestSharpSliceDisplay(frame());
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+      const nextLoads = deps.load.mock.calls.length;
+      load.resolve(source);
+      await next;
+      expect(waitingLoads).toBe(1);
+      expect(waitingWorkers).toBe(0);
+      expect(waitingError).toMatchObject({ name: 'AbortError' });
+      expect(nextLoads).toBe(1);
+      expect(deps.load).toHaveBeenCalledTimes(1 + target.frames.length);
+      expect(getPixelData).not.toHaveBeenCalled();
+      expect(MockWorker.instances).toHaveLength(1);
+    },
+  );
 
   it.each(['error', 'messageerror', 'malformed', 'transfer'] as const)(
     'terminates and releases on %s failure',

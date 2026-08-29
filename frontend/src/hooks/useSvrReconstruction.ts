@@ -118,24 +118,22 @@ export function useSvrReconstruction() {
           [accepted?.volume, accepted?.initialSelection?.data],
           [selectionToRefine?.volume, selectionToRefine?.labels.data],
         ] as const) {
-          if (!volume || !mask) continue;
+          if (!volume) continue;
           const buffers = retainedMasks.get(volume) ?? new Set<ArrayBufferLike>();
-          buffers.add(mask.buffer);
+          if (mask) buffers.add(mask.buffer);
           retainedMasks.set(volume, buffers);
         }
-        const retainedTransferBytes = [...retainedMasks].reduce(
-          (bytes, [volume, buffers]) =>
-            bytes + Math.max(0, [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0) - volume.data.length),
-          0,
-        );
         const reconstruction = await reconstructVolumeMultiPlane({
           selectedSeries,
           svrParams,
           acceptedProvenance: selectionToRefine?.volume.sourceProvenance,
           retainedBytes:
-            [...new Set([accepted?.volume, selectionToRefine?.volume])].reduce(
-              (bytes, volume) => bytes + retainedSvrVolumeBytes(volume),
-              additionalRetainedBytes + retainedTransferBytes,
+            [...retainedMasks].reduce(
+              (bytes, [volume, buffers]) =>
+                bytes +
+                retainedSvrVolumeBytes(volume) +
+                Math.max(0, [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0) - volume.data.length),
+              additionalRetainedBytes,
             ) + (selectionToRefine ? retainedDerivedAlignmentBytes() : 0),
           signal: controller.signal,
           onProgress: (p) => {
