@@ -58,7 +58,16 @@ vi.mock('../src/hooks/useOnnxTumorSession', () => ({
   }),
 }));
 
-vi.mock('cornerstone-core', () => ({ default: { loadImage: vi.fn() } }));
+vi.mock('cornerstone-core', () => ({
+  default: {
+    loadImage: vi.fn(),
+    getEnabledElements: () => [],
+    imageCache: {
+      cachedImages: [],
+      getCacheInfo: () => ({ cacheSizeInBytes: 0, numberOfImagesCached: 0, maximumSizeInBytes: 256 * 1024 * 1024 }),
+    },
+  },
+}));
 
 import { DicomRoiSlicePreview, Svr3DView } from '../src/components/Svr3DView';
 
@@ -117,6 +126,7 @@ function manifest(seriesUid: string) {
       instanceNumber: index + 1,
       rows: 8,
       columns: 8,
+      dicomByteLength: 8 * 8 * 2,
       imagePositionPatient: coronal ? `0\\${index}\\0` : `0\\0\\${index}`,
       imageOrientationPatient: coronal ? '1\\0\\0\\0\\0\\1' : '1\\0\\0\\0\\1\\0',
       pixelSpacing: '1\\1',
@@ -216,7 +226,7 @@ describe('Quiet Instrument reconstruction lightbox', () => {
 
     const { container } = render(<Svr3DView data={comparisonData()} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Select tissue' })).toBeEnabled());
-    expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute('data-editing', 'false');
     fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
     fireEvent.click(screen.getByText('Slice settings', { selector: 'summary' }));

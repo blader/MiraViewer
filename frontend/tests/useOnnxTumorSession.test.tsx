@@ -7,9 +7,10 @@ import type * as ModelCache from '../src/utils/segmentation/onnx/modelCache';
 import type { SvrVolume } from '../src/types/svr';
 import { deferred } from './helpers/deferred';
 
-const { cache, createSession } = vi.hoisted(() => ({
+const { cache, createSession, enabledImages } = vi.hoisted(() => ({
   cache: new Map<string, Blob>(),
   createSession: vi.fn(async () => ({ release: vi.fn(async () => undefined) })),
+  enabledImages: [] as { image: { getPixelData: () => Uint8Array; data?: { byteArray: Uint8Array } } }[],
 }));
 
 vi.mock('../src/utils/segmentation/onnx/modelCache', () => ({
@@ -39,7 +40,13 @@ vi.mock('../src/utils/segmentation/onnx/tumorSegmentation', () => ({
 }));
 
 vi.mock('cornerstone-core', () => ({
-  default: { imageCache: { getCacheInfo: () => ({ maximumSizeInBytes: 256 * 1024 * 1024, cacheSizeInBytes: 0 }) } },
+  default: {
+    imageCache: {
+      cachedImages: [],
+      getCacheInfo: () => ({ maximumSizeInBytes: 256 * 1024 * 1024, cacheSizeInBytes: 0 }),
+    },
+    getEnabledElements: () => enabledImages,
+  },
 }));
 
 import { useOnnxTumorSession } from '../src/hooks/useOnnxTumorSession';
@@ -102,6 +109,7 @@ function deferVerification(...models: Blob[]) {
 
 beforeEach(() => {
   cache.clear();
+  enabledImages.length = 0;
   vi.clearAllMocks();
   vi.stubGlobal('crypto', webcrypto);
 });
@@ -549,6 +557,23 @@ describe('useOnnxTumorSession verified model ownership', () => {
     );
     expect(createSession).not.toHaveBeenCalled();
     expect(onLabels).not.toHaveBeenCalled();
+  });
+
+  it('remeasures uncached displayed DICOM ownership when inference starts without replacing the accepted volume', async () => {
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, onLabels));
+    await act(async () => undefined);
+    expect(result.current.preflight?.blockedByDefault).toBe(false);
+    const data = new Uint8Array(256 * 1024 * 1024);
+    const pixels = new Uint8Array(data.buffer, 0, 4);
+    enabledImages.push({ image: { getPixelData: () => pixels, data: { byteArray: data } } });
+    act(() => result.current.runSegmentation());
+    expect(result.current.status.error).toMatch(/memory budget/);
+    expect(createSession).not.toHaveBeenCalled();
+    expect(onLabels).not.toHaveBeenCalled();
+    expect(enabledImages[0]!.image.getPixelData()).toBe(pixels);
+    expect(enabledImages[0]!.image.data!.byteArray).toBe(data);
+    expect(syntheticVolume.data).toEqual(Float32Array.of(0.5));
   });
 });
 

@@ -108,7 +108,7 @@ describe('Native MRI workspace controls', () => {
     const volume = nativeVolume();
     renderVolume(volume);
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(5);
-    expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next original MRI slice' }));
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(6);
     fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));

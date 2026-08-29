@@ -4,6 +4,7 @@ import { getSliceGeometryFromInstance } from './dicomGeometry';
 import { waitForNativeFrame } from './nativeFrameWait';
 import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES, type SvrMemoryPlan } from './svrMemoryPlan';
 import { assertNotAborted, yieldToMain } from './svrUtils';
+import { CORNERSTONE_MEMORY_FALLBACK_BYTES } from '../cornerstoneMemory';
 import {
   IDENTITY_PATIENT_TRANSFORM,
   patientToVolumeVoxel,
@@ -63,7 +64,7 @@ export function nativeDecodedCacheBudgetBytes(cache?: {
   cacheSizeInBytes?: number;
 }): number {
   const measured = cache?.cacheSizeInBytes;
-  return Number.isFinite(measured) && measured! >= 0 ? measured! : 256 * 1024 * 1024;
+  return Number.isFinite(measured) && measured! >= 0 ? measured! : CORNERSTONE_MEMORY_FALLBACK_BYTES;
 }
 
 /** Accepted CPU, normalization, staging, GPU and annotation owners survive until replacement publishes. */

@@ -180,11 +180,40 @@ describe('accepted native-frame cache', () => {
     expect(await cache.load(source, 0)).toBe(first);
     for (const index of [1, 2, 3]) await cache.load(source, index);
     expect(mocks.decode).toHaveBeenCalledTimes(4);
-    expect(mocks.decode).toHaveBeenNthCalledWith(1, 'source', 'frame-0');
+    expect(mocks.decode).toHaveBeenNthCalledWith(1, 'source', 'frame-0', { cache: 'reuse-only' });
+    expect(mocks.decode.mock.calls.every((call) => call[2]?.cache === 'reuse-only')).toBe(true);
     expect(cache.size).toBe(3);
     expect(cache.residentBytes).toBe(3 * 12 * 8);
     cache.dispose();
     expect(cache.residentBytes).toBe(0);
+  });
+
+  it('retains source pixels, validity and physical metadata without mutating them during native reuse', async () => {
+    const { source, volume } = fixture();
+    const original = image();
+    original.validity[0] = 0;
+    original.invert = true;
+    original.windowWidth = 1;
+    const pixels = original.pixels.slice();
+    const validity = original.validity.slice();
+    mocks.decode.mockResolvedValue(original);
+    const cache = new NativeFrameCache(volume);
+    try {
+      const decoded = await cache.load(source, 0);
+      const plane = makeNativePlaneData(volume, source, 0, decoded);
+      expect(await cache.load(source, 0)).toBe(decoded);
+      expect(decoded).toBe(original);
+      expect(decoded.pixels).toEqual(pixels);
+      expect(decoded.validity).toEqual(validity);
+      expect(plane.windowRange).toEqual([49.5, 49.5]);
+      expect(plane.invert).toBe(true);
+      expect(nativePixelToVolumeVoxel(volume, source, plane.frame, 2, 1)).toEqual([2, 1, 0]);
+      expect(mocks.decode).toHaveBeenCalledExactlyOnceWith('source', 'frame-0', { cache: 'reuse-only' });
+    } finally {
+      cache.dispose();
+    }
+    expect(original.pixels).toEqual(pixels);
+    expect(original.validity).toEqual(validity);
   });
 
   it('enforces a byte ceiling and refuses oversized native frames without downsampling', async () => {

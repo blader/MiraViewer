@@ -22,7 +22,8 @@ import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../ut
 import type { SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
-import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from '../utils/svr/sourceMemory';
+import { estimateSvrSourceMemory } from '../utils/svr/sourceMemory';
+import { measureCornerstoneImageMemory } from '../utils/cornerstoneMemory';
 import {
   estimateSvrPeakMemoryBytes,
   estimateSvrRegistrationBytes,
@@ -39,12 +40,7 @@ import {
   nativeReferenceSources,
   type SvrAcquisitionClassification,
 } from '../utils/svr/acquisitionProvenance';
-import {
-  nativeDecodedCacheBudgetBytes,
-  nativePlaneMemoryBytes,
-  planNativeVolume,
-  retainedSvrVolumeBytes,
-} from '../utils/svr/nativeVolume';
+import { nativePlaneMemoryBytes, planNativeVolume, retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
 import {
@@ -609,12 +605,7 @@ function planReconstruction(
   // Recomputing deliberately preserves the prior Float32 result and its
   // support evidence while both independent 3D GPU textures stay visible.
   const retainedBytes = retainedVolume ? retainedSvrVolumeBytes(retainedVolume) : 0;
-  let cacheInfo: SvrDecodedCacheInfo | undefined;
-  try {
-    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
-  } catch {
-    /* Reserve the default cache if telemetry is unavailable. */
-  }
+  const cacheMemory = measureCornerstoneImageMemory(cornerstone);
   const acceptedSourceTransforms = acceptedProvenance
     ? Object.fromEntries(acceptedProvenance.sources.map((source) => [source.seriesUid, source.transform]))
     : undefined;
@@ -625,7 +616,7 @@ function planReconstruction(
       { ...params, roi },
       {
         retainedBytes,
-        decodedCacheBytes: nativeDecodedCacheBudgetBytes(cacheInfo),
+        decodedCacheBytes: cacheMemory.bytes,
         nativePlaneBytes: nativePlaneMemoryBytes(nativeReferenceSources(manifests, nativeManifest)),
         transform: acceptedProvenance?.sources.find((source) => source.seriesUid === nativeManifest.seriesUid)
           ?.transform,
@@ -641,30 +632,42 @@ function planReconstruction(
 
   const evaluate = (targetVoxelSizeMm: number) => {
     const effectiveParams = { ...params, targetVoxelSizeMm };
-    const { sourceBytes, decodedSourceCacheBytes } = estimateSvrSourceMemory(manifests, effectiveParams, {
-      roi,
-      cacheInfo,
-      acceptedSourceTransforms,
-    });
+    const { sourceBytes, decodedSourceCacheBytes, sourceDecodeBytes } = estimateSvrSourceMemory(
+      manifests,
+      effectiveParams,
+      {
+        roi,
+        cacheMemory,
+        acceptedSourceTransforms,
+      },
+    );
     const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(manifests, effectiveParams, roi);
+    const residentBytes = retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests);
+    const decodePlan = estimateSvrPeakMemoryBytes({
+      voxelCount: 0,
+      sourceBytes,
+      iterations: 0,
+      retainedBytes: residentBytes + sourceDecodeBytes,
+    });
+    const reconstructionPlan = estimateSvrPeakMemoryBytes({
+      voxelCount,
+      sourceBytes,
+      iterations: effectiveParams.iterations,
+      retainedBytes: residentBytes,
+      // Reserve independently owned CPU/GPU labels for both the incoming
+      // result and any already-annotated retained reconstruction.
+      labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
+      registrationBytes:
+        roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
+          ? estimateSvrRegistrationBytes(voxelCount)
+          : 0,
+    });
 
     return {
       effectiveParams,
       effectiveVoxelSizeMm,
       sourceBytes,
-      memoryPlan: estimateSvrPeakMemoryBytes({
-        voxelCount,
-        sourceBytes,
-        iterations: effectiveParams.iterations,
-        retainedBytes: retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests),
-        // Reserve independently owned CPU/GPU labels for both the incoming
-        // result and any already-annotated retained reconstruction.
-        labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
-        registrationBytes:
-          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
-            ? estimateSvrRegistrationBytes(voxelCount)
-            : 0,
-      }),
+      memoryPlan: decodePlan.totalBytes > reconstructionPlan.totalBytes ? decodePlan : reconstructionPlan,
     };
   };
 
@@ -1234,7 +1237,7 @@ function useSvrReconstructionWorkspace({
   }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
 
   const refineRegion = useCallback(
-    (labels: SvrLabelVolume) => {
+    (labels: SvrLabelVolume, retainedBytes: number | (() => number) = 0) => {
       if (!canRun || !workspaceIdentity || !acceptedResult || !currentReadiness) return;
       const volume = acceptedResult.volume;
       const requested = regionalRefinementParameters(
@@ -1242,24 +1245,29 @@ function useSvrReconstructionWorkspace({
         selectionFocusRoi(volume, labels, effectiveRoiSeriesUid ?? undefined),
       );
       const roi = requested.roi!;
-      const planned = planReconstruction(
-        nativeSource
-          ? currentReadiness.manifests
-          : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
-        requested,
-        roi,
+      // Native regions cannot trade away source detail. The loader admits their
+      // exact grid once, after releasing idle copies and measuring live owners.
+      const effectiveParams = nativeSource
+        ? requested
+        : planReconstruction(
+            currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests,
+            requested,
+            roi,
+            volume,
+            null,
+            volume.sourceProvenance,
+          ).effectiveParams;
+      void run(selectedSeries, { ...effectiveParams, roi }, workspaceIdentity, {
         volume,
-        nativeSource,
-        volume.sourceProvenance,
-      );
-      setRoiWorld(roi);
-      setRoiRect(null);
-      setParams(requested);
-      void run(selectedSeries, { ...planned.effectiveParams, roi }, workspaceIdentity, { volume, labels }).then(
-        (outcome) => {
-          if (outcome.result) setGenerationCollapsed(true);
-        },
-      );
+        labels,
+        retainedBytes,
+      }).then((outcome) => {
+        if (!outcome.result) return;
+        setRoiWorld(roi);
+        setRoiRect(null);
+        setParams(requested);
+        setGenerationCollapsed(true);
+      });
     },
     [
       acceptedResult,
@@ -1282,12 +1290,7 @@ function useSvrReconstructionWorkspace({
     async (labels, options) => {
       if (!acceptedResult || isRunning) throw new Error('Wait for reconstruction to finish before enhancing a region.');
       const volume = acceptedResult.volume;
-      let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
-      try {
-        decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
-      } catch {
-        // Optional telemetry may be unavailable; retain the conservative cache reservation.
-      }
+      const decodedCacheBytes = measureCornerstoneImageMemory(cornerstone).bytes;
       const nativePlaneBytes = nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []);
       // Raw aligned frames survive compare → 3D navigation independently of
       // Cornerstone's decoded presentation cache, and must remain reusable.
@@ -1313,6 +1316,7 @@ function useSvrReconstructionWorkspace({
           retainedBytes: additionalRetainedBytes + nativePlaneBytes,
           imageCache,
           protectedImageIds,
+          getEnabledElements: cornerstone.getEnabledElements,
         });
       if (!volume.nativeVoxelSizeMm) return cropAccepted();
       if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
@@ -1362,6 +1366,7 @@ function useSvrReconstructionWorkspace({
         imageCache,
         protectedImageIds,
         options.signal,
+        cornerstone.getEnabledElements,
       );
       const result = await reconstructVolumeMultiPlane({
         selectedSeries,
@@ -1381,6 +1386,7 @@ function useSvrReconstructionWorkspace({
         imageCache,
         protectedImageIds,
         options.signal,
+        cornerstone.getEnabledElements,
       );
       return result.volume;
     },

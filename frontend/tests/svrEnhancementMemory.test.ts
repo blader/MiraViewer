@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import cornerstone from 'cornerstone-core';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import {
   assertEnhancementFits,
-  cropEnhancementSource,
+  cropEnhancementSource as cropSource,
   enhancementWorkingBytes,
-  prepareEnhancementMemory,
+  prepareEnhancementMemory as prepareMemory,
   type EnhancementImageCache,
 } from '../src/utils/svr/superResolutionRegion';
 import { MAX_SR_OUTPUT_VOXELS, MIN_SR_CONTEXT_DIM } from '../src/utils/svr/superResolutionTypes';
@@ -13,13 +14,22 @@ import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 const MIB = 1024 * 1024;
 const TINY_CONTEXT = 33 ** 3;
 type Entry = NonNullable<EnhancementImageCache['cachedImages']>[number];
-const entry = (imageId: string, sizeMiB: number, timeStamp = 0, loaded = true): Entry => ({
-  imageId,
-  sizeInBytes: sizeMiB * MIB,
-  timeStamp,
-  loaded,
-  imageLoadObject: {},
-});
+const entry = (imageId: string, sizeMiB: number, timeStamp = 0, loaded = true): Entry => {
+  // Unfilled synthetic allocations exercise real backing-buffer accounting without touching MRI data.
+  const pixels = new Uint8Array(sizeMiB * MIB);
+  return {
+    imageId,
+    sizeInBytes: pixels.byteLength,
+    timeStamp,
+    loaded,
+    imageLoadObject: {},
+    image: { getPixelData: () => pixels },
+  };
+};
+const prepareEnhancementMemory = (...args: Parameters<typeof prepareMemory>) =>
+  prepareMemory(args[0], args[1], args[2], args[3], args[4], args[5] ?? (() => []));
+const cropEnhancementSource = (volume: SvrVolume, labels: SvrLabelVolume, options: Parameters<typeof cropSource>[2]) =>
+  cropSource(volume, labels, { getEnabledElements: () => [], ...options });
 function imageCache(entries: Entry[]) {
   const cachedImages = [...entries];
   const getCacheInfo = vi.fn(() => ({
@@ -70,7 +80,7 @@ describe('enhancement admission under retained workspace pressure', () => {
     expect(() => assertEnhancementFits(MAX_SR_OUTPUT_VOXELS / 8 + 1)).toThrow(/region is too large.*smaller region/i);
     const justBelowMinimumHeadroom = SVR_MEMORY_BUDGET_BYTES - enhancementWorkingBytes(MIN_SR_CONTEXT_DIM ** 3) + 1;
     expect(() => assertEnhancementFits(MIN_SR_CONTEXT_DIM ** 3, justBelowMinimumHeadroom)).toThrow(
-      /open volume and working data.*even a small enhancement.*Load native detail for this selection/i,
+      /open volume and working data.*even a small enhancement.*Use original detail for this selection/i,
     );
     expect(() => assertEnhancementFits(100 ** 3, 440 * MIB)).toThrow(/estimated.*smaller region/i);
   });
@@ -158,14 +168,44 @@ describe('enhancement admission under retained workspace pressure', () => {
 
   it('uses fresh total residency instead of subtracting advertised per-entry sizes', async () => {
     const cache = imageCache([entry('miradb:first', 100, 1), entry('miradb:second', 100, 2)]);
-    let actualBytes = 220 * MIB;
-    cache.getCacheInfo.mockImplementation(() => ({ cacheSizeInBytes: actualBytes, maximumSizeInBytes: 512 * MIB }));
-    cache.removeImageLoadObject.mockImplementation(() => {
-      actualBytes -= 30 * MIB;
-    });
-    await expect(prepareEnhancementMemory(TINY_CONTEXT, 300 * MIB, cache)).resolves.toBe(160 * MIB);
+    const pixels = new Uint8Array(160 * MIB);
+    const first = new Uint8Array(30 * MIB),
+      second = new Uint8Array(30 * MIB);
+    const owners = [first, second];
+    for (const [index, current] of cache.cachedImages.entries())
+      current.image = { getPixelData: () => pixels, data: { byteArray: owners[index] } };
+    const enabled = () => [{ image: { getPixelData: () => pixels } }];
+    await expect(prepareEnhancementMemory(TINY_CONTEXT, 300 * MIB, cache, undefined, undefined, enabled)).resolves.toBe(
+      160 * MIB,
+    );
     expect(cache.removeImageLoadObject.mock.calls).toEqual([['miradb:first'], ['miradb:second']]);
     expect(cache.getCacheInfo).toHaveBeenCalledTimes(4);
+  });
+
+  it('admits against actual parsed and displayed buffers, not the installed cache pixel counter', async () => {
+    const pixels = new Int16Array(8),
+      dataset = new Uint8Array(23);
+    const image = { sizeInBytes: pixels.byteLength, getPixelData: () => pixels, data: { byteArray: dataset } };
+    const id = 'miradb:enhancement-parsed-owner';
+    cornerstone.imageCache.putImageLoadObject(id, { promise: Promise.resolve(image) } as never);
+    await Promise.resolve();
+    const enabled = () => [{ image }];
+    const retained = SVR_MEMORY_BUDGET_BYTES - enhancementWorkingBytes(TINY_CONTEXT) - 20;
+    try {
+      expect(cornerstone.imageCache.getCacheInfo().cacheSizeInBytes).toBe(16);
+      await expect(
+        prepareEnhancementMemory(TINY_CONTEXT, retained, cornerstone.imageCache, new Set([id]), undefined, enabled),
+      ).rejects.toThrow(/memory|room|estimated/i);
+      cornerstone.imageCache.removeImageLoadObject(id);
+      await expect(
+        prepareEnhancementMemory(TINY_CONTEXT, retained, cornerstone.imageCache, undefined, undefined, enabled),
+      ).rejects.toThrow(/memory|room|estimated/i);
+      expect(await prepareEnhancementMemory(TINY_CONTEXT, retained, cornerstone.imageCache)).toBe(0);
+      expect(image.getPixelData()).toBe(pixels);
+      expect(image.data.byteArray).toBe(dataset);
+    } finally {
+      if (cornerstone.imageCache.getImageLoadObject(id)) cornerstone.imageCache.removeImageLoadObject(id);
+    }
   });
 
   it('does not evict or yield when all retained owners and decoded cache already fit', async () => {

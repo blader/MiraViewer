@@ -8,6 +8,7 @@ type PersistedComparisonUiState = {
   rightSidebarOpen: boolean;
   alignmentOutputMode: OutputGridMode;
   automaticAlignment: boolean;
+  sharpSlices: boolean;
 };
 
 type InstrumentDialog = 'help' | 'upload' | 'export' | 'clear' | null;
@@ -17,6 +18,7 @@ const DEFAULT_COMPARISON_UI_STATE: PersistedComparisonUiState = {
   rightSidebarOpen: false,
   alignmentOutputMode: 'native',
   automaticAlignment: true,
+  sharpSlices: false,
 };
 
 function validateComparisonUiState(raw: unknown): PersistedComparisonUiState | null {
@@ -33,6 +35,7 @@ function validateComparisonUiState(raw: unknown): PersistedComparisonUiState | n
       ? value.alignmentOutputMode
       : DEFAULT_COMPARISON_UI_STATE.alignmentOutputMode,
     automaticAlignment: typeof value.automaticAlignment === 'boolean' ? value.automaticAlignment : true,
+    sharpSlices: value.sharpSlices === true,
   };
 }
 

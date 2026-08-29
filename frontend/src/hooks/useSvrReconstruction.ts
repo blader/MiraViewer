@@ -4,6 +4,7 @@ import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
 import { resampleSelectionForRefinement } from '../utils/svr/refineRegion';
 import { retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
+import { retainedDerivedAlignmentBytes } from '../utils/derivedAlignmentFrame';
 
 export type UseSvrReconstructionState = {
   status: 'idle' | 'running' | 'canceling' | 'ready' | 'canceled' | 'failed';
@@ -72,7 +73,7 @@ export function useSvrReconstruction() {
       selectedSeries: SvrSelectedSeries[],
       params?: Partial<SvrParams>,
       identity?: string,
-      selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume },
+      selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume; retainedBytes?: number | (() => number) },
     ): Promise<SvrRunOutcome> => {
       abortRef.current?.abort();
 
@@ -101,14 +102,41 @@ export function useSvrReconstruction() {
       const started = performance.now();
 
       try {
+        // Release reproducible idle-worker storage before counting live editing
+        // buffers. Rejection leaves the accepted volume and its edits in place.
+        const additionalRetainedBytes =
+          typeof selectionToRefine?.retainedBytes === 'function'
+            ? selectionToRefine.retainedBytes()
+            : (selectionToRefine?.retainedBytes ?? 0);
+        if (!Number.isSafeInteger(additionalRetainedBytes) || additionalRetainedBytes < 0)
+          throw new Error('Refinement requires a valid retained-memory estimate. Original data is unchanged.');
+        const accepted = acceptedResultRef.current;
+        // The retained volume reserves one live CPU mask. A previously transferred
+        // mask can survive independently after editing replaces its backing buffer.
+        const retainedMasks = new Map<SvrVolume, Set<ArrayBufferLike>>();
+        for (const [volume, mask] of [
+          [accepted?.volume, accepted?.initialSelection?.data],
+          [selectionToRefine?.volume, selectionToRefine?.labels.data],
+        ] as const) {
+          if (!volume || !mask) continue;
+          const buffers = retainedMasks.get(volume) ?? new Set<ArrayBufferLike>();
+          buffers.add(mask.buffer);
+          retainedMasks.set(volume, buffers);
+        }
+        const retainedTransferBytes = [...retainedMasks].reduce(
+          (bytes, [volume, buffers]) =>
+            bytes + Math.max(0, [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0) - volume.data.length),
+          0,
+        );
         const reconstruction = await reconstructVolumeMultiPlane({
           selectedSeries,
           svrParams,
           acceptedProvenance: selectionToRefine?.volume.sourceProvenance,
-          retainedBytes: [...new Set([acceptedResultRef.current?.volume, selectionToRefine?.volume])].reduce(
-            (bytes, volume) => bytes + retainedSvrVolumeBytes(volume),
-            0,
-          ),
+          retainedBytes:
+            [...new Set([accepted?.volume, selectionToRefine?.volume])].reduce(
+              (bytes, volume) => bytes + retainedSvrVolumeBytes(volume),
+              additionalRetainedBytes + retainedTransferBytes,
+            ) + (selectionToRefine ? retainedDerivedAlignmentBytes() : 0),
           signal: controller.signal,
           onProgress: (p) => {
             if (runIdRef.current !== runId || controller.signal.aborted) return;

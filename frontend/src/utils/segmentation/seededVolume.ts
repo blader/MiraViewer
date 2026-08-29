@@ -41,42 +41,54 @@ export function markedRegionBounds(input: SeededVolumeInput): VoxelBounds {
   const axes = ['x', 'y', 'z'] as const;
   const full = { min: { x: 0, y: 0, z: 0 }, max: { x: input.dims[0] - 1, y: input.dims[1] - 1, z: input.dims[2] - 1 } };
   if (input.volume.length <= MAX_SEGMENTATION_DOMAIN_VOXELS) return full;
-  const min = { x: Infinity, y: Infinity, z: Infinity };
-  const max = { x: -Infinity, y: -Infinity, z: -Infinity };
-  for (const indices of [input.foreground, input.background]) {
-    for (const index of indices) {
-      const point = voxelPoint(index, input.dims);
-      for (const axis of axes) {
-        min[axis] = Math.min(min[axis], point[axis]);
-        max[axis] = Math.max(max[axis], point[axis]);
+  const fitContext = (marks: readonly Uint32Array[]): VoxelBounds => {
+    const min = { x: Infinity, y: Infinity, z: Infinity };
+    const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+    for (const indices of marks) {
+      for (const index of indices) {
+        const point = voxelPoint(index, input.dims);
+        for (const axis of axes) {
+          min[axis] = Math.min(min[axis], point[axis]);
+          max[axis] = Math.max(max[axis], point[axis]);
+        }
       }
     }
-  }
-  let bounds = { min, max };
-  let low = 0;
-  let high = Math.max(...input.dims.map((size, axis) => size * input.voxelSizeMm[axis]!));
-  // Keep all explicit marks. The caller rejects an over-budget mark span before allocating scratch.
-  for (let iteration = 0; iteration < 40; iteration++) {
-    const paddingMm = (low + high) / 2;
-    const candidate = { min: { ...min }, max: { ...max } };
-    let count = 1;
-    for (const [position, axis] of axes.entries()) {
-      const padding = Math.floor(paddingMm / input.voxelSizeMm[position]!);
-      candidate.min[axis] = Math.max(0, min[axis] - padding);
-      candidate.max[axis] = Math.min(full.max[axis], max[axis] + padding);
-      count *= candidate.max[axis] - candidate.min[axis] + 1;
+    let bounds = { min, max };
+    let low = 0;
+    let high = Math.max(...input.dims.map((size, axis) => size * input.voxelSizeMm[axis]!));
+    // Keep all explicit marks. The caller rejects an over-budget mark span before allocating scratch.
+    for (let iteration = 0; iteration < 40; iteration++) {
+      const paddingMm = (low + high) / 2;
+      const candidate = { min: { ...min }, max: { ...max } };
+      let count = 1;
+      for (const [position, axis] of axes.entries()) {
+        const padding = Math.floor(paddingMm / input.voxelSizeMm[position]!);
+        candidate.min[axis] = Math.max(0, min[axis] - padding);
+        candidate.max[axis] = Math.min(full.max[axis], max[axis] + padding);
+        count *= candidate.max[axis] - candidate.min[axis] + 1;
+      }
+      if (count <= MAX_SEGMENTATION_DOMAIN_VOXELS) {
+        low = paddingMm;
+        bounds = candidate;
+      } else high = paddingMm;
     }
-    if (count <= MAX_SEGMENTATION_DOMAIN_VOXELS) {
-      low = paddingMm;
-      bounds = candidate;
-    } else high = paddingMm;
-  }
-  return bounds;
+    return bounds;
+  };
+  const foregroundContext = fitContext([input.foreground]);
+  // A Remove stroke corrects membership, not the search field. Re-centering
+  // around already-contained outside marks can clip valid tissue on another axis.
+  const containsBackground = input.background.every((index) => {
+    const point = voxelPoint(index, input.dims);
+    return axes.every(
+      (axis) => point[axis] >= foregroundContext.min[axis] && point[axis] <= foregroundContext.max[axis],
+    );
+  });
+  return containsBackground ? foregroundContext : fitContext([input.foreground, input.background]);
 }
 
 /** Indexed queue: each voxel occupies at most one heap slot, even after a better path is found. */
 class VoxelQueue {
-  private heap: Uint32Array;
+  readonly heap: Uint32Array;
   private distance: Float64Array;
   private labels: Uint8Array;
   readonly positions: Int32Array;
@@ -236,7 +248,9 @@ export async function segmentSeededVolume(
   const inverseRange = range > 1e-8 ? 1 / range : 0;
 
   const distances = new Float64Array(count).fill(Infinity);
+  // 3 marks missing exterior visited during the flood; it never enters the heap.
   const labels = new Uint8Array(count);
+  const queue = new VoxelQueue(distances, labels);
   const localOffsets = [-1, 1, -nx, nx, -nx * ny, nx * ny];
   const globalOffsets = [-1, 1, -dims[0], dims[0], -dims[0] * dims[1], dims[0] * dims[1]];
   const steps = voxelSizeMm.flatMap((spacing) => [spacing, spacing]);
@@ -250,12 +264,12 @@ export async function segmentSeededVolume(
   {
     // Reach the acquired exterior through missing data connected to the search shell.
     // Enclosed gaps remain unknown, not automatic outside marks inside the tissue.
-    const visited = new Uint8Array(count);
-    const exterior = new Uint32Array(count);
+    // Flood and shortest-path work do not overlap. Reuse their bounded storage.
+    const exterior = queue.heap;
     let tail = 0;
     const visit = (local: number) => {
-      if (seed(local, 2) || visited[local]) return;
-      visited[local] = 1;
+      if (seed(local, 2) || labels[local] === 3) return;
+      labels[local] = 3;
       exterior[tail++] = local;
     };
     for (let z = 0; z < nz; z++) {
@@ -281,13 +295,13 @@ export async function segmentSeededVolume(
       if ((head + 1) % 8192 === 0) {
         abort();
         await hooks.yieldFn?.();
+        abort();
       }
     }
   }
   for (const index of background) seed(localIndex(index), 2);
   for (const index of foreground) seed(localIndex(index), 1);
-  const queue = new VoxelQueue(distances, labels);
-  for (let local = 0; local < count; local++) if (labels[local]) queue.update(local);
+  for (let local = 0; local < count; local++) if (labels[local] === 1 || labels[local] === 2) queue.update(local);
 
   let processed = 0;
   while (queue.size) {
@@ -314,6 +328,7 @@ export async function segmentSeededVolume(
       abort();
       hooks.onProgress?.(processed, count);
       await hooks.yieldFn?.();
+      abort();
     }
   }
   abort();
@@ -328,5 +343,7 @@ export async function segmentSeededVolume(
     const { x, y, z } = voxelPoint(local, localDims);
     if (x <= 1 || x >= nx - 2 || y <= 1 || y >= ny - 2 || z <= 1 || z >= nz - 2) boundaryCount++;
   }
+  hooks.onProgress?.(count, count);
+  abort();
   return { indices, bounds, boundaryCount, domainVoxels: count };
 }

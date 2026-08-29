@@ -23,12 +23,7 @@ import {
   hydrateSvrAcquisitionMetadata,
   nativeReferenceSources,
 } from './acquisitionProvenance';
-import {
-  assembleNativeVolume,
-  nativeDecodedCacheBudgetBytes,
-  nativePlaneMemoryBytes,
-  planNativeVolume,
-} from './nativeVolume';
+import { assembleNativeVolume, nativePlaneMemoryBytes, planNativeVolume } from './nativeVolume';
 import { IDENTITY_PATIENT_TRANSFORM, snapshotPatientTransform } from './volumeGeometry';
 import { dot } from './vec3';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
@@ -40,7 +35,8 @@ import type {
   SvrComputeWorkerResponse,
 } from './svrComputeCore';
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
-import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from './sourceMemory';
+import { estimateSvrSourceMemory, SVR_SOURCE_PREFETCH_LIMIT } from './sourceMemory';
+import { measureCornerstoneImageMemory } from '../cornerstoneMemory';
 import { SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
 import { assertNotAborted, formatMiB, yieldToMain } from './svrUtils';
 
@@ -193,21 +189,24 @@ async function loadSeriesSlices(params: {
     | { ok: true; image: Awaited<ReturnType<typeof loadCornerstoneImage>> }
     | { ok: false; error: unknown };
   const maximumWorkers =
-    typeof navigator === 'undefined' ? 1 : Math.max(1, Math.min(4, navigator.hardwareConcurrency || 1));
+    typeof navigator === 'undefined'
+      ? 1
+      : Math.max(1, Math.min(SVR_SOURCE_PREFETCH_LIMIT, navigator.hardwareConcurrency || 1));
   const prefetchedImages: Array<Promise<PrefetchedImage>> = [];
   let nextImageIndex = 0;
   const prefetchNextImage = () => {
     if (signal?.aborted || nextImageIndex >= manifest.frames.length) return;
 
     const frame = manifest.frames[nextImageIndex++]!;
-    // The bounded Cornerstone cache remains the sole decoded-image owner.
+    // Reuse existing display images without inserting processing frames: this
+    // bounded queue and the current conversion own new decoded source images.
     // Settling failures here also prevents an unconsumed prefetched rejection
     // from escaping after an earlier image fails or reconstruction is aborted.
     prefetchedImages.push(
       Promise.resolve()
         .then(() => {
           assertNotAborted(signal);
-          return loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`);
+          return loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`, { cache: 'reuse-only' });
         })
         .then(
           (image): PrefetchedImage => ({ ok: true, image }),
@@ -660,12 +659,7 @@ export async function reconstructVolumeMultiPlane(params: {
       canonicalSeries.find((source) => source.series.seriesUid === classification.primaryOriginal3d?.seriesUid) ??
       first;
     const references = nativeReferenceSources(manifests, primary.manifest);
-    let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
-    try {
-      decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
-    } catch {
-      // Optional telemetry may be unavailable; reserve the configured default cache.
-    }
+    const decodedCacheBytes = measureCornerstoneImageMemory(cornerstone).bytes;
     const transform = acceptedSourceTransforms?.[primary.series.seriesUid] ?? IDENTITY_PATIENT_TRANSFORM;
     const plan = planNativeVolume(primary.manifest, svrParams, {
       retainedBytes: params.retainedBytes,
@@ -746,20 +740,19 @@ export async function reconstructVolumeMultiPlane(params: {
     }
     return manifest === source.manifest ? source : { ...source, manifest };
   });
-  let cacheInfo: SvrDecodedCacheInfo | undefined;
-  try {
-    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
-  } catch {
-    /* Reserve the default cache if telemetry is unavailable. */
-  }
+  const cacheMemory = measureCornerstoneImageMemory(cornerstone);
   const sourceMemory = estimateSvrSourceMemory(
     contributingSeries.map((source) => source.manifest),
     svrParams,
-    { cacheInfo, acceptedSourceTransforms },
+    { cacheMemory, acceptedSourceTransforms },
   );
   const nativePlaneBytes = nativePlaneMemoryBytes(contributingSeries.map((source) => source.manifest));
   const sourceResidentFloor =
-    sourceMemory.sourceBytes + sourceMemory.decodedSourceCacheBytes + (params.retainedBytes ?? 0) + nativePlaneBytes;
+    sourceMemory.sourceBytes +
+    sourceMemory.decodedSourceCacheBytes +
+    sourceMemory.sourceDecodeBytes +
+    (params.retainedBytes ?? 0) +
+    nativePlaneBytes;
   if (sourceResidentFloor > SVR_MEMORY_BUDGET_BYTES)
     throw new Error(
       `SVR source inputs alone require an estimated ${formatMiB(sourceResidentFloor)}, exceeding the ${formatMiB(SVR_MEMORY_BUDGET_BYTES)} browser memory budget before decoding. Select a smaller focus region or clear the previous volume.`,
@@ -889,18 +882,12 @@ export async function reconstructVolumeMultiPlane(params: {
   // Only clone-safe pixel evidence and source identity cross the boundary;
   // SvrSelectedSeries display metadata stays main-side (the compute phase needs
   // physical slices, not free-text labels or duplicate source counts).
-  // Preserve the same projected source-cache owner used by UI and pre-decode
-  // admission; missing optional telemetry cannot erase it before allocation.
-  let residentCacheBytes = sourceMemory.decodedSourceCacheBytes;
-  try {
-    const cacheSize = cornerstone.imageCache?.getCacheInfo?.()?.cacheSizeInBytes;
-    if (typeof cacheSize === 'number' && Number.isFinite(cacheSize) && cacheSize > 0) {
-      residentCacheBytes = Math.max(residentCacheBytes, Math.ceil(cacheSize));
-    }
-  } catch {
-    // Some supported hosts do not expose Cornerstone's optional cache telemetry.
-    // The shared conservative reservation still applies.
-  }
+  // The processing batch is gone; remeasure cache/display owners without
+  // charging the bounded decoding phase again during reconstruction.
+  const residentCacheBytes = Math.max(
+    sourceMemory.decodedSourceCacheBytes,
+    measureCornerstoneImageMemory(cornerstone).bytes,
+  );
 
   const computed = await runSvrComputePhase({
     payload: {

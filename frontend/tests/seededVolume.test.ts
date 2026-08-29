@@ -3,6 +3,8 @@ import {
   markedRegionBounds,
   MAX_SEGMENTATION_DOMAIN_VOXELS,
   segmentSeededVolume,
+  voxelIndex,
+  voxelPoint,
   type SeededVolumeInput,
 } from '../src/utils/segmentation/seededVolume';
 import { segmentationQuality } from './helpers/segmentationQuality';
@@ -167,6 +169,55 @@ describe('explicitly seeded physical-volume segmentation', () => {
     expect(count).toBeLessThanOrEqual(MAX_SEGMENTATION_DOMAIN_VOXELS);
     expect(expandedCount).toBeGreaterThan(MAX_SEGMENTATION_DOMAIN_VOXELS);
     expect(Math.max(...physicalPadding) - Math.min(...physicalPadding)).toBeLessThanOrEqual(Math.max(...voxelSizeMm));
+  });
+
+  it('keeps the foreground search context when new outside marks already fit inside it', () => {
+    const dims: [number, number, number] = [224, 192, 128];
+    const input: SeededVolumeInput = {
+      dims,
+      voxelSizeMm: [0.6, 0.9, 1.4],
+      volume: new Float32Array(dims[0] * dims[1] * dims[2]),
+      foreground: Uint32Array.of(
+        voxelIndex({ x: 110, y: 80, z: 64 }, dims),
+        voxelIndex({ x: 112, y: 98, z: 64 }, dims),
+      ),
+      background: new Uint32Array(),
+    };
+    const initial = markedRegionBounds(input);
+    const background = Uint32Array.of(
+      voxelIndex({ x: initial.min.x + 2, y: 89, z: 64 }, dims),
+      voxelIndex({ x: initial.max.x - 2, y: 89, z: 64 }, dims),
+      voxelIndex({ x: 111, y: initial.min.y + 2, z: 64 }, dims),
+      voxelIndex({ x: 111, y: initial.max.y - 2, z: 64 }, dims),
+    );
+    expect(markedRegionBounds({ ...input, background })).toEqual(initial);
+    expect(markedRegionBounds({ ...input, background: background.slice().reverse() })).toEqual(initial);
+    expect(input.background).toHaveLength(0);
+  });
+
+  it('still includes an outside mark beyond the foreground search region without exceeding the budget', () => {
+    const dims: [number, number, number] = [224, 192, 128];
+    const input: SeededVolumeInput = {
+      dims,
+      voxelSizeMm: [0.6, 0.9, 1.4],
+      volume: new Float32Array(dims[0] * dims[1] * dims[2]),
+      foreground: Uint32Array.of(voxelIndex({ x: 112, y: 96, z: 64 }, dims)),
+      background: new Uint32Array(),
+    };
+    const initial = markedRegionBounds(input);
+    input.background = Uint32Array.of(voxelIndex({ x: initial.min.x - 1, y: 96, z: 64 }, dims));
+    const changed = markedRegionBounds(input);
+    expect(changed).not.toEqual(initial);
+    for (const index of [...input.foreground, ...input.background]) {
+      const point = voxelPoint(index, dims);
+      for (const axis of ['x', 'y', 'z'] as const) {
+        expect(point[axis]).toBeGreaterThanOrEqual(changed.min[axis]);
+        expect(point[axis]).toBeLessThanOrEqual(changed.max[axis]);
+      }
+    }
+    expect(
+      (changed.max.x - changed.min.x + 1) * (changed.max.y - changed.min.y + 1) * (changed.max.z - changed.min.z + 1),
+    ).toBeLessThanOrEqual(MAX_SEGMENTATION_DOMAIN_VOXELS);
   });
 
   it('is deterministic under seed ordering, duplicate marks, and exact-cost ties', async () => {

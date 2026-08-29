@@ -19,6 +19,7 @@ import {
   type LongitudinalRegistrationResult,
   type LongitudinalRegistrationEstimate,
 } from './longitudinalRegistration';
+import { waitForNativeFrame } from './nativeFrameWait';
 import type { SvrReconstructionSlice } from './reconstructionCore';
 import { resample2dAreaAverageWithValidity, retainFullySupportedPixels } from './resample2d';
 import {
@@ -297,6 +298,45 @@ function medianPhysicalSpacing(manifest: SeriesFrameManifest): number | null {
   return gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)]! : null;
 }
 
+function referencePlaneFromFrame(
+  frame: SeriesFrameManifest['frames'][number],
+  maxDimension: number,
+  inferredSpacing: number | null,
+  frameOfReferenceUid?: string,
+): LongitudinalReferencePlane {
+  const geometry = getSliceGeometryFromInstance(frame);
+  const scale = Math.min(1, maxDimension / Math.max(geometry.rows, geometry.cols));
+  const rows = Math.max(2, Math.round(geometry.rows * scale));
+  const cols = Math.max(2, Math.round(geometry.cols * scale));
+  return {
+    sopInstanceUid: frame.sopInstanceUid,
+    dsRows: rows,
+    dsCols: cols,
+    ippMm: downsampledSliceOriginMm(geometry, rows, cols),
+    rowDir: geometry.rowDir,
+    colDir: geometry.colDir,
+    normalDir: geometry.normalDir,
+    rowSpacingDsMm: geometry.rowSpacingMm * (geometry.rows / rows),
+    colSpacingDsMm: geometry.colSpacingMm * (geometry.cols / cols),
+    sliceThicknessMm: frame.sliceThickness ?? null,
+    spacingBetweenSlicesMm: frame.spacingBetweenSlices ?? inferredSpacing,
+    frameOfReferenceUid: frame.frameOfReferenceUid ?? frameOfReferenceUid,
+  };
+}
+
+/** Build the same sample-centered plane as reference decoding, without reading or allocating image pixels. */
+export function getLongitudinalReferencePlane(
+  manifest: SeriesFrameManifest,
+  index: number,
+  maxDimension: number,
+  signal?: AbortSignal,
+): LongitudinalReferencePlane {
+  assertNotAborted(signal);
+  const frame = manifest.frames[index];
+  if (!frame) throw new Error('A selected longitudinal frame is missing from its physical manifest');
+  return referencePlaneFromFrame(frame, maxDimension, medianPhysicalSpacing(manifest), manifest.frameOfReferenceUid);
+}
+
 async function decodeManifestSlices(
   manifest: SeriesFrameManifest,
   sourceIndices: readonly number[],
@@ -314,12 +354,12 @@ async function decodeManifestSlices(
     const frame = manifest.frames[sourceIndex];
     if (!frame) throw new Error('A selected longitudinal frame is missing from its physical manifest');
 
-    const geometry = getSliceGeometryFromInstance(frame);
     const sliceDimension = sourceIndex === highResolutionIndex ? highResolutionDimension : maxDimension;
-    const scale = Math.min(1, sliceDimension / Math.max(geometry.rows, geometry.cols));
-    const rows = Math.max(2, Math.round(geometry.rows * scale));
-    const cols = Math.max(2, Math.round(geometry.cols * scale));
-    const image = await loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`);
+    const plane = referencePlaneFromFrame(frame, sliceDimension, inferredSpacing, manifest.frameOfReferenceUid);
+    const image = await waitForNativeFrame<Parameters<typeof decodeImageWithValidity>[0]>(
+      loadCornerstoneImage(`miradb:${frame.sopInstanceUid}`),
+      signal,
+    );
     assertNotAborted(signal);
     const decodedImage =
       frame.pixelPaddingValue === undefined
@@ -329,24 +369,13 @@ async function decodeManifestSlices(
             pixelPaddingRangeLimit: frame.pixelPaddingRangeLimit,
           });
     const { pixels, valid } = retainFullySupportedPixels(
-      decodeImageWithValidity(decodedImage as Parameters<typeof decodeImageWithValidity>[0], rows, cols),
+      decodeImageWithValidity(decodedImage, plane.dsRows, plane.dsCols),
     );
 
     output.push({
+      ...plane,
       pixels,
       valid,
-      sopInstanceUid: frame.sopInstanceUid,
-      dsRows: rows,
-      dsCols: cols,
-      ippMm: downsampledSliceOriginMm(geometry, rows, cols),
-      rowDir: geometry.rowDir,
-      colDir: geometry.colDir,
-      normalDir: geometry.normalDir,
-      rowSpacingDsMm: geometry.rowSpacingMm * (geometry.rows / rows),
-      colSpacingDsMm: geometry.colSpacingMm * (geometry.cols / cols),
-      sliceThicknessMm: frame.sliceThickness ?? null,
-      spacingBetweenSlicesMm: frame.spacingBetweenSlices ?? inferredSpacing,
-      frameOfReferenceUid: frame.frameOfReferenceUid ?? manifest.frameOfReferenceUid,
     });
 
     if ((cursor + 1) % 8 === 0) {
@@ -770,7 +799,7 @@ export function selectDenseLongitudinalSourceEnvelope(
 /** Load every native slice physically intersecting the already-registered reference plane. */
 export async function prepareDenseLongitudinalResliceInput(
   targetManifest: SeriesFrameManifest,
-  selectedReference: SvrReconstructionSlice,
+  selectedReference: LongitudinalReferencePlane & Partial<Pick<SvrReconstructionSlice, 'pixels'>>,
   targetToReference: RigidParams,
   centerMm: Vec3,
   options: DenseLongitudinalOptions = {},
@@ -797,7 +826,7 @@ export async function prepareDenseLongitudinalResliceInput(
 
   return {
     targetSlices,
-    referencePlane: referencePlane as LongitudinalReferencePlane,
+    referencePlane,
     targetToReference,
     centerMm,
     outputGrid: options.outputGrid,
@@ -810,9 +839,21 @@ export async function prepareDenseLongitudinalResliceInput(
 }
 
 /** Replace a coarse-stack preview with native through-plane anatomy in a fresh worker. */
-export async function densifyLongitudinalRegistration(
+export function densifyLongitudinalRegistration(
+  targetManifest: SeriesFrameManifest,
+  selectedReference: LongitudinalReferencePlane,
+  registration: LongitudinalRegistrationEstimate,
+  options: DenseLongitudinalOptions & { refinePose: false },
+): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure>;
+export function densifyLongitudinalRegistration(
   targetManifest: SeriesFrameManifest,
   selectedReference: SvrReconstructionSlice,
+  registration: LongitudinalRegistrationEstimate,
+  options?: DenseLongitudinalOptions,
+): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure>;
+export async function densifyLongitudinalRegistration(
+  targetManifest: SeriesFrameManifest,
+  selectedReference: LongitudinalReferencePlane,
   registration: LongitudinalRegistrationEstimate,
   options: DenseLongitudinalOptions = {},
 ): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure> {

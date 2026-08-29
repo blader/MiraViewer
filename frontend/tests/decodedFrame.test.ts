@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type CornerstoneCore from 'cornerstone-core';
 
 const mocks = vi.hoisted(() => ({
   getImageIdForInstance: vi.fn(),
@@ -38,6 +39,95 @@ describe('canonical decoded DICOM frames', () => {
     await expect(loadCornerstoneImage('miradb:instance-1')).resolves.toBe(image);
     expect(mocks.loadAndCacheImage).toHaveBeenCalledWith('miradb:instance-1');
     expect(mocks.loadImage).not.toHaveBeenCalled();
+  });
+
+  it('streams exact SOP frames with unchanged pixels, validity, geometry and presentation metadata', async () => {
+    const stored = Int16Array.of(-2000, -1999, -3, 0, 50, 2047);
+    const original = stored.slice();
+    const image = {
+      rows: 2,
+      columns: 3,
+      slope: 2,
+      intercept: -100,
+      pixelPaddingValue: -2000,
+      pixelPaddingRangeLimit: -1999,
+      rowPixelSpacing: 2,
+      columnPixelSpacing: 0.5,
+      windowCenter: 75,
+      windowWidth: 1,
+      invert: true,
+      getPixelData: () => stored,
+    };
+    mocks.loadAndCacheImage.mockResolvedValue(image);
+    mocks.loadImage.mockResolvedValue(image);
+
+    const cached = await getDecodedFrameBySopInstanceUid('series-1', 'accepted-instance');
+    const streamed = await getDecodedFrameBySopInstanceUid('series-1', 'accepted-instance', { cache: 'reuse-only' });
+
+    expect(streamed).toEqual(cached);
+    expect([...streamed.pixels]).toEqual([0, 0, -106, -100, 0, 3994]);
+    expect([...streamed.validity]).toEqual([0, 0, 1, 1, 1, 1]);
+    expect(streamed).toMatchObject({
+      imageId: 'miradb:accepted-instance',
+      sopInstanceUid: 'accepted-instance',
+      rows: 2,
+      cols: 3,
+      rowSpacingMm: 2,
+      colSpacingMm: 0.5,
+      windowCenter: 75,
+      windowWidth: 1,
+      invert: true,
+    });
+    expect(mocks.getImageIdForInstance).not.toHaveBeenCalled();
+    expect(mocks.loadAndCacheImage).toHaveBeenCalledOnce();
+    expect(mocks.loadImage).toHaveBeenCalledExactlyOnceWith('miradb:accepted-instance');
+    expect(stored).toEqual(original);
+    expect(streamed.pixels.buffer).not.toBe(stored.buffer);
+    expect(streamed.validity.buffer).not.toBe(streamed.pixels.buffer);
+  });
+
+  it('reuses real Cornerstone cache hits without inserting streamed misses or growing global residency', async () => {
+    const { default: cornerstone } = await vi.importActual<{ default: typeof CornerstoneCore }>('cornerstone-core');
+    const scheme = 'decoded-frame-stream-test';
+    const key = (imageId: string) => imageId.replace('miradb:', `${scheme}:`);
+    const pixels = Int16Array.of(-10, 20);
+    const loader = vi.fn((imageId: string) => ({
+      promise: Promise.resolve({
+        imageId,
+        rows: 1,
+        columns: 2,
+        sizeInBytes: pixels.byteLength,
+        getPixelData: () => pixels,
+      }),
+    }));
+    cornerstone.registerImageLoader(scheme, loader);
+    const cachedKey = key('miradb:cached');
+    await cornerstone.loadAndCacheImage(cachedKey);
+    const cached = cornerstone.imageCache.getImageLoadObject(cachedKey);
+    const before = cornerstone.imageCache.getCacheInfo();
+    loader.mockClear();
+    mocks.loadImage.mockImplementation((imageId: string) => cornerstone.loadImage(key(imageId)));
+    mocks.loadAndCacheImage.mockImplementation((imageId: string) => cornerstone.loadAndCacheImage(key(imageId)));
+    try {
+      for (const sop of ['cached', 'stream-1', 'stream-2']) {
+        const frame = await getDecodedFrameBySopInstanceUid('series-1', sop, { cache: 'reuse-only' });
+        expect(frame.sopInstanceUid).toBe(sop);
+        expect(frame.pixels).toEqual(Float32Array.of(-10, 20));
+        expect(frame.validity).toEqual(Float32Array.of(1, 1));
+      }
+      expect(mocks.loadAndCacheImage).not.toHaveBeenCalled();
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(cornerstone.imageCache.getImageLoadObject(cachedKey)).toBe(cached);
+      expect(cornerstone.imageCache.getImageLoadObject(key('miradb:stream-1'))).toBeUndefined();
+      expect(cornerstone.imageCache.getImageLoadObject(key('miradb:stream-2'))).toBeUndefined();
+      expect(cornerstone.imageCache.getCacheInfo()).toEqual(before);
+      expect(pixels).toEqual(Int16Array.of(-10, 20));
+    } finally {
+      for (const sop of ['cached', 'stream-1', 'stream-2']) {
+        const imageId = key(`miradb:${sop}`);
+        if (cornerstone.imageCache.getImageLoadObject(imageId)) cornerstone.imageCache.removeImageLoadObject(imageId);
+      }
+    }
   });
 
   it('preserves signed 16-bit precision and applies modality slope/intercept before analysis', async () => {

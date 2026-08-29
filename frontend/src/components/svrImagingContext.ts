@@ -8,7 +8,7 @@ export const SvrImagingContext = createContext<{
   labels?: SvrLabelVolume | null;
   initialSelection?: SvrLabelVolume;
   busy?: boolean;
-  refineRegion?: (labels: SvrLabelVolume) => void;
+  refineRegion?: (labels: SvrLabelVolume, retainedBytes?: number | (() => number)) => void;
   loadEnhancementSource?: EnhancementSourceLoader;
 } | null>(null);
 

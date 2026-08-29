@@ -10,6 +10,7 @@ import { DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 import {
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
+  getDerivedAlignmentFrameByImageId,
   setDerivedAlignmentFrame,
   type DerivedAlignmentReference,
 } from '../src/utils/derivedAlignmentFrame';
@@ -28,7 +29,10 @@ vi.mock('cornerstone-core', () => ({
   default: {
     enable: vi.fn(),
     disable: vi.fn(),
-    loadImage: vi.fn(async (imageId: string) => ({ imageId })),
+    loadImage: vi.fn(async (imageId: string) => {
+      const frame = getDerivedAlignmentFrameByImageId(imageId);
+      return { imageId, ...(frame && { derivedSource: new WeakRef(frame) }) };
+    }),
     displayImage: vi.fn(),
     getDefaultViewportForImage: vi.fn(() => ({})),
     resize: vi.fn(),
@@ -556,8 +560,9 @@ describe('DicomViewer aligned browsing', () => {
     const next = alignedResult(41, 4);
     next.computedSettings = { ...next.computedSettings, brightness: 80, contrast: 125, rotation: 10, zoom: 1.1 };
     act(() => setDerivedAlignmentFrame(next));
-    const nextImageId = getDerivedAlignmentFrame('target-series', 4)!.imageId;
-    const pendingImage = deferred<{ imageId: string }>();
+    const nextFrame = getDerivedAlignmentFrame('target-series', 4)!;
+    const nextImage = { imageId: nextFrame.imageId, derivedSource: new WeakRef(nextFrame) };
+    const pendingImage = deferred<typeof nextImage>();
     vi.mocked(cornerstone.loadImage).mockReturnValueOnce(pendingImage.promise);
 
     rerender(viewer(context({ sliceIndex: 41 }), 4));
@@ -568,7 +573,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(1.11) contrast(0.89)');
     expect(presentation.style.transform).toBe(acceptedTransform);
 
-    await act(async () => pendingImage.resolve({ imageId: nextImageId }));
+    await act(async () => pendingImage.resolve(nextImage));
 
     expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
     expect(presentation.style.filter).toBe('brightness(0.8) contrast(1.25)');

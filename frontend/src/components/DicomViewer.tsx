@@ -5,6 +5,7 @@ import {
   useState,
   useLayoutEffect,
   useCallback,
+  useContext,
   useImperativeHandle,
   useSyncExternalStore,
 } from 'react';
@@ -21,6 +22,10 @@ import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
 import { getDecodedFrame as loadDecodedFrame, loadCornerstoneImage, type DecodedFrame } from '../utils/decodedFrame';
 import type { DerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
 import { useAlignedFrame } from '../hooks/useAlignedFrame';
+import { SharpSliceDisplayContext, useSharpSliceDisplay } from '../hooks/useSharpSliceDisplay';
+import type { SharpSliceDisplay } from '../hooks/useSharpSliceDisplay';
+import { createDerivedImagePresentation } from '../utils/derivedImagePresentation';
+import type { DerivedImagePresentation } from '../utils/derivedImagePresentation';
 
 export type DicomViewerCaptureOptions = {
   /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
@@ -228,6 +233,13 @@ interface ImageContentProps {
   alt: string;
   imgRef: React.RefObject<HTMLImageElement | null>;
 }
+
+type DicomImageSource = {
+  imageId: string;
+  derivedFrame: DerivedAlignmentFrame | null;
+  contentKey: string;
+  presentationKey: string;
+};
 
 function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: ImageContentProps) {
   const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
@@ -651,9 +663,17 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     onPanChange: alignmentPending ? undefined : onPanChange,
     interactionBlocked,
   });
+  const sharpPreference = useContext(SharpSliceDisplayContext);
+  const suspendImageSwap = sharpPreference.suspended || interactionBlocked || alignmentPending || viewportPan.isPanning;
+  const sharpDisplay = useSharpSliceDisplay(imageUrlOverride ? null : derivedFrame, {
+    enabled: sharpPreference.enabled,
+    suspended: suspendImageSwap,
+  });
 
   // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
-  const [imageId, setImageId] = useState<string | null>(null);
+  const [imageSource, setImageSource] = useState<DicomImageSource | null>(null);
+  const contentKey = `${studyId}:${seriesUid}:${derivedFrame?.instanceIndex ?? effectiveInstanceIndex}`;
+  const presentationKey = derivedFrame?.imageId ?? `${studyId}:${seriesUid}:${effectiveInstanceIndex}:native`;
 
   // Track what slice is actually displayed in the viewer.
   // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
@@ -689,16 +709,24 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     (async () => {
       try {
         const id = derivedFrame?.imageId ?? (await getImageIdForInstance(seriesUid, effectiveInstanceIndex));
-        if (!cancelled) setImageId(id);
+        if (!cancelled)
+          setImageSource((previous) =>
+            previous?.imageId === id &&
+            previous.derivedFrame === derivedFrame &&
+            previous.contentKey === contentKey &&
+            previous.presentationKey === presentationKey
+              ? previous
+              : { imageId: id, derivedFrame, contentKey, presentationKey },
+          );
       } catch (e) {
         console.error(e);
-        if (!cancelled) setImageId(null);
+        if (!cancelled) setImageSource(null);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [derivedFrame, effectiveInstanceIndex, imageUrlOverride, seriesUid]);
+  }, [contentKey, derivedFrame, effectiveInstanceIndex, imageUrlOverride, presentationKey, seriesUid]);
 
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
@@ -766,7 +794,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         aria-label={`Pan MRI slice ${instanceIndex + 1}`}
         aria-description="Drag to pan. Double-click or press Enter to reset pan."
         aria-disabled={!viewportPan.canPan}
-        aria-busy={alignmentStatus === 'updating' || undefined}
+        aria-busy={alignmentStatus === 'updating' || sharpDisplay.status === 'loading' || undefined}
         {...viewportPan.handlers}
       >
         {imageUrlOverride ? (
@@ -778,15 +806,18 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             alt={`Slice ${instanceIndex + 1}`}
             imgRef={imgRef}
           />
-        ) : imageId ? (
+        ) : imageSource ? (
           <CornerstoneImage
-            imageId={imageId}
-            contentKey={`${studyId}:${seriesUid}:${derivedFrame?.instanceIndex ?? effectiveInstanceIndex}`}
-            presentationKey={derivedFrame?.imageId ?? `${studyId}:${seriesUid}:${effectiveInstanceIndex}:native`}
+            imageSource={imageSource}
+            derivedFrame={derivedFrame}
+            contentKey={contentKey}
+            presentationKey={presentationKey}
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${(derivedFrame?.instanceIndex ?? effectiveInstanceIndex) + 1}`}
             onDisplayedContentKey={setDisplayedContentKey}
+            sharpDisplay={sharpDisplay}
+            suspendImageSwap={suspendImageSwap}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
@@ -827,7 +858,8 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 });
 
 interface CornerstoneImageProps {
-  imageId: string;
+  imageSource: DicomImageSource;
+  derivedFrame: DerivedAlignmentFrame | null;
   /** Known before asynchronous ID resolution, so new settings never reach old pixels. */
   presentationKey?: string;
   /**
@@ -847,6 +879,8 @@ interface CornerstoneImageProps {
 
   /** Called after Cornerstone actually displays the requested image. */
   onDisplayedContentKey?: (contentKey: string) => void;
+  sharpDisplay?: SharpSliceDisplay;
+  suspendImageSwap?: boolean;
 }
 
 function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
@@ -883,14 +917,18 @@ function ErrorOverlay({ message }: { message: string }) {
 }
 
 function CornerstoneImage({
-  imageId,
+  imageSource,
+  derivedFrame,
   contentKey,
   presentationKey = contentKey,
   imageFilter,
   imageTransform,
   alt,
   onDisplayedContentKey,
+  sharpDisplay,
+  suspendImageSwap = false,
 }: CornerstoneImageProps) {
+  const { imageId } = imageSource;
   const elementRef = useRef<HTMLDivElement | null>(null);
   const enabledRef = useRef(false);
 
@@ -906,20 +944,25 @@ function CornerstoneImage({
   // Note: we intentionally do NOT clear `loadedImageId` when navigating so the previous
   // slice stays visible until the next slice is ready. This avoids "black flashes"
   // while scrubbing quickly with the mouse wheel.
-  const [loadedImageId, setLoadedImageId] = useState<string | null>(null);
+  type LoadedImage = DicomImageSource & {
+    image: Awaited<ReturnType<typeof loadCornerstoneImage>>;
+  };
+  const [available, setAvailable] = useState<LoadedImage | null>(null);
+  const [displayed, setDisplayed] = useState<{
+    source: LoadedImage;
+    sharpImage?: DerivedImagePresentation;
+    failedImage?: DerivedImagePresentation;
+  } | null>(null);
+  const loadedImageId = displayed?.sharpImage?.imageId ?? displayed?.source.imageId ?? null;
   const [errorImageId, setErrorImageId] = useState<string | null>(null);
 
   // Track which contentKey the currently-loaded image corresponds to.
   // This lets us avoid applying the *new* settings/transform to the *old* image
   // during async navigation (e.g. switching overlay dates).
-  const [loadedContent, setLoadedContent] = useState<{ contentKey: string; presentationKey: string } | null>(null);
+  const loadedContent = displayed?.source;
 
-  // Keep a ref of the latest requested key so the imageId load effect can associate
-  // a loaded imageId with the correct contentKey without re-running on every key change.
-  const contentKeyRef = useRef({ contentKey, presentationKey });
-  useEffect(() => {
-    contentKeyRef.current = { contentKey, presentationKey };
-  }, [contentKey, presentationKey]);
+  // Resolved source IDs carry their producing keys and frame together; a newer
+  // request must never relabel an older asynchronous native lookup.
 
   const onDisplayedContentKeyRef = useRef(onDisplayedContentKey);
   useEffect(() => {
@@ -928,10 +971,11 @@ function CornerstoneImage({
 
   // Derive status from comparison
   const status: 'loading' | 'loaded' | 'error' =
-    errorImageId === imageId ? 'error' : loadedImageId === imageId ? 'loaded' : 'loading';
+    errorImageId === imageId ? 'error' : loadedContent?.imageId === imageId ? 'loaded' : 'loading';
 
   const isContentInSync =
-    loadedImageId === imageId &&
+    loadedContent?.imageId === imageId &&
+    loadedContent.derivedFrame === derivedFrame &&
     loadedContent?.contentKey === contentKey &&
     loadedContent.presentationKey === presentationKey;
 
@@ -982,38 +1026,95 @@ function CornerstoneImage({
     const element = elementRef.current;
     if (!element) return;
 
-    const keyForThisLoad = contentKeyRef.current;
+    const controller = new AbortController();
+    const { signal } = controller;
 
+    void enabledDeferred.promise
+      .then(() => {
+        signal.throwIfAborted();
+        return loadCornerstoneImage(imageSource.imageId);
+      })
+      .then((cached) => {
+        signal.throwIfAborted();
+        const original = imageSource.derivedFrame;
+        // A rerun may reuse a derived ID with different pixels or tone. Refresh
+        // only this presentation, leaving the native cache and registration alone.
+        return original && cached.derivedSource?.deref?.() !== original
+          ? createDerivedImagePresentation(
+              original,
+              `${imageSource.imageId}:original:${crypto.randomUUID()}`,
+              undefined,
+              signal,
+            )
+          : cached;
+      })
+      .then((image) => {
+        signal.throwIfAborted();
+        setAvailable({ ...imageSource, image });
+        setErrorImageId(null);
+      })
+      .catch((err: unknown) => {
+        if (!signal.aborted) {
+          console.error('Failed to load DICOM image:', err);
+          setErrorImageId(imageSource.imageId);
+        }
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [enabledDeferred, imageSource]);
+
+  const replacement = sharpDisplay?.sourceKey === imageId ? sharpDisplay.image : undefined;
+  // One canvas commit owns both variants. Keep the loaded original for immediate
+  // comparison; a display toggle never starts a new source lookup or changes pan.
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (
+      !element ||
+      !available ||
+      available.imageId !== imageId ||
+      available.derivedFrame !== derivedFrame ||
+      available.contentKey !== contentKey ||
+      available.presentationKey !== presentationKey
+    )
+      return;
+    // Suspending enhancement must not freeze normal slice browsing or the first image.
+    if (suspendImageSwap && displayed?.source === available) return;
+    const sharpImage =
+      suspendImageSwap || (displayed?.source === available && displayed.failedImage === replacement)
+        ? undefined
+        : replacement;
+    if (displayed?.source === available && displayed.sharpImage === sharpImage) return;
     let cancelled = false;
-
-    const load = async () => {
+    void Promise.resolve().then(() => {
+      if (cancelled || !enabledRef.current) return;
       try {
-        await enabledDeferred.promise;
-        if (cancelled) return;
-
-        const image = await loadCornerstoneImage(imageId);
-        if (cancelled) return;
-
+        const image = sharpImage ?? available.image;
         const viewport = cornerstone.getDefaultViewportForImage(element, image);
         cornerstone.displayImage(element, image, viewport);
-        setLoadedImageId(imageId);
-        setLoadedContent(keyForThisLoad);
-        setErrorImageId(null);
-        onDisplayedContentKeyRef.current?.(keyForThisLoad.contentKey);
-      } catch (err) {
-        console.error('Failed to load DICOM image:', err);
-        if (!cancelled) {
-          setErrorImageId(imageId);
+        setDisplayed({ source: available, sharpImage });
+        onDisplayedContentKeyRef.current?.(available.contentKey);
+      } catch (error) {
+        if (sharpImage) {
+          try {
+            const viewport = cornerstone.getDefaultViewportForImage(element, available.image);
+            cornerstone.displayImage(element, available.image, viewport);
+            setDisplayed({ source: available, failedImage: sharpImage });
+            onDisplayedContentKeyRef.current?.(available.contentKey);
+            return;
+          } catch {
+            // If the original also fails, use the established image-load error surface.
+          }
         }
+        console.error('Failed to display DICOM image:', error);
+        setErrorImageId(imageId);
       }
-    };
-
-    load();
-
+    });
     return () => {
       cancelled = true;
     };
-  }, [enabledDeferred, imageId]);
+  }, [available, contentKey, derivedFrame, displayed, imageId, presentationKey, replacement, suspendImageSwap]);
 
   // Handle resize
   useEffect(() => {
@@ -1035,17 +1136,45 @@ function CornerstoneImage({
     return () => observer.disconnect();
   }, []);
 
+  const originalShown = displayed && !displayed.sharpImage ? ' · Original shown' : '';
   return (
-    <div className="w-full h-full relative" style={{ transform: appliedImageTransform, filter: appliedImageFilter }}>
-      <div
-        ref={elementRef}
-        className="w-full h-full"
-        style={{ minWidth: '100px', minHeight: '100px' }}
-        aria-label={alt}
-        data-image-id={loadedImageId ?? undefined}
-      />
-      {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
-      {status === 'error' && <ErrorOverlay message="Failed to load image" />}
-    </div>
+    <>
+      <div className="w-full h-full relative" style={{ transform: appliedImageTransform, filter: appliedImageFilter }}>
+        <div
+          ref={elementRef}
+          className="w-full h-full"
+          style={{ minWidth: '100px', minHeight: '100px' }}
+          aria-label={alt}
+          data-image-id={loadedImageId ?? undefined}
+        />
+        {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
+        {status === 'error' && <ErrorOverlay message="Failed to load image" />}
+      </div>
+      {displayed?.sharpImage || (sharpDisplay && sharpDisplay.status !== 'original') ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute bottom-2 left-2 max-w-[calc(100%-1rem)] rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
+          title={
+            displayed?.sharpImage
+              ? 'Experimental synthesized detail, not acquired MRI. Alignment and measurements always use the original image.'
+              : sharpDisplay?.message
+          }
+          data-sharp-slice={displayed?.sharpImage ? 'synthesized' : 'original'}
+        >
+          {displayed?.sharpImage
+            ? 'Synthesized detail · Experimental'
+            : displayed?.failedImage || sharpDisplay?.status === 'error'
+              ? `Sharp slice unavailable${originalShown}`
+              : sharpDisplay?.status === 'loading'
+                ? `${sharpDisplay.message ?? 'Preparing sharp slice…'}${originalShown}`
+                : sharpDisplay?.status === 'ready'
+                  ? `Sharp slice ready${originalShown}`
+                  : displayed
+                    ? 'Original acquired slice'
+                    : 'Loading original slice…'}
+        </div>
+      ) : null}
+    </>
   );
 }

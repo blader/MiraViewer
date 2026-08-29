@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import type CornerstoneCore from 'cornerstone-core';
 import { DATASET_REVISION_STATE_KEY, deleteAllStoredMriData, getDB } from '../src/db/db';
 import type { DicomAcquisitionMetadata, DicomInstance } from '../src/db/schema';
@@ -12,13 +13,15 @@ const cornerstone = vi.hoisted(() => ({
   loadAndCacheImage: vi.fn(),
   loadImage: vi.fn(),
   getCacheInfo: vi.fn((): { cacheSizeInBytes?: number; maximumSizeInBytes?: number } => ({})),
+  cachedImages: [] as { image: { getPixelData: () => Uint8Array }; sizeInBytes: number; loaded: boolean }[],
 }));
 
 vi.mock('cornerstone-core', () => ({
   default: {
     loadAndCacheImage: cornerstone.loadAndCacheImage,
     loadImage: cornerstone.loadImage,
-    imageCache: { getCacheInfo: cornerstone.getCacheInfo },
+    imageCache: { getCacheInfo: cornerstone.getCacheInfo, cachedImages: cornerstone.cachedImages },
+    getEnabledElements: () => [],
   },
 }));
 
@@ -122,7 +125,7 @@ async function seedSeries(options: SourceFixture): Promise<SvrSelectedSeries> {
       spacingBetweenSlices: 1,
       pixelPaddingValue: options.pixelPaddingValue,
       acquisitionMetadata,
-      fileBlob: new Blob(),
+      fileBlob: new NodeBlob(),
     };
     await db.put('instances', instance);
 
@@ -175,6 +178,7 @@ describe('SVR canonical source admission and acquired support', () => {
     acquisitionNumber = 0;
     localStorage.setItem('miraviewer:debug-svr', '0');
     cornerstone.getCacheInfo.mockReset();
+    cornerstone.cachedImages.length = 0;
     cornerstone.getCacheInfo.mockReturnValue({});
     const readImage = async (imageId: string) => {
       const image = images.get(imageId);
@@ -203,6 +207,7 @@ describe('SVR canonical source admission and acquired support', () => {
     });
 
     await expect(reconstruct([axial, coronal])).rejects.toThrow(/same patient/i);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
     expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
   });
 
@@ -384,6 +389,76 @@ describe('SVR canonical source admission and acquired support', () => {
     }
   });
 
+  it.each(['complete', 'failure', 'abort'] as const)(
+    'streams independent 2D sources without changing the real image cache (%s)',
+    async (outcome) => {
+      vi.spyOn(navigator, 'hardwareConcurrency', 'get').mockReturnValue(4);
+      const pixels = Int16Array.of(10, -2000, 30, 40);
+      const originalPixels = pixels.slice();
+      const axial = await seedSeries({ seriesUid: 'streamed-2d-axial', count: 16, pixels, pixelPaddingValue: -2000 });
+      const coronal = await seedSeries({
+        seriesUid: 'streamed-2d-coronal',
+        count: 16,
+        orientation: 'coronal',
+        pixels,
+        pixelPaddingValue: -2000,
+      });
+      const { default: real } = await vi.importActual<{ default: typeof CornerstoneCore }>('cornerstone-core');
+      const scheme = `svr-stream-${outcome}`;
+      const key = (id: string) => id.replace('miradb:', `${scheme}:`);
+      const controller = new AbortController();
+      const loader = vi.fn((id: string) => {
+        if (id.endsWith('axial.2')) {
+          if (outcome === 'failure') return { promise: Promise.reject(new Error('Synthetic decode failure')) };
+          if (outcome === 'abort') controller.abort();
+        }
+        const image = images.get(id.replace(`${scheme}:`, 'miradb:'))!;
+        return { promise: Promise.resolve({ ...image, imageId: id, sizeInBytes: pixels.byteLength }) };
+      });
+      real.registerImageLoader(scheme, loader);
+      const first = key('miradb:streamed-2d-axial.0');
+      await real.loadAndCacheImage(first);
+      const before = real.imageCache.getCacheInfo();
+      const cachedFirst = real.imageCache.getImageLoadObject(first);
+      loader.mockClear();
+      cornerstone.loadImage.mockImplementation((id: string) => real.loadImage(key(id)));
+      const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices').mockImplementation(async (payload) => {
+        expect(payload.allSlices).toHaveLength(32);
+        for (const frame of payload.allSlices) {
+          expect(frame.pixels).toEqual(Float32Array.of(10, 0, 30, 40));
+          expect(frame.valid).toEqual(Uint8Array.of(255, 0, 255, 255));
+          expect([frame.srcRows, frame.srcCols, frame.dsRows, frame.dsCols]).toEqual([2, 2, 2, 2]);
+          expect([frame.rowSpacingMm, frame.colSpacingMm]).toEqual([1, 1]);
+        }
+        return syntheticComputeResult('non-inserting-2d');
+      });
+      try {
+        const run = reconstructVolumeMultiPlane({
+          selectedSeries: [axial, coronal],
+          svrParams: params,
+          signal: controller.signal,
+        });
+        if (outcome === 'complete') {
+          await run;
+          expect(loader).toHaveBeenCalledTimes(31);
+          expect(compute).toHaveBeenCalledOnce();
+        } else {
+          await expect(run).rejects.toThrow(outcome === 'abort' ? /cancel/i : /Synthetic decode failure/);
+          expect(loader.mock.calls.length).toBeLessThan(16);
+          expect(compute).not.toHaveBeenCalled();
+        }
+        await Promise.resolve();
+        expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+        expect(real.imageCache.getCacheInfo()).toEqual(before);
+        expect(real.imageCache.getImageLoadObject(first)).toBe(cachedFirst);
+        expect(real.imageCache.getImageLoadObject(key('miradb:streamed-2d-axial.1'))).toBeUndefined();
+        expect(pixels).toEqual(originalPixels);
+      } finally {
+        real.imageCache.removeImageLoadObject(first);
+      }
+    },
+  );
+
   it('cancels a stalled native decoder, retries successfully, and never reads or publishes its late source pixels', async () => {
     const original = await seedSeries({
       seriesUid: 'cancel-native',
@@ -438,9 +513,7 @@ describe('SVR canonical source admission and acquired support', () => {
       'accepted-axial',
       'accepted-coronal',
     ]);
-    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).not.toContain(
-      'miradb:excluded-derived.0',
-    );
+    expect(cornerstone.loadImage.mock.calls.map(([imageId]) => imageId)).not.toContain('miradb:excluded-derived.0');
   });
 
   it('exposes only the native original and verified same-acquisition reformats and inherits the primary accepted pose', async () => {
@@ -490,6 +563,7 @@ describe('SVR canonical source admission and acquired support', () => {
         },
       }),
     ).rejects.toThrow(/source inputs.*budget before decoding/);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
     expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
     expect(compute).not.toHaveBeenCalled();
   });
@@ -555,7 +629,7 @@ describe('SVR canonical source admission and acquired support', () => {
       onProgress: (value) => progress.push(value),
     });
 
-    const decodedFrames = cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId);
+    const decodedFrames = cornerstone.loadImage.mock.calls.map(([imageId]) => imageId);
     expect(decodedFrames).toEqual([
       'miradb:focused-axial.0',
       'miradb:focused-axial.1',
@@ -592,7 +666,7 @@ describe('SVR canonical source admission and acquired support', () => {
       },
     });
 
-    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).toEqual([
+    expect(cornerstone.loadImage.mock.calls.map(([imageId]) => imageId)).toEqual([
       'miradb:thick-axial.0',
       'miradb:thick-axial.1',
       'miradb:thick-coronal.0',
@@ -618,7 +692,7 @@ describe('SVR canonical source admission and acquired support', () => {
       },
     });
 
-    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).toEqual([
+    expect(cornerstone.loadImage.mock.calls.map(([imageId]) => imageId)).toEqual([
       'miradb:rigid-margin-axial.0',
       'miradb:rigid-margin-axial.1',
       'miradb:rigid-margin-axial.2',
@@ -646,6 +720,7 @@ describe('SVR canonical source admission and acquired support', () => {
         },
       }),
     ).rejects.toThrow(/focus region does not intersect acquired frames from source 1/i);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
     expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
   });
 
@@ -667,7 +742,7 @@ describe('SVR canonical source admission and acquired support', () => {
       },
     });
 
-    expect(cornerstone.loadAndCacheImage).toHaveBeenCalledTimes(6);
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(6);
   });
 
   it.each([false, true])(
@@ -814,6 +889,12 @@ describe('SVR canonical source admission and acquired support', () => {
       cacheSizeInBytes: 96 * 1024 * 1024,
       maximumSizeInBytes: 256 * 1024 * 1024,
     });
+    const pixels = new Uint8Array(96 * 1024 * 1024);
+    cornerstone.cachedImages.push({
+      image: { getPixelData: () => pixels },
+      loaded: true,
+      sizeInBytes: pixels.byteLength,
+    });
     let transferred: Transferable[] = [];
     let sourceMasks: Uint8Array[] = [];
     let residentCacheBytes: number | undefined;
@@ -851,8 +932,8 @@ describe('SVR canonical source admission and acquired support', () => {
     for (const mask of sourceMasks) {
       expect(transferred).toContain(mask.buffer);
     }
-    // The four incoming 2x2 frames retain their worst-case Float32 decoder representation too.
-    expect(residentCacheBytes).toBe(96 * 1024 * 1024 + 4 * 2 * 2 * 4);
+    // Processing frames never enter the cache; their bounded decode batch is gone before this phase.
+    expect(residentCacheBytes).toBe(96 * 1024 * 1024);
     expect(Array.from(result.volume.observedSupport ?? [])).toEqual([1]);
     expect(result.volume.supportedVoxelCount).toBe(1);
     expect(result.volume.acquiredOrientationCount).toBe(2);
@@ -901,7 +982,7 @@ describe('SVR canonical source admission and acquired support', () => {
     let maximumActiveDecodes = 0;
     let consumedSourceFrames: string[] = [];
 
-    cornerstone.loadAndCacheImage.mockImplementation(async (imageId: string) => {
+    cornerstone.loadImage.mockImplementation(async (imageId: string) => {
       activeDecodes++;
       maximumActiveDecodes = Math.max(maximumActiveDecodes, activeDecodes);
       const frameIndex = Number(imageId.split('.').at(-1));
@@ -921,7 +1002,7 @@ describe('SVR canonical source admission and acquired support', () => {
       ...Array.from({ length: 8 }, (_, index) => `parallel-axial.${index}`),
       ...Array.from({ length: 4 }, (_, index) => `parallel-coronal.${index}`),
     ]);
-    expect(cornerstone.loadAndCacheImage.mock.calls.map(([imageId]) => imageId)).toEqual(
+    expect(cornerstone.loadImage.mock.calls.map(([imageId]) => imageId)).toEqual(
       consumedSourceFrames.map((sopInstanceUid) => `miradb:${sopInstanceUid}`),
     );
   });
@@ -933,7 +1014,7 @@ describe('SVR canonical source admission and acquired support', () => {
     const releaseDecodes: Array<() => void> = [];
     const controller = new AbortController();
 
-    cornerstone.loadAndCacheImage.mockImplementation(
+    cornerstone.loadImage.mockImplementation(
       (imageId: string) =>
         new Promise((resolve) => {
           releaseDecodes.push(() => resolve(images.get(imageId)!));
@@ -947,21 +1028,22 @@ describe('SVR canonical source admission and acquired support', () => {
     });
 
     await vi.waitFor(() => {
-      expect(cornerstone.loadAndCacheImage).toHaveBeenCalledTimes(4);
+      expect(cornerstone.loadImage).toHaveBeenCalledTimes(4);
     });
 
     controller.abort();
     for (const release of releaseDecodes) release();
 
     await expect(reconstruction).rejects.toThrow(/cancelled/i);
-    expect(cornerstone.loadAndCacheImage).toHaveBeenCalledTimes(4);
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(4);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
   });
 
   it('rejects a dataset revision that changes while admitted source frames are decoding', async () => {
     const axial = await seedSeries({ seriesUid: 'mutated-axial' });
     const coronal = await seedSeries({ seriesUid: 'mutated-coronal', orientation: 'coronal' });
     let changed = false;
-    cornerstone.loadAndCacheImage.mockImplementation(async (imageId: string) => {
+    cornerstone.loadImage.mockImplementation(async (imageId: string) => {
       if (!changed) {
         changed = true;
         await (await getDB()).put('app_state', { key: DATASET_REVISION_STATE_KEY, value: 1 });
@@ -977,7 +1059,7 @@ describe('SVR canonical source admission and acquired support', () => {
     const coronal = await seedSeries({ seriesUid: 'switched-patient-coronal', orientation: 'coronal' });
     await setSelectedPatientKey('patient-one');
     let changed = false;
-    cornerstone.loadAndCacheImage.mockImplementation(async (imageId: string) => {
+    cornerstone.loadImage.mockImplementation(async (imageId: string) => {
       if (!changed) {
         changed = true;
         await setSelectedPatientKey('patient-two');

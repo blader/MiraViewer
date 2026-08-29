@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import { getDB, resetDbForTests } from '../src/db/db';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { alignmentDisplayBaseline, DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
@@ -277,7 +278,7 @@ describe('localApi', () => {
         pixelSpacing: '1\\1',
         rows: 16,
         columns: 16,
-        fileBlob: new Blob([new Uint8Array([index])]),
+        fileBlob: new NodeBlob([new Uint8Array(index + 1)]),
       });
     }
 
@@ -292,6 +293,11 @@ describe('localApi', () => {
     expect(manifest.frames).toHaveLength(24);
     expect(manifest.frames[0]?.physicalSlicePosition).toBe(0);
     expect(manifest.frames[23]?.physicalSlicePosition).toBe(23);
+    expect(manifest.frames.map((frame) => frame.dicomByteLength)).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+    expect(manifest.frames.every((frame) => !('fileBlob' in frame))).toBe(true);
     expect(instanceTransactions).toHaveLength(1);
+    const persisted = await db.get('instances', 'manifest-instance-00');
+    expect(persisted).not.toHaveProperty('dicomByteLength');
+    expect(persisted!.fileBlob.size).toBe(1);
   });
 });

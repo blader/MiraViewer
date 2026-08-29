@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentReference, AlignmentResult, SeriesRef } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import * as mutualInformation from '../src/utils/mutualInformation';
 import {
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
@@ -10,6 +11,7 @@ import {
 } from '../src/utils/derivedAlignmentFrame';
 import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
+import type * as LongitudinalFrames from '../src/utils/svr/longitudinalFrames';
 import { resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
 import { deferred } from './helpers/deferred';
 import {
@@ -57,13 +59,17 @@ vi.mock('../src/utils/elastixRegistration', () => ({
   registerAffine2DWithElastix: mocks.registerAffine,
 }));
 
-vi.mock('../src/utils/svr/longitudinalFrames', () => ({
-  densifyLongitudinalRegistration: mocks.densify,
-  prepareLongitudinalReferenceInput: mocks.prepareReference,
-  decodeLongitudinalReferenceFrame: mocks.decodeReference,
-  prepareLongitudinalRegistrationInput: mocks.prepare,
-  measureLongitudinalPlaneDrift: mocks.planeDrift,
-}));
+vi.mock('../src/utils/svr/longitudinalFrames', async (importOriginal) => {
+  const actual = await importOriginal<typeof LongitudinalFrames>();
+  return {
+    getLongitudinalReferencePlane: actual.getLongitudinalReferencePlane,
+    densifyLongitudinalRegistration: mocks.densify,
+    prepareLongitudinalReferenceInput: mocks.prepareReference,
+    decodeLongitudinalReferenceFrame: mocks.decodeReference,
+    prepareLongitudinalRegistrationInput: mocks.prepare,
+    measureLongitudinalPlaneDrift: mocks.planeDrift,
+  };
+});
 
 vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({
   runLongitudinalRegistration: mocks.register3d,
@@ -606,6 +612,8 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(next?.registrationId).toBe(first?.registrationId);
     act(() => setDerivedAlignmentFrame(next!));
     const reslicesBeforeRevisit = mocks.densify.mock.calls.length;
+    const capturesBeforeRevisit = mocks.captureSlice.mock.calls.length;
+    const referenceDecodesBeforeRevisit = mocks.decodeReference.mock.calls.length;
     const [revisited] = await browseAutomatically(result.current, 1, 'revisited-view');
 
     expect(revisited?.registrationId).toBe(first?.registrationId);
@@ -613,6 +621,8 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(revisited?.runId).not.toBe(first?.runId);
     expect(revisited?.requestKey).toBe('revisited-view');
     expect(mocks.densify).toHaveBeenCalledTimes(reslicesBeforeRevisit);
+    expect(mocks.captureSlice).toHaveBeenCalledTimes(capturesBeforeRevisit);
+    expect(mocks.decodeReference).toHaveBeenCalledTimes(referenceDecodesBeforeRevisit);
     expect(mocks.register3d).toHaveBeenCalledTimes(1);
 
     act(() => result.current.clearRegistrationCache());
@@ -625,6 +635,360 @@ describe('physically registered longitudinal auto-alignment', () => {
     expect(realigned?.registrationId).toBe(realigned?.runId);
     expect(mocks.register3d).toHaveBeenCalledTimes(2);
     expect(mocks.densify).toHaveBeenCalledTimes(reslicesBeforeRevisit + 1);
+  });
+
+  it('refreshes accepted-model recency when browsing before evicting the least recently used pair', async () => {
+    await configureAutomaticAlignment();
+    const { result } = renderHook(useAutoAlign);
+    const pairs = Array.from({ length: 17 }, (_, index) => ({
+      date: `lru-date-${index}`,
+      series: {
+        ...target,
+        series_uid: `lru-target-${index}`,
+        study_id: `study-lru-target-${index}`,
+        study_uid: `study-lru-target-${index}`,
+      },
+    }));
+    const series = Object.fromEntries(pairs.map((pair) => [pair.date, pair.series]));
+    const automaticReference = { ...reference, exclusionMask: undefined };
+    const browse = async (indices: number[], sliceIndex: number, requestKey: string) => {
+      let aligned: AlignmentResult[] = [];
+      await act(async () => {
+        aligned = await result.current.alignAllDates(
+          { ...automaticReference, sliceIndex },
+          indices.map((index) => pairs[index]!.date),
+          series,
+          sliceIndex / 2,
+          { reuseRegistration: true, requestKey },
+        );
+      });
+      expect(aligned).toHaveLength(indices.length);
+      expect(aligned.every((entry) => entry.outcome === 'aligned')).toBe(true);
+      return aligned;
+    };
+
+    const first = await browse(
+      Array.from({ length: 16 }, (_, index) => index),
+      1,
+      'fill-sixteen-models',
+    );
+    expect(mocks.register3d).toHaveBeenCalledTimes(16);
+    const [reused] = await browse([0], 2, 'reuse-oldest-model');
+    expect(reused?.registrationId).toBe(first[0]!.registrationId);
+    expect(mocks.register3d).toHaveBeenCalledTimes(16);
+    await browse([16], 2, 'add-seventeenth-model');
+    expect(mocks.register3d).toHaveBeenCalledTimes(17);
+
+    for (let index = 0; index < pairs.length; index++)
+      expect(
+        result.current.canReuseRegistration(automaticReference, [pairs[index]!.date], series),
+        `pair ${index}: browsing pair 0 must retain it and evict untouched pair 1`,
+      ).toBe(index !== 1);
+  });
+
+  it('does not publish or resurrect a model cleared while its warm reslice is pending', async () => {
+    await configureAutomaticAlignment(32);
+    const { result } = renderHook(useAutoAlign);
+    const [first] = await browseAutomatically(result.current, 1, 'accepted-before-cache-clear');
+    expect(first?.outcome).toBe('aligned');
+    act(() => setDerivedAlignmentFrame(first!));
+    const original = mocks.densify.getMockImplementation()!;
+    const started = deferred<void>(),
+      release = deferred<void>();
+    mocks.densify.mockImplementationOnce(async (...args) => {
+      const plane = await original(...args);
+      started.resolve();
+      await release.promise;
+      return plane;
+    });
+    const nextReference = { ...reference, sliceIndex: 2, exclusionMask: undefined };
+    let pending: Promise<AlignmentResult[]> = Promise.resolve([]);
+    try {
+      await act(async () => {
+        pending = result.current.alignAllDates(nextReference, ['target'], { target }, 1, {
+          reuseRegistration: true,
+          requestKey: 'cleared-during-reslice',
+        });
+        await started.promise;
+      });
+      act(() => result.current.clearRegistrationCache());
+      expect(result.current.canReuseRegistration(nextReference, ['target'], { target })).toBe(false);
+      let cancelled: AlignmentResult[] = [];
+      await act(async () => {
+        release.resolve();
+        cancelled = await pending;
+      });
+      expect(cancelled).toEqual([]);
+      expect(result.current.results).toEqual([]);
+      expect(result.current.isAligning).toBe(false);
+      expect(result.current.error).toBeNull();
+      expect(result.current.canReuseRegistration(nextReference, ['target'], { target })).toBe(false);
+      expect(getDerivedAlignmentFrameForReference(target.series_uid, nextReference)).toBeNull();
+      expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => {
+        result.current.abort();
+        release.resolve();
+        await pending;
+      });
+    }
+  });
+
+  it('renders a warm physical plane without capture, registration analysis, or tone recalibration', async () => {
+    await configureAutomaticAlignment(256);
+    const { result } = renderHook(useAutoAlign);
+    const initialSettings = { ...reference.settings, brightness: 83, contrast: 117 };
+    const [first] = await browseAutomatically(result.current, 1, 'accepted-model', initialSettings);
+    expect(first?.outcome).toBe('aligned');
+    expect(first?.derivedFrame?.displayTone).toBeDefined();
+    expect(first?.computedSettings.affine01).not.toBe(0);
+    mocks.densify.mockClear();
+    const forbidden = [
+      mocks.captureSlice,
+      mocks.prepareReference,
+      mocks.prepare,
+      mocks.decodeReference,
+      mocks.register3d,
+      mocks.registerAffine,
+      mocks.loadCornerstoneImage,
+      mocks.createScorer,
+    ];
+    for (const dependency of forbidden)
+      dependency.mockClear().mockImplementation(() => {
+        throw new Error('Accepted-model browsing must not wait for registration or calibration.');
+      });
+    const score = vi.spyOn(mutualInformation, 'computeMutualInformation').mockImplementation(() => {
+      throw new Error('An accepted pose must not be rescored before its next plane can display.');
+    });
+    try {
+      const editedSettings = { ...reference.settings, brightness: 126, contrast: 92 };
+      const [next] = await browseAutomatically(result.current, 0, 'warm-corrected-plane', editedSettings, 1);
+      expect(next).toMatchObject({
+        outcome: 'aligned',
+        requestKey: 'warm-corrected-plane',
+        registrationId: first!.registrationId,
+        manualSliceOffset: 1,
+        bestSliceIndex: 1,
+        computedSettings: { offset: 1, brightness: 126, contrast: 92 },
+        derivedFrame: {
+          referenceFrameIndex: 0,
+          referenceSopInstanceUid: 'reference-series-0',
+          sourceImageId: 'miradb:target-series-1',
+          rigidTransform: [0, 0, -1, 0, 0, 0],
+        },
+      });
+      expect(next?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+      for (const key of ['affine00', 'affine01', 'affine10', 'affine11', 'rotation', 'zoom', 'panX', 'panY'] as const)
+        expect(next?.computedSettings[key]).toBe(first?.computedSettings[key]);
+      expect(mocks.densify).toHaveBeenCalledTimes(1);
+      expect(mocks.densify.mock.lastCall![3].refinePose).toBe(false);
+      expect(mocks.densify.mock.lastCall![1]).not.toHaveProperty('pixels');
+      expect(mocks.densify.mock.lastCall![1]).not.toHaveProperty('valid');
+      for (const dependency of forbidden) expect(dependency).not.toHaveBeenCalled();
+      expect(score).not.toHaveBeenCalled();
+    } finally {
+      score.mockRestore();
+    }
+  });
+
+  it.each([
+    'missing-grid',
+    'shifted-grid',
+    'invalid-grid-spacing',
+    'rows',
+    'columns',
+    'pixel-length',
+    'support-length',
+    'pose-translation',
+    'pose-rotation',
+    'rotation-center',
+  ] as const)('rejects malformed warm %s without replacing the accepted model', async (kind) => {
+    await configureAutomaticAlignment(32);
+    const { result } = renderHook(useAutoAlign);
+    const [first] = await browseAutomatically(result.current, 1, 'accepted-before-malformed-reslice');
+    expect(first?.outcome).toBe('aligned');
+    act(() => setDerivedAlignmentFrame(first!));
+    const accepted = getDerivedAlignmentFrameForReference(target.series_uid, reference);
+    const original = mocks.densify.getMockImplementation()!;
+    mocks.densify.mockImplementationOnce(async (...args) => {
+      const plane = await original(...args);
+      switch (kind) {
+        case 'missing-grid':
+          return { ...plane, outputGrid: undefined };
+        case 'shifted-grid':
+          return {
+            ...plane,
+            outputGrid: {
+              ...plane.outputGrid,
+              originMm: [plane.outputGrid.originMm[0], plane.outputGrid.originMm[1], plane.outputGrid.originMm[2] + 1],
+            },
+          };
+        case 'invalid-grid-spacing':
+          return { ...plane, outputGrid: { ...plane.outputGrid, rowSpacingMm: 0 } };
+        case 'rows':
+          return { ...plane, rows: plane.rows + 1 };
+        case 'columns':
+          return { ...plane, cols: plane.cols + 1 };
+        case 'pixel-length':
+          return { ...plane, pixels: plane.pixels.slice(1) };
+        case 'support-length':
+          return { ...plane, valid: plane.valid.slice(1) };
+        case 'pose-translation':
+          return { ...plane, targetToReference: { ...plane.targetToReference, tx: plane.targetToReference.tx + 1 } };
+        case 'pose-rotation':
+          return { ...plane, targetToReference: { ...plane.targetToReference, rz: plane.targetToReference.rz + 0.1 } };
+        case 'rotation-center':
+          return { ...plane, centerMm: { ...plane.centerMm, z: plane.centerMm.z + 1 } };
+      }
+    });
+    const [rejected] = await browseAutomatically(result.current, 2, `malformed-${kind}`);
+    expect(rejected?.outcome).toBe('incompatible-geometry');
+    expect(rejected?.message).toMatch(/grid|plane|pose|geometry|support|size|shape|pixel|dimension|center|reslice/i);
+    expect(rejected?.derivedFrame).toBeUndefined();
+    expect(result.current.results).toEqual([rejected]);
+    act(() => setDerivedAlignmentFrame(rejected!));
+    expect(getDerivedAlignmentFrameForReference(target.series_uid, reference)).toBe(accepted);
+    expect(
+      result.current.canReuseRegistration({ ...reference, sliceIndex: 2, exclusionMask: undefined }, ['target'], {
+        target,
+      }),
+    ).toBe(true);
+
+    const [recovered] = await browseAutomatically(result.current, 2, `recovered-${kind}`);
+    expect(recovered).toMatchObject({
+      outcome: 'aligned',
+      registrationId: first!.registrationId,
+      manualSliceOffset: 0,
+      derivedFrame: { referenceFrameIndex: 2, sourceImageId: 'miradb:target-series-2' },
+    });
+    expect(recovered?.derivedFrame?.rigidTransform).toEqual(first?.derivedFrame?.rigidTransform);
+    expect(recovered?.derivedFrame?.rotationCenterMm).toEqual(first?.derivedFrame?.rotationCenterMm);
+    expect(recovered?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+    expect(mocks.register3d).toHaveBeenCalledTimes(1);
+    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.densify).toHaveBeenCalledTimes(3);
+  });
+
+  it('allows immediate mixed-target scheduling when a later target already has an accepted model', async () => {
+    await configureAutomaticAlignment();
+    const { result } = renderHook(useAutoAlign);
+    await browseAutomatically(result.current, 1, 'accepted-before-mixed-scheduling');
+    expect(
+      result.current.canReuseRegistration(
+        { ...reference, sliceIndex: 2, exclusionMask: undefined },
+        ['cold', 'target'],
+        { cold: { ...target, series_uid: 'uncached-series' }, target },
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['capture', 'preparation'] as const)(
+    'publishes a warm target while an earlier cold target is waiting for %s',
+    async (phase) => {
+      await configureAutomaticAlignment(32);
+      const { result } = renderHook(useAutoAlign);
+      const [first] = await browseAutomatically(result.current, 1, 'accepted-warm-target');
+      expect(first?.outcome).toBe('aligned');
+      const coldTarget = {
+        ...target,
+        series_uid: 'cold-target-series',
+        study_id: 'study-cold-target-series',
+        study_uid: 'study-cold-target-series',
+      };
+      const started = deferred<void>(),
+        release = deferred<void>();
+      const prerequisite = phase === 'capture' ? mocks.captureSlice : mocks.prepareReference;
+      const original = prerequisite.getMockImplementation()!;
+      prerequisite.mockImplementation(async (...args) => {
+        started.resolve();
+        await release.promise;
+        return original(...args);
+      });
+      let pending: Promise<AlignmentResult[]> = Promise.resolve([]);
+      try {
+        await act(async () => {
+          pending = result.current.alignAllDates(
+            { ...reference, sliceIndex: 2, exclusionMask: undefined },
+            ['cold', 'target'],
+            { cold: coldTarget, target },
+            1,
+            { reuseRegistration: true, requestKey: `mixed-${phase}` },
+          );
+          await started.promise;
+        });
+        expect(result.current.isAligning).toBe(true);
+        expect(result.current.results).toHaveLength(1);
+        expect(result.current.results[0]).toMatchObject({
+          date: 'target',
+          outcome: 'aligned',
+          registrationId: first!.registrationId,
+          requestKey: `mixed-${phase}`,
+          derivedFrame: { referenceFrameIndex: 2, referenceSopInstanceUid: 'reference-series-2' },
+        });
+        expect(result.current.results[0]?.derivedFrame?.displayTone).toBe(first?.derivedFrame?.displayTone);
+      } finally {
+        await act(async () => {
+          result.current.abort();
+          release.resolve();
+          await pending;
+        });
+      }
+    },
+  );
+
+  it('does not publish an older warm reslice after a newer browsing plane has completed', async () => {
+    await configureAutomaticAlignment(32);
+    const { result } = renderHook(useAutoAlign);
+    const [first] = await browseAutomatically(result.current, 1, 'accepted-before-scrolling');
+    const original = mocks.densify.getMockImplementation()!;
+    const started = deferred<AbortSignal>(),
+      release = deferred<void>();
+    mocks.densify.mockImplementation(async (...args) => {
+      const plane = await original(...args);
+      if (args[3].outputGrid.referenceSopInstanceUid === 'reference-series-0') {
+        started.resolve(args[3].signal);
+        await release.promise; // Deliberately finish after abort, like a late uncancellable source operation.
+      }
+      return plane;
+    });
+    let pending: Promise<AlignmentResult[]> = Promise.resolve([]);
+    try {
+      let oldSignal: AbortSignal | undefined;
+      await act(async () => {
+        pending = result.current.alignAllDates(
+          { ...reference, sliceIndex: 0, exclusionMask: undefined },
+          ['target'],
+          { target },
+          0,
+          { reuseRegistration: true, requestKey: 'old-scroll-position' },
+        );
+        oldSignal = await started.promise;
+      });
+      const [latest] = await browseAutomatically(result.current, 2, 'latest-scroll-position');
+      expect(latest).toMatchObject({
+        outcome: 'aligned',
+        registrationId: first!.registrationId,
+        requestKey: 'latest-scroll-position',
+        derivedFrame: { referenceFrameIndex: 2 },
+      });
+      expect(oldSignal?.aborted).toBe(true);
+      let cancelled: AlignmentResult[] = [];
+      await act(async () => {
+        release.resolve();
+        cancelled = await pending;
+      });
+      expect(cancelled).toEqual([]);
+      expect(result.current.requestKey).toBe('latest-scroll-position');
+      expect(result.current.results).toEqual([latest]);
+      expect(result.current.isAligning).toBe(false);
+      expect(result.current.error).toBeNull();
+    } finally {
+      await act(async () => {
+        result.current.abort();
+        release.resolve();
+        await pending;
+      });
+    }
   });
 
   it.each([

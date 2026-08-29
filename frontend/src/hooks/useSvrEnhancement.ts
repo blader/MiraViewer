@@ -3,6 +3,10 @@ import type { SvrLabelVolume, SvrVolume } from '../types/svr';
 import { cropEnhancementSource, type EnhancementSourceLoader } from '../utils/svr/superResolutionRegion';
 import { runSuperResolution } from '../utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../utils/svr/superResolutionTypes';
+import {
+  ENHANCED_TEXTURE_BYTES_PER_VOXEL,
+  ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
+} from '../utils/svr/enhancedVolumeBinding';
 import { clamp } from '../utils/math';
 
 type Scope = { volume: SvrVolume | null; data: Uint8Array | undefined };
@@ -41,13 +45,15 @@ export function useSvrEnhancement({
   loadSource?: EnhancementSourceLoader;
   blocked?: boolean;
 }) {
-  const scope = useMemo(() => ({ volume, data: labels?.data, blocked }), [volume, labels?.data, blocked]);
+  const scope = useMemo(() => ({ volume, data: labels?.data }), [volume, labels?.data]);
   const liveScope = useRef(scope);
   const operation = useRef<AbortController | null>(null);
   const [stored, setStored] = useState<EnhancementState>(EMPTY);
   // A new examination/selection owns a new display layer. Release stale buffers,
   // rather than merely hiding them and undercounting them in the next admission.
-  if (stored.scope !== null && stored.scope !== scope) setStored(EMPTY);
+  // A busy workspace cancels active inference, but a completed display still
+  // belongs to the same source/selection and survives a rejected refinement.
+  if (stored.scope !== null && (stored.scope !== scope || (blocked && stored.running))) setStored(EMPTY);
   const state = stored.scope === scope ? stored : EMPTY;
   useLayoutEffect(() => {
     liveScope.current = scope;
@@ -55,7 +61,30 @@ export function useSvrEnhancement({
       operation.current?.abort();
       operation.current = null;
     };
-  }, [scope]);
+  }, [scope, blocked]);
+
+  let retainedBytes = 0;
+  if (state.result) {
+    const alreadyCounted = new Set([
+      volume?.data.buffer,
+      volume?.observedSupport?.buffer,
+      labels?.data.buffer,
+      labels?.seeds?.foreground.buffer,
+      labels?.seeds?.background.buffer,
+    ]);
+    for (const buffer of new Set([
+      state.source?.data.buffer,
+      state.source?.observedSupport?.buffer,
+      state.result.data.buffer,
+      state.result.observedSupport.buffer,
+    ])) {
+      if (buffer && !alreadyCounted.has(buffer)) retainedBytes += buffer.byteLength;
+    }
+    // Original comparison keeps both textures resident. Completed uploads no
+    // longer own training, normalization, or half-float upload scratch buffers.
+    retainedBytes += state.result.data.length * ENHANCED_TEXTURE_BYTES_PER_VOXEL;
+    retainedBytes += (state.source?.data.length ?? 0) * ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL;
+  }
 
   const cancel = useCallback(() => {
     operation.current?.abort();
@@ -101,8 +130,8 @@ export function useSvrEnhancement({
           throw new Error('Enhancement requires a valid retained-memory estimate. Original data is unchanged.');
         const options = {
           signal: controller.signal,
-          // A previous enhanced GPU allocation can survive until React commits this run's loading state.
-          retainedBytes: (state.result ? state.result.data.length * 10 : 0) + additionalRetainedBytes,
+          // A previous completed display can survive until React commits this run's loading state.
+          retainedBytes: retainedBytes + additionalRetainedBytes,
           onProgress: (p: { current: number; total: number; message: string }) =>
             progress((p.current / Math.max(1, p.total)) * 0.2, p.message),
         };
@@ -134,7 +163,7 @@ export function useSvrEnhancement({
         if (operation.current === controller) operation.current = null;
       }
     },
-    [blocked, labels, loadSource, scope, state.result, volume],
+    [blocked, labels, loadSource, scope, retainedBytes, volume],
   );
 
   const setEnabled = useCallback(
@@ -161,5 +190,5 @@ export function useSvrEnhancement({
     [scope],
   );
 
-  return { ...state, run, cancel, clear, setEnabled, setStrength, failDisplay };
+  return { ...state, retainedBytes, run, cancel, clear, setEnabled, setStrength, failDisplay };
 }

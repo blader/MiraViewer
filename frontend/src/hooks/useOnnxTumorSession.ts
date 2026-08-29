@@ -14,11 +14,8 @@ import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmen
 import { assertTumorModelGrid, prepareTumorModelInput } from '../utils/segmentation/onnx/volumeInput';
 import { formatMiB } from '../utils/svr/svrUtils';
 import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES } from '../utils/svr/svrMemoryPlan';
-import {
-  nativeDecodedCacheBudgetBytes,
-  nativePlaneMemoryBytes,
-  retainedSvrVolumeBytes,
-} from '../utils/svr/nativeVolume';
+import { CORNERSTONE_MEMORY_FALLBACK_BYTES, measureCornerstoneImageMemory } from '../utils/cornerstoneMemory';
+import { nativePlaneMemoryBytes, retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 
 const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 const ONNX_TUMOR_MANIFEST_KEY = `${ONNX_TUMOR_MODEL_KEY}:manifest`;
@@ -165,26 +162,20 @@ export function useOnnxTumorSession(
     refreshCacheStatus();
   }, [refreshCacheStatus]);
 
-  const preflight = useMemo<OnnxPreflight | null>(() => {
+  const measurePreflight = useCallback((): OnnxPreflight | null => {
     if (!volume) return null;
     const [nx, ny, nz] = volume.dims;
     const nvox = nx * ny * nz;
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
     const preprocessingBytes = nvox * 4;
-    let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
-    try {
-      const cache = cornerstone.imageCache?.getCacheInfo?.();
-      // Long model operations may overlap continued interactive browsing,
-      // unlike the bounded non-inserting native assembly pass.
-      const maximum = cache?.maximumSizeInBytes;
-      decodedCacheBytes = Math.max(
-        nativeDecodedCacheBudgetBytes(cache),
-        Number.isFinite(maximum) && maximum! >= 0 ? maximum! : 256 * 1024 * 1024,
-      );
-    } catch {
-      // A missing optional cache API cannot make retained source frames free.
-    }
+    const cacheMemory = measureCornerstoneImageMemory(cornerstone);
+    // Long model operations may overlap continued interactive browsing,
+    // unlike the bounded non-inserting native assembly pass. Reserve remaining
+    // pixel capacity once, beside all currently retained parsed/display buffers.
+    const maximum = cacheMemory.cacheInfo?.maximumSizeInBytes;
+    const capacity = Number.isFinite(maximum) && maximum! >= 0 ? maximum! : CORNERSTONE_MEMORY_FALLBACK_BYTES;
+    const decodedCacheBytes = cacheMemory.bytes + Math.max(0, capacity - cacheMemory.reservedPixelCacheBytes);
     // The existing labels remain visible while inference builds their
     // replacement. Both overlap the immutable supported result and tensors.
     const inferencePlan = estimateSvrPeakMemoryBytes({
@@ -215,6 +206,7 @@ export function useOnnxTumorSession(
       blockedByDefault: estimatedPeakBytes > SVR_MEMORY_BUDGET_BYTES,
     };
   }, [volume]);
+  const preflight = useMemo(measurePreflight, [measurePreflight]);
 
   const uploadClick = useCallback(() => fileInputRef.current?.click(), []);
 
@@ -398,7 +390,9 @@ export function useOnnxTumorSession(
       return;
     }
 
-    if (preflight?.blockedByDefault) {
+    const currentPreflight = measurePreflight();
+    if (currentPreflight?.blockedByDefault) {
+      const preflight = currentPreflight;
       const dims = `${preflight.nx}×${preflight.ny}×${preflight.nz}`;
       const msg =
         `ONNX exceeds the shared ${formatMiB(preflight.budgetBytes)} memory budget ` +
@@ -470,7 +464,7 @@ export function useOnnxTumorSession(
       }
     })();
     inferenceTaskRef.current = inferenceTask;
-  }, [ensureSession, onLabels, preflight, volume]);
+  }, [ensureSession, onLabels, measurePreflight, volume]);
 
   const cancelSegmentation = useCallback(() => {
     if (!inferenceTaskRef.current) return;

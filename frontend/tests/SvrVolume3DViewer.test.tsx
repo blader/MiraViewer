@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SvrVolume3DViewer as ContextViewer, type SvrVolume3DViewerProps } from '../src/components/SvrVolume3DViewer';
 import { SvrImagingContext } from '../src/components/svrImagingContext';
@@ -12,10 +13,15 @@ import { SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
 import { makeNativePlaneData, nativeDisplayWindow } from '../src/utils/svr/nativePlane';
 import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
+import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
+import {
+  ENHANCED_TEXTURE_BYTES_PER_VOXEL,
+  ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
+} from '../src/utils/svr/enhancedVolumeBinding';
 import { volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 import type * as SelectionMigration from '../src/utils/svr/selectionMigration';
 import { deferred } from './helpers/deferred';
-import { paint } from './helpers/selectionInteraction';
+import { paint, setAutoFill } from './helpers/selectionInteraction';
 import {
   findTransferableSelection,
   transferSavedSelection,
@@ -438,7 +444,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].seeds?.foreground).toEqual(new Uint32Array([30]));
     expect(deleteVolumeSegmentation).not.toHaveBeenCalledWith('previous-grid');
     openSelectionEditor();
-    expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
   });
 
   it('retains older unverifiable selections without offering an unsafe transfer', async () => {
@@ -514,8 +520,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       />,
     );
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeEnabled());
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm selection' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
     await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels).toBe(labels);
@@ -627,18 +633,19 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(screen.queryByRole('button', { name: 'Overlay' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Selection only' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Enhance selection/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
     expect(screen.queryByRole('slider', { name: 'Selection brush radius in millimeters' })).not.toBeInTheDocument();
     expect(screen.queryByText('Slice settings', { selector: 'summary' })).not.toBeInTheDocument();
     openSelectionEditor();
-    expect(screen.getByText(/Mark inside, then suggest a boundary. Outside marks are optional./i)).toBeInTheDocument();
+    expect(screen.getByText(/Auto-fill follows your brush/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Suggest boundary' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Confirm selection' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeChecked();
     expect(screen.queryByRole('button', { name: 'Undo selection edit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Clear selection' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Navigate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Browse' }));
     expect(screen.queryByRole('slider', { name: 'Selection brush radius in millimeters' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Mark inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' })).toBeEnabled();
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2 is not available/i));
   });
@@ -976,7 +983,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
           'data-editing',
           'true',
         );
-        fireEvent.click(screen.getByRole('button', { name: 'View in 3D' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Done' }));
         expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute(
           'data-editing',
           'false',
@@ -1197,7 +1204,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   });
 
   it.each([false, true])(
-    'paints exact user marks, suggests only on request, and restores edits with outside marks: %s',
+    'paints exact marks with auto-fill off, fills on re-enable, and restores edits with outside marks: %s',
     async (withOutside) => {
       const volume = editingVolume();
       const at = (x: number, y: number) => (6 * 12 + y) * 12 + x;
@@ -1212,21 +1219,22 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       const recorder = createViewportRecorder({ width: 400, height: 320 });
       render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
       openSelectionEditor();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      setAutoFill(false);
       const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
         screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
       );
       expect(screen.queryByRole('button', { name: 'Suggest boundary' })).not.toBeInTheDocument();
       expect(run).not.toHaveBeenCalled();
       if (withOutside) {
-        paint(9, 6, 'Mark outside');
+        paint(9, 6, 'Remove');
         expect(screen.queryByRole('button', { name: 'Suggest boundary' })).not.toBeInTheDocument();
         expect(run).not.toHaveBeenCalled();
       }
       paint(5, 6);
       expect(run).not.toHaveBeenCalled();
-      expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeEnabled();
-      fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+      expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeEnabled();
+      setAutoFill(true);
       await waitFor(() => expect(run).toHaveBeenCalledOnce());
       expect([...run.mock.calls[0]![0].foreground]).toEqual([at(5, 6)]);
       expect([...run.mock.calls[0]![0].background]).toEqual(background);
@@ -1235,7 +1243,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       expect([...vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds!.foreground]).toEqual([at(5, 6)]);
       expect([...vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds!.background]).toEqual(background);
       expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
-      paint(6, 6, 'Mark outside');
+      setAutoFill(false);
+      paint(6, 6, 'Remove');
       await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(0));
       expect(run).toHaveBeenCalledOnce();
       fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
@@ -1243,21 +1252,22 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       expect([...vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds!.background]).toEqual(background);
       fireEvent.click(screen.getByRole('button', { name: 'Redo selection edit' }));
       await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(0));
-      fireEvent.click(screen.getByRole('button', { name: 'Confirm selection' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
       await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
       expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute(
         'data-editing',
         'false',
       );
-      expect(screen.queryByRole('button', { name: 'Mark inside' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
       expect(screen.queryByText('Slice settings', { selector: 'summary' })).not.toBeInTheDocument();
       for (const plane of planes) expect(plane).toBeInTheDocument();
       expect(recorder.texSubImage3D.mock.calls.some((args) => args.slice(5, 8).every((value) => value === 1))).toBe(
         true,
       );
       openSelectionEditor();
-      expect(screen.getByRole('button', { name: 'Navigate' })).toHaveAttribute('aria-pressed', 'true');
-      expect(screen.queryByRole('slider', { name: 'Selection brush radius in millimeters' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add' })).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' })).toBeEnabled();
+      expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).not.toBeChecked();
       fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
       await waitFor(() =>
         expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels.some(Boolean)).toBe(false),
@@ -1274,13 +1284,15 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     render(<SvrVolume3DViewer volume={volume} />);
     openSelectionEditor();
     paint(5, 6);
-    expect(screen.queryByRole('button', { name: 'Confirm selection' })).not.toBeInTheDocument();
+    expect(screen.getByText('No tissue selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
     expect(run).not.toHaveBeenCalled();
     cleanup();
     render(<SvrVolume3DViewer volume={editingVolume()} />);
     openSelectionEditor();
-    paint(5, 6, 'Mark inside', true);
-    expect(screen.queryByRole('button', { name: 'Confirm selection' })).not.toBeInTheDocument();
+    paint(5, 6, 'Add', true);
+    expect(screen.getByText('No tissue selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Undo selection edit' })).not.toBeInTheDocument();
   });
 
@@ -1297,10 +1309,11 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
       openSelectionEditor();
       open3DSettings('Custom model');
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      setAutoFill(false);
       paint(5, 6);
       await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
-      fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+      setAutoFill(true);
       await waitFor(() => expect(run).toHaveBeenCalledOnce());
       const enhance = screen.getByRole('button', { name: /Enhance selection/ });
       expect(enhance).toBeDisabled();
@@ -1314,7 +1327,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Suggest with model' }));
       expect(modelSession.run).not.toHaveBeenCalled();
       if (completion === 'cancel') {
-        fireEvent.click(screen.getByRole('button', { name: 'Cancel suggestion' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
         expect(run.mock.calls[0]![1]?.signal?.aborted).toBe(true);
         await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
       }
@@ -1328,7 +1341,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       );
       await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
       expect(screen.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
-      expect(screen.queryByRole('button', { name: 'Cancel suggestion' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
       expect(runSuperResolution).not.toHaveBeenCalled();
       expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels[at(6, 6)]).toBe(
         completion === 'finish' ? 1 : 0,
@@ -1347,10 +1360,11 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     const suggestion = vi.spyOn(SeededVolumeWorker.prototype, 'run');
     render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+    setAutoFill(false);
     paint(5, 6);
-    paint(8, 6, 'Mark outside');
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm selection' }));
+    paint(8, 6, 'Remove');
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
     const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
     const labels = saved.labels.slice();
@@ -1386,17 +1400,17 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     ).toBeCloseTo(0.4);
     expect(screen.getByText('Learning local 3D detail')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel enhancement' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Mark outside' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Auto-fill' }));
     expect(suggestion).not.toHaveBeenCalled();
     unchanged();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel enhancement' }));
     expect(firstCall[1]!.signal!.aborted).toBe(true);
     expect(screen.getByText('Enhancement canceled. Original data is unchanged.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: /Enhance selection/ }));
     await waitFor(() => expect(runSuperResolution).toHaveBeenCalledTimes(2));
     await act(async () => first.resolve(enhancedFixture(firstCall[0])));
@@ -1461,11 +1475,13 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     createViewportRecorder({ width: 400, height: 320 });
     render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+    setAutoFill(false);
     paint(5, 6);
-    paint(8, 6, 'Mark outside');
-    fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+    paint(8, 6, 'Remove');
+    setAutoFill(true);
     await waitFor(() => expect(screen.getByRole('button', { name: /Enhance selection/ })).toBeEnabled());
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels[at(6, 6)]).toBe(1));
     const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
     const writes = vi.mocked(saveVolumeSegmentation).mock.calls.length;
     expect(dispose).not.toHaveBeenCalled();
@@ -1487,6 +1503,101 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds).toEqual(saved.seeds);
     expect(screen.getByRole('button', { name: 'Redo selection edit' })).toBeEnabled();
   });
+
+  it.each(['rejected', 'replaced'] as const)(
+    'retains completed enhancement through native-detail admission until the source is %s',
+    async (outcome) => {
+      const source = { ...editingVolume(), nativeVoxelSizeMm: [0.5, 0.5, 1] as [number, number, number] };
+      const native = { ...source, data: source.data.slice(), observedSupport: source.observedSupport!.slice() };
+      const output = enhancedFixture(native);
+      const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(native);
+      vi.mocked(runSuperResolution).mockResolvedValue(output);
+      const completion = deferred<SvrVolume | null>();
+      const admitted = vi.fn();
+      const recorder = createViewportRecorder({ width: 400, height: 320 });
+      function Workspace() {
+        const [volume, setVolume] = useState<SvrVolume>(source);
+        const [busy, setBusy] = useState(false);
+        return (
+          <SvrImagingContext.Provider
+            value={{
+              volume,
+              busy,
+              loadEnhancementSource: loadSource,
+              refineRegion: (labels, prepareMemory = 0) => {
+                admitted(labels, typeof prepareMemory === 'function' ? prepareMemory() : prepareMemory);
+                setBusy(true);
+                void completion.promise.then((replacement) => {
+                  if (replacement) setVolume(replacement);
+                  setBusy(false);
+                });
+              },
+            }}
+          >
+            <ContextViewer volumeIdentity={identity} />
+          </SvrImagingContext.Provider>
+        );
+      }
+      render(<Workspace />);
+      openSelectionEditor();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      setAutoFill(false);
+      paint(5, 6);
+      paint(8, 6, 'Remove');
+      await waitFor(() =>
+        expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].seeds!.background.length).toBe(1),
+      );
+      const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
+      const writes = vi.mocked(saveVolumeSegmentation).mock.calls.length;
+      fireEvent.click(screen.getByRole('button', { name: /Enhance selection/ }));
+      const comparison = await screen.findByRole('group', { name: 'Volume detail comparison' });
+      await waitFor(() => expect(recorder.latestInteger('u_enhancedEnabled')).toBe(1));
+      if (outcome === 'rejected') fireEvent.click(within(comparison).getByRole('button', { name: 'Original' }));
+      const displayEnabled = outcome === 'replaced' ? 1 : 0;
+      await waitFor(() => expect(recorder.latestInteger('u_enhancedEnabled')).toBe(displayEnabled));
+      const retainedDisplay =
+        native.data.byteLength +
+        native.observedSupport!.byteLength +
+        output.data.byteLength +
+        output.observedSupport.byteLength +
+        output.data.length * ENHANCED_TEXTURE_BYTES_PER_VOXEL +
+        native.data.length * ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL;
+      const editingBytes = loadSource.mock.calls[0]![1].retainedBytes!;
+      expect(editingBytes).toBeGreaterThan(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Use original detail' }));
+      expect(admitted).toHaveBeenCalledOnce();
+      const [current, bytes] = admitted.mock.lastCall!;
+      expect(current.data).toBe(saved.labels);
+      expect(current.seeds).toEqual(saved.seeds);
+      expect(bytes).toBe(editingBytes + retainedDisplay);
+      expect(screen.getByRole('button', { name: 'Use original detail' })).toBeDisabled();
+      expect(screen.getByRole('group', { name: 'Volume detail comparison' })).toBe(comparison);
+      await waitFor(() => expect(recorder.latestInteger('u_enhancedOriginalAvailable')).toBe(1));
+      expect(recorder.latestInteger('u_enhancedEnabled')).toBe(displayEnabled);
+      expect(vi.mocked(saveVolumeSegmentation)).toHaveBeenCalledTimes(writes);
+      await act(async () =>
+        completion.resolve(outcome === 'replaced' ? { ...source, data: source.data.slice() } : null),
+      );
+      if (outcome === 'rejected') {
+        expect(screen.getByRole('group', { name: 'Volume detail comparison' })).toBe(comparison);
+        expect(screen.getByRole('button', { name: 'Use original detail' })).toBeEnabled();
+        expect(recorder.latestInteger('u_enhancedOriginalAvailable')).toBe(1);
+        expect(recorder.latestInteger('u_enhancedEnabled')).toBe(displayEnabled);
+        expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeEnabled();
+        expect(vi.mocked(saveVolumeSegmentation)).toHaveBeenCalledTimes(writes);
+        expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0]).toBe(saved);
+      } else {
+        await waitFor(() =>
+          expect(screen.queryByRole('group', { name: 'Volume detail comparison' })).not.toBeInTheDocument(),
+        );
+        await waitFor(() => expect(recorder.latestInteger('u_enhancedOriginalAvailable')).toBe(0));
+      }
+      expect(native.data).toEqual(source.data);
+      expect(native.observedSupport).toEqual(source.observedSupport);
+      expect(runSuperResolution).toHaveBeenCalledOnce();
+      expect(loadSource).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([true, false])(
     'preserves MRI slice visibility=%s when enhancement completes and detail is toggled',
@@ -1554,17 +1665,18 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
   it.each(['slice', 'tool', 'escape'] as const)('discards an unfinished stroke after a %s change', (kind) => {
     render(<SvrVolume3DViewer volume={editingVolume()} />);
     openSelectionEditor();
-    fireEvent.click(screen.getByRole('button', { name: 'Mark inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });
     vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
     const point = { pointerId: 1, button: 0, isPrimary: true, clientX: 200, clientY: 160 };
     fireEvent.pointerDown(canvas, point);
     if (kind === 'slice')
       fireEvent.change(screen.getByRole('spinbutton', { name: 'Axial slice' }), { target: { value: '8' } });
-    else if (kind === 'tool') fireEvent.click(screen.getByRole('button', { name: 'Mark outside' }));
+    else if (kind === 'tool') fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
     else fireEvent.keyDown(canvas, { key: 'Escape' });
     fireEvent.pointerUp(canvas, point);
-    expect(screen.queryByRole('button', { name: 'Confirm selection' })).not.toBeInTheDocument();
+    expect(screen.getByText('No tissue selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Undo selection edit' })).not.toBeInTheDocument();
   });
 
@@ -1573,20 +1685,22 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     const run = vi.spyOn(SeededVolumeWorker.prototype, 'run');
     const view = render(<SvrVolume3DViewer volume={volume} />);
     openSelectionEditor();
+    setAutoFill(false);
     paint(5, 6);
-    expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeEnabled();
     view.rerender(<SvrVolume3DViewer volume={volume} busy />);
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Mark outside' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Suggest boundary' }));
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back to 3D' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Auto-fill' }));
     expect(run).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Navigate' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Browse' })).toBeEnabled();
     expect(screen.getByText(/your current selection is preserved/i)).toBeInTheDocument();
     view.rerender(<SvrVolume3DViewer volume={volume} />);
-    expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
   });
 
   it('reports exact patient-space crosshair coordinates without treating observed zero as missing data', () => {
@@ -1748,7 +1862,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} />);
     openSelectionEditor();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry loading' })).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Suggest boundary' })).not.toBeInTheDocument();
     expect(saveVolumeSegmentation).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry loading' }));
@@ -1761,7 +1875,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+    setAutoFill(false);
     paint(5, 6);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry saving' })).toBeInTheDocument());
     const unsaved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels;
@@ -1788,13 +1903,13 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     const view = render(<SvrVolume3DViewer volume={first} volumeIdentity={identity} />);
     openSelectionEditor();
     await waitFor(() => expect(getVolumeSegmentation).toHaveBeenCalledOnce());
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Suggest boundary' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Navigate' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Browse' })).toBeEnabled();
     expect(run).not.toHaveBeenCalled();
     expect(saveVolumeSegmentation).not.toHaveBeenCalled();
     view.rerender(<SvrVolume3DViewer volume={second} volumeIdentity={identity} />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm selection' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled());
     await act(async () =>
       load.resolve({ volumeKey: 'old', dims: first.dims, labels: new Uint8Array(first.data.length), updatedAt: 0 }),
     );
@@ -1806,7 +1921,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     vi.mocked(saveVolumeSegmentation).mockReturnValueOnce(save.promise);
     const view = render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark inside' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+    setAutoFill(false);
     paint(5, 6);
     await waitFor(() => expect(saveVolumeSegmentation).toHaveBeenCalledOnce());
     const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
@@ -1830,7 +1946,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       <SvrVolume3DViewer volume={volume} initialSelection={initialSelection} volumeIdentity={identity} />,
     );
     openSelectionEditor();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Suggest boundary' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeEnabled());
     expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
     view.unmount();
     const saved = data.slice();
@@ -1862,7 +1978,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       />,
     );
     openSelectionEditor();
-    expect(screen.getByRole('button', { name: 'Mark inside' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
     expect(screen.getByText(/Draft · review/)).toBeInTheDocument();
     expect(screen.queryByText(/Reviewed selection ·/)).not.toBeInTheDocument();
     open3DSettings('Selection measurements');

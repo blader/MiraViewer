@@ -161,8 +161,63 @@ describe('visible background alignment', () => {
     });
   });
 
-  it('still debounces a cold registration when a visible target cannot reuse the accepted pose', async () => {
-    const props = options({ canReuseRegistration: vi.fn(() => false) });
+  it('schedules mixed warm and cold targets immediately when any visible pair can reuse registration', async () => {
+    const cold = { ...target, series_uid: 'cold' };
+    const seriesMap = { new: reference, cold, old: target };
+    const canReuseRegistration = vi.fn<NonNullable<Options['canReuseRegistration']>>((_reference, dates) =>
+      dates.includes('old'),
+    );
+    const props = options({
+      data: { ...data, dates: ['new', 'cold', 'old'], series_map: { flair: seriesMap } },
+      columns: [
+        { date: 'new', ref: reference },
+        { date: 'cold', ref: cold },
+        { date: 'old', ref: target },
+      ],
+      canReuseRegistration,
+    });
+    const { result, rerender } = renderHook(useVisibleAlignment, { initialProps: props });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(canReuseRegistration).toHaveBeenCalledWith(
+      expect.objectContaining({ seriesUid: 'new', sliceIndex: 50 }),
+      ['cold', 'old'],
+      seriesMap,
+      'native',
+    );
+    expect(props.alignAllDates).toHaveBeenCalledOnce();
+
+    rerender({ ...props, progress: 0.51 });
+    rerender({ ...props, progress: 0.52 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(props.abort).toHaveBeenCalledTimes(2);
+    expect(props.alignAllDates).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(props.alignAllDates).mock.lastCall).toEqual([
+      expect.objectContaining({ sliceIndex: 52 }),
+      ['cold', 'old'],
+      seriesMap,
+      0.52,
+      expect.objectContaining({ reuseRegistration: true, requestKey: result.current.activeRequestKey }),
+    ]);
+    await settle(props, 2);
+  });
+
+  it('still waits 650ms when all visible target registrations are cold', async () => {
+    const cold = { ...target, series_uid: 'cold' };
+    const props = options({
+      data: { ...data, dates: ['new', 'cold', 'old'], series_map: { flair: { new: reference, cold, old: target } } },
+      columns: [
+        { date: 'new', ref: reference },
+        { date: 'cold', ref: cold },
+        { date: 'old', ref: target },
+      ],
+      canReuseRegistration: vi.fn(() => false),
+    });
     renderHook(() => useVisibleAlignment(props));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(649);
@@ -295,7 +350,7 @@ describe('visible background alignment', () => {
     const { result, rerender } = renderHook(useVisibleAlignment, { initialProps: props });
     await settle(props);
     rerender({ ...props, progress: 0.51 });
-    expect(result.current.browsing?.reference.sliceIndex).toBe(51);
+    expect(result.current.browsing?.reference?.sliceIndex).toBe(51);
 
     rerender({ ...props, progress: 0.51, enabled: false });
 
@@ -353,7 +408,7 @@ describe('visible background alignment', () => {
     });
 
     act(() => clearDerivedAlignmentFrames());
-    expect(result.current.browsing?.reference.seriesUid).toBe('new');
+    expect(result.current.browsing?.reference?.seriesUid).toBe('new');
   });
 
   it.each([

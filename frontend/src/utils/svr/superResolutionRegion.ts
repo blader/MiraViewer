@@ -1,5 +1,6 @@
 import type { SvrLabelVolume, SvrRoi, SvrVolume } from '../../types/svr';
-import { nativeDecodedCacheBudgetBytes, retainedSvrVolumeBytes } from './nativeVolume';
+import { measureCornerstoneImageMemory, type CornerstoneMemorySource } from '../cornerstoneMemory';
+import { retainedSvrVolumeBytes } from './nativeVolume';
 import { SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { MAX_SR_OUTPUT_VOXELS, MIN_SR_CONTEXT_DIM } from './superResolutionTypes';
@@ -45,6 +46,7 @@ export type EnhancementImageCache = {
     imageId: string;
     timeStamp: number;
     sizeInBytes: number;
+    image?: unknown;
     imageLoadObject?: object;
   }[];
   getImageLoadObject?: (imageId: string) => unknown;
@@ -72,7 +74,7 @@ export function assertEnhancementFits(sourceVoxels: number, retainedBytes = 0): 
   const budgetMiB = Math.floor(SVR_MEMORY_BUDGET_BYTES / (1024 * 1024));
   if (retainedBytes + enhancementWorkingBytes(MIN_SR_CONTEXT_DIM ** 3) > SVR_MEMORY_BUDGET_BYTES)
     throw new Error(
-      `The open volume and working data leave no room for even a small enhancement (${Math.ceil(retainedBytes / (1024 * 1024))} MiB retained; ${budgetMiB} MiB budget). Load native detail for this selection, then try again. Original detail will not be reduced.`,
+      `The open volume and working data leave no room for even a small enhancement (${Math.ceil(retainedBytes / (1024 * 1024))} MiB retained; ${budgetMiB} MiB budget). Use original detail for this selection, then try again. Original detail will not be reduced.`,
     );
   throw new Error(
     `This region is too large for 2× enhancement with the currently open data (estimated ${Math.ceil(totalBytes / (1024 * 1024))} MiB; ${budgetMiB} MiB budget). Select a smaller region; original detail will not be reduced.`,
@@ -86,21 +88,12 @@ export async function prepareEnhancementMemory(
   cache: EnhancementImageCache,
   protectedImageIds?: EnhancementProtectedImageIds,
   signal?: AbortSignal,
+  getEnabledElements?: CornerstoneMemorySource['getEnabledElements'],
 ): Promise<number> {
   assertNotAborted(signal);
   // A larger-than-supported region or an irreducible resident floor cannot be fixed by discarding cache entries.
   assertEnhancementFits(sourceVoxels, retainedBytes);
-  const measure = () => {
-    try {
-      const info = cache.getCacheInfo?.();
-      return {
-        bytes: nativeDecodedCacheBudgetBytes(info),
-        measured: Number.isFinite(info?.cacheSizeInBytes) && info!.cacheSizeInBytes! >= 0,
-      };
-    } catch {
-      return { bytes: nativeDecodedCacheBudgetBytes(), measured: false };
-    }
-  };
+  const measure = () => measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements });
   const availableBytes = SVR_MEMORY_BUDGET_BYTES - retainedBytes - enhancementWorkingBytes(sourceVoxels);
   let residency = measure();
   let removed = false;
@@ -278,6 +271,7 @@ export async function cropEnhancementSource(
   options: EnhancementSourceOptions & {
     imageCache?: EnhancementImageCache;
     protectedImageIds?: EnhancementProtectedImageIds;
+    getEnabledElements?: CornerstoneMemorySource['getEnabledElements'];
   } = {},
 ): Promise<SvrVolume> {
   const { min, max } = await selectionBounds(volume, labels, options.signal);
@@ -296,7 +290,14 @@ export async function cropEnhancementSource(
   const count = dims[0] * dims[1] * dims[2];
   const retainedBytes = retainedSvrVolumeBytes(volume) + (options.retainedBytes ?? 0);
   if (options.imageCache)
-    await prepareEnhancementMemory(count, retainedBytes, options.imageCache, options.protectedImageIds, options.signal);
+    await prepareEnhancementMemory(
+      count,
+      retainedBytes,
+      options.imageCache,
+      options.protectedImageIds,
+      options.signal,
+      options.getEnabledElements,
+    );
   else assertEnhancementFits(count, retainedBytes);
   const data = new Float32Array(count),
     observedSupport = new Uint8Array(count);
@@ -319,7 +320,14 @@ export async function cropEnhancementSource(
   assertNotAborted(options.signal);
   // Decoding/browsing can refill the cache during cooperative copying; admit the next phase against current owners.
   if (options.imageCache)
-    await prepareEnhancementMemory(count, retainedBytes, options.imageCache, options.protectedImageIds, options.signal);
+    await prepareEnhancementMemory(
+      count,
+      retainedBytes,
+      options.imageCache,
+      options.protectedImageIds,
+      options.signal,
+      options.getEnabledElements,
+    );
   const cropped: SvrVolume = {
     ...volume,
     data,

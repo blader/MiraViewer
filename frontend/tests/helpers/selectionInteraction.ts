@@ -1,7 +1,12 @@
 import { fireEvent, screen } from '@testing-library/react';
 import { vi } from 'vitest';
 
-export function paint(x = 5, y = 6, kind: 'Mark inside' | 'Mark outside' = 'Mark inside', cancel = false) {
+export function setAutoFill(enabled: boolean) {
+  const checkbox = screen.getByRole('checkbox', { name: 'Auto-fill' }) as HTMLInputElement;
+  if (checkbox.checked !== enabled) fireEvent.click(checkbox);
+}
+
+export function paint(x = 5, y = 6, kind: 'Add' | 'Remove' = 'Add', cancel = false) {
   fireEvent.click(screen.getByRole('button', { name: kind }));
   fireEvent.change(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' }), {
     target: { value: '0.5' },

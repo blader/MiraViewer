@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
 import type { SvrLabelVolume, SvrProgress, SvrResult, SvrVolume } from '../src/types/svr';
@@ -6,9 +6,12 @@ import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
 import { useSvrImaging } from '../src/components/svrImagingContext';
 import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 import type * as DerivedAlignmentFrames from '../src/utils/derivedAlignmentFrame';
+import type * as ReconstructionHooks from '../src/hooks/useSvrReconstruction';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
-import { retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
+import { assembleNativeVolume, planNativeVolume, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
+import { regionalRefinementParameters, selectionFocusRoi } from '../src/utils/svr/refineRegion';
+import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 
 const mocks = vi.hoisted(() => ({
   cacheInfo: vi.fn(),
@@ -17,7 +20,7 @@ const mocks = vi.hoisted(() => ({
     sizeInBytes: number;
     timeStamp: number;
     loaded: boolean;
-    image?: { imageId: string };
+    image?: { imageId: string; getPixelData?: () => Uint8Array };
     imageLoadObject?: object;
   }[],
   removeCachedImage: vi.fn(),
@@ -30,7 +33,9 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   clear: vi.fn(),
   reconstruct: vi.fn(),
+  useReconstruction: vi.fn(),
   enhancementLoader: vi.fn(),
+  refinementLoader: vi.fn(),
   hook: {
     status: 'idle' as 'idle' | 'running' | 'ready' | 'failed' | 'canceled' | 'canceling',
     isRunning: false,
@@ -54,12 +59,7 @@ vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
-  useSvrReconstruction: () => ({
-    ...mocks.hook,
-    run: mocks.run,
-    cancel: mocks.cancel,
-    clear: mocks.clear,
-  }),
+  useSvrReconstruction: () => mocks.useReconstruction(),
 }));
 
 vi.mock('../src/utils/svr/reconstructVolume', () => ({ reconstructVolumeMultiPlane: mocks.reconstruct }));
@@ -77,6 +77,7 @@ vi.mock('../src/components/SvrVolume3DViewer', () => ({
   }) {
     const imaging = useSvrImaging();
     mocks.enhancementLoader(imaging.loadEnhancementSource);
+    mocks.refinementLoader(imaging.refineRegion);
     return (
       <div data-testid="accepted-svr-volume">
         {volumeIdentity?.patientKey} / {volumeIdentity?.studyUid}
@@ -175,6 +176,7 @@ function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = fa
       instanceNumber: index + 1,
       rows: 8,
       columns: 8,
+      dicomByteLength: 8 * 8 * 2,
       imagePositionPatient: isCoronal
         ? '0\\\\' + index + '\\\\0'
         : isSagittal
@@ -325,6 +327,12 @@ function openReconstructionSettings() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.useReconstruction.mockImplementation(() => ({
+    ...mocks.hook,
+    run: mocks.run,
+    cancel: mocks.cancel,
+    clear: mocks.clear,
+  }));
   mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
   mocks.reconstruct.mockReset();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
@@ -564,7 +572,11 @@ describe('SVR reconstruction workspace', () => {
         reload ? [20, 0, 0] : [0, 0, 0],
         reload ? [12, 32, 32] : [32, 32, 32],
       );
-      const displayedImage = { imageId: 'dicomfile:0' };
+      const decodedImage = (imageId: string, sizeMiB: number) => {
+        const pixels = new Uint8Array(sizeMiB * mib);
+        return { imageId, getPixelData: () => pixels };
+      };
+      const displayedImage = decodedImage('dicomfile:0', 64);
       mocks.cachedImages.push(
         {
           imageId: 'miradb:displayed',
@@ -574,7 +586,14 @@ describe('SVR reconstruction workspace', () => {
           image: displayedImage,
           imageLoadObject: {},
         },
-        { imageId: 'miradb:loading', sizeInBytes: 80 * mib, timeStamp: 2, loaded: false, imageLoadObject: {} },
+        {
+          imageId: 'miradb:loading',
+          sizeInBytes: 80 * mib,
+          timeStamp: 2,
+          loaded: false,
+          image: decodedImage('miradb:loading', 80),
+          imageLoadObject: {},
+        },
         // Inner file-manager IDs can be reused; a different object with the
         // same dicomfile ID must not be mistaken for the displayed frame.
         {
@@ -582,10 +601,17 @@ describe('SVR reconstruction workspace', () => {
           sizeInBytes: 80 * mib,
           timeStamp: 3,
           loaded: true,
-          image: { imageId: 'dicomfile:0' },
+          image: decodedImage('dicomfile:0', 80),
           imageLoadObject: {},
         },
-        { imageId: 'miraderived:idle-recent', sizeInBytes: 176 * mib, timeStamp: 4, loaded: true, imageLoadObject: {} },
+        {
+          imageId: 'miraderived:idle-recent',
+          sizeInBytes: 176 * mib,
+          timeStamp: 4,
+          loaded: true,
+          image: decodedImage('miraderived:idle-recent', 176),
+          imageLoadObject: {},
+        },
       );
       mocks.cacheInfo.mockImplementation(() => ({
         cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
@@ -648,36 +674,38 @@ describe('SVR reconstruction workspace', () => {
       const mib = 1024 * 1024;
       const comparisonData = nativeComparisonData();
       const { sourceManifest, previous, labels } = nativeEnhancementFixture([24, 64, 64], [20, 0, 0], [12, 32, 32]);
+      const pixels = new Uint8Array(320 * mib);
+      const displayedImage = { imageId: 'miradb:displayed', getPixelData: () => pixels };
       mocks.cachedImages.push({
         imageId: 'miradb:displayed',
         sizeInBytes: 320 * mib,
         timeStamp: 1,
         loaded: true,
+        image: displayedImage,
         imageLoadObject: {},
       });
       mocks.cacheInfo.mockImplementation(() => ({
         cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
         maximumSizeInBytes: 512 * mib,
       }));
-      mocks.enabledElements.mockReturnValue([{ image: { imageId: 'miradb:displayed' } }]);
+      mocks.enabledElements.mockReturnValue([{ image: displayedImage }]);
       mocks.manifests.mockResolvedValue(sourceManifest);
       mocks.hook.result = previous;
       mocks.hook.resultIdentity = identity(comparisonData);
       mocks.hook.status = 'ready';
       const loaded = nativeEnhancementFixture([33, 33, 33], [16, 16, 16], [16, 16, 16]).previous;
       mocks.reconstruct.mockImplementation(async () => {
+        const newPixels = new Uint8Array(80 * mib);
+        const newImage = { imageId: 'miradb:new-frame', getPixelData: () => newPixels };
         mocks.cachedImages.push({
           imageId: 'miradb:new-frame',
           sizeInBytes: 80 * mib,
           timeStamp: 2,
           loaded: true,
+          image: newImage,
           imageLoadObject: {},
         });
-        if (protectedFrame)
-          mocks.enabledElements.mockReturnValue([
-            { image: { imageId: 'miradb:displayed' } },
-            { image: { imageId: 'miradb:new-frame' } },
-          ]);
+        if (protectedFrame) mocks.enabledElements.mockReturnValue([{ image: displayedImage }, { image: newImage }]);
         return loaded;
       });
       render(<Svr3DView data={comparisonData} />);
@@ -733,6 +761,83 @@ describe('SVR reconstruction workspace', () => {
     expect(transfer.volume).toBe(previous.volume);
     expect(transfer.labels.data[0]).toBe(1);
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+  });
+
+  it('rejects exact native refinement using live retained owners before decoding and preserves the visible draft/settings', async () => {
+    const { useSvrReconstruction } = await vi.importActual<typeof ReconstructionHooks>(
+      '../src/hooks/useSvrReconstruction',
+    );
+    mocks.useReconstruction.mockImplementation(useSvrReconstruction);
+    const { sourceManifest, previous, labels } = nativeEnhancementFixture([12, 12, 12], [0, 0, 0], [6, 6, 6]);
+    labels.reviewState = 'draft';
+    labels.seeds = { foreground: Uint32Array.of((6 * 12 + 6) * 12 + 6), background: new Uint32Array() };
+    const maskBefore = labels.data.slice();
+    const sourceBefore = previous.volume.data.slice();
+    const requested = regionalRefinementParameters(
+      previous.parameters,
+      selectionFocusRoi(previous.volume, labels, 'axial-patient-a'),
+    );
+    const transform = previous.volume.sourceProvenance!.sources[0]!.transform;
+    const retainedVolume = retainedSvrVolumeBytes(previous.volume);
+    const base = planNativeVolume(sourceManifest, requested, {
+      retainedBytes: retainedVolume,
+      decodedCacheBytes: 0,
+      transform,
+    });
+    const decodedCacheBytes = SVR_MEMORY_BUDGET_BYTES - base.totalBytes - 32;
+    const editing = new Uint32Array(16);
+    const alignment = new Float32Array(32);
+    const prepareMemory = vi.fn(() => editing.buffer.byteLength);
+    const readFrame = vi.fn();
+    mocks.manifests.mockResolvedValue(sourceManifest);
+    mocks.reconstruct.mockResolvedValueOnce(previous).mockImplementationOnce(async (request) => {
+      expect(request.acceptedProvenance).toBe(previous.volume.sourceProvenance);
+      expect(request.svrParams).toEqual(requested);
+      expect(request.retainedBytes).toBe(retainedVolume + editing.buffer.byteLength + alignment.buffer.byteLength);
+      const plan = planNativeVolume(sourceManifest, request.svrParams, {
+        retainedBytes: request.retainedBytes,
+        decodedCacheBytes,
+        transform,
+      });
+      const withoutEditing = planNativeVolume(sourceManifest, request.svrParams, {
+        retainedBytes: retainedVolume,
+        decodedCacheBytes,
+        transform,
+      });
+      expect(withoutEditing.totalBytes).toBeLessThanOrEqual(SVR_MEMORY_BUDGET_BYTES);
+      expect(plan.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+      expect(plan.sourceStrides).toEqual([1, 1, 1]);
+      expect(plan.voxelSizeMm).toEqual(previous.volume.nativeVoxelSizeMm);
+      expect(plan.boundsMm).toEqual(base.boundsMm);
+      expect(plan.dims).toEqual(base.dims);
+      return { volume: await assembleNativeVolume(plan, readFrame) };
+    });
+    render(<Svr3DView data={nativeComparisonData()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open 3D volume' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Open 3D volume' }));
+    await screen.findByTestId('accepted-svr-volume');
+    mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: decodedCacheBytes });
+    mocks.retainedAlignmentBytes.mockReturnValue(alignment.buffer.byteLength);
+    act(() => mocks.refinementLoader.mock.lastCall![0](labels, prepareMemory));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/native-resolution region exceeds the browser memory budget/),
+    );
+    expect(prepareMemory).toHaveBeenCalledOnce();
+    expect(mocks.retainedAlignmentBytes).toHaveBeenCalledOnce();
+    expect(mocks.reconstruct).toHaveBeenCalledTimes(2);
+    expect(readFrame).not.toHaveBeenCalled();
+    expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
+    expect(labels.data).toEqual(maskBefore);
+    expect(labels.reviewState).toBe('draft');
+    expect(labels.seeds.foreground).toEqual(Uint32Array.of((6 * 12 + 6) * 12 + 6));
+    expect(previous.volume.data).toEqual(sourceBefore);
+    openSources();
+    expect(screen.queryByRole('button', { name: 'Load native region' })).not.toBeInTheDocument();
+    mocks.reconstruct.mockResolvedValueOnce(previous);
+    fireEvent.click(screen.getByRole('button', { name: 'Open 3D volume' }));
+    await waitFor(() => expect(mocks.reconstruct).toHaveBeenCalledTimes(3));
+    expect(mocks.reconstruct.mock.calls[2]![0].svrParams).toEqual(mocks.reconstruct.mock.calls[0]![0].svrParams);
+    expect(mocks.reconstruct.mock.calls[2]![0].svrParams.roi).toBeNull();
   });
 
   it('opens one reliable source stack without pretending it is independent multi-acquisition fusion', async () => {
@@ -852,55 +957,64 @@ describe('SVR reconstruction workspace', () => {
     expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
   });
 
-  it('automatically admits 702 acquired source frames at the nearest memory-safe effective voxel spacing', async () => {
-    const comparisonData = data('patient-a', 3);
-    const sourceFrameCounts = { axial: 221, coronal: 221, sagittal: 260 };
+  it.each([0, 256])(
+    'admits 702 acquired source frames without reserving an entire new image cache (%i MiB already resident)',
+    async (cachedMiB) => {
+      const comparisonData = data('patient-a', 3);
+      mocks.cacheInfo.mockReturnValue({
+        cacheSizeInBytes: cachedMiB * 1024 * 1024,
+        maximumSizeInBytes: 256 * 1024 * 1024,
+      });
+      const sourceFrameCounts = { axial: 221, coronal: 221, sagittal: 260 };
 
-    for (const sequence of comparisonData.sequences) {
-      const plane = sequence.plane!.toLowerCase() as keyof typeof sourceFrameCounts;
-      comparisonData.series_map[sequence.id]![EXAMINATION]!.instance_count = sourceFrameCounts[plane];
-    }
+      for (const sequence of comparisonData.sequences) {
+        const plane = sequence.plane!.toLowerCase() as keyof typeof sourceFrameCounts;
+        comparisonData.series_map[sequence.id]![EXAMINATION]!.instance_count = sourceFrameCounts[plane];
+      }
 
-    mocks.manifests.mockImplementation(async (seriesUid: string) => {
-      const source = manifest(seriesUid);
-      const plane = seriesUid.split('-')[0] as keyof typeof sourceFrameCounts;
-      const frame = source.frames[0]!;
+      mocks.manifests.mockImplementation(async (seriesUid: string) => {
+        const source = manifest(seriesUid);
+        const plane = seriesUid.split('-')[0] as keyof typeof sourceFrameCounts;
+        const frame = source.frames[0]!;
 
-      return {
-        ...source,
-        frames: Array.from({ length: sourceFrameCounts[plane] }, (_, index) => ({
-          ...frame,
-          sopInstanceUid: `${seriesUid}-frame-${index}`,
-          instanceNumber: index + 1,
-          rows: 512,
-          columns: 512,
-          pixelSpacing: '0.43,0.43',
-          imagePositionPatient:
-            plane === 'coronal' ? `0,${index},0` : plane === 'sagittal' ? `${index},0,0` : `0,0,${index}`,
-          physicalSlicePosition: index,
-        })),
-      };
-    });
+        return {
+          ...source,
+          frames: Array.from({ length: sourceFrameCounts[plane] }, (_, index) => ({
+            ...frame,
+            sopInstanceUid: `${seriesUid}-frame-${index}`,
+            instanceNumber: index + 1,
+            rows: 512,
+            columns: 512,
+            pixelSpacing: '0.43,0.43',
+            imagePositionPatient:
+              plane === 'coronal' ? `0,${index},0` : plane === 'sagittal' ? `${index},0,0` : `0,0,${index}`,
+            physicalSlicePosition: index,
+          })),
+        };
+      });
 
-    render(<Svr3DView data={comparisonData} />);
-    await openSourceDetails();
+      render(<Svr3DView data={comparisonData} />);
+      await openSourceDetails();
 
-    await waitFor(() => {
-      expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/(?:[1-4]\d\d|50\d|51[0-2]) MiB/);
-    });
+      await waitFor(() => {
+        expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/(?:[1-4]\d\d|50\d|51[0-2]) MiB/);
+      });
 
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
-    expect(screen.getByText('Requested voxel spacing').parentElement).toHaveTextContent('1.00 mm');
-    expect(screen.getByText('Effective voxel spacing').parentElement).not.toHaveTextContent('1.00 mm');
-    expect(screen.getByText(/automatically adjusted to stay within the 512 mib memory budget/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
+      expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
+      expect(screen.getByText('Requested voxel spacing').parentElement).toHaveTextContent('1.00 mm');
+      expect(screen.getByText('Effective voxel spacing').parentElement).not.toHaveTextContent('1.00 mm');
+      const adjusted = screen.queryByText(/automatically adjusted to stay within the 512 mib memory budget/i);
+      if (cachedMiB) expect(adjusted).toBeInTheDocument();
+      else expect(adjusted).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
 
-    const effectiveParams = mocks.run.mock.calls[0]?.[1];
-    // Admission includes the bounded native-plane cache and upload transients
-    // alongside decoded frames, the solver, and incoming CPU/GPU labels.
-    expect(effectiveParams.targetVoxelSizeMm).toBe(1.19);
-    expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
-  });
+      const effectiveParams = mocks.run.mock.calls[0]?.[1];
+      // Admission includes the bounded native-plane cache and upload transients
+      // alongside decoded frames, the solver, and incoming CPU/GPU labels.
+      expect(effectiveParams.targetVoxelSizeMm).toBe(cachedMiB ? 1.19 : 1);
+      expect(mocks.run.mock.calls[0]?.[2]).toBe(identity(comparisonData));
+    },
+  );
 
   it('never renders the previous patient volume after a patient switch', async () => {
     const first = data('patient-a');

@@ -47,6 +47,7 @@
 .svr-selection-review-state,
 .svr-selection-brush,
 .svr-selection-display-controls,
+.svr-selection-native-detail,
 .svr-selection-toolbar button,
 .svr-selection-guidance {
   font-size: 12px;
@@ -136,21 +137,30 @@
   margin-left: auto;
   gap: 6px;
 }
-.svr-selection-toolbar button.svr-selection-suggest:not(:disabled) {
-  color: var(--bg-primary);
-  background: var(--signal-metal);
-  border-color: var(--signal-metal);
-}
 .svr-selection-toolbar .svr-selection-clear {
   border-color: transparent;
 }
 .svr-selection-toolbar .svr-selection-workflow-action {
   margin-left: auto;
 }
-.svr-selection-workbench[data-editing='false'] .svr-selection-workflow-action:not(:disabled) {
+.svr-selection-toolbar .svr-selection-workflow-action:not(:disabled) {
   color: var(--bg-primary);
   border-color: var(--signal-metal);
   background: var(--signal-metal);
+}
+.svr-selection-autofill {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.svr-selection-autofill input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--evidence);
 }
 .svr-selection-workbench[data-editing='false'] .svr-selection-volume > .svr-selection-pane-heading {
   display: none;
@@ -159,6 +169,23 @@
   margin-top: 8px;
   min-height: 18px;
   line-height: 1.5;
+}
+.svr-selection-native-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 8px;
+}
+.svr-selection-native-detail > div {
+  display: flex;
+  flex: 1 1 260px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.svr-selection-sampling {
+  font: 11px var(--font-mono);
+  color: var(--text-primary);
 }
 .svr-selection-warning {
   margin-top: 6px;
@@ -670,6 +697,7 @@
 }
 @media (pointer: coarse) {
   .svr-selection-toolbar button,
+  .svr-selection-autofill,
   .svr-selection-pane-actions button {
     min-height: 44px;
     min-width: 44px;
@@ -1564,7 +1592,8 @@ textarea {
   .instrument-context-rail {
     min-height: 44px;
     gap: 6px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding: 0 6px;
   }
 

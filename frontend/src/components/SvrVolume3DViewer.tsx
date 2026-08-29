@@ -430,7 +430,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   const [hydrated, setHydrated] = useState<{ key: string; volume: SvrVolume } | null>(null);
   const [storageError, setStorageError] = useState<{ key: string; phase: 'load' | 'save' } | null>(null);
   const [storageRetry, setStorageRetry] = useState({ load: 0, save: 0 });
-  const saveQueue = useRef<Promise<void> | null>(null);
   const labelSourceRef = useRef<string | undefined>(undefined);
   const labelCountsRef = useRef<{
     data: Uint8Array;
@@ -501,8 +500,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       return;
     }
     let cancelled = false;
-    void (saveQueue.current ?? Promise.resolve())
-      .then(() => getVolumeSegmentation(volumeKey))
+    void getVolumeSegmentation(volumeKey)
       .then(async (saved) => {
         if (cancelled) return;
         if (saved) {
@@ -573,8 +571,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     )
       return;
 
-    // Each completed edit is durable work. Serialize writes and let them finish on
-    // unmount; a debounced cleanup used to discard the most recent correction.
+    // Submit each completed edit immediately. IndexedDB serializes it with later
+    // reads/writes across mounts; component-local queues cannot protect a remount.
     let current = true;
     const record = generatedLabels
       ? {
@@ -595,9 +593,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           updatedAt: Date.now(),
         }
       : null;
-    saveQueue.current = (saveQueue.current ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => (record ? saveVolumeSegmentation(record) : deleteVolumeSegmentation(volumeKey)))
+    void (record ? saveVolumeSegmentation(record) : deleteVolumeSegmentation(volumeKey))
       .then(() => {
         if (current) setStorageError(null);
       })
@@ -675,6 +671,15 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     loadSource: loadEnhancementSource,
     blocked: Boolean(busy || onnxSegRunning || savedMigration?.running),
   });
+  const refineWithEnhancement = useCallback<NonNullable<typeof refineRegion>>(
+    (selection, prepareMemory = 0) =>
+      refineRegion?.(selection, () => {
+        const bytes = typeof prepareMemory === 'function' ? prepareMemory() : prepareMemory;
+        // Invalid caller estimates must reach the admission guard unchanged.
+        return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes + enhancement.retainedBytes : bytes;
+      }),
+    [refineRegion, enhancement.retainedBytes],
+  );
   const glEnhancementRef = useRef<EnhancedVolumeBinding | null>(null);
   const enhancementDisplayRef = useRef(enhancement);
 
@@ -2236,7 +2241,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     cancelSavedTransfer,
     observedSupportSummary,
     onSelectionChange,
-    refineRegion,
+    refineRegion: refineRegion ? refineWithEnhancement : undefined,
     selectionReady:
       (!volumeKey || (hydrated?.key === volumeKey && hydrated.volume === volume)) &&
       !labelsOverride &&

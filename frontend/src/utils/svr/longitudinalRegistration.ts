@@ -1,4 +1,5 @@
 import { outputGridPixelToWorld, validateOutputPlaneGrid, type OutputPlaneGrid } from '../outputPlaneGrid';
+import { boundedCubicValue, cubicInterpolationWeights } from '../sharpSliceSynthesis';
 import { prepareAlignmentContext } from '../contextualAlignment';
 import {
   minimumBilateralAnatomicalRetention,
@@ -571,6 +572,7 @@ type NativeSliceSample = {
   value: number;
   lower?: SvrReconstructionSlice;
   upper?: SvrReconstructionSlice;
+  context?: readonly SvrReconstructionSlice[];
 };
 
 function prepareNativeSliceStack(slices: readonly SvrReconstructionSlice[]): NativeSliceStack {
@@ -591,7 +593,7 @@ function prepareNativeSliceStack(slices: readonly SvrReconstructionSlice[]): Nat
   };
 }
 
-function sampleNativeSliceStack(stack: NativeSliceStack, point: Vec3): NativeSliceSample | null {
+function sampleNativeSliceStack(stack: NativeSliceStack, point: Vec3, sharp = false): NativeSliceSample | null {
   const { ordered, expectedSpacing } = stack;
   const depth = dot(point, stack.normal);
   const first = ordered[0]!;
@@ -649,11 +651,45 @@ function sampleNativeSliceStack(stack: NativeSliceStack, point: Vec3): NativeSli
   const useUpper = fraction > COORDINATE_EPSILON_MM;
   if ((useLower && lowerValue === null) || (useUpper && upperValue === null)) return null;
   if (!useLower && upperValue === null && lowerValue === null) return null;
-  return {
-    value: (lowerValue ?? upperValue ?? 0) * (1 - fraction) + (upperValue ?? lowerValue ?? 0) * fraction,
+  let value = (lowerValue ?? upperValue ?? 0) * (1 - fraction) + (upperValue ?? lowerValue ?? 0) * fraction;
+  let context: readonly SvrReconstructionSlice[] | undefined;
+  // Display-only higher-order sampling uses the same patient-space points and
+  // support checks. Registration and all existing callers stay linear by default.
+  if (sharp && useLower && useUpper && lo > 1 && lo + 1 < ordered.length) {
+    const neighbors = ordered.slice(lo - 2, lo + 2);
+    const contiguous = neighbors.slice(1).every((neighbor, index) => {
+      const previous = neighbors[index]!;
+      const gap = neighbor.depth - previous.depth;
+      const thickness = (slice: SvrReconstructionSlice) =>
+        slice.sliceThicknessMm ?? slice.spacingBetweenSlicesMm ?? expectedSpacing;
+      return (
+        gap > COORDINATE_EPSILON_MM &&
+        gap <= expectedSpacing * 1.5 + COORDINATE_EPSILON_MM &&
+        (thickness(previous.slice) + thickness(neighbor.slice)) / 2 + COORDINATE_EPSILON_MM >= gap
+      );
+    });
+    if (contiguous) {
+      const a = sampleSliceBilinear(neighbors[0]!.slice, point);
+      const d = sampleSliceBilinear(neighbors[3]!.slice, point);
+      if (a !== null && d !== null) {
+        value = boundedCubicValue(
+          [a, lowerValue!, upperValue!, d],
+          cubicInterpolationWeights(
+            neighbors.map((neighbor) => neighbor.depth),
+            depth,
+          ),
+        );
+        context = [neighbors[0]!.slice, neighbors[3]!.slice];
+      }
+    }
+  }
+  const result: NativeSliceSample = {
+    value,
     ...(useLower || !useUpper ? { lower: lower.slice } : {}),
     ...(useUpper ? { upper: upper.slice } : {}),
   };
+  if (context) result.context = context;
+  return result;
 }
 
 export function resliceStackToReferencePlane(params: {
@@ -662,6 +698,8 @@ export function resliceStackToReferencePlane(params: {
   outputGrid?: OutputPlaneGrid;
   targetToReference?: RigidParams;
   centerMm?: Vec3;
+  /** Opt-in presentation only; never use inferred detail in registration scoring. */
+  interpolation?: 'linear' | 'bounded-cubic';
   signal?: AbortSignal;
 }): LongitudinalReslicedPlane {
   const { targetSlices, referenceSlice, outputGrid, signal } = params;
@@ -715,7 +753,7 @@ export function resliceStackToReferencePlane(params: {
             referencePoint.z + outputRowDirection.z * rowOffset + outputColDirection.z * colOffset,
           );
           const targetPoint = inverseRigidPoint(footprintPoint, rigid, center, rotation);
-          const sample = sampleNativeSliceStack(targetStack, targetPoint);
+          const sample = sampleNativeSliceStack(targetStack, targetPoint, params.interpolation === 'bounded-cubic');
           if (!sample) {
             sampleCount = -1;
             break;
@@ -734,6 +772,10 @@ export function resliceStackToReferencePlane(params: {
       for (const sample of contributingSamples) {
         if (sample.lower?.sopInstanceUid) contributingSourceSopInstanceUids.add(sample.lower.sopInstanceUid);
         if (sample.upper?.sopInstanceUid) contributingSourceSopInstanceUids.add(sample.upper.sopInstanceUid);
+        if (sample.context)
+          for (const source of sample.context) {
+            if (source.sopInstanceUid) contributingSourceSopInstanceUids.add(source.sopInstanceUid);
+          }
       }
     }
   }
