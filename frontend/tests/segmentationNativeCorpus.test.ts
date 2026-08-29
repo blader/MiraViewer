@@ -51,6 +51,15 @@ type ApprovedNativeMarks = {
   withheldAnchors: { slices: number[]; inside: [number, number][]; outside: [number, number][]; radiusMm: number };
 };
 
+function paintContour(pixels: Float32Array, mask: Uint8Array, columns: number, rows: number, value: number) {
+  for (let row = 1; row < rows - 1; row++)
+    for (let column = 1; column < columns - 1; column++) {
+      const at = row * columns + column;
+      if (mask[at] && (!mask[at - 1] || !mask[at + 1] || !mask[at - columns] || !mask[at + columns]))
+        pixels[at] = value;
+    }
+}
+
 describe('native segmentation validation oracles', () => {
   it('rejects sparse inside loss and new outside leakage without substituting mask size for truth', () => {
     const inside = { slice: 2, kind: 'inside' as const, point: [3, 4], voxels: 3, selected: 2 };
@@ -514,12 +523,7 @@ describe.skipIf(!corpusRoot)('private native MRI segmentation validation (no cli
               ? Float32Array.from(mask)
               : cropCorpusPixels(frame.pixels, source.columns, marks.crop, frame.invert);
           if (kind === 'EDGE0' || kind === 'EDGE1')
-            for (let row = 1; row < height - 1; row++)
-              for (let column = 1; column < width - 1; column++) {
-                const at = row * width + column;
-                if (mask[at] && (!mask[at - 1] || !mask[at + 1] || !mask[at - width] || !mask[at + width]))
-                  pixels[at] = frame.invert ? -window.lower : window.upper;
-              }
+            paintContour(pixels, mask, width, height, frame.invert ? -window.lower : window.upper);
           return {
             label: `E1 AX ${slice} ${kind}`,
             pixels,
@@ -857,15 +861,7 @@ describe.skipIf(!corpusRoot)('private native MRI segmentation validation (no cli
             );
             const pixels = kind === 'mask' ? Float32Array.from(labels) : frame.pixels.slice();
             if (kind === 'contour' || kind === 'reference')
-              for (let row = 1; row < volume.dims[1] - 1; row++)
-                for (let column = 1; column < volume.dims[0] - 1; column++) {
-                  const at = row * volume.dims[0] + column;
-                  if (
-                    labels[at] &&
-                    (!labels[at - 1] || !labels[at + 1] || !labels[at - volume.dims[0]] || !labels[at + volume.dims[0]])
-                  )
-                    pixels[at] = displayWindow.upper;
-                }
+              paintContour(pixels, labels, volume.dims[0], volume.dims[1], displayWindow.upper);
             return {
               label: `E${examination} AX ${slice} ${{ source: 'SRC', reference: 'EDGE0', contour: 'EDGE1', mask: 'REGION' }[kind]}`,
               pixels,
@@ -896,18 +892,7 @@ describe.skipIf(!corpusRoot)('private native MRI segmentation validation (no cli
             const section = nativeOrthogonalSection(volume, kind === 'reference' ? referenceMask! : mask, axis, index);
             const pixels = kind === 'mask' ? Float32Array.from(section.labels) : section.pixels;
             if (kind === 'contour' || kind === 'reference')
-              for (let row = 1; row < section.rows - 1; row++)
-                for (let column = 1; column < section.columns - 1; column++) {
-                  const at = row * section.columns + column;
-                  if (
-                    section.labels[at] &&
-                    (!section.labels[at - 1] ||
-                      !section.labels[at + 1] ||
-                      !section.labels[at - section.columns] ||
-                      !section.labels[at + section.columns])
-                  )
-                    pixels[at] = displayWindow.upper;
-                }
+              paintContour(pixels, section.labels, section.columns, section.rows, displayWindow.upper);
             return {
               label: `E${examination} ${axis === 'coronal' ? 'COR' : 'SAG'} ${nativeIndex} ${{ source: 'SRC', reference: 'EDGE0', contour: 'EDGE1', mask: 'REGION' }[kind]}`,
               pixels: physicalAspectSection(

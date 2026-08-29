@@ -99,8 +99,7 @@ export function measureCornerstoneImageMemory(source: CornerstoneMemorySource = 
     add(own(own(image, 'data'), 'byteArray'));
     for (const key of ['cachedLut', 'modalityLUT', 'voiLUT']) add(own(own(image, key), 'lut'));
   }
-  const total = (values: Set<ArrayBufferLike>) => [...values].reduce((sum, buffer) => sum + buffer.byteLength, 0);
-  const knownBytes = total(buffers);
+  const knownBytes = [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0);
   const reported = cacheInfo?.cacheSizeInBytes;
   const reportedPixelBytes = Number.isFinite(reported) && reported! >= 0 ? reported! : 0;
   const reservedPixelCacheBytes = measured

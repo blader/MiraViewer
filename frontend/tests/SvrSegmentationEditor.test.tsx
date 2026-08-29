@@ -6,7 +6,7 @@ import { SvrImagingContext } from '../src/components/svrImagingContext';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
-import { paint, setAutoFill } from './helpers/selectionInteraction';
+import { paint, proposedRegion, setAutoFill } from './helpers/selectionInteraction';
 import { deferred } from './helpers/deferred';
 
 type EditorProps = ComponentProps<typeof SvrSegmentationEditor>;
@@ -276,14 +276,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     expect(action).toBeDisabled();
     fireEvent.click(action);
     expect(refineRegion).not.toHaveBeenCalled();
-    await act(async () =>
-      completion.resolve({
-        indices: Uint32Array.of(at(7, 6)),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      }),
-    );
+    await act(async () => completion.resolve(proposedRegion([at(7, 6)])));
     expect(action).toBeEnabled();
     fireEvent.click(action);
     expect(refineRegion.mock.lastCall![0]).toBe(changed.mock.lastCall![0]);
@@ -412,12 +405,7 @@ describe('Focused SVR tissue-selection workflow', () => {
   });
 
   it('auto-fills only after a new stroke and undoes the stroke and its filled boundary together', async () => {
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(at(5, 6), at(6, 6)),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    });
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([at(5, 6), at(6, 6)]));
     const { changed, source } = setup();
     const original = source.data.slice();
     fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
@@ -470,12 +458,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     const run = vi
       .spyOn(SeededVolumeWorker.prototype, 'run')
       .mockRejectedValueOnce(new Error('Boundary worker unavailable'))
-      .mockResolvedValue({
-        indices: Uint32Array.of(at(5, 6), at(6, 6)),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      });
+      .mockResolvedValue(proposedRegion([at(5, 6), at(6, 6)]));
     const { changed } = setup(draft());
     fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
     expect(screen.queryByRole('button', { name: 'Retry boundary' })).not.toBeInTheDocument();
@@ -540,14 +523,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     fireEvent.pointerDown(canvas, point);
     expect(signal.aborted).toBe(true);
     expect(changed).toHaveBeenCalledOnce();
-    await act(async () =>
-      completion.resolve({
-        indices: Uint32Array.of(at(5, 6), at(7, 6)),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      }),
-    );
+    await act(async () => completion.resolve(proposedRegion([at(5, 6), at(7, 6)])));
     fireEvent.pointerUp(canvas, point);
     setAutoFill(false);
     expect(changed).toHaveBeenCalledTimes(2);
@@ -569,14 +545,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     const point = { pointerId: 1, button: 0, isPrimary: true, clientX: 214, clientY: 173 };
     fireEvent.pointerDown(canvas, point);
     expect(signal.aborted).toBe(false);
-    await act(async () =>
-      completion.resolve({
-        indices: Uint32Array.of(at(5, 6), at(6, 6)),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      }),
-    );
+    await act(async () => completion.resolve(proposedRegion([at(5, 6), at(6, 6)])));
     fireEvent.pointerMove(canvas, { ...point, clientX: 240 });
     expect(screen.getByRole('spinbutton', { name: 'Sagittal slice' })).toHaveValue(8);
     fireEvent.pointerUp(canvas, { ...point, clientX: 240 });
@@ -630,14 +599,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     const signal = run.mock.lastCall![1]!.signal!;
     fireEvent.click(screen.getByRole('button', { name: 'Expand 3D view' }));
     expect(signal.aborted).toBe(true);
-    await act(async () =>
-      completion.resolve({
-        indices: Uint32Array.of(at(6, 6)),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      }),
-    );
+    await act(async () => completion.resolve(proposedRegion([at(6, 6)])));
     expect(changed).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
     expect(screen.getByRole('checkbox', { name: 'Auto-fill' })).toBeChecked();

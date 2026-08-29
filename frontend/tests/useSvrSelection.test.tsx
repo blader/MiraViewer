@@ -10,6 +10,7 @@ import {
 } from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { deferred } from './helpers/deferred';
+import { proposedRegion } from './helpers/selectionInteraction';
 
 function volume(size = 12): SvrVolume {
   return {
@@ -30,12 +31,6 @@ function setup(source = volume(), saved: SvrLabelVolume | null = null, automatic
     { initialProps: { source, automatic } },
   );
 }
-const proposedRegion = (indices = [30, 31, 32]): Awaited<ReturnType<SeededVolumeWorker['run']>> => ({
-  indices: Uint32Array.from(indices),
-  bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-  boundaryCount: 0,
-  domainVoxels: 1728,
-});
 function selectionWorkers() {
   const workers: MockWorker[] = [];
   class MockWorker {
@@ -78,12 +73,9 @@ describe('SVR selection publication and editing history', () => {
     source.data[31] = NaN;
     source.data[32] = Infinity;
     source.observedSupport![33] = 0;
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(31, 32, 33, 34, 35, source.data.length),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    });
+    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(
+      proposedRegion([31, 32, 33, 34, 35, source.data.length]),
+    );
     const { result } = setup(source);
     act(() => result.current.selection.stroke(Uint32Array.of(30, 31, 32, 33), 'include'));
     act(() => result.current.selection.stroke(Uint32Array.of(35), 'exclude'));
@@ -96,12 +88,7 @@ describe('SVR selection publication and editing history', () => {
 
   it('auto-fills only after a new stroke settles and undoes the stroke and proposal together', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(31, 32),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    });
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([31, 32]));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     expect(result.current.labels?.data[30]).toBe(1);
@@ -134,12 +121,7 @@ describe('SVR selection publication and editing history', () => {
     await act(async () => vi.advanceTimersByTimeAsync(350));
     expect(run).toHaveBeenCalledOnce();
     await act(async () => {
-      completion.resolve({
-        indices: Uint32Array.of(31, 32),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      });
+      completion.resolve(proposedRegion([31, 32]));
       await completion.promise;
       expect(result.current.labels?.data[31]).toBe(0);
       result.current.selection.travel('undo');
@@ -360,12 +342,7 @@ describe('SVR selection publication and editing history', () => {
 
   it('keeps an automatic stroke started in the replacement source commit alive', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(31),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    });
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([31]));
     const first = volume(),
       second = volume();
     const { result, rerender } = renderHook(
@@ -426,12 +403,7 @@ describe('SVR selection publication and editing history', () => {
 
   it('coalesces rapid marks into one solver request without collapsing distinct brush undo steps', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(30, 31, 32, 33),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    });
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([30, 31, 32, 33]));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(200));
@@ -492,12 +464,7 @@ describe('SVR selection publication and editing history', () => {
     await act(async () => vi.advanceTimersByTimeAsync(350));
     act(() => result.current.selection.stroke(Uint32Array.of(31), 'exclude'));
     expect(run.mock.calls[0]![1]?.signal?.aborted).toBe(true);
-    const proposal = {
-      indices: Uint32Array.of(30, 31, 99),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-      boundaryCount: 0,
-      domainVoxels: 1728,
-    };
+    const proposal = proposedRegion([30, 31, 99]);
     await act(async () => resolvers[0]!(proposal));
     expect(result.current.labels?.data[99]).toBe(0);
     await act(async () => vi.advanceTimersByTimeAsync(350));
