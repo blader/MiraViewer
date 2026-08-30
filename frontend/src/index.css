@@ -20,6 +20,7 @@
 
 .svr-selection-title-row,
 .svr-selection-actions,
+.svr-selection-native-detail,
 .svr-selection-tool-group,
 .svr-selection-history,
 .svr-selection-zoom,
@@ -48,6 +49,7 @@
 .svr-selection-brush,
 .svr-selection-display-controls,
 .svr-selection-native-detail,
+.svr-selection-autofill,
 .svr-selection-toolbar button,
 .svr-selection-guidance {
   font-size: 12px;
@@ -152,8 +154,6 @@
   min-height: 36px;
   align-items: center;
   gap: 7px;
-  font-size: 12px;
-  color: var(--text-secondary);
   cursor: pointer;
 }
 .svr-selection-autofill input {
@@ -170,10 +170,8 @@
   line-height: 1.5;
 }
 .svr-selection-native-detail {
-  display: flex;
   min-height: 36px;
   flex-wrap: wrap;
-  align-items: center;
   gap: 6px 12px;
   margin-top: 8px;
 }

@@ -12,6 +12,20 @@ function mask(dims: Dims, points: readonly Point[]) {
   for (const point of points) data[at(dims, point)] = 1;
   return data;
 }
+function observeUint32Allocations() {
+  const allocations: number[] = [];
+  vi.stubGlobal(
+    'Uint32Array',
+    new Proxy(Uint32Array, {
+      construct(target, args) {
+        allocations.push(args[0]);
+        return Reflect.construct(target, args);
+      },
+    }),
+  );
+  return allocations;
+}
+
 const neighbors: Point[] = [];
 for (let z = -1; z <= 1; z++)
   for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) if (x || y || z) neighbors.push([x, y, z]);
@@ -227,17 +241,7 @@ describe('literal-mark connected binary selection', () => {
     async (count) => {
       const data = new Uint8Array(count).fill(1),
         foreground = Uint32Array.of(0);
-      const NativeUint32 = Uint32Array,
-        allocations: number[] = [];
-      vi.stubGlobal(
-        'Uint32Array',
-        new Proxy(NativeUint32, {
-          construct(target, args) {
-            allocations.push(args[0]);
-            return Reflect.construct(target, args);
-          },
-        }),
-      );
+      const allocations = observeUint32Allocations();
       expect(await retainMarkedComponents(data, [count, 1, 1], foreground)).toBe(0);
       expect(allocations).toEqual([count]);
       expect(yieldToMain).toHaveBeenCalledTimes(4 + count / 2048);
@@ -253,17 +257,7 @@ describe('literal-mark connected binary selection', () => {
         [127, 127, 31],
       ]),
       foreground = Uint32Array.of(at(dims, [1, 1, 1]));
-    const NativeUint32 = Uint32Array,
-      allocations: number[] = [];
-    vi.stubGlobal(
-      'Uint32Array',
-      new Proxy(NativeUint32, {
-        construct(target, args) {
-          allocations.push(args[0]);
-          return Reflect.construct(target, args);
-        },
-      }),
-    );
+    const allocations = observeUint32Allocations();
     expect(await retainMarkedComponents(data, dims, foreground)).toBe(1);
     expect(allocations).toEqual([3]);
     expect(yieldToMain).toHaveBeenCalledTimes(19);

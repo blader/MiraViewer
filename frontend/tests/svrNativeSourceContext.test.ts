@@ -428,12 +428,9 @@ describe('accepted native source context', () => {
       const { images } = sourceImages(f);
       let finish!: (image: (typeof images)[number]) => void;
       let fail!: (error: Error) => void;
-      let started!: () => void;
-      const decoding = new Promise<void>((resolve) => {
-        started = resolve;
-      });
+      const started = deferred<void>();
       sourceReads.load.mockResolvedValueOnce(images[0]).mockImplementationOnce(() => {
-        started();
+        started.resolve();
         return new Promise((resolve, reject) => {
           finish = resolve;
           fail = reject;
@@ -443,7 +440,7 @@ describe('accepted native source context', () => {
       const controller = new AbortController();
       const result = context.intensityRange({ signal: controller.signal });
       const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' });
-      await decoding;
+      await started.promise;
       controller.abort();
       await rejected;
       if (outcome === 'resolve') finish(images[1]!);
