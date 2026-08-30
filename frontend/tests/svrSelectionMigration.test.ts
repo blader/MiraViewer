@@ -215,24 +215,110 @@ describe('saved selection discovery and explicit draft transfer', () => {
     },
   );
 
-  it('copies supported categorical labels and both mark classes as a draft while preserving the original record', async () => {
-    const saved = record();
+  it.each([undefined, false, true])(
+    'copies supported labels, marks and context %s as a draft while preserving the original record',
+    async (contextLimited) => {
+      const saved = record();
+      saved.clippedNativeVoxels = 152;
+      if (contextLimited !== undefined) saved.contextLimited = contextLimited;
+      await put(saved);
+      const target = targetVolume();
+      target.observedSupport![31] = 0;
+      target.data[32] = NaN;
+      const { candidate } = await findTransferableSelection(target, identity, key(target));
+      const transferred = await transferSavedSelection(candidate!, target, identity, key(target));
+      expect([...transferred.data].filter(Boolean)).toHaveLength(6);
+      expect(transferred.data[31]).toBe(0);
+      expect(transferred.data[32]).toBe(0);
+      expect(transferred.seeds!.foreground).toHaveLength(6);
+      expect([...transferred.seeds!.background]).toEqual([0]);
+      expect(transferred.seeds).not.toHaveProperty('lastStroke');
+      expect(transferred.reviewState).toBe('draft');
+      expect(transferred.clippedNativeVoxels).toBe(152);
+      expect(transferred.contextLimited).toBe(contextLimited);
+      if (contextLimited === undefined) expect(transferred).not.toHaveProperty('contextLimited');
+      expect(JSON.stringify(await (await getDB()).get('volume_segmentations', saved.volumeKey))).toBe(
+        JSON.stringify(saved),
+      );
+      expect(await (await getDB()).get('volume_segmentations', key(target))).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ...[null, '152', -1, 0.5, Infinity].map((value) => ({ field: 'clippedNativeVoxels' as const, value })),
+    ...[null, 'false', 0, 1, {}].map((value) => ({ field: 'contextLimited' as const, value })),
+  ])('retains but does not transfer malformed $field ($value)', async ({ field, value }) => {
+    const saved = Object.assign(record(), { [field]: value }) as VolumeSegmentationRow;
     await put(saved);
     const target = targetVolume();
-    target.observedSupport![31] = 0;
-    target.data[32] = NaN;
-    const { candidate } = await findTransferableSelection(target, identity, key(target));
-    const transferred = await transferSavedSelection(candidate!, target, identity, key(target));
-    expect([...transferred.data].filter(Boolean)).toHaveLength(6);
-    expect(transferred.data[31]).toBe(0);
-    expect(transferred.data[32]).toBe(0);
-    expect(transferred.seeds!.foreground).toHaveLength(6);
-    expect([...transferred.seeds!.background]).toEqual([0]);
-    expect(transferred.reviewState).toBe('draft');
-    expect(JSON.stringify(await (await getDB()).get('volume_segmentations', saved.volumeKey))).toBe(
-      JSON.stringify(saved),
-    );
-    expect(await (await getDB()).get('volume_segmentations', key(target))).toBeUndefined();
+    expect(await findTransferableSelection(target, identity, key(target))).toMatchObject({
+      candidate: null,
+      retainedCount: 1,
+      unavailableCount: 1,
+    });
+    expect((await (await getDB()).get('volume_segmentations', saved.volumeKey))?.[field]).toEqual(value);
+  });
+
+  it.each(['clippedNativeVoxels', 'contextLimited'] as const)(
+    'rejects a %s-only saved-record change during transfer, even when its timestamp and mask are unchanged',
+    async (field) => {
+      const saved = { ...record(), clippedNativeVoxels: 152, contextLimited: true };
+      await put(saved);
+      const target = targetVolume();
+      const { candidate } = await findTransferableSelection(target, identity, key(target));
+      const changed =
+        field === 'contextLimited' ? { ...saved, contextLimited: false } : { ...saved, clippedNativeVoxels: 153 };
+      vi.spyOn(scheduling, 'yieldToMain').mockImplementationOnce(() => put(changed));
+      await expect(transferSavedSelection(candidate!, target, identity, key(target))).rejects.toThrow(/changed/);
+      expect((await (await getDB()).get('volume_segmentations', saved.volumeKey))?.[field]).toBe(changed[field]);
+      expect(await (await getDB()).get('volume_segmentations', key(target))).toBeUndefined();
+    },
+  );
+
+  it.each(['axial', 'coronal', 'sagittal'] as const)(
+    'transfers a valid saved last %s stroke even when earlier marks occupy other sections',
+    async (plane) => {
+      const saved = record();
+      saved.labels[26] = 1;
+      saved.seeds!.foreground = Uint32Array.of(13, 26);
+      saved.seeds!.lastStroke = { plane, slice: 1 };
+      await put(saved);
+      const target = targetVolume();
+      const { candidate } = await findTransferableSelection(target, identity, key(target));
+      expect(candidate).toBeDefined();
+      const transferred = await transferSavedSelection(candidate!, target, identity, key(target));
+      expect(transferred.seeds!.lastStroke).toEqual({ plane, slice: 2 });
+      expect(transferred.seeds!.foreground).toContain(62);
+      expect(transferred.seeds!.foreground).toContain(124);
+      expect([...transferred.seeds!.background]).toEqual([0]);
+      expect(transferred.reviewState).toBe('draft');
+      expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+      expect(await (await getDB()).get('volume_segmentations', key(target))).toBeUndefined();
+    },
+  );
+
+  it.each([
+    null,
+    {},
+    { plane: 'unknown', slice: 1 },
+    { plane: 'axial' },
+    { plane: 'axial', slice: -1 },
+    { plane: 'axial', slice: 0.5 },
+    { plane: 'axial', slice: NaN },
+    { plane: 'axial', slice: Infinity },
+    { plane: 'axial', slice: 3 },
+    { plane: 'coronal', slice: 3 },
+    { plane: 'sagittal', slice: 3 },
+  ])('retains but does not migrate saved work with invalid stroke metadata %j', async (lastStroke) => {
+    const saved = record();
+    Object.assign(saved.seeds!, { lastStroke });
+    await put(saved);
+    const target = targetVolume();
+    const status = await findTransferableSelection(target, identity, key(target));
+    expect(status.candidate).toBeNull();
+    expect(status.retainedCount).toBe(1);
+    expect(status.unavailableCount).toBe(1);
+    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
   });
 
   it('transfers in patient millimeters across rotated grids without a half-voxel shift', async () => {
@@ -281,6 +367,39 @@ describe('saved selection discovery and explicit draft transfer', () => {
     },
   );
 
+  it.each(['added', 'removed', 'plane', 'slice'] as const)(
+    'rejects a last-stroke change (%s) during transfer even when timestamp, labels and marks are unchanged',
+    async (kind) => {
+      const saved = record();
+      if (kind !== 'added') saved.seeds!.lastStroke = { plane: 'axial', slice: 1 };
+      await put(saved);
+      const target = targetVolume();
+      const { candidate } = await findTransferableSelection(target, identity, key(target));
+      const changed = structuredClone(saved);
+      if (kind === 'removed') delete changed.seeds!.lastStroke;
+      else
+        changed.seeds!.lastStroke = { plane: kind === 'plane' ? 'coronal' : 'axial', slice: kind === 'slice' ? 2 : 1 };
+      vi.spyOn(scheduling, 'yieldToMain').mockImplementationOnce(() => put(changed));
+      await expect(transferSavedSelection(candidate!, target, identity, key(target))).rejects.toThrow(/changed/);
+      expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(changed);
+      expect(await (await getDB()).get('volume_segmentations', key(target))).toBeUndefined();
+    },
+  );
+
+  it('compares saved stroke metadata by meaning rather than object property order', async () => {
+    const saved = record();
+    saved.seeds!.lastStroke = { plane: 'axial', slice: 1 };
+    await put(saved);
+    const target = targetVolume();
+    const { candidate } = await findTransferableSelection(target, identity, key(target));
+    const unchanged = structuredClone(saved);
+    unchanged.seeds!.lastStroke = { slice: 1, plane: 'axial' };
+    vi.spyOn(scheduling, 'yieldToMain').mockImplementationOnce(() => put(unchanged));
+    const result = await transferSavedSelection(candidate!, target, identity, key(target));
+    expect(result.seeds!.lastStroke).toEqual({ plane: 'axial', slice: 2 });
+    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(unchanged);
+  });
+
   it('does not publish an empty transfer when the saved selection has no supported target intersection', async () => {
     const saved = record();
     delete saved.seeds;
@@ -295,6 +414,7 @@ describe('saved selection discovery and explicit draft transfer', () => {
 
   it('preserves a thin inside mark missed by reverse sampling on a coarser grid', async () => {
     const saved = record(volume({ voxelSizeMm: [1, 1, 1] }));
+    saved.seeds!.lastStroke = { plane: 'axial', slice: 1 };
     await put(saved);
     const target = volume({ dims: [2, 2, 2], voxelSizeMm: [2, 2, 2], reconstructionFingerprint: 'coarse' });
     target.sourceProvenance!.fingerprint = target.reconstructionFingerprint!;
@@ -303,6 +423,7 @@ describe('saved selection discovery and explicit draft transfer', () => {
     expect([...transferred.data]).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
     expect([...transferred.seeds!.foreground]).toEqual([7]);
     expect([...transferred.seeds!.background]).toEqual([0]);
+    expect(transferred.seeds).not.toHaveProperty('lastStroke');
   });
 
   it.each(['inside-outside-collision', 'outside-region', 'missing-support'])(

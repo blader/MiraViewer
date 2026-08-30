@@ -18,12 +18,14 @@ import type {
   TumorSegmentationRow,
   VolumeSegmentationRow,
 } from '../db/schema';
+import type { SvrSelectionPlane, SvrSelectionSeeds } from '../types/svr';
 import { isOwnedStorageKey } from '../utils/storageKeys';
 import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
 import * as localApi from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
 import { readArchiveEntry } from './archiveSafety';
+import { isSelectionContextValid, isSelectionCoverageValid } from '../utils/segmentation/selectionEditing';
 import type { ArchiveReadOptions } from './archiveSafety';
 
 export type ExportProgress = {
@@ -54,7 +56,12 @@ type SnapshotFile = {
 };
 
 type SnapshotInstance = Omit<DicomInstance, 'fileBlob'> & { file: SnapshotFile };
-type SnapshotVolume = Omit<VolumeSegmentationRow, 'labels'> & { file: SnapshotFile };
+type SnapshotSeeds = Omit<SvrSelectionSeeds, 'foreground' | 'background'> & {
+  /** Older v2 exports used JSON.stringify(Uint32Array), which emits numeric-key objects. */
+  foreground: number[] | Record<string, number>;
+  background: number[] | Record<string, number>;
+};
+type SnapshotVolume = Omit<VolumeSegmentationRow, 'labels' | 'seeds'> & { file: SnapshotFile; seeds?: SnapshotSeeds };
 type SnapshotDerivedFrame = Omit<DerivedAlignmentFrameRow, 'pixels' | 'valid'> & {
   file: SnapshotFile;
   validFile?: SnapshotFile;
@@ -81,6 +88,53 @@ type SnapshotManifest = {
     localStorage: Record<string, string>;
   };
 };
+
+function snapshotVoxelCount(dims: unknown): number {
+  if (!Array.isArray(dims) || dims.length !== 3 || dims.some((size) => !Number.isSafeInteger(size) || size < 1))
+    throw new Error('A saved volume segmentation does not match its reconstruction geometry.');
+  const count = dims.reduce((product, size: number) => product * size, 1);
+  if (!Number.isSafeInteger(count))
+    throw new Error('A saved volume segmentation does not match its reconstruction geometry.');
+  return count;
+}
+
+/** Validate before typed-array construction can coerce, truncate or discard editing marks. */
+function decodeSnapshotSeeds(value: unknown, dims: VolumeSegmentationRow['dims']): SvrSelectionSeeds | undefined {
+  if (value === undefined) return undefined;
+  const invalid = () => new Error('A saved volume segmentation contains invalid editing marks.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
+  const count = snapshotVoxelCount(dims);
+  const marks = (input: unknown): Uint32Array => {
+    let length: number;
+    if (Array.isArray(input)) length = input.length;
+    else if (ArrayBuffer.isView(input) && Object.prototype.toString.call(input) === '[object Uint32Array]')
+      length = (input as Uint32Array).length;
+    else if (input && Object.prototype.toString.call(input) === '[object Object]') {
+      const keys = Object.keys(input);
+      if (keys.some((key, index) => key !== String(index))) throw invalid();
+      length = keys.length;
+    } else throw invalid();
+    const result = new Uint32Array(length);
+    for (let index = 0; index < length; index++) {
+      const mark = (input as Record<number, unknown>)[index];
+      if (typeof mark !== 'number' || !Number.isSafeInteger(mark) || mark < 0 || mark > 0xffffffff || mark >= count)
+        throw invalid();
+      result[index] = mark;
+    }
+    return result;
+  };
+  const { foreground, background, lastStroke, ...metadata } = value as Record<string, unknown>;
+  const seeds: SvrSelectionSeeds = { ...metadata, foreground: marks(foreground), background: marks(background) };
+  if (lastStroke !== undefined) {
+    const stroke = lastStroke as SvrSelectionPlane;
+    const axis = ['sagittal', 'coronal', 'axial'].indexOf(stroke?.plane);
+    if (axis < 0 || !Number.isSafeInteger(stroke?.slice) || stroke.slice < 0 || stroke.slice >= dims[axis]!)
+      throw new Error('A saved volume segmentation contains invalid last-stroke geometry.');
+    // Earlier accumulated marks need not occupy this one editing section.
+    seeds.lastStroke = { ...stroke };
+  }
+  return seeds;
+}
 
 /** Complete restores must remain atomic; verified payloads cannot yet be staged without a schema migration. */
 export function getSnapshotRestoreBytes(manifest: SnapshotManifest): number {
@@ -188,11 +242,20 @@ export async function exportStudiesToZip(
     if (row.studyUid && !selectedStudies.has(row.studyUid)) continue;
     if (row.patientKey && selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
     if (row.seriesUids?.length && !row.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
-    const { labels, ...metadata } = row;
+    const { labels, seeds: savedSeeds, ...metadata } = row;
+    if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
+      throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
+    const seeds = decodeSnapshotSeeds(savedSeeds, row.dims);
     const path = `segmentations/${encodeURIComponent(row.volumeKey)}.labels`;
     // Sparse label masks can legitimately exceed archive expansion-ratio guards.
     const file = await addSnapshotFile(path, labels, true);
-    volumeSegmentations.push({ ...metadata, file });
+    volumeSegmentations.push({
+      ...metadata,
+      file,
+      ...(seeds && {
+        seeds: { ...seeds, foreground: Array.from(seeds.foreground), background: Array.from(seeds.background) },
+      }),
+    });
   }
 
   const derivedAlignmentFrames: SnapshotDerivedFrame[] = [];
@@ -394,12 +457,15 @@ export async function restoreSnapshot(
   const volumes: VolumeSegmentationRow[] = [];
   for (const metadata of manifest.records.volumeSegmentations) {
     throwIfRestoreAborted(signal);
-    const { file, ...volume } = metadata;
+    const { file, seeds: savedSeeds, ...volume } = metadata;
+    if (!isSelectionCoverageValid(volume.clippedNativeVoxels) || !isSelectionContextValid(volume.contextLimited))
+      throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
     const bytes = new Uint8Array(await toArrayBuffer(await readVerifiedFile(zip, file, signal, integrityWarnings)));
-    if (bytes.length !== volume.dims[0] * volume.dims[1] * volume.dims[2]) {
+    if (bytes.length !== snapshotVoxelCount(volume.dims)) {
       throw new Error('A saved volume segmentation does not match its reconstruction geometry.');
     }
-    volumes.push({ ...volume, labels: bytes });
+    const seeds = decodeSnapshotSeeds(savedSeeds, volume.dims);
+    volumes.push({ ...volume, labels: bytes, ...(seeds && { seeds }) });
   }
 
   const derivedFrames: DerivedAlignmentFrameRow[] = [];

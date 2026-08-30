@@ -134,7 +134,6 @@
   font: 11px var(--font-mono);
 }
 .svr-selection-commit-actions {
-  margin-left: auto;
   gap: 6px;
 }
 .svr-selection-toolbar .svr-selection-clear {
@@ -172,6 +171,7 @@
 }
 .svr-selection-native-detail {
   display: flex;
+  min-height: 36px;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 12px;
@@ -247,6 +247,12 @@
 .svr-selection-grid[data-expanded] {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(var(--svr-pane-min-height), 1fr);
+}
+@media (min-width: 2400px) and (min-aspect-ratio: 2/1) {
+  .svr-selection-grid:not([data-expanded]) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-rows: minmax(var(--svr-pane-min-height), 1fr);
+  }
 }
 .svr-selection-workbench[data-editing='false'] .svr-selection-grid {
   flex: 1 1 0;
@@ -662,9 +668,6 @@
   .svr-selection-actions {
     gap: 8px;
   }
-  .svr-selection-commit-actions {
-    margin-left: 0;
-  }
   .svr-selection-toolbar {
     padding: 10px;
   }
@@ -696,6 +699,9 @@
   }
 }
 @media (pointer: coarse) {
+  .svr-selection-native-detail {
+    min-height: 44px;
+  }
   .svr-selection-toolbar button,
   .svr-selection-autofill,
   .svr-selection-pane-actions button {

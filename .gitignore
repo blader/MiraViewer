@@ -3,6 +3,10 @@ node_modules/
 dist/
 *.log
 
+# Local Python helper/test bytecode
+__pycache__/
+*.py[cod]
+
 # Local environment variables (API keys, etc.)
 .env
 .env.*

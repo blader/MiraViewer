@@ -1,6 +1,12 @@
 import type { OutputPlaneGrid } from '../utils/outputPlaneGrid';
 import type { AlignmentDisplayTone } from '../utils/alignmentDisplayTone';
-import type { SvrDirection, SvrNativeSource, SvrPatientTransform, SvrSourceProvenance } from '../types/svr';
+import type {
+  SvrDirection,
+  SvrNativeSource,
+  SvrPatientTransform,
+  SvrSelectionSeeds,
+  SvrSourceProvenance,
+} from '../types/svr';
 import type { PanelSettings } from '../types/api';
 
 export interface DicomStudy {
@@ -307,7 +313,11 @@ export interface VolumeSegmentationRow {
   classMetadata?: unknown;
   modelKey?: string;
   reviewState?: 'draft' | 'reviewed';
-  seeds?: { foreground: Uint32Array; background: Uint32Array };
+  seeds?: SvrSelectionSeeds;
+  /** Mask-owned evidence that its originating prediction was only partially retained. */
+  clippedNativeVoxels?: number;
+  /** Mask-owned source-context evidence; absence does not establish unrestricted analysis. */
+  contextLimited?: boolean;
   datasetRevision?: number;
   updatedAt: number;
 }

@@ -4,6 +4,9 @@ import tailwindcss from '@tailwindcss/vite';
 import checker from 'vite-plugin-checker';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import type { PluginOption } from 'vite';
+import { fileURLToPath } from 'node:url';
+
+const privateArtifactsDirectory = fileURLToPath(new URL('./tmp/', import.meta.url)).replace(/\/$/, '');
 
 // https://vite.dev/config/
 export default defineConfig(() => {
@@ -42,6 +45,7 @@ export default defineConfig(() => {
         eslint: {
           lintCommand: 'eslint "src/**/*.{ts,tsx}"',
           useFlatConfig: true,
+          watchPath: 'src',
         },
       }),
     );
@@ -62,7 +66,13 @@ export default defineConfig(() => {
       strictPort: true,
       // On macOS Chokidar chooses FSEvents before reading the polling env var.
       // Set both options so opt-in polling actually refreshes edited worktrees.
-      watch: usePolling ? { usePolling: true, useFsEvents: false } : undefined,
+      watch: {
+        ...(usePolling ? { usePolling: true, useFsEvents: false } : {}),
+        // Private MRI benchmarks include their own Python environment. They are
+        // served on demand, never application source: polling tens of thousands
+        // of these files can otherwise consume several CPU cores while idle.
+        ignored: [privateArtifactsDirectory, `${privateArtifactsDirectory}/**`],
+      },
       // Cross-origin isolation unlocks multithreaded WASM for ONNX inference (see
       // ortLoader.ts, which keys off crossOriginIsolated). Safe here because every runtime
       // asset (ORT, ITK pipelines, DICOM data) is same-origin. The offline launcher sends

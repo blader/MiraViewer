@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import { Crosshair, Maximize2, Minimize2, Minus, Plus, Redo2, Trash2, Undo2 } from 'lucide-react';
-import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
+import type { SvrLabelVolume, SvrRoiPlane, SvrSelectionPlane, SvrVolume } from '../types/svr';
 import { useSvrSelection } from '../hooks/useSvrSelection';
 import { useSvrImaging } from './svrImagingContext';
 import { REGION_DETAIL_SPACING_MM } from '../utils/svr/refineRegion';
@@ -38,7 +38,7 @@ type SliceProps = {
   expanded: boolean;
   onExpand: () => void;
   onStrokeStart: () => void;
-  onStroke: (indices: Uint32Array, kind: 'include' | 'exclude') => void;
+  onStroke: (indices: Uint32Array, kind: 'include' | 'exclude', plane: SvrSelectionPlane) => void;
 };
 
 function useSelectionSlice({
@@ -257,7 +257,7 @@ function useSelectionSlice({
     if (event.currentTarget.hasPointerCapture?.(event.pointerId))
       event.currentTarget.releasePointerCapture(event.pointerId);
     if (!cancelled && stroke.scope === scope && stroke.kind !== 'navigate')
-      onStroke(Uint32Array.from(stroke.indices), stroke.kind);
+      onStroke(Uint32Array.from(stroke.indices), stroke.kind, { plane: stroke.scope.plane, slice: stroke.scope.slice });
   };
   const keyDown = (event: KeyboardEvent<HTMLCanvasElement>) => {
     if (event.key === 'Escape' && strokeRef.current) {
@@ -805,7 +805,7 @@ export function SvrSegmentationEditor({
   selectionNotice?: ReactNode;
   children: ReactNode | ((selectionRunning: boolean, prepareEnhancement: () => number) => ReactNode);
 }) {
-  const { volume, labels = null } = useSvrImaging();
+  const { volume, labels = null, proposeSelection } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
   const [tool, setTool] = useState<Tool>('navigate');
   const [autoFill, setAutoFill] = useState(true);
@@ -816,7 +816,7 @@ export function SvrSegmentationEditor({
   const hasSelection = selectedVolumeMl > 0;
   const reviewed = labels?.reviewState === 'reviewed';
   const editing = expanded !== 'volume';
-  const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill);
+  const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill, proposeSelection);
   const show3D = () => {
     setTool('navigate');
     setExpanded('volume');
@@ -993,14 +993,20 @@ export function SvrSegmentationEditor({
         ) : null}
         {selection.status.boundaryCount ? (
           <div className="svr-selection-warning" role="status">
-            The selection reaches the search boundary. Check its extent and add marks near any missing tissue before
+            The initial prediction reached the edge of the analyzed region. Check the retained selection’s extent before
             confirming.
           </div>
         ) : null}
-        {selection.status.contextLimited ? (
+        {labels?.contextLimited ? (
           <div className="svr-selection-warning" role="status">
-            This suggestion used a memory-limited region around your marks, not the entire reconstruction. Check its
-            extent before confirming.
+            This selection was suggested from a limited source region. Check its extent before confirming.
+          </div>
+        ) : null}
+        {labels?.clippedNativeVoxels ? (
+          <div className="svr-selection-warning" role="status">
+            Only part of the predicted tissue is retained in this selection. The prediction extended beyond its viewing
+            region or included unavailable samples. Enlarge or clear the focus region in Sources, reconstruct, then
+            suggest the boundary again to review its full extent.
           </div>
         ) : null}
       </div>

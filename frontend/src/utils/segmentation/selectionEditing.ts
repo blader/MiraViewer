@@ -1,5 +1,5 @@
-import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../../types/svr';
-import { voxelIndex, type VoxelPoint } from './seededVolume';
+import type { SvrLabelVolume, SvrRoiPlane, SvrSelectionPlane, SvrVolume } from '../../types/svr';
+import { voxelIndex, voxelPoint, type VoxelPoint } from './seededVolume';
 
 export const SLICE_AXES = {
   axial: {
@@ -33,6 +33,31 @@ export const SLICE_AXES = {
 export const SELECTION_LABEL_META: SvrLabelVolume['meta'] = [
   { id: 1, name: 'Selected tissue', color: [103, 207, 193] },
 ];
+
+/** Counts refer to native predictions and can exceed the smaller editing grid. Missing legacy evidence is valid. */
+export function isSelectionCoverageValid(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+}
+
+export function isSelectionContextValid(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean';
+}
+
+export function selectionPlaneContainsMarks(
+  plane: SvrSelectionPlane,
+  indices: Uint32Array,
+  dims: SvrVolume['dims'],
+): boolean {
+  const axis = SLICE_AXES[plane.plane]?.slice;
+  return Boolean(
+    axis &&
+    Number.isSafeInteger(plane.slice) &&
+    plane.slice >= 0 &&
+    plane.slice < dims[axis === 'x' ? 0 : axis === 'y' ? 1 : 2] &&
+    indices.length &&
+    indices.every((index) => voxelPoint(index, dims)[axis] === plane.slice),
+  );
+}
 
 /** A continuous in-plane physical brush; interpolation prevents holes between pointer events. */
 export function physicalBrushIndices(

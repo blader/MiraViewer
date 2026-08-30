@@ -5,6 +5,7 @@ import { SvrSegmentationEditor } from './SvrSegmentationEditor';
 import { SvrImagingContext, useSvrImaging } from './svrImagingContext';
 import { voxelPoint, type VoxelBounds, type VoxelPoint as Vec3i } from '../utils/segmentation/seededVolume';
 import type { SelectionPatch } from '../utils/segmentation/selectionEditing';
+import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
 import { segmentationVolumeMm3 } from '../utils/segmentation/physicalMeasurements';
@@ -378,6 +379,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     busy,
     refineRegion,
     loadEnhancementSource,
+    proposeSelection,
   } = useSvrImaging();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -521,6 +523,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
                 dims: saved.dims,
                 meta: metadata,
                 seeds: saved.seeds,
+                ...(saved.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: saved.clippedNativeVoxels } : {}),
+                ...(saved.contextLimited !== undefined ? { contextLimited: saved.contextLimited } : {}),
                 reviewState: saved.reviewState === 'reviewed' ? 'reviewed' : 'draft',
               },
               volume.observedSupport,
@@ -588,6 +592,10 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           classMetadata: generatedLabels.meta,
           reviewState: generatedLabels.reviewState,
           seeds: generatedLabels.seeds,
+          ...(generatedLabels.clippedNativeVoxels !== undefined
+            ? { clippedNativeVoxels: generatedLabels.clippedNativeVoxels }
+            : {}),
+          ...(generatedLabels.contextLimited !== undefined ? { contextLimited: generatedLabels.contextLimited } : {}),
           modelKey: labelSourceRef.current,
           datasetRevision: volumeIdentity.datasetRevision,
           updatedAt: Date.now(),
@@ -663,6 +671,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     clearModel: onnxClearModel,
     runSegmentation: runOnnxSegmentation,
     cancelSegmentation: cancelOnnxSegmentation,
+    releaseIdleSession,
   } = onnx;
 
   const enhancement = useSvrEnhancement({
@@ -682,6 +691,28 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   );
   const glEnhancementRef = useRef<EnhancedVolumeBinding | null>(null);
   const enhancementDisplayRef = useRef(enhancement);
+  const proposeWithEnhancement = useMemo<SelectionProposer | undefined>(
+    () =>
+      proposeSelection
+        ? async (request) => {
+            request.signal.throwIfAborted();
+            await releaseIdleSession();
+            request.signal.throwIfAborted();
+            const enhancementBytes = enhancementDisplayRef.current.retainedBytes;
+            const retainedBytes = request.retainedBytes + enhancementBytes;
+            if (
+              [request.retainedBytes, enhancementBytes, retainedBytes].some(
+                (bytes) => !Number.isSafeInteger(bytes) || bytes < 0,
+              )
+            )
+              throw new Error(
+                'Interactive selection requires a valid retained-memory estimate. Your marks are unchanged.',
+              );
+            return proposeSelection({ ...request, retainedBytes });
+          }
+        : undefined,
+    [proposeSelection, releaseIdleSession],
+  );
 
   // Viewer controls (composite-only)
   const [controlsCollapsed, setControlsCollapsed] = useState(true);
@@ -2242,6 +2273,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     observedSupportSummary,
     onSelectionChange,
     refineRegion: refineRegion ? refineWithEnhancement : undefined,
+    proposeSelection: proposeWithEnhancement,
     selectionReady:
       (!volumeKey || (hydrated?.key === volumeKey && hydrated.volume === volume)) &&
       !labelsOverride &&
@@ -2899,8 +2931,13 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
     volume,
   } = model;
   const imaging = useMemo(
-    () => ({ volume, labels: model.labels, refineRegion: model.refineRegion }),
-    [volume, model.labels, model.refineRegion],
+    () => ({
+      volume,
+      labels: model.labels,
+      refineRegion: model.refineRegion,
+      proposeSelection: model.proposeSelection,
+    }),
+    [volume, model.labels, model.refineRegion, model.proposeSelection],
   );
   const controlsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsRef = useRef<HTMLElement>(null);

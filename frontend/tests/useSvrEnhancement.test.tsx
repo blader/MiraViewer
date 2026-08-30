@@ -9,6 +9,7 @@ import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
 import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
+import * as svrUtils from '../src/utils/svr/svrUtils';
 import {
   ENHANCED_TEXTURE_BYTES_PER_VOXEL,
   ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
@@ -96,6 +97,9 @@ afterEach(() => {
 describe('display-only learned MRI enhancement lifecycle', () => {
   it('retains completed detail through confirming strokes and mark-only history, but not a changed selection', async () => {
     vi.useFakeTimers();
+    // This case controls debounce time, not MessageChannel scheduling. Keep the
+    // actual connectivity algorithm while letting its cooperative yields settle.
+    vi.spyOn(svrUtils, 'yieldToMain').mockResolvedValue(undefined);
     const source = volume();
     const output = enhanced(source);
     const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(source);
@@ -114,6 +118,8 @@ describe('display-only learned MRI enhancement lifecycle', () => {
     });
     act(() => result.current.selection.stroke(Uint32Array.of(5), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(result.current.selection.status.running).toBe(false);
+    expect(result.current.labels!.data[6]).toBe(1);
     await act(async () =>
       expect(await result.current.enhancement.run(result.current.selection.prepareEnhancement)).toBe(true),
     );

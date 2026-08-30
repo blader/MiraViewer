@@ -19,6 +19,7 @@ import { parseSeriesDescription } from './dicomSeriesParsing';
 import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
 import { dot } from './svr/vec3';
+import { isSelectionContextValid, isSelectionCoverageValid } from './segmentation/selectionEditing';
 
 export type PatientSummary = NonNullable<ComparisonData['patients']>[number];
 export type ExaminationSummary = NonNullable<ComparisonData['examinations']>[string];
@@ -663,6 +664,8 @@ export async function deleteTumorGroundTruth(seriesUid: string, sopInstanceUid: 
 }
 
 export async function saveVolumeSegmentation(record: VolumeSegmentationRow): Promise<void> {
+  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
+    throw new Error('Volume segmentation has invalid viewing-region coverage. The saved selection is unchanged.');
   const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
   if (record.labels.length !== expectedVoxels) {
     throw new Error(`Volume segmentation does not match its geometry (${record.labels.length}/${expectedVoxels})`);
@@ -694,6 +697,8 @@ export async function getVolumeSegmentation(volumeKey: string): Promise<VolumeSe
   if (!record) return null;
   const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
   if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient) return null;
+  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
+    throw new Error('The saved selection has invalid viewing-region coverage and cannot be safely restored.');
   const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
   return record.labels.length === expectedVoxels ? record : null;
 }

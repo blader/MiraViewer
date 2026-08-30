@@ -14,7 +14,7 @@ export async function loadOrtAll(): Promise<typeof Ort> {
 
     if (import.meta.env.DEV) {
       // In dev, load from the package so Vite can handle wasm asset URLs.
-      mod = await import('onnxruntime-web');
+      mod = await import('onnxruntime-web/all');
     } else {
       // In production builds, load from our vendored runtime assets.
       // IMPORTANT: keep the specifier non-literal so Vite/Vitest don't try to resolve it during import analysis.
@@ -41,7 +41,10 @@ export async function loadOrtAll(): Promise<typeof Ort> {
     }
 
     return ort;
-  })();
+  })().catch((error: unknown) => {
+    ortPromise = null;
+    throw error;
+  });
 
   return ortPromise;
 }

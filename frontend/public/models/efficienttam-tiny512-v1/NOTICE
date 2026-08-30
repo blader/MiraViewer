@@ -1,0 +1,35 @@
+EfficientTAM Tiny 512 model assets for MiraViewer
+
+Upstream: Efficient Track Anything (EfficientTAM)
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+
+Code and checkpoints are distributed by upstream under Apache License 2.0.
+The accompanying LICENSE is an unchanged copy of the pinned upstream license.
+
+Source repository: https://github.com/yformer/EfficientTAM
+Source revision: abcd061ebd3cc6e7527d152d75b890126aaa53f6
+Configuration: configs/efficienttam/efficienttam_ti_512x512.yaml
+Checkpoint repository: https://huggingface.co/yunyangx/efficient-track-anything
+Checkpoint revision: 9bdd8ab585b19ef95f9c9ed847ac9478301890b4
+Checkpoint file: efficienttam_ti_512x512.pt
+Checkpoint SHA-256: 7d4d652a465f0081391050932f45d8a66768ccc99c8ea393ce8a5927e83f3b9b
+
+MiraViewer export modifications:
+- Split inference into image encoder, prompt/mask decoder, memory encoder,
+  and memory-attention ONNX graphs using opset 17.
+- Express complex rotary position operations as real-valued arithmetic.
+- Store model-only spatial and learned temporal positions separately as
+  little-endian Float32 tensors. No MRI values are part of these tensors.
+- Preserve the checkpoint parameters without fine-tuning.
+
+Citation: Yunyang Xiong et al., Efficient Track Anything, 2024,
+arXiv:2411.18933. https://arxiv.org/abs/2411.18933
+The upstream implementation acknowledges SAM 2, Segment Anything,
+EfficientSAM, SAM2-Video-Predictor, and florence-sam.
+
+These are general single-object tracking assets, not a four-class tumor
+model or an independent anatomical reference. Byte verification establishes
+asset identity only, not clinical accuracy, runtime fit, or browser speed.
+Distribute only the six model files listed in the application manifest and
+these notices. Do not include image inputs, prompts, or prediction outputs.

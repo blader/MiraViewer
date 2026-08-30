@@ -1,15 +1,22 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { SvrLabelVolume, SvrVolume } from '../types/svr';
+import type { SvrLabelVolume, SvrSelectionPlane, SvrVolume } from '../types/svr';
 import { SeededVolumeWorker } from '../utils/segmentation/seededVolumeWorker';
+import { retainMarkedComponents } from '../utils/segmentation/seedConnectedSelection';
+import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
 import {
   applySelectionPatch,
   combineSelectionPatches,
   selectionPatch,
+  selectionPlaneContainsMarks,
+  isSelectionCoverageValid,
   SELECTION_LABEL_META,
   type SelectionPatch,
 } from '../utils/segmentation/selectionEditing';
 
-type LabelDescription = Pick<SvrLabelVolume, 'meta' | 'reviewState' | 'seeds'>;
+type LabelDescription = Pick<
+  SvrLabelVolume,
+  'meta' | 'reviewState' | 'seeds' | 'clippedNativeVoxels' | 'contextLimited'
+>;
 type Edit = { mask: SelectionPatch; before: LabelDescription; after: LabelDescription };
 type History = {
   volume: SvrVolume;
@@ -37,6 +44,8 @@ const description = (labels: SvrLabelVolume | null): LabelDescription => ({
   meta: labels?.meta ?? SELECTION_LABEL_META,
   reviewState: labels?.reviewState,
   seeds: labels?.seeds,
+  ...(labels?.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: labels.clippedNativeVoxels } : {}),
+  ...(labels?.contextLimited !== undefined ? { contextLimited: labels.contextLimited } : {}),
 });
 const editBytes = (edit: Edit) =>
   edit.mask.indices.byteLength +
@@ -89,6 +98,7 @@ export function useSvrSelection(
   labels: SvrLabelVolume | null,
   onChange: (labels: SvrLabelVolume | null, patch?: SelectionPatch, previousData?: Uint8Array) => void,
   automatic = false,
+  proposeSelection?: SelectionProposer,
 ) {
   const [history, setHistory] = useState(() => initial(volume, labels));
   // Actions share a synchronous authority; React projects it after the current batch.
@@ -141,14 +151,14 @@ export function useSvrSelection(
       setHistory(historyRef.current);
     }
   }, [labels, stop, volume]);
-  useLayoutEffect(
-    () => () => {
+  useLayoutEffect(() => {
+    setStatus(IDLE_STATUS);
+    return () => {
       stop();
       runner.current?.dispose();
       runner.current = null;
-    },
-    [stop, volume],
-  );
+    };
+  }, [proposeSelection, setStatus, stop, volume]);
 
   const publish = useCallback(
     (next: History, patch?: SelectionPatch) => {
@@ -205,48 +215,97 @@ export function useSvrSelection(
       }
       const controller = new AbortController();
       request.current = controller;
-      runner.current ??= new SeededVolumeWorker();
+      const isCurrent = () =>
+        !controller.signal.aborted && request.current === controller && historyRef.current.volume === volume;
+      const onProgress = (progress: number) => {
+        if (isCurrent() && Number.isFinite(progress))
+          setStatus({ running: true, progress: Math.min(1, Math.max(0, progress)) });
+      };
+      if (proposeSelection) {
+        // A previously configured legacy runner may retain its own MRI copy.
+        // It is not a fallback and must not occupy unaccounted proposal memory.
+        runner.current?.dispose();
+        runner.current = null;
+      }
       setStatus({ running: true, progress: 0 });
       try {
-        const result = await runner.current.run(
-          {
-            volume: volume.data,
-            observedSupport: volume.observedSupport,
-            dims: volume.dims,
-            voxelSizeMm: volume.voxelSizeMm,
-            ...seeds,
-          },
-          {
-            signal: controller.signal,
-            onProgress: (processed, total) => {
-              if (!controller.signal.aborted) setStatus({ running: true, progress: processed / total });
-            },
-          },
-        );
-        if (controller.signal.aborted || request.current !== controller) return;
+        const result = proposeSelection
+          ? await proposeSelection({
+              volume,
+              seeds,
+              retainedBytes: retainedEditingBytes(historyRef.current),
+              signal: controller.signal,
+              onProgress,
+            })
+          : await (runner.current ??= new SeededVolumeWorker()).run(
+              {
+                volume: volume.data,
+                observedSupport: volume.observedSupport,
+                dims: volume.dims,
+                voxelSizeMm: volume.voxelSizeMm,
+                ...seeds,
+              },
+              {
+                signal: controller.signal,
+                onProgress: (processed, total) => onProgress(processed / total),
+              },
+            );
+        if (!isCurrent()) return;
+        const clippedNativeVoxels = 'clippedNativeVoxels' in result ? result.clippedNativeVoxels : undefined;
+        if (!isSelectionCoverageValid(clippedNativeVoxels))
+          throw new Error('The boundary suggestion has invalid viewing-region coverage. Your marks are unchanged.');
+        const contextLimited =
+          'contextLimited' in result
+            ? result.contextLimited
+            : (['x', 'y', 'z'] as const).some(
+                (axis, position) => result.bounds.min[axis] > 0 || result.bounds.max[axis] < volume.dims[position]! - 1,
+              );
+        if (typeof contextLimited !== 'boolean')
+          throw new Error('The boundary suggestion has invalid source-context coverage. Your marks are unchanged.');
         const next = new Uint8Array(volume.data.length);
-        for (const index of result.indices) if (supportsMark(volume, index)) next[index] = 1;
+        if ('data' in result) {
+          if (!(result.data instanceof Uint8Array) || result.data.length !== next.length)
+            throw new Error('The boundary suggestion does not match the editing volume. Your marks are unchanged.');
+          for (let index = 0; index < next.length; index++) {
+            if (result.data[index]! > 1)
+              throw new Error('The boundary suggestion is not a binary selection. Your marks are unchanged.');
+            if (result.data[index] && supportsMark(volume, index)) next[index] = 1;
+          }
+        } else for (const index of result.indices) if (supportsMark(volume, index)) next[index] = 1;
         // The solver proposes unmarked tissue; explicit user edits remain the authority.
         for (const index of seeds.foreground) if (supportsMark(volume, index)) next[index] = 1;
         for (const index of seeds.background) if (index < next.length) next[index] = 0;
-        record(next, { meta: SELECTION_LABEL_META, reviewState: 'draft', seeds }, undefined, strokeEdit, {
-          boundaryCount: result.boundaryCount,
-          contextLimited: (['x', 'y', 'z'] as const).some(
-            (axis, position) => result.bounds.min[axis] > 0 || result.bounds.max[axis] < volume.dims[position]! - 1,
-          ),
-        });
+        // Filter only this unpublished copy, after unsupported tissue and Remove
+        // marks have severed any connections they cannot legitimately provide.
+        await retainMarkedComponents(next, volume.dims, seeds.foreground, controller.signal);
+        if (!isCurrent()) return;
+        record(
+          next,
+          {
+            meta: SELECTION_LABEL_META,
+            reviewState: 'draft',
+            seeds,
+            contextLimited,
+            ...(clippedNativeVoxels ? { clippedNativeVoxels } : {}),
+          },
+          undefined,
+          strokeEdit,
+          {
+            boundaryCount: result.boundaryCount,
+            contextLimited,
+          },
+        );
       } catch (error) {
-        if (!controller.signal.aborted)
-          setStatus({ running: false, error: error instanceof Error ? error.message : String(error) });
+        if (isCurrent()) setStatus({ running: false, error: error instanceof Error ? error.message : String(error) });
       } finally {
         if (request.current === controller) request.current = null;
       }
     },
-    [cancel, record, setStatus, volume],
+    [cancel, proposeSelection, record, setStatus, volume],
   );
 
   const stroke = useCallback(
-    (indices: Uint32Array, kind: 'include' | 'exclude') => {
+    (indices: Uint32Array, kind: 'include' | 'exclude', plane?: SvrSelectionPlane) => {
       if (historyRef.current.volume !== volume) return;
       const supported = indices.filter((index) => supportsMark(volume, index));
       if (!supported.length) {
@@ -254,6 +313,10 @@ export function useSvrSelection(
           ...current,
           error: 'This stroke contains no acquired MRI tissue. Move the brush inside the observed image.',
         }));
+        return;
+      }
+      if (plane && !selectionPlaneContainsMarks(plane, supported, volume.dims)) {
+        setStatus((current) => ({ ...current, error: 'The stroke plane does not match its marked MRI voxels.' }));
         return;
       }
       cancel();
@@ -281,7 +344,13 @@ export function useSvrSelection(
         {
           meta: SELECTION_LABEL_META,
           reviewState: 'draft',
-          seeds: { foreground: Uint32Array.from(foreground), background: Uint32Array.from(background) },
+          ...(previous?.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: previous.clippedNativeVoxels } : {}),
+          ...(previous?.contextLimited !== undefined ? { contextLimited: previous.contextLimited } : {}),
+          seeds: {
+            foreground: Uint32Array.from(foreground),
+            background: Uint32Array.from(background),
+            ...(plane ? { lastStroke: { ...plane } } : {}),
+          },
         },
         relabel ? undefined : supported,
         undefined,

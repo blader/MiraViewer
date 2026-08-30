@@ -201,6 +201,16 @@ export type SvrLabelMeta = {
   color: [number, number, number];
 };
 
+/** The actual editing section, in the owning volume's grid; never an inferred or projected prompt. */
+export type SvrSelectionPlane = { plane: SvrRoiPlane; slice: number };
+
+export type SvrSelectionSeeds = {
+  foreground: Uint32Array;
+  background: Uint32Array;
+  /** Missing on legacy drafts or when a grid transfer cannot represent the original physical plane exactly. */
+  lastStroke?: SvrSelectionPlane;
+};
+
 export type SvrLabelVolume = {
   /** Per-voxel label IDs, in the same indexing order as `SvrVolume.data`. */
   data: Uint8Array;
@@ -210,7 +220,11 @@ export type SvrLabelVolume = {
   /** Explicit user review, not algorithmic confidence or a clinical diagnosis. Missing legacy state is draft. */
   reviewState?: 'draft' | 'reviewed';
   /** Explicit editing constraints, retained so saved drafts can be grown and corrected again. */
-  seeds?: { foreground: Uint32Array; background: Uint32Array };
+  seeds?: SvrSelectionSeeds;
+  /** Native prediction cells omitted by projection. Retained through edits/transfers until a new prediction or Clear. */
+  clippedNativeVoxels?: number;
+  /** Whether the originating suggestion analyzed a limited source region. Missing legacy/manual evidence is unknown. */
+  contextLimited?: boolean;
 };
 
 export type SvrResult = {

@@ -1,8 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useState } from 'react';
+import { useState, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SvrVolume3DViewer as ContextViewer, type SvrVolume3DViewerProps } from '../src/components/SvrVolume3DViewer';
-import { SvrImagingContext } from '../src/components/svrImagingContext';
+import type * as SegmentationEditor from '../src/components/SvrSegmentationEditor';
+import { SvrImagingContext, useSvrImaging } from '../src/components/svrImagingContext';
 import { useSvrNativePlane } from '../src/hooks/useSvrNativePlane';
 import type { SvrLabelVolume, SvrNativeSource, SvrVolume } from '../src/types/svr';
 import type { DecodedFrame } from '../src/utils/decodedFrame';
@@ -14,6 +15,7 @@ import { makeNativePlaneData, nativeDisplayWindow } from '../src/utils/svr/nativ
 import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
+import type { SelectionProposer } from '../src/utils/segmentation/selectionProposal';
 import {
   ENHANCED_TEXTURE_BYTES_PER_VOXEL,
   ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
@@ -54,7 +56,20 @@ const modelSession = vi.hoisted(() => ({
   run: vi.fn(),
   init: vi.fn(),
   cancel: vi.fn(),
+  releaseIdle: vi.fn(async () => undefined),
+  proposer: vi.fn(),
 }));
+
+vi.mock('../src/components/SvrSegmentationEditor', async (importOriginal) => {
+  const original = await importOriginal<typeof SegmentationEditor>();
+  return {
+    ...original,
+    SvrSegmentationEditor: function RecordProposal(props: ComponentProps<typeof original.SvrSegmentationEditor>) {
+      modelSession.proposer(useSvrImaging().proposeSelection);
+      return <original.SvrSegmentationEditor {...props} />;
+    },
+  };
+});
 
 vi.mock('../src/hooks/useOnnxTumorSession', () => ({
   useOnnxTumorSession: () => ({
@@ -78,6 +93,7 @@ vi.mock('../src/hooks/useOnnxTumorSession', () => ({
     initSession: modelSession.init,
     runSegmentation: modelSession.run,
     cancelSegmentation: modelSession.cancel,
+    releaseIdleSession: modelSession.releaseIdle,
   }),
 }));
 
@@ -101,15 +117,21 @@ function SvrVolume3DViewer({
   labels,
   initialSelection,
   busy,
+  proposeSelection,
+  loadEnhancementSource,
   ...props
 }: SvrVolume3DViewerProps & {
   volume: SvrVolume | null;
   labels?: SvrLabelVolume | null;
   initialSelection?: SvrLabelVolume;
   busy?: boolean;
+  proposeSelection?: SelectionProposer;
+  loadEnhancementSource?: EnhancementSourceLoader;
 }) {
   return (
-    <SvrImagingContext.Provider value={{ volume, labels, initialSelection, busy }}>
+    <SvrImagingContext.Provider
+      value={{ volume, labels, initialSelection, busy, proposeSelection, loadEnhancementSource }}
+    >
       <ContextViewer {...props} />
     </SvrImagingContext.Provider>
   );
@@ -390,6 +412,7 @@ function recordSlices() {
 beforeEach(() => {
   vi.clearAllMocks();
   Object.assign(modelSession, { cached: false, verified: false, loading: false, running: false, memoryBlocked: false });
+  modelSession.releaseIdle.mockReset().mockResolvedValue(undefined);
   vi.mocked(useSvrNativePlane).mockReset().mockReturnValue({ plane: null, loading: false, error: null });
   vi.mocked(getVolumeSegmentation).mockReset().mockResolvedValue(null);
   vi.mocked(saveVolumeSegmentation).mockReset().mockResolvedValue(undefined);
@@ -1277,6 +1300,47 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     },
   );
 
+  it.each([false, true])(
+    'saves and reopens a confirmed clipped selection with context %s without rerunning',
+    async (contextLimited) => {
+      const volume = editingVolume();
+      const predicted = new Uint8Array(volume.data.length);
+      predicted[(6 * 12 + 6) * 12 + 6] = 1;
+      const proposeSelection = vi.fn<SelectionProposer>().mockResolvedValue({
+        data: predicted,
+        boundaryCount: 0,
+        contextLimited,
+        clippedNativeVoxels: 152,
+      });
+      createViewportRecorder({ width: 400, height: 320 });
+      const view = render(
+        <SvrVolume3DViewer volume={volume} volumeIdentity={identity} proposeSelection={proposeSelection} />,
+      );
+      openSelectionEditor();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      paint(5, 6);
+      await screen.findByText(/only part of the predicted tissue is retained/i);
+      await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].clippedNativeVoxels).toBe(152));
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+      await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].reviewState).toBe('reviewed'));
+      const saved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
+      expect(saved.clippedNativeVoxels).toBe(152);
+      expect(saved.contextLimited).toBe(contextLimited);
+      view.unmount();
+      vi.mocked(getVolumeSegmentation).mockResolvedValue(saved);
+      render(<SvrVolume3DViewer volume={volume} volumeIdentity={identity} proposeSelection={proposeSelection} />);
+      const warning = await screen.findByText(/only part of the predicted tissue is retained/i);
+      expect(warning).toBeVisible();
+      openSelectionEditor();
+      expect(screen.getByText(/only part of the predicted tissue is retained/i)).toBeVisible();
+      expect(proposeSelection).toHaveBeenCalledOnce();
+      expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].clippedNativeVoxels).toBe(152);
+      expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].contextLimited).toBe(contextLimited);
+      if (contextLimited) expect(screen.getByText(/limited source region/i)).toBeVisible();
+      else expect(screen.queryByText(/limited source region/i)).not.toBeInTheDocument();
+    },
+  );
+
   it('does not commit canceled pointer strokes or paint unsupported anatomy', async () => {
     const volume = editingVolume();
     volume.observedSupport!.fill(0);
@@ -1598,6 +1662,133 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
       expect(loadSource).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([true, false])(
+    'counts completed enhancement with its comparison textures during learned suggestions (display enabled=%s)',
+    async (enabled) => {
+      const volume = editingVolume();
+      const native = { ...volume, data: volume.data.slice(), observedSupport: volume.observedSupport!.slice() };
+      const output = enhancedFixture(native);
+      const loadEnhancementSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(native);
+      vi.mocked(runSuperResolution).mockResolvedValue(output);
+      const proposeSelection = vi.fn<SelectionProposer>().mockRejectedValue(new Error('Controlled proposal failure'));
+      const recorder = createViewportRecorder({ width: 400, height: 320 });
+      render(
+        <SvrVolume3DViewer
+          volume={volume}
+          volumeIdentity={identity}
+          proposeSelection={proposeSelection}
+          loadEnhancementSource={loadEnhancementSource}
+        />,
+      );
+      openSelectionEditor();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      setAutoFill(false);
+      paint(5, 6);
+      paint(8, 6, 'Remove');
+      const wrapped = modelSession.proposer.mock.lastCall![0];
+      fireEvent.click(screen.getByRole('button', { name: /Enhance selection/ }));
+      const comparison = await screen.findByRole('group', { name: 'Volume detail comparison' });
+      await waitFor(() => expect(recorder.latestInteger('u_enhancedEnabled')).toBe(1));
+      if (!enabled) fireEvent.click(within(comparison).getByRole('button', { name: 'Original' }));
+      await waitFor(() => expect(recorder.latestInteger('u_enhancedEnabled')).toBe(enabled ? 1 : 0));
+      expect(modelSession.proposer.mock.lastCall![0]).toBe(wrapped);
+      const enhancedBytes =
+        native.data.byteLength +
+        native.observedSupport!.byteLength +
+        output.data.byteLength +
+        output.observedSupport.byteLength +
+        output.data.length * ENHANCED_TEXTURE_BYTES_PER_VOXEL +
+        native.data.length * ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL;
+      const editingBytes = loadEnhancementSource.mock.calls[0]![1].retainedBytes!;
+      setAutoFill(true);
+      await screen.findByText('Controlled proposal failure');
+      expect(proposeSelection).toHaveBeenCalledOnce();
+      expect(modelSession.releaseIdle).toHaveBeenCalledOnce();
+      expect(proposeSelection.mock.calls[0]![0].retainedBytes).toBe(editingBytes + enhancedBytes);
+      expect(screen.getByRole('group', { name: 'Volume detail comparison' })).toBe(comparison);
+      expect(modelSession.proposer.mock.lastCall![0]).toBe(wrapped);
+      paint(5, 6); // An agreeing hard mark keeps the completed display's mask identity.
+      await waitFor(() => expect(proposeSelection).toHaveBeenCalledTimes(2));
+      expect(proposeSelection.mock.calls[1]![0].retainedBytes).toBeGreaterThan(editingBytes + enhancedBytes);
+      expect(screen.getByRole('group', { name: 'Volume detail comparison' })).toBe(comparison);
+      expect(modelSession.proposer.mock.lastCall![0]).toBe(wrapped);
+      expect(recorder.latestInteger('u_enhancedOriginalAvailable')).toBe(1);
+      await act(async () => {
+        await expect(
+          (wrapped as SelectionProposer)({
+            ...proposeSelection.mock.calls[1]![0],
+            retainedBytes: Number.MAX_SAFE_INTEGER,
+          }),
+        ).rejects.toThrow(/valid retained-memory estimate/i);
+      });
+      expect(proposeSelection).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([NaN, Infinity, -1, 1.5])('rejects invalid learned-proposal retained bytes (%s)', async (retainedBytes) => {
+    const volume = editingVolume();
+    const proposeSelection = vi.fn<SelectionProposer>();
+    render(<SvrVolume3DViewer volume={volume} proposeSelection={proposeSelection} />);
+    const wrapped = modelSession.proposer.mock.lastCall![0] as SelectionProposer;
+    await act(async () => {
+      await expect(
+        wrapped({
+          volume,
+          seeds: { foreground: Uint32Array.of(1), background: new Uint32Array() },
+          retainedBytes,
+          signal: new AbortController().signal,
+          onProgress: vi.fn(),
+        }),
+      ).rejects.toThrow(/valid retained-memory estimate/i);
+    });
+    expect(proposeSelection).not.toHaveBeenCalled();
+  });
+
+  it('waits for idle-model release and rejects a canceled request before asking the learned model to allocate', async () => {
+    const release = deferred<void>();
+    modelSession.releaseIdle.mockReturnValue(release.promise);
+    const volume = editingVolume();
+    const proposeSelection = vi.fn<SelectionProposer>();
+    render(<SvrVolume3DViewer volume={volume} proposeSelection={proposeSelection} />);
+    const wrapped = modelSession.proposer.mock.lastCall![0] as SelectionProposer;
+    const controller = new AbortController();
+    await act(async () => {
+      const pending = wrapped({
+        volume,
+        seeds: { foreground: Uint32Array.of(1), background: new Uint32Array() },
+        retainedBytes: 0,
+        signal: controller.signal,
+        onProgress: vi.fn(),
+      });
+      const rejected = expect(pending).rejects.toThrow();
+      expect(proposeSelection).not.toHaveBeenCalled();
+      controller.abort();
+      release.resolve();
+      await rejected;
+    });
+    expect(proposeSelection).not.toHaveBeenCalled();
+  });
+
+  it('preserves a pending-model or cleanup failure without submitting a learned proposal', async () => {
+    modelSession.releaseIdle.mockRejectedValue(new Error('Other model runtime is still initializing.'));
+    const volume = editingVolume();
+    const proposeSelection = vi.fn<SelectionProposer>();
+    render(<SvrVolume3DViewer volume={volume} proposeSelection={proposeSelection} />);
+    const wrapped = modelSession.proposer.mock.lastCall![0] as SelectionProposer;
+    await act(async () => {
+      await expect(
+        wrapped({
+          volume,
+          seeds: { foreground: Uint32Array.of(1), background: new Uint32Array() },
+          retainedBytes: 0,
+          signal: new AbortController().signal,
+          onProgress: vi.fn(),
+        }),
+      ).rejects.toThrow(/initializing/i);
+    });
+    expect(proposeSelection).not.toHaveBeenCalled();
+  });
 
   it.each([true, false])(
     'preserves MRI slice visibility=%s when enhancement completes and detail is toggled',

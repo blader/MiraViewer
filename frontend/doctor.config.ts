@@ -20,6 +20,9 @@ export default defineConfig({
           // Native grids stream one decoded frame at a time within the memory
           // budget. Model-input conversion yields over one shared output buffer.
           'src/utils/svr/nativeVolume.ts',
+          // Full-source range measurement owns one decoded frame at a time;
+          // parallel decoding would invalidate that bounded memory plan.
+          'src/utils/svr/nativeSourceContext.ts',
           // Region copying scans one shared volume in bounded chunks; yields are
           // for input/cancel responsiveness, not parallelizable network work.
           'src/utils/svr/superResolutionRegion.ts',
@@ -36,6 +39,10 @@ export default defineConfig({
           'src/utils/svr/acquisitionProvenance.ts',
           'src/services/exportBackup.ts',
           'src/utils/segmentation/onnx/modelCache.ts',
+          // Graph initialization is sequential to bound transient weight and
+          // compiler buffers. Tracking directions share one exclusive model.
+          'src/utils/segmentation/efficientTam/model.ts',
+          'src/utils/segmentation/interactiveTracking.worker.ts',
           'src/utils/svr/longitudinalFrames.ts',
           'src/utils/svr/reconstructVolume.ts',
           // Registration hypotheses share one rendering/scoring worker, cancellation
@@ -44,6 +51,12 @@ export default defineConfig({
           'src/utils/svr/longitudinalRegistration.ts',
         ],
         rules: ['react-doctor/async-await-in-loop'],
+      },
+      {
+        // These fixtures reproduce the actual JSON wire format of old typed-array
+        // backups. structuredClone would hide the persistence bug under test.
+        files: ['tests/exportBackup.test.ts'],
+        rules: ['react-doctor/no-json-parse-stringify-clone'],
       },
       {
         // The GPU diagnostic canvas intentionally owns keyboard navigation as an

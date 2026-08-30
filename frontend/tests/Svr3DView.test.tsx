@@ -7,11 +7,22 @@ import { useSvrImaging } from '../src/components/svrImagingContext';
 import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 import type * as DerivedAlignmentFrames from '../src/utils/derivedAlignmentFrame';
 import type * as ReconstructionHooks from '../src/hooks/useSvrReconstruction';
+import type * as DecodedFrames from '../src/utils/decodedFrame';
+import type * as InteractiveAdmission from '../src/utils/segmentation/interactiveAdmission';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
+import type { SelectionProposer } from '../src/utils/segmentation/selectionProposal';
+import { planInteractiveSelectionContext } from '../src/utils/svr/interactiveSelectionContext';
+import { createNativeSourceContext } from '../src/utils/svr/nativeSourceContext';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
-import { assembleNativeVolume, planNativeVolume, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
+import {
+  assembleNativeVolume,
+  nativePlaneMemoryBytes,
+  planNativeVolume,
+  retainedSvrVolumeBytes,
+} from '../src/utils/svr/nativeVolume';
 import { regionalRefinementParameters, selectionFocusRoi } from '../src/utils/svr/refineRegion';
 import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
+import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({
   cacheInfo: vi.fn(),
@@ -36,6 +47,10 @@ const mocks = vi.hoisted(() => ({
   useReconstruction: vi.fn(),
   enhancementLoader: vi.fn(),
   refinementLoader: vi.fn(),
+  selectionProposer: vi.fn(),
+  admitSelection: vi.fn(),
+  proposeSelection: vi.fn(),
+  decodedFrame: vi.fn(),
   hook: {
     status: 'idle' as 'idle' | 'running' | 'ready' | 'failed' | 'canceled' | 'canceling',
     isRunning: false,
@@ -49,6 +64,20 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.manifests,
   getSortedSopInstanceUidsForSeries: mocks.sortedSopUids,
+  getDatasetRevision: vi.fn(async () => 7),
+  getSelectedPatientKey: vi.fn(async () => 'patient-a'),
+}));
+
+vi.mock('../src/utils/decodedFrame', async (importOriginal) => ({
+  ...(await importOriginal<typeof DecodedFrames>()),
+  getDecodedFrameBySopInstanceUid: mocks.decodedFrame,
+}));
+vi.mock('../src/utils/segmentation/interactiveAdmission', async (importOriginal) => ({
+  ...(await importOriginal<typeof InteractiveAdmission>()),
+  admitInteractiveSelection: mocks.admitSelection,
+}));
+vi.mock('../src/utils/segmentation/interactiveSelection', () => ({
+  proposeInteractiveSelection: mocks.proposeSelection,
 }));
 
 vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
@@ -78,6 +107,7 @@ vi.mock('../src/components/SvrVolume3DViewer', () => ({
     const imaging = useSvrImaging();
     mocks.enhancementLoader(imaging.loadEnhancementSource);
     mocks.refinementLoader(imaging.refineRegion);
+    mocks.selectionProposer(imaging.proposeSelection);
     return (
       <div data-testid="accepted-svr-volume">
         {volumeIdentity?.patientKey} / {volumeIdentity?.studyUid}
@@ -234,6 +264,7 @@ function nativeEnhancementFixture(
   start: [number, number, number],
   selected: [number, number, number],
   angle = 0,
+  sourceSize = 64,
 ) {
   const base = manifest('axial-patient-a');
   const c = Math.cos(angle),
@@ -241,10 +272,10 @@ function nativeEnhancementFixture(
   const direction = [c, -s, 0, s, c, 0, 0, 0, 1] as const;
   const sourceManifest = {
     ...base,
-    frames: Array.from({ length: 64 }, (_, index) => ({
+    frames: Array.from({ length: sourceSize }, (_, index) => ({
       ...base.frames[0]!,
-      rows: 64,
-      columns: 64,
+      rows: sourceSize,
+      columns: sourceSize,
       instanceNumber: index + 1,
       sopInstanceUid: `axial-native-${index}`,
       imagePositionPatient: `0\\0\\${index}`,
@@ -285,8 +316,8 @@ function nativeEnhancementFixture(
           contributingSopInstanceUids: [],
           frames: sourceManifest.frames.map((frame, index) => ({
             sopInstanceUid: frame.sopInstanceUid,
-            rows: 64,
-            columns: 64,
+            rows: sourceSize,
+            columns: sourceSize,
             originMm: [0, 0, index] as const,
             columnDirection: [c, s, 0] as const,
             rowDirection: [-s, c, 0] as const,
@@ -305,9 +336,9 @@ function nativeEnhancementFixture(
   return { sourceManifest, previous: { volume, parameters: DEFAULT_SVR_PARAMS }, labels };
 }
 
-function nativeComparisonData() {
+function nativeComparisonData(sourceSize = 64) {
   const comparisonData = data('patient-a', 1);
-  comparisonData.series_map[comparisonData.sequences[0]!.id]![EXAMINATION]!.instance_count = 64;
+  comparisonData.series_map[comparisonData.sequences[0]!.id]![EXAMINATION]!.instance_count = sourceSize;
   return comparisonData;
 }
 
@@ -335,6 +366,9 @@ beforeEach(() => {
   }));
   mocks.run.mockResolvedValue({ result: null, error: null, durationMs: 0 });
   mocks.reconstruct.mockReset();
+  mocks.admitSelection.mockReset().mockResolvedValue('wasm');
+  mocks.proposeSelection.mockReset();
+  mocks.decodedFrame.mockReset();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
   mocks.cachedImages.length = 0;
@@ -361,6 +395,243 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('Native interactive selection workspace', () => {
+  async function setupSelection(angle = 0, sourceSize = 64) {
+    const comparisonData = nativeComparisonData(sourceSize);
+    const start: [number, number, number] = sourceSize === 64 ? [20, 0, 0] : [52, 32, 32];
+    const { sourceManifest, previous, labels } = nativeEnhancementFixture(
+      [24, 64, 64],
+      start,
+      [12, 32, 32],
+      angle,
+      sourceSize,
+    );
+    labels.seeds = {
+      foreground: Uint32Array.of((32 * 64 + 32) * 24 + 12),
+      background: new Uint32Array(),
+      lastStroke: { plane: 'axial', slice: 32 },
+    };
+    mocks.manifests.mockResolvedValue(sourceManifest);
+    mocks.hook.result = previous;
+    mocks.hook.resultIdentity = identity(comparisonData);
+    mocks.hook.status = 'ready';
+    mocks.decodedFrame.mockImplementation(async (seriesUid: string, sopInstanceUid: string) => {
+      const index = Number(sopInstanceUid.split('-').at(-1));
+      return {
+        seriesUid,
+        sopInstanceUid,
+        rows: sourceSize,
+        cols: sourceSize,
+        pixels: Float32Array.from({ length: sourceSize ** 2 }, (_, pixel) => index * sourceSize ** 2 + pixel - 17),
+        validity: new Float32Array(sourceSize ** 2).fill(1),
+      };
+    });
+    mocks.reconstruct.mockImplementation(async (request) => {
+      const plan = planNativeVolume(sourceManifest, request.svrParams, {
+        retainedBytes: request.retainedBytes,
+        decodedCacheBytes: 0,
+        transform: previous.volume.sourceProvenance!.sources[0]!.transform,
+      });
+      const volume = await assembleNativeVolume(
+        plan,
+        (frame) => mocks.decodedFrame(sourceManifest.seriesUid, frame.sopInstanceUid),
+        {
+          signal: request.signal,
+          onProgress: (current, total) =>
+            request.onProgress?.({ phase: 'loading', current, total, message: 'Native source' }),
+        },
+      );
+      return {
+        volume: { ...volume, sourceProvenance: previous.volume.sourceProvenance },
+        parameters: request.svrParams,
+      };
+    });
+    const result = render(<Svr3DView data={comparisonData} />);
+    openSources();
+    await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
+    const proposer = mocks.selectionProposer.mock.lastCall![0] as SelectionProposer;
+    const request = {
+      volume: previous.volume,
+      seeds: labels.seeds,
+      retainedBytes: 1234,
+      signal: new AbortController().signal,
+      onProgress: vi.fn(),
+    };
+    return { ...result, comparisonData, sourceManifest, previous, labels, proposer, request };
+  }
+
+  it('provides a stable native proposer without starting work on hydration or label publication', async () => {
+    const { comparisonData, previous, labels, proposer, rerender } = await setupSelection();
+    expect(proposer).toBeTypeOf('function');
+    expect(mocks.admitSelection).not.toHaveBeenCalled();
+    expect(mocks.decodedFrame).not.toHaveBeenCalled();
+    expect(mocks.proposeSelection).not.toHaveBeenCalled();
+    mocks.hook.result = { ...previous, initialSelection: labels };
+    rerender(<Svr3DView data={comparisonData} />);
+    expect(mocks.selectionProposer.mock.lastCall![0]).toBe(proposer);
+    expect(mocks.admitSelection).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 0.31])(
+    'loads exact source context, admits distinct crop memory and preserves the accepted grid (rotation %s)',
+    async (angle) => {
+      const { sourceManifest, previous, labels, proposer, request } = await setupSelection(angle, 128);
+      const before = previous.volume.data.slice();
+      const markedBefore = labels.data.slice();
+      const owners = {
+        retainedBytes: retainedSvrVolumeBytes(previous.volume) + request.retainedBytes + 2048,
+        nativePlaneBytes: nativePlaneMemoryBytes(previous.volume.sourceProvenance!.sources),
+        decodedCacheBytes: 0,
+      };
+      mocks.retainedAlignmentBytes.mockReturnValue(2048);
+      const context = createNativeSourceContext({
+        volume: previous.volume,
+        nativeSource: sourceManifest,
+        selectedSeries: [],
+        parameters: previous.parameters,
+        ...owners,
+      });
+      const planned = planInteractiveSelectionContext(previous.volume, context.grid, request.seeds);
+      const loadPlan = context.plan(planned.loaderRoi);
+      const output = { data: new Uint8Array(previous.volume.data.length), boundaryCount: 0, contextLimited: true };
+      mocks.proposeSelection.mockImplementation(async (_source, runRequest) => {
+        runRequest.onProgress(1);
+        return output;
+      });
+      const result = await proposer(request);
+      expect(result).toBe(output);
+      expect(mocks.admitSelection).toHaveBeenCalledTimes(3);
+      for (const [admission] of mocks.admitSelection.mock.calls) {
+        expect(admission).toEqual({
+          signal: request.signal,
+          retainedBytes: owners.retainedBytes + owners.nativePlaneBytes + 256 * 1024 * 1024,
+          sourceLoadPeakBytes: loadPlan.memoryPlan.totalBytes + 256 * 1024 * 1024,
+          contextBytes: planned.contextBytes,
+          editingVoxels: previous.volume.data.length,
+          width: planned.width,
+          height: planned.height,
+          frameCount: planned.frameCount,
+          conditioningFrames: 1,
+          literalMarkCount: request.seeds.foreground.length + request.seeds.background.length,
+        });
+      }
+      if (angle) expect(loadPlan.dims.reduce((count, size) => count * size, 1)).toBeGreaterThan(planned.contextVoxels);
+      expect(mocks.reconstruct).toHaveBeenCalledOnce();
+      expect(mocks.reconstruct.mock.lastCall![0]).toMatchObject({
+        acceptedProvenance: previous.volume.sourceProvenance,
+        retainedBytes: owners.retainedBytes,
+        nativeContextBudgetBytes: 1536 * 1024 * 1024,
+        svrParams: { ...previous.parameters, roi: planned.loaderRoi },
+      });
+      expect(mocks.proposeSelection).toHaveBeenCalledOnce();
+      const [native, forwarded] = mocks.proposeSelection.mock.lastCall!;
+      expect(native.provider).toBe('wasm');
+      expect(native.retainMarkedComponents).toBe(true);
+      expect(native.sourceRange).toEqual([-17, 128 ** 3 - 18]);
+      expect(native.nativeContext.dims).toEqual(planned.grid.dims);
+      expect(native.nativeContext.originMm).toEqual(planned.grid.originMm);
+      expect(native.nativeContext.voxelSizeMm).toEqual(planned.grid.voxelSizeMm);
+      expect(native.nativeContext.data.buffer).not.toBe(previous.volume.data.buffer);
+      expect(forwarded.volume).toBe(previous.volume);
+      expect(forwarded.seeds).toBe(request.seeds);
+      expect(forwarded.signal).toBe(request.signal);
+      expect(request.onProgress.mock.lastCall![0]).toBe(1);
+      expect(previous.volume.data).toEqual(before);
+      expect(labels.data).toEqual(markedBefore);
+      expect(mocks.run).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects failed admission before any native decode, model call, or accepted-volume change', async () => {
+    const { previous, proposer, request } = await setupSelection();
+    mocks.admitSelection.mockRejectedValue(new Error('The verified runtime does not fit the browser memory budget.'));
+    await expect(proposer(request)).rejects.toThrow(/memory budget/i);
+    expect(mocks.decodedFrame).not.toHaveBeenCalled();
+    expect(mocks.reconstruct).not.toHaveBeenCalled();
+    expect(mocks.proposeSelection).not.toHaveBeenCalled();
+    expect(mocks.hook.result?.volume).toBe(previous.volume);
+  });
+
+  it('rechecks changing retained owners before native crop and inference', async () => {
+    const { previous, proposer, request } = await setupSelection();
+    const reconstruct = mocks.reconstruct.getMockImplementation()!;
+    mocks.reconstruct.mockImplementation(async (value) => {
+      const result = await reconstruct(value);
+      mocks.retainedAlignmentBytes.mockReturnValue(16_384);
+      return result;
+    });
+    mocks.proposeSelection.mockResolvedValue({
+      data: new Uint8Array(previous.volume.data.length),
+      boundaryCount: 0,
+      contextLimited: true,
+    });
+    await proposer(request);
+    const admissions = mocks.admitSelection.mock.calls.map(([value]) => value);
+    expect(admissions).toHaveLength(3);
+    expect(admissions[1].retainedBytes - admissions[0].retainedBytes).toBe(16_384);
+    expect(admissions[2].retainedBytes).toBe(admissions[1].retainedBytes);
+    expect(admissions[1].sourceLoadPeakBytes - admissions[0].sourceLoadPeakBytes).toBe(16_384);
+  });
+
+  it('reserves remaining pixel cache capacity beside parsed buffers without charging that capacity twice', async () => {
+    const { previous, proposer, request } = await setupSelection();
+    const pixels = new Uint8Array(16),
+      parsed = new Uint8Array(32);
+    const image = { imageId: 'miradb:visible', getPixelData: () => pixels, data: { byteArray: parsed } };
+    mocks.cachedImages.push({ imageId: image.imageId, sizeInBytes: 16, timeStamp: 0, loaded: true, image });
+    mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 16, maximumSizeInBytes: 128 });
+    mocks.proposeSelection.mockResolvedValue({
+      data: new Uint8Array(previous.volume.data.length),
+      boundaryCount: 0,
+      contextLimited: true,
+    });
+    await proposer(request);
+    const expectedOwners =
+      retainedSvrVolumeBytes(previous.volume) +
+      request.retainedBytes +
+      nativePlaneMemoryBytes(previous.volume.sourceProvenance!.sources);
+    for (const [admission] of mocks.admitSelection.mock.calls)
+      expect(admission.retainedBytes).toBe(expectedOwners + 128 + parsed.byteLength);
+    expect(mocks.removeCachedImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'source', 'reconstruct', 'unmount'] as const)(
+    'rejects pending work after %s before starting MRI decode',
+    async (change) => {
+      const { comparisonData, previous, proposer, request, rerender, unmount } = await setupSelection();
+      const admission = deferred<'webgpu'>();
+      mocks.admitSelection.mockReturnValue(admission.promise);
+      const controller = new AbortController();
+      const pending = proposer({ ...request, signal: controller.signal });
+      const rejected = expect(pending).rejects.toThrow(/canceled|source changed/i);
+      if (change === 'cancel') controller.abort();
+      else if (change === 'unmount') unmount();
+      else {
+        if (change === 'source') mocks.hook.result = { ...previous, volume: { ...previous.volume } };
+        else mocks.hook.isRunning = true;
+        rerender(<Svr3DView data={comparisonData} />);
+      }
+      admission.resolve('webgpu');
+      await rejected;
+      expect(mocks.decodedFrame).not.toHaveBeenCalled();
+      expect(mocks.reconstruct).not.toHaveBeenCalled();
+      expect(mocks.proposeSelection).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves learned failures without rerunning reconstruction or another algorithm', async () => {
+    const { previous, proposer, request } = await setupSelection();
+    const sourceBefore = previous.volume.data.slice();
+    mocks.proposeSelection.mockRejectedValue(new Error('Interactive model failed.'));
+    await expect(proposer(request)).rejects.toThrow('Interactive model failed.');
+    expect(mocks.reconstruct).toHaveBeenCalledOnce();
+    expect(mocks.proposeSelection).toHaveBeenCalledOnce();
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(previous.volume.data).toEqual(sourceBefore);
+  });
 });
 
 describe('SVR reconstruction workspace', () => {

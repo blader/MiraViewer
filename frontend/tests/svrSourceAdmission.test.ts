@@ -7,6 +7,9 @@ import { DEFAULT_SVR_PARAMS, type SvrProgress, type SvrSelectedSeries } from '..
 import { getSeriesFrameManifest, setSelectedPatientKey } from '../src/utils/localApi';
 import * as computeCore from '../src/utils/svr/svrComputeCore';
 import { estimateSvrSourceMemory } from '../src/utils/svr/sourceMemory';
+import { createNativeSourceContext } from '../src/utils/svr/nativeSourceContext';
+import { nativePlaneMemoryBytes, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
+import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { deferred } from './helpers/deferred';
 
 const cornerstone = vi.hoisted(() => ({
@@ -54,6 +57,7 @@ type SourceFixture = {
   columns?: number;
   slicePositionsMm?: number[];
   sliceThicknessMm?: number;
+  pixelSpacingMm?: [number, number];
   acquisitionMetadata?: Partial<DicomAcquisitionMetadata> | null;
 };
 
@@ -120,7 +124,7 @@ async function seedSeries(options: SourceFixture): Promise<SvrSelectedSeries> {
       columns,
       imagePositionPatient: coronal ? `0\\${-slicePositionMm}\\0` : `0\\0\\${slicePositionMm}`,
       imageOrientationPatient: coronal ? '1\\0\\0\\0\\0\\1' : '1\\0\\0\\0\\1\\0',
-      pixelSpacing: '1\\1',
+      pixelSpacing: (options.pixelSpacingMm ?? [1, 1]).join('\\'),
       sliceThickness: options.sliceThicknessMm ?? 1,
       spacingBetweenSlices: 1,
       pixelPaddingValue: options.pixelPaddingValue,
@@ -548,6 +552,104 @@ describe('SVR canonical source admission and acquired support', () => {
     expect(refined.volume.sourceProvenance!.sources[1]!.transform).not.toBe(transform);
     expect(JSON.stringify(accepted)).toBe(snapshot);
   });
+
+  it('loads context beside the actual default overview only within its explicit combined native-source budget', async () => {
+    cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
+    const pixels = Int16Array.from({ length: 512 * 512 }, (_, index) => (index % 32000) - 16000);
+    const original = await seedSeries({
+      seriesUid: 'default-overview-context',
+      count: 221,
+      rows: 512,
+      columns: 512,
+      pixels,
+      pixelSpacingMm: [0.4296875, 0.4296875],
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    const accepted = await reconstruct([original]);
+    expect(accepted.volume.dims).toEqual([256, 512, 221]);
+    const originalData = accepted.volume.data;
+    const originalSample = originalData[50];
+    const nativeSource = await getSeriesFrameManifest(original.seriesUid);
+    const options = {
+      volume: accepted.volume,
+      nativeSource,
+      selectedSeries: [original],
+      parameters: params,
+      retainedBytes: retainedSvrVolumeBytes(accepted.volume) + 1024,
+      decodedCacheBytes: 0,
+      nativePlaneBytes: nativePlaneMemoryBytes([nativeSource]),
+    };
+    const roi = {
+      mode: 'box' as const,
+      sourcePlane: 'axial' as const,
+      boundsMm: { min: [60, 60, 0] as [number, number, number], max: [140, 140, 220] as [number, number, number] },
+    };
+    const ordinary = createNativeSourceContext(options);
+    const plan = ordinary.plan(roi);
+    expect(plan.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
+    expect(plan.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    cornerstone.loadImage.mockClear();
+    await expect(ordinary.load(roi)).rejects.toThrow(/memory budget/);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
+
+    const rejected = createNativeSourceContext({ ...options, budgetBytes: plan.totalBytes - 1 });
+    await expect(rejected.load(roi)).rejects.toThrow(/memory budget/);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
+
+    const admitted = createNativeSourceContext({ ...options, budgetBytes: plan.totalBytes });
+    expect(admitted.plan(roi).budgetBytes).toBe(plan.totalBytes);
+    const loaded = await admitted.load(roi);
+    expect(loaded.dims).toEqual(plan.dims);
+    expect(loaded.voxelSizeMm).toEqual(plan.nativeVoxelSizeMm);
+    expect(loaded.originMm).toEqual(plan.originMm);
+    expect(loaded.sourceProvenance?.sources[0]?.transform).toEqual(
+      accepted.volume.sourceProvenance?.sources[0]?.transform,
+    );
+    expect(loaded.data[0]).toBe(pixels[plan.cropMin[1] * 512 + plan.cropMin[0]]);
+    expect(loaded.observedSupport?.every((value) => value === 1)).toBe(true);
+    expect(loaded.data.buffer).not.toBe(originalData.buffer);
+    expect(accepted.volume.data).toBe(originalData);
+    expect(originalData[50]).toBe(originalSample);
+    expect(cornerstone.loadImage).toHaveBeenCalledTimes(221);
+    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
+
+    // A caller-supplied operation budget does not weaken the source identity boundary.
+    cornerstone.loadImage.mockClear();
+    await setSelectedPatientKey('another-active-patient');
+    await expect(admitted.load(roi)).rejects.toThrow(/currently selected patient/);
+    expect(cornerstone.loadImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['no accepted source', 'no region', 'independent source', 'invalid budget'] as const)(
+    'does not apply a native-context budget to %s',
+    async (kind) => {
+      cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 0 });
+      const selectedSeries = [
+        await seedSeries({
+          seriesUid: 'budget-native',
+          acquisitionMetadata: kind === 'independent source' ? {} : { mrAcquisitionType: '3D' },
+        }),
+      ];
+      if (kind === 'independent source')
+        selectedSeries.push(await seedSeries({ seriesUid: 'budget-coronal', orientation: 'coronal' }));
+      const accepted = await reconstruct(selectedSeries);
+      cornerstone.loadImage.mockClear();
+      await expect(
+        reconstructVolumeMultiPlane({
+          selectedSeries,
+          svrParams: {
+            ...params,
+            ...(kind !== 'no region' && {
+              roi: { mode: 'box' as const, sourcePlane: 'axial' as const, boundsMm: accepted.volume.boundsMm },
+            }),
+          },
+          acceptedProvenance: kind === 'no accepted source' ? undefined : accepted.volume.sourceProvenance,
+          nativeContextBudgetBytes: kind === 'invalid budget' ? NaN : 3 * 1024 ** 3,
+        }),
+      ).rejects.toThrow(/native source context/);
+      expect(cornerstone.loadImage).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects an over-budget native-pitch regional source stack before any image decode or solver allocation', async () => {
     const large = { count: 60, rows: 1024, columns: 1024, pixels: Int16Array.of(1) };

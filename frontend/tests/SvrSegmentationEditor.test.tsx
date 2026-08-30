@@ -6,6 +6,7 @@ import { SvrImagingContext } from '../src/components/svrImagingContext';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
+import type { SelectionProposer } from '../src/utils/segmentation/selectionProposal';
 import { paint, proposedRegion, setAutoFill } from './helpers/selectionInteraction';
 import { deferred } from './helpers/deferred';
 
@@ -44,7 +45,7 @@ function draft(): SvrLabelVolume {
 function setup(
   initial: SvrLabelVolume | null = null,
   overrides: Partial<Pick<EditorProps, 'disabled' | 'disabledReason' | 'storageError' | 'selectionNotice'>> = {},
-  imaging: Partial<Pick<ImagingProps, 'volume' | 'refineRegion' | 'busy'>> = {},
+  imaging: Partial<Pick<ImagingProps, 'volume' | 'refineRegion' | 'busy' | 'proposeSelection'>> = {},
 ) {
   const source = imaging.volume ?? volume();
   const changed = vi.fn<EditorProps['onChange']>();
@@ -277,7 +278,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     fireEvent.click(action);
     expect(refineRegion).not.toHaveBeenCalled();
     await act(async () => completion.resolve(proposedRegion([at(7, 6)])));
-    expect(action).toBeEnabled();
+    await waitFor(() => expect(action).toBeEnabled());
     fireEvent.click(action);
     expect(refineRegion.mock.lastCall![0]).toBe(changed.mock.lastCall![0]);
     expect(dispose).not.toHaveBeenCalled();
@@ -431,6 +432,94 @@ describe('Focused SVR tissue-selection workflow', () => {
     expect(source.data).toEqual(original);
   });
 
+  it('uses the configured native proposer from the imaging workspace with the same brush and undo controls', async () => {
+    const legacy = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    const source = volume();
+    const prediction = new Uint8Array(source.data.length);
+    prediction[at(6, 6)] = 1;
+    const proposeSelection = vi.fn<SelectionProposer>().mockResolvedValue({
+      data: prediction,
+      boundaryCount: 0,
+      contextLimited: false,
+    });
+    const { changed } = setup(null, {}, { volume: source, proposeSelection });
+    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    expect(proposeSelection).not.toHaveBeenCalled();
+    paint();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
+    await waitFor(() => expect(proposeSelection).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled());
+    expect(legacy).not.toHaveBeenCalled();
+    expect(proposeSelection.mock.calls[0]![0]).toMatchObject({
+      volume: source,
+      seeds: {
+        foreground: Uint32Array.of(at(5, 6)),
+        background: new Uint32Array(),
+        lastStroke: { plane: 'axial', slice: 6 },
+      },
+      retainedBytes: 10,
+    });
+    const filled = changed.mock.lastCall![0]!;
+    expect(filled.data[at(5, 6)]).toBe(1);
+    expect(filled.data[at(6, 6)]).toBe(1);
+    expect(prediction[at(5, 6)]).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
+    expect(changed.mock.lastCall![0]!.data.some(Boolean)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Redo selection edit' }));
+    expect(changed.mock.lastCall![0]!.data).toEqual(filled.data);
+    expect(proposeSelection).toHaveBeenCalledOnce();
+  });
+
+  it('discloses a larger native prediction clipped by the current viewing region without replacing its volume', async () => {
+    const source = volume();
+    const prediction = new Uint8Array(source.data.length);
+    prediction[at(6, 6)] = 1;
+    const proposeSelection = vi.fn<SelectionProposer>().mockResolvedValue({
+      data: prediction,
+      boundaryCount: 0,
+      contextLimited: false,
+      clippedNativeVoxels: 152,
+    });
+    const { changed } = setup(null, {}, { volume: source, proposeSelection });
+    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    paint();
+    const warning = await screen.findByText(/only part of the predicted tissue is retained/i);
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(warning).toHaveTextContent(/Enlarge or clear the focus region in Sources/i);
+    expect(screen.queryByText(/initial prediction reached the edge/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/analyzed a limited source region/i)).not.toBeInTheDocument();
+    expect(changed.mock.lastCall![0]!.data.length).toBe(source.data.length);
+    expect(changed.mock.lastCall![0]!.clippedNativeVoxels).toBe(152);
+    expect(source.dims).toEqual([12, 12, 12]);
+  });
+
+  it('shows stored clipping evidence without running another prediction on reopen', () => {
+    const proposeSelection = vi.fn<SelectionProposer>();
+    setup({ ...draft(), clippedNativeVoxels: 152, reviewState: 'reviewed' }, {}, { proposeSelection });
+    expect(screen.getByText(/only part of the predicted tissue is retained/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
+    expect(screen.getByText(/only part of the predicted tissue is retained/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.getByText(/only part of the predicted tissue is retained/i)).toBeVisible();
+    expect(proposeSelection).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false, true])(
+    'restores context evidence %s without inferring coverage or rerunning',
+    (contextLimited) => {
+      const proposeSelection = vi.fn<SelectionProposer>();
+      setup({ ...draft(), ...(contextLimited !== undefined ? { contextLimited } : {}) }, {}, { proposeSelection });
+      fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
+      const warning = screen.queryByText(/limited source region/i);
+      if (contextLimited) expect(warning).toBeVisible();
+      else expect(warning).not.toBeInTheDocument();
+      setAutoFill(false);
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+      if (contextLimited) expect(screen.getByText(/limited source region/i)).toBeVisible();
+      expect(proposeSelection).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['draft', 'reviewed'] as const)(
     'does not run auto-fill on restoring, browsing, or reopening a %s selection',
     (reviewState) => {
@@ -470,7 +559,11 @@ describe('Focused SVR tissue-selection workflow', () => {
     expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry boundary' }));
     await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry boundary' })).not.toBeInTheDocument());
+    await waitFor(() => {
+      expect(changed).toHaveBeenCalledOnce();
+      expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
+    });
+    expect(screen.queryByRole('button', { name: 'Retry boundary' })).not.toBeInTheDocument();
     expect(changed.mock.lastCall![0]!.data[at(5, 6)]).toBe(1);
     expect(changed.mock.lastCall![0]!.data[at(6, 6)]).toBe(1);
   });
@@ -675,7 +768,7 @@ describe('Focused SVR tissue-selection workflow', () => {
   });
 
   it('retains boundary and limited-context warnings when viewing a suggested draft in 3D', async () => {
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
+    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
       indices: Uint32Array.of(at(5, 6), at(6, 6)),
       bounds: { min: { x: 1, y: 1, z: 1 }, max: { x: 11, y: 11, z: 11 } },
       boundaryCount: 1,
@@ -685,10 +778,20 @@ describe('Focused SVR tissue-selection workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
     setAutoFill(false);
     setAutoFill(true);
-    await screen.findByText(/selection reaches the search boundary/i);
+    await screen.findByText(/initial prediction reached the edge/i);
     fireEvent.keyDown(screen.getByRole('application', { name: /axial reconstructed slice/i }), { key: 'Escape' });
-    expect(screen.getByText(/selection reaches the search boundary/i)).toBeInTheDocument();
-    expect(screen.getByText(/memory-limited region/i)).toBeInTheDocument();
+    expect(screen.getByText(/initial prediction reached the edge/i)).toBeInTheDocument();
+    expect(screen.getByText(/limited source region/i)).toBeInTheDocument();
     expect(changed.mock.lastCall![0]!.reviewState).toBe('draft');
+    const savedDraft = changed.mock.lastCall![0];
+    fireEvent.click(screen.getByRole('button', { name: 'Edit selection' }));
+    setAutoFill(false);
+    expect(screen.getByText(/limited source region/i)).toBeVisible();
+    expect(changed.mock.lastCall![0]).toBe(savedDraft);
+    run.mockRejectedValueOnce(new Error('Retry could not complete'));
+    setAutoFill(true);
+    await screen.findByText('Retry could not complete');
+    expect(screen.getByText(/limited source region/i)).toBeVisible();
+    expect(changed.mock.lastCall![0]).toBe(savedDraft);
   });
 });

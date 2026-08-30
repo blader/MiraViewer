@@ -562,6 +562,8 @@ export async function reconstructVolumeMultiPlane(params: {
   onProgress?: (p: SvrProgress) => void;
   acceptedProvenance?: SvrSourceProvenance;
   retainedBytes?: number;
+  /** Source-only loading within an already admitted operation; never a general reconstruction override. */
+  nativeContextBudgetBytes?: number;
 }): Promise<SvrResult> {
   const { selectedSeries, svrParams, signal, onProgress } = params;
   if (!selectedSeries.length) throw new Error('Select a source series to open its volume.');
@@ -601,6 +603,16 @@ export async function reconstructVolumeMultiPlane(params: {
       'The accepted source geometry no longer matches this examination. Reopen the volume before refining.',
     );
   }
+  if (
+    params.nativeContextBudgetBytes !== undefined &&
+    (!Number.isSafeInteger(params.nativeContextBudgetBytes) ||
+      params.nativeContextBudgetBytes <= 0 ||
+      !accepted ||
+      accepted.mode === 'independent-2d' ||
+      classification.mode === 'independent-2d' ||
+      !svrParams.roi)
+  )
+    throw new Error('An explicit budget requires a valid accepted native source context and exact region.');
   const acceptedSourceTransforms = accepted
     ? Object.fromEntries(
         accepted.sources.map((source) => [source.seriesUid, snapshotPatientTransform(source.transform)]),
@@ -666,6 +678,7 @@ export async function reconstructVolumeMultiPlane(params: {
       decodedCacheBytes,
       transform,
       nativePlaneBytes: nativePlaneMemoryBytes(references),
+      budgetBytes: params.nativeContextBudgetBytes,
     });
     const contributing: string[] = [];
     const volume = await assembleNativeVolume(

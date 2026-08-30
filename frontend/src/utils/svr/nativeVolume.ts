@@ -369,6 +369,8 @@ export async function assembleNativeVolume(
     ({ slice }) =>
       slice >= plan.cropMin[2] && slice <= plan.cropMax[2] && (slice - plan.cropMin[2]) % plan.sourceStrides[2] === 0,
   );
+  let windowMinimum = Infinity,
+    windowMaximum = -Infinity;
   for (const [position, { frame, slice }] of frames.entries()) {
     assertNotAborted(options.signal);
     const source = await waitForNativeFrame(readFrame(frame), options.signal);
@@ -385,6 +387,8 @@ export async function assembleNativeVolume(
     const padding = source.pixelPaddingValue;
     const limit = Number.isFinite(source.pixelPaddingRangeLimit) ? source.pixelPaddingRangeLimit! : padding;
     const hasPadding = Number.isFinite(padding);
+    let frameMinimum = Infinity,
+      frameMaximum = -Infinity;
     const sliceBase = flippedOrigin + ((slice - plan.cropMin[2]) / plan.sourceStrides[2]) * sourceWeights[2];
     for (let row = plan.cropMin[1]; row <= plan.cropMax[1]; row += plan.sourceStrides[1]) {
       const rowBase = sliceBase + ((row - plan.cropMin[1]) / plan.sourceStrides[1]) * sourceWeights[1];
@@ -402,9 +406,24 @@ export async function assembleNativeVolume(
         data[index] = value;
         observedSupport[index] = 1;
         supportedVoxelCount++;
-        minimum = Math.min(minimum, data[index]!);
-        maximum = Math.max(maximum, data[index]!);
+        frameMinimum = Math.min(frameMinimum, data[index]!);
+        frameMaximum = Math.max(frameMaximum, data[index]!);
       }
+    }
+    minimum = Math.min(minimum, frameMinimum);
+    maximum = Math.max(maximum, frameMaximum);
+    // One frame's VOI can clip other sections. Enclose source windows from all
+    // informative loaded frames, excluding blank/padding-only variation. This
+    // needs no extra source read and keeps common width-one windows intact.
+    if (
+      frameMaximum > frameMinimum &&
+      Number.isFinite(frame.windowCenter) &&
+      Number.isFinite(frame.windowWidth) &&
+      frame.windowWidth! >= 1
+    ) {
+      const halfWidth = (frame.windowWidth! - 1) / 2;
+      windowMinimum = Math.min(windowMinimum, frame.windowCenter! - 0.5 - halfWidth);
+      windowMaximum = Math.max(windowMaximum, frame.windowCenter! - 0.5 + halfWidth);
     }
     options.onProgress?.(position + 1, frames.length);
     await yieldToMain();
@@ -415,9 +434,11 @@ export async function assembleNativeVolume(
     width = frames[0]?.frame.windowWidth;
   const intensityRange: [number, number] = [minimum, maximum > minimum ? maximum : minimum + 1];
   const displayWindow: [number, number] =
-    Number.isFinite(center) && Number.isFinite(width) && width! > 0
-      ? [center! - 0.5 - Math.max(0, width! - 1) / 2, center! - 0.5 + Math.max(0, width! - 1) / 2]
-      : intensityRange;
+    windowMinimum <= windowMaximum
+      ? [windowMinimum, windowMaximum]
+      : Number.isFinite(center) && Number.isFinite(width) && width! > 0
+        ? [center! - 0.5 - Math.max(0, width! - 1) / 2, center! - 0.5 + Math.max(0, width! - 1) / 2]
+        : intensityRange;
   return {
     data,
     observedSupport,
