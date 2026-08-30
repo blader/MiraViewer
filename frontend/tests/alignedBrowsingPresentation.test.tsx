@@ -509,7 +509,7 @@ describe('DicomViewer aligned browsing', () => {
     const acceptedFrame = getDerivedAlignmentFrame('target-series', 4)!;
     const handle = createRef<DicomViewerHandle>();
     const { rerender } = render(viewer(context(), 4, handle));
-    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4'));
 
     const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
     const presentation = imageElement.parentElement!;
@@ -518,7 +518,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.transform).toContain('rotate(2deg)');
     expect(presentation.style.transform).toContain('matrix(1.04, -0.02, 0.01, 0.98, 0, 0)');
     expect(imageElement).toHaveAttribute('aria-label', 'Slice 5');
-    expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4');
+    expect(cornerstone.displayImage).toHaveBeenCalledOnce();
     const acceptedTransform = presentation.style.transform;
 
     await act(async () => {
@@ -536,7 +536,7 @@ describe('DicomViewer aligned browsing', () => {
     const completed = alignedResult(41, 6);
     completed.computedSettings = { ...completed.computedSettings, brightness: 92, contrast: 118, zoom: 1.03 };
     act(() => setDerivedAlignmentFrame(completed));
-    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:6'));
 
     expect(getImageIdForInstance).not.toHaveBeenCalled();
     expect(vi.mocked(cornerstone.loadImage).mock.calls.map(([imageId]) => imageId)).toEqual([
@@ -546,7 +546,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(0.92) contrast(1.18)');
     expect(presentation.style.transform).toContain('scale(1.03)');
     expect(imageElement).toHaveAttribute('aria-label', 'Slice 7');
-    expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:6');
+    expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
     expect(imageElement.closest('[aria-busy="true"]')).toBeNull();
   });
 

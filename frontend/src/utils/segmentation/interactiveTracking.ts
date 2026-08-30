@@ -352,6 +352,40 @@ export function createTrackingController({
   let operation: Promise<TrackingResult | TrackingSnapshotResult> | null = null;
   let closing: Promise<void> | undefined;
 
+  function createRunScope(signal: AbortSignal | undefined, progress: (phase: string) => void) {
+    const owned = new Set<Ort.Tensor>();
+    const check = () => {
+      if (disposed) throw new DOMException('Tracking was disposed.', 'AbortError');
+      signal?.throwIfAborted();
+    };
+    const release = (tensor: Ort.Tensor) => {
+      if (owned.delete(tensor)) tensor.dispose();
+    };
+    const tensor = (
+      type: 'float32' | 'int64' | 'bool',
+      data: Float32Array | BigInt64Array | Uint8Array,
+      dims: number[],
+    ) => {
+      const value = new ort.Tensor(type, data, dims);
+      owned.add(value);
+      return value;
+    };
+    async function graph(name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) {
+      check();
+      progress(`before-${name}`);
+      await new Promise((resolve) => setTimeout(resolve, 0)); // Real event-loop boundary for cancellation and progress.
+      check();
+      const result = await sessions[name].run(feeds);
+      for (const value of Object.values(result)) owned.add(value);
+      check();
+      progress(`after-${name}`);
+      check();
+      return result;
+    }
+    const flag = (value: boolean) => tensor('bool', Uint8Array.of(value ? 1 : 0), [1]);
+    return { owned, check, release, tensor, graph, flag };
+  }
+
   async function runFrames({
     readFrame,
     width,
@@ -393,25 +427,9 @@ export function createTrackingController({
     );
     const promptLabels = BigInt64Array.from(labels, BigInt);
     const recent = new Map<number, TrackingMemoryEntry>();
-    const owned = new Set<Ort.Tensor>();
+    const { owned, check, release, tensor, graph, flag } = createRunScope(signal, progress);
     let anchor: TrackingMemoryEntry | null = null;
     let frameIndex = anchorIndex;
-    const check = () => {
-      if (disposed) throw new DOMException('Tracking was disposed.', 'AbortError');
-      signal?.throwIfAborted();
-    };
-    const release = (tensor: Ort.Tensor) => {
-      if (owned.delete(tensor)) tensor.dispose();
-    };
-    const tensor = (
-      type: 'float32' | 'int64' | 'bool',
-      data: Float32Array | BigInt64Array | Uint8Array,
-      dims: number[],
-    ) => {
-      const value = new ort.Tensor(type, data, dims);
-      owned.add(value);
-      return value;
-    };
     function progress(phase: string): void {
       const entries = anchor ? [anchor, ...recent.values()] : [...recent.values()];
       const retained = new Set<ArrayBufferLike>();
@@ -431,19 +449,6 @@ export function createTrackingController({
         liveTensorBackingBytes: [...backing].reduce((sum, buffer) => sum + buffer.byteLength, 0),
       });
     }
-    async function graph(name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) {
-      check();
-      progress(`before-${name}`);
-      await new Promise((resolve) => setTimeout(resolve, 0)); // Real event-loop boundary for cancellation and progress.
-      check();
-      const result = await sessions[name].run(feeds);
-      for (const value of Object.values(result)) owned.add(value);
-      check();
-      progress(`after-${name}`);
-      check();
-      return result;
-    }
-    const flag = (value: boolean) => tensor('bool', Uint8Array.of(value ? 1 : 0), [1]);
     let completedFrames = 0;
     try {
       for (frameIndex = anchorIndex; (stopIndex - frameIndex) * direction >= 0; frameIndex += direction) {
@@ -582,32 +587,15 @@ export function createTrackingController({
     type ConditioningEntry = TrackingMemoryEntry & Omit<TrackingFrameOutput, 'direction' | 'initial'>;
     const conditioning = new Map<number, ConditioningEntry>();
     const recent = new Map<number, TrackingMemoryEntry>();
-    const owned = new Set<Ort.Tensor>();
     const { width, height, frameCount, anchorIndex, sourceRange, signal, readFrame, onFrame, onProgress } = options;
+    const { owned, check, release, tensor, graph, flag } = createRunScope(signal, progress);
     let stage: 'prepare' | 'final' = 'prepare';
     let direction: 1 | -1 = 1;
     let index = anchorIndex;
     let completedFrames = 0;
-    const check = () => {
-      if (disposed) throw new DOMException('Tracking was disposed.', 'AbortError');
-      signal?.throwIfAborted();
-    };
-    const release = (value: Ort.Tensor) => {
-      if (owned.delete(value)) value.dispose();
-    };
     const releaseFrame = () => {
       for (const value of [...owned]) release(value);
     };
-    const tensor = (
-      type: 'float32' | 'int64' | 'bool',
-      data: Float32Array | BigInt64Array | Uint8Array,
-      dims: number[],
-    ) => {
-      const value = new ort.Tensor(type, data, dims);
-      owned.add(value);
-      return value;
-    };
-    const flag = (value: boolean) => tensor('bool', Uint8Array.of(value ? 1 : 0), [1]);
     function progress(phase: string) {
       const entries = [...conditioning.values(), ...recent.values()];
       const retained = new Set<ArrayBufferLike>();
@@ -631,18 +619,6 @@ export function createTrackingController({
         retainedStateBytes: [...retained].reduce((sum, buffer) => sum + buffer.byteLength, 0),
         liveTensorBackingBytes: [...backing].reduce((sum, buffer) => sum + buffer.byteLength, 0),
       });
-    }
-    async function graph(name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) {
-      check();
-      progress(`before-${name}`);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      check();
-      const result = await sessions[name].run(feeds);
-      for (const value of Object.values(result)) owned.add(value);
-      check();
-      progress(`after-${name}`);
-      check();
-      return result;
     }
     async function decode(features: Ort.Tensor, prompts?: TrackingFramePrompts, prior?: Ort.Tensor, initial = false) {
       const coords = prompts

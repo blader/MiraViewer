@@ -5,6 +5,7 @@ import checker from 'vite-plugin-checker';
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 import type { PluginOption } from 'vite';
 import { fileURLToPath } from 'node:url';
+import { availableParallelism } from 'node:os';
 
 const privateArtifactsDirectory = fileURLToPath(new URL('./tmp/', import.meta.url)).replace(/\/$/, '');
 
@@ -94,7 +95,8 @@ export default defineConfig(() => {
       setupFiles: ['./tests/setup.ts'],
       include: ['tests/**/*.test.{ts,tsx}'],
       clearMocks: true,
-      threads: false,
+      // Native-grid tests own large buffers; bound the worker pool on shared machines.
+      maxWorkers: Math.min(4, availableParallelism()),
     },
   };
 });
