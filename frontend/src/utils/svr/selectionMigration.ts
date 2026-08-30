@@ -4,6 +4,7 @@ import type { VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db
 import type { SvrLabelMeta, SvrLabelVolume, SvrVolume } from '../../types/svr';
 import { IDENTITY_DIRECTION } from './volumeGeometry';
 import { transferSelectionAnnotations } from './annotationTransfer';
+import { isSelectionContextValid, isSelectionCoverageValid } from '../segmentation/selectionEditing';
 
 export type SavedSelectionIdentity = {
   patientKey?: string;
@@ -184,6 +185,8 @@ function matchesVolume(volume: SvrVolume, identity: RequiredIdentity, key: KeyGe
 }
 
 function validLabels(record: VolumeSegmentationRow): boolean {
+  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
+    return false;
   if (!finiteArray(record.dims, 3) || !record.dims.every((size) => Number.isSafeInteger(size) && size > 0))
     return false;
   const count = record.dims.reduce((product, size) => product * size, 1);
@@ -202,6 +205,13 @@ function validLabels(record: VolumeSegmentationRow): boolean {
     )
   )
     return false;
+  // The last editing action does not constrain earlier accumulated marks to the same section.
+  const stroke = seeds.lastStroke;
+  if (stroke !== undefined) {
+    const axis = ['sagittal', 'coronal', 'axial'].indexOf(stroke?.plane);
+    if (axis < 0 || !Number.isSafeInteger(stroke?.slice) || stroke.slice < 0 || stroke.slice >= record.dims[axis]!)
+      return false;
+  }
   return (
     seeds.foreground.every((index) => index < count && record.labels[index]! > 0) &&
     seeds.background.every((index) => index < count && record.labels[index] === 0)
@@ -365,6 +375,10 @@ function sameSavedWork(left: VolumeSegmentationRow, right: VolumeSegmentationRow
     equal(left.labels, right.labels) &&
     equal(left.seeds?.foreground, right.seeds?.foreground) &&
     equal(left.seeds?.background, right.seeds?.background) &&
+    left.seeds?.lastStroke?.plane === right.seeds?.lastStroke?.plane &&
+    left.seeds?.lastStroke?.slice === right.seeds?.lastStroke?.slice &&
+    left.clippedNativeVoxels === right.clippedNativeVoxels &&
+    left.contextLimited === right.contextLimited &&
     JSON.stringify(left.classMetadata) === JSON.stringify(right.classMetadata)
   );
 }
@@ -407,7 +421,14 @@ export async function transferSavedSelection(
   };
   const transferred = await transferSelectionAnnotations(
     source,
-    { data: record.labels, dims: record.dims, meta, seeds: record.seeds },
+    {
+      data: record.labels,
+      dims: record.dims,
+      meta,
+      seeds: record.seeds,
+      ...(record.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: record.clippedNativeVoxels } : {}),
+      ...(record.contextLimited !== undefined ? { contextLimited: record.contextLimited } : {}),
+    },
     volume,
     {
       signal,

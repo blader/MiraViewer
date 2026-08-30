@@ -7,9 +7,10 @@ import type * as ModelCache from '../src/utils/segmentation/onnx/modelCache';
 import type { SvrVolume } from '../src/types/svr';
 import { deferred } from './helpers/deferred';
 
-const { cache, createSession } = vi.hoisted(() => ({
+const { cache, createSession, enabledImages } = vi.hoisted(() => ({
   cache: new Map<string, Blob>(),
   createSession: vi.fn(async () => ({ release: vi.fn(async () => undefined) })),
+  enabledImages: [] as { image: { getPixelData: () => Uint8Array; data?: { byteArray: Uint8Array } } }[],
 }));
 
 vi.mock('../src/utils/segmentation/onnx/modelCache', () => ({
@@ -39,7 +40,13 @@ vi.mock('../src/utils/segmentation/onnx/tumorSegmentation', () => ({
 }));
 
 vi.mock('cornerstone-core', () => ({
-  default: { imageCache: { getCacheInfo: () => ({ maximumSizeInBytes: 256 * 1024 * 1024, cacheSizeInBytes: 0 }) } },
+  default: {
+    imageCache: {
+      cachedImages: [],
+      getCacheInfo: () => ({ maximumSizeInBytes: 256 * 1024 * 1024, cacheSizeInBytes: 0 }),
+    },
+    getEnabledElements: () => enabledImages,
+  },
 }));
 
 import { useOnnxTumorSession } from '../src/hooks/useOnnxTumorSession';
@@ -102,6 +109,7 @@ function deferVerification(...models: Blob[]) {
 
 beforeEach(() => {
   cache.clear();
+  enabledImages.length = 0;
   vi.clearAllMocks();
   vi.stubGlobal('crypto', webcrypto);
 });
@@ -112,6 +120,97 @@ afterEach(() => {
 });
 
 describe('useOnnxTumorSession verified model ownership', () => {
+  it('awaits idle runtime release once, preserves its verified cache, and refuses overlapping initialization', async () => {
+    const [model, manifest] = await files();
+    cache.set(MODEL_KEY, model);
+    cache.set(MANIFEST_KEY, manifest);
+    const release = deferred<void>();
+    const session = { release: vi.fn(() => release.promise) };
+    createSession.mockResolvedValueOnce(session);
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
+    await waitFor(() => expect(result.current.status.verified).toBe(true));
+    act(() => result.current.initSession());
+    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
+    let first!: Promise<void>, second!: Promise<void>;
+    act(() => {
+      first = result.current.releaseIdleSession();
+      second = result.current.releaseIdleSession();
+    });
+    await waitFor(() => expect(session.release).toHaveBeenCalledOnce());
+    expect(result.current.status.sessionReady).toBe(false);
+    act(() => result.current.initSession());
+    await waitFor(() => expect(result.current.status.error).toMatch(/release its memory/i));
+    expect(createSession).toHaveBeenCalledOnce();
+    await act(async () => {
+      release.resolve();
+      await Promise.all([first, second]);
+    });
+    expect(cache.get(MODEL_KEY)).toBe(model);
+    expect(cache.get(MANIFEST_KEY)).toBe(manifest);
+    expect(deleteModelBlobs).not.toHaveBeenCalled();
+    expect(putModelBlobs).not.toHaveBeenCalled();
+    expect(result.current.status).toMatchObject({ cached: true, verified: true, loading: false, sessionReady: false });
+    act(() => result.current.initSession());
+    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
+    expect(createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])(
+    'does not hide an unfinished initializer when preparing another model (cleared=%s)',
+    async (cleared) => {
+      const [model, manifest] = await files();
+      cache.set(MODEL_KEY, model);
+      cache.set(MANIFEST_KEY, manifest);
+      const session = { release: vi.fn(async () => undefined) };
+      const initialized = deferred<typeof session>();
+      createSession.mockReturnValueOnce(initialized.promise);
+      const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
+      await waitFor(() => expect(result.current.status.verified).toBe(true));
+      act(() => result.current.initSession());
+      await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
+      if (cleared) {
+        act(() => result.current.clearModel());
+        await waitFor(() => expect(result.current.status.loading).toBe(false));
+      }
+      await expect(result.current.releaseIdleSession()).rejects.toThrow(/other model operation/i);
+      expect(session.release).not.toHaveBeenCalled();
+      await act(async () => initialized.resolve(session));
+      if (!cleared) await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
+      await act(async () => result.current.releaseIdleSession());
+      expect(session.release).toHaveBeenCalledOnce();
+      if (!cleared) expect(cache.get(MODEL_KEY)).toBe(model);
+    },
+  );
+
+  it('keeps a failed cleanup as an admission barrier without deleting the cached model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const [model, manifest] = await files();
+    cache.set(MODEL_KEY, model);
+    cache.set(MANIFEST_KEY, manifest);
+    const session = {
+      release: vi.fn(async () => {
+        throw new Error('GPU release failed');
+      }),
+    };
+    createSession.mockResolvedValueOnce(session);
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
+    await waitFor(() => expect(result.current.status.verified).toBe(true));
+    act(() => result.current.initSession());
+    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
+    await act(async () => {
+      await expect(result.current.releaseIdleSession()).rejects.toThrow('GPU release failed');
+    });
+    await expect(result.current.releaseIdleSession()).rejects.toThrow('GPU release failed');
+    expect(session.release).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(result.current.status.error).toMatch(/could not release its memory/i);
+    expect(cache.get(MODEL_KEY)).toBe(model);
+    expect(deleteModelBlobs).not.toHaveBeenCalled();
+    act(() => result.current.initSession());
+    await waitFor(() => expect(result.current.status.error).toMatch(/release its memory/i));
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
   it('retains legacy cached models but blocks initialization and inference without a manifest', async () => {
     const [model] = await files();
     cache.set(MODEL_KEY, model);
@@ -500,6 +599,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     act(() => result.current.cancelSegmentation());
     expect(result.current.segRunning).toBe(true);
     expect(result.current.status.message).toMatch(/waiting.*release its memory/i);
+    await expect(result.current.releaseIdleSession()).rejects.toThrow(/other model operation/i);
 
     act(() => result.current.runSegmentation());
     expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce();
@@ -549,6 +649,23 @@ describe('useOnnxTumorSession verified model ownership', () => {
     );
     expect(createSession).not.toHaveBeenCalled();
     expect(onLabels).not.toHaveBeenCalled();
+  });
+
+  it('remeasures uncached displayed DICOM ownership when inference starts without replacing the accepted volume', async () => {
+    const onLabels = vi.fn();
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, onLabels));
+    await act(async () => undefined);
+    expect(result.current.preflight?.blockedByDefault).toBe(false);
+    const data = new Uint8Array(256 * 1024 * 1024);
+    const pixels = new Uint8Array(data.buffer, 0, 4);
+    enabledImages.push({ image: { getPixelData: () => pixels, data: { byteArray: data } } });
+    act(() => result.current.runSegmentation());
+    expect(result.current.status.error).toMatch(/memory budget/);
+    expect(createSession).not.toHaveBeenCalled();
+    expect(onLabels).not.toHaveBeenCalled();
+    expect(enabledImages[0]!.image.getPixelData()).toBe(pixels);
+    expect(enabledImages[0]!.image.data!.byteArray).toBe(data);
+    expect(syntheticVolume.data).toEqual(Float32Array.of(0.5));
   });
 });
 

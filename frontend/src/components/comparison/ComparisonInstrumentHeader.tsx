@@ -45,6 +45,7 @@ type InstrumentNotices = {
 
 export type ComparisonInstrumentHeaderProps = {
   alignmentControls?: ReactNode;
+  displayControls?: ReactNode;
   clinical: InstrumentClinicalContext;
   navigation: InstrumentNavigation;
   actions: InstrumentActions;
@@ -288,6 +289,7 @@ function InstrumentContextRail({
   noticesVisible,
   unsuccessfulResults,
   alignmentControls,
+  displayControls,
   panels,
 }: Omit<ComparisonInstrumentHeaderProps, 'actions'> & {
   noticesVisible: boolean;
@@ -337,6 +339,7 @@ function InstrumentContextRail({
       </div>
 
       {alignmentControls}
+      {displayControls}
 
       {navigation.viewMode === 'overlay' && navigation.overlayColumns.length > 0 ? (
         <div className="instrument-context-playback">
@@ -417,6 +420,7 @@ export function ComparisonInstrumentHeader({
   notices,
   panels,
   alignmentControls,
+  displayControls,
 }: ComparisonInstrumentHeaderProps) {
   const unsuccessfulResults =
     !actions.isAligning && !notices.alignmentError
@@ -447,6 +451,7 @@ export function ComparisonInstrumentHeader({
           noticesVisible={noticesVisible}
           unsuccessfulResults={unsuccessfulResults}
           alignmentControls={alignmentControls}
+          displayControls={displayControls}
         />
       ) : null}
     </header>

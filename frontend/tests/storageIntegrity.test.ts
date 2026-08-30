@@ -4,12 +4,13 @@ import { createElement } from 'react';
 import JSZip from 'jszip';
 import dicomParser from 'dicom-parser';
 import { assertStorageHeadroom, getDB, deleteAllStoredMriData, resetDbForTests } from '../src/db/db';
-import type { DerivedAlignmentFrameRow } from '../src/db/schema';
+import type { DerivedAlignmentFrameRow, VolumeSegmentationRow } from '../src/db/schema';
 import { loadSafeArchive } from '../src/services/archiveSafety';
 import { processDicomFile } from '../src/services/dicomIngestion';
 import { exportStudiesToZip, readSnapshotManifest, restoreSnapshot } from '../src/services/exportBackup';
 import {
   clearPersistedDerivedAlignmentFrames,
+  deleteVolumeSegmentation,
   getComparisonData,
   getDatasetRevision,
   getPanelSettings,
@@ -36,6 +37,61 @@ import {
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { ClearDataModal } from '../src/components/ClearDataModal';
+
+describe('3D selection transaction ordering', () => {
+  const selection = (voxel: number): VolumeSegmentationRow => ({
+    volumeKey: 'ordered-selection',
+    patientKey: 'synthetic-patient',
+    dims: [2, 2, 1],
+    labels: Uint8Array.from([0, 1, 2, 3], (index) => (index === voxel ? 1 : 0)),
+    reviewState: 'draft',
+    seeds: { foreground: Uint32Array.of(voxel), background: new Uint32Array() },
+    updatedAt: voxel,
+  });
+
+  it('reads the latest submitted edit immediately after navigation, without a component-owned queue', async () => {
+    await setSelectedPatientKey('synthetic-patient');
+    const first = saveVolumeSegmentation(selection(0));
+    const second = saveVolumeSegmentation(selection(1));
+    const read = getVolumeSegmentation('ordered-selection');
+    const third = saveVolumeSegmentation(selection(2));
+    expect(Array.from((await read)!.labels)).toEqual(Array.from(selection(1).labels));
+    await Promise.all([first, second, third]);
+    const restored = (await getVolumeSegmentation('ordered-selection'))!;
+    expect(Array.from(restored.labels)).toEqual(Array.from(selection(2).labels));
+    expect(Array.from(restored.seeds!.foreground)).toEqual([2]);
+    expect(restored.reviewState).toBe('draft');
+  });
+
+  it('orders clear and later edits with outstanding writes', async () => {
+    await setSelectedPatientKey('synthetic-patient');
+    const first = saveVolumeSegmentation(selection(0));
+    const clear = deleteVolumeSegmentation('ordered-selection');
+    const empty = getVolumeSegmentation('ordered-selection');
+    const next = saveVolumeSegmentation(selection(3));
+    expect(await empty).toBeNull();
+    await Promise.all([first, clear, next]);
+    expect(Array.from((await getVolumeSegmentation('ordered-selection'))!.labels)).toEqual(
+      Array.from(selection(3).labels),
+    );
+  });
+
+  it('keeps patient checking and persistence in one transaction and recovers after a rejected save', async () => {
+    await setSelectedPatientKey('different-patient');
+    await expect(saveVolumeSegmentation(selection(0))).rejects.toThrow(/another patient/);
+    expect(await getVolumeSegmentation('ordered-selection')).toBeNull();
+    await setSelectedPatientKey('synthetic-patient');
+    await saveVolumeSegmentation(selection(1));
+    const switched = setSelectedPatientKey('different-patient');
+    const hidden = getVolumeSegmentation('ordered-selection');
+    expect(await hidden).toBeNull();
+    await switched;
+    await setSelectedPatientKey('synthetic-patient');
+    expect(Array.from((await getVolumeSegmentation('ordered-selection'))!.labels)).toEqual(
+      Array.from(selection(1).labels),
+    );
+  });
+});
 
 type SyntheticDicomOptions = {
   patientId?: string;

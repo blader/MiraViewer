@@ -244,7 +244,7 @@ export class NativeFrameCache {
           if (this.entries.get(key) !== entry) throw cancelled();
           await this.verifyOwner();
           const image = await waitForNativeFrame(
-            getDecodedFrameBySopInstanceUid(source.seriesUid, frame.sopInstanceUid),
+            getDecodedFrameBySopInstanceUid(source.seriesUid, frame.sopInstanceUid, { cache: 'reuse-only' }),
             this.controller.signal,
           );
           await this.verifyOwner();

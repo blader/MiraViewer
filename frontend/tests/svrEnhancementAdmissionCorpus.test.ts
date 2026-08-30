@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
+import { measureCornerstoneImageMemory } from '../src/utils/cornerstoneMemory';
 import { buildOutputPlaneGrid, outputGridPixelToWorld } from '../src/utils/outputPlaneGrid';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
@@ -42,14 +43,14 @@ function fingerprint(data: Float32Array | Uint8Array | Uint32Array): string {
     .digest('hex');
 }
 
-/** Actual decoded MRI buffers, with only Cornerstone's cache API/lifetime modeled. */
+/** Decoded Float32 owners only; this fixture does not retain or model parsed DICOM datasets. */
 function decodedFrameCache() {
   const cachedImages: {
     loaded: boolean;
     imageId: string;
     timeStamp: number;
     sizeInBytes: number;
-    pixels: Float32Array;
+    image: { imageId: string; sizeInBytes: number; getPixelData: () => Float32Array };
     imageLoadObject: object;
   }[] = [];
   let clock = 0;
@@ -63,13 +64,14 @@ function decodedFrameCache() {
       return evictionCount;
     },
     remember(imageId: string, pixels: Float32Array) {
+      const image = { imageId, sizeInBytes: pixels.byteLength, getPixelData: () => pixels };
       cachedImages.push({
         loaded: true,
         imageId,
         timeStamp: ++clock,
         sizeInBytes: pixels.byteLength,
-        pixels,
-        imageLoadObject: {},
+        image,
+        imageLoadObject: { promise: Promise.resolve(image) },
       });
       size += pixels.byteLength;
       while (size > 256 * MiB) size -= cachedImages.shift()!.sizeInBytes;
@@ -82,6 +84,25 @@ function decodedFrameCache() {
     },
   };
 }
+
+it('exposes measurable corpus cache owners and retains the displayed image after cache removal', async () => {
+  const cache = decodedFrameCache();
+  const pixels = Float32Array.of(1, 2, 3, 4);
+  const id = 'miradb:synthetic-corpus-owner';
+  cache.remember(id, pixels);
+  const image = cache.cachedImages[0]!.image;
+  const getEnabledElements = () => [{ image }];
+  const measured = measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements });
+  expect(measured.measured).toBe(true);
+  expect(measured.bytes).toBe(pixels.byteLength);
+  await expect(
+    prepareEnhancementMemory(MIN_SR_CONTEXT_DIM ** 3, 0, cache, new Set([id]), undefined, getEnabledElements),
+  ).resolves.toBe(pixels.byteLength);
+  cache.removeImageLoadObject(id);
+  expect(measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements }).bytes).toBe(pixels.byteLength);
+  expect(measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements: () => [] }).bytes).toBe(0);
+  expect(image.getPixelData()).toBe(pixels);
+});
 
 function markNeighborhood(volume: SvrVolume, center: Triple, radius: number): SvrLabelVolume {
   const data = new Uint8Array(volume.data.length);
@@ -142,7 +163,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
     let compressedFrames = 0;
     const readFrame = async (frame: (typeof manifest.frames)[number], remember = false) => {
       const cached = cache.cachedImages.find((entry) => entry.imageId === `miradb:${frame.sopInstanceUid}`);
-      if (cached) return { pixels: cached.pixels };
+      if (cached) return { pixels: cached.image.getPixelData() };
       const original = byUid.get(frame.sopInstanceUid);
       if (!original) throw new Error('A requested native source frame is absent from the MRI corpus');
       const decoded = await decodeAlignmentCorpusFrame(original, codec);
@@ -222,8 +243,13 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
     const protectedId = `miradb:${protectedFrame.sopInstanceUid}`;
     const protectedImage = cache.cachedImages.find((entry) => entry.imageId === protectedId);
     expect(protectedImage).toBeDefined();
-    const protectedPixels = fingerprint(protectedImage!.pixels);
+    const protectedPixels = fingerprint(protectedImage!.image.getPixelData());
     const protectedIds = new Set([protectedId]);
+    const getEnabledElements = () => [{ image: protectedImage!.image }];
+    const measureCache = () => measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements });
+    expect(measureCache().measured).toBe(true);
+    // Every retained allocation in this decoded-only model is a whole Float32 frame.
+    expect(measureCache().bytes).toBe(initialCacheBytes);
     // Complete acquired-grid metadata, not a silently upsampled overview.
     const extent = planNativeVolume(manifest, {
       roi: { mode: 'box', sourcePlane: 'axial', boundsMm: overview.boundsMm },
@@ -254,7 +280,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
         { roi },
         {
           retainedBytes: retainedSvrVolumeBytes(overview),
-          decodedCacheBytes: cache.getCacheInfo().cacheSizeInBytes,
+          decodedCacheBytes: measureCache().bytes,
           nativePlaneBytes,
         },
       );
@@ -293,7 +319,14 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
       expect(() => assertEnhancementFits(count, retainedBytes + initialCacheBytes)).toThrow(
         /no room for even a small/i,
       );
-      const decodedCacheBytes = await prepareEnhancementMemory(count, retainedBytes, cache, protectedIds);
+      const decodedCacheBytes = await prepareEnhancementMemory(
+        count,
+        retainedBytes,
+        cache,
+        protectedIds,
+        undefined,
+        getEnabledElements,
+      );
       expect(decodedCacheBytes).toBeLessThan(initialCacheBytes);
       expect(() => assertEnhancementFits(count, retainedBytes + decodedCacheBytes)).not.toThrow();
       plan = planNativeVolume(
@@ -315,7 +348,14 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
       });
       if (radius === 0) {
         enhancedSource = await assembleNativeVolume(plan, readFrame);
-        await prepareEnhancementMemory(enhancedSource.data.length, retainedBytes, cache, protectedIds);
+        await prepareEnhancementMemory(
+          enhancedSource.data.length,
+          retainedBytes,
+          cache,
+          protectedIds,
+          undefined,
+          getEnabledElements,
+        );
         finalLabels = labels;
         finalLabelFingerprint = maskBefore;
         finalSeedFingerprints = seedsBefore;
@@ -373,7 +413,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
     );
     expect(finalLabels!.reviewState).toBe('draft');
     expect(cache.cachedImages.find((entry) => entry.imageId === protectedId) === protectedImage).toBe(true);
-    expect(fingerprint(protectedImage!.pixels)).toBe(protectedPixels);
+    expect(fingerprint(protectedImage!.image.getPixelData())).toBe(protectedPixels);
     // Numeric, anonymized evidence only: never persist source images, identifiers,
     // paths, or patient data. Cache ownership is modeled; this is not browser QA.
     console.info(
@@ -384,6 +424,8 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
         decodedFrames,
         compressedFrames,
         cacheModelUsesRealDecodedPixels: true,
+        cacheModelRetainsParsedDicomDatasets: false,
+        modeledDisplayedImages: 1,
         initialCacheMiB: initialCacheBytes / MiB,
         retainedMiB: retainedBytes / MiB,
         evictedFrames: cache.evictionCount,

@@ -6,8 +6,7 @@ import Hammer from 'hammerjs';
 import dicomParser from 'dicom-parser';
 import { getDB } from '../db/db';
 import { getDerivedAlignmentFrameByImageId } from './derivedAlignmentFrame';
-import { loadCornerstoneImage } from './decodedFrame';
-import { applyAlignmentDisplayTone, validAlignmentDisplayTone } from './alignmentDisplayTone';
+import { createDerivedImagePresentation } from './derivedImagePresentation';
 
 // Configure external dependencies
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
@@ -60,7 +59,9 @@ function miraDbLoader(imageId: string) {
       }
 
       try {
-        cornerstoneWADOImageLoader.wadouri?.dataSetCacheManager?.unload?.(fileImageId);
+        // WADO caches by parsed URL ("0"), not image ID ("dicomfile:0").
+        const dataSetKey = cornerstoneWADOImageLoader.wadouri.parseImageId(fileImageId).url;
+        cornerstoneWADOImageLoader.wadouri?.dataSetCacheManager?.unload?.(dataSetKey);
       } catch {
         // Ignore.
       }
@@ -87,70 +88,7 @@ function miraDerivedLoader(imageId: string) {
     promise: (async () => {
       const frame = getDerivedAlignmentFrameByImageId(imageId);
       if (!frame) throw new Error('The derived registration frame is no longer available');
-      const source = await loadCornerstoneImage(frame.sourceImageId);
-      let minimum = Number.POSITIVE_INFINITY;
-      let maximum = Number.NEGATIVE_INFINITY;
-      for (let index = 0; index < frame.pixels.length; index++) {
-        if (frame.valid && !frame.valid[index]) continue;
-        const pixel = frame.pixels[index]!;
-        if (!Number.isFinite(pixel)) continue;
-        minimum = Math.min(minimum, pixel);
-        maximum = Math.max(maximum, pixel);
-      }
-      if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) {
-        throw new Error('The derived registration frame contains no finite image samples');
-      }
-
-      const intensityRange = maximum - minimum;
-      const intensityScale = intensityRange > 0 ? intensityRange / 65_534 : 1;
-      const preserveSourceWindow =
-        Number.isFinite(source.windowCenter) && Number.isFinite(source.windowWidth) && source.windowWidth > 0;
-      const presentationPixels = new Uint16Array(frame.pixels.length);
-      const tone = frame.displayTone && validAlignmentDisplayTone(frame.displayTone) ? frame.displayTone : undefined;
-      // The native reference is the display authority. DICOM windows can change on
-      // every slice even though the scan-pair intensity calibration stays constant.
-      const displayReference =
-        tone?.referenceWindow && frame.referenceSopInstanceUid
-          ? await loadCornerstoneImage(`miradb:${frame.referenceSopInstanceUid}`)
-          : undefined;
-      for (let index = 0; index < frame.pixels.length; index++) {
-        const pixel = frame.pixels[index]!;
-        if ((frame.valid && !frame.valid[index]) || !Number.isFinite(pixel)) continue;
-        presentationPixels[index] = tone
-          ? 1 + Math.round(applyAlignmentDisplayTone(pixel, tone, displayReference) * 65_534)
-          : intensityRange > 0
-            ? 1 + Math.round(((pixel - minimum) / intensityRange) * 65_534)
-            : 1;
-      }
-
-      return {
-        ...source,
-        imageId,
-        rows: frame.rows,
-        columns: frame.columns,
-        height: frame.rows,
-        width: frame.columns,
-        ...(frame.outputGrid && {
-          rowPixelSpacing: frame.outputGrid.rowSpacingMm,
-          columnPixelSpacing: frame.outputGrid.columnSpacingMm,
-          imagePositionPatient: frame.outputGrid.originMm,
-          imageOrientationPatient: [...frame.outputGrid.rowDirection, ...frame.outputGrid.columnDirection],
-        }),
-        minPixelValue: 1,
-        maxPixelValue: tone || intensityRange > 0 ? 65_535 : 1,
-        windowCenter: tone ? 32_768 : preserveSourceWindow ? source.windowCenter : (minimum + maximum) / 2,
-        windowWidth: tone ? 65_534 : preserveSourceWindow ? source.windowWidth : Math.max(1, intensityRange),
-        slope: tone ? 1 : intensityScale,
-        intercept: tone ? 0 : minimum - intensityScale,
-        invert: displayReference ? displayReference.invert === true : source.invert,
-        pixelPaddingValue: 0,
-        pixelPaddingRangeLimit: 0,
-        cachedLut: undefined,
-        modalityLUT: undefined,
-        voiLUT: undefined,
-        sizeInBytes: presentationPixels.byteLength,
-        getPixelData: () => presentationPixels,
-      };
+      return createDerivedImagePresentation(frame, imageId);
     })(),
   };
 }

@@ -25,14 +25,25 @@ scope.onmessage = ({ data }) => {
   }
   const run = { id: data.id, controller: new AbortController() };
   active = run;
+  let lastYield = performance.now();
+  let lastProgress = -Infinity;
   void segmentSeededVolume(
     { ...source, ...data },
     {
       signal: run.controller.signal,
-      yieldFn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+      // Poll cancellation frequently without paying a clamped browser timer for
+      // every cheap scan chunk. No long uninterrupted worker phase is introduced.
+      yieldFn: async () => {
+        if (performance.now() - lastYield < 8) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        lastYield = performance.now();
+      },
       onProgress: (processed, total) => {
-        if (active === run && !run.controller.signal.aborted)
-          scope.postMessage({ type: 'progress', id: run.id, processed, total });
+        if (active !== run || run.controller.signal.aborted) return;
+        const now = performance.now();
+        if (processed < total && now - lastProgress < 50) return;
+        lastProgress = now;
+        scope.postMessage({ type: 'progress', id: run.id, processed, total });
       },
     },
   )

@@ -147,6 +147,173 @@ describe('native source volume preservation', () => {
     ).rejects.toThrow(/disagree on photometric inversion/);
   });
 
+  it('encloses informative source windows instead of clipping other sections to the middle-frame VOI', async () => {
+    const manifest = stack({ dims: [6, 5, 5] });
+    for (const frame of manifest.frames) {
+      frame.windowCenter = frame.instanceNumber === 1 ? 0 : frame.instanceNumber === 3 ? 656.5 : 500;
+      frame.windowWidth = frame.instanceNumber === 1 ? 1 : frame.instanceNumber === 3 ? 1313 : 1000;
+      if (frame.instanceNumber === 2) {
+        frame.windowCenter = 1871;
+        frame.windowWidth = 3742;
+      }
+    }
+    const plan = planNativeVolume(manifest, {}, { decodedCacheBytes: 0 });
+    const read = vi.fn(async (frame: SeriesFrameManifest['frames'][number]) => ({
+      pixels: Float32Array.from({ length: frame.rows * frame.columns }, (_, index) =>
+        frame.instanceNumber === 1 ? 0 : frame.instanceNumber * 100 + index,
+      ),
+    }));
+    const volume = await assembleNativeVolume(plan, read);
+    expect(volume.displayWindow).toEqual([0, 3741]);
+    expect(volume.intensityRange).toEqual([0, 529]);
+    expect(volume.data.slice(0, 30)).toEqual(new Float32Array(30));
+    expect(volume.data.slice(60, 90)).toEqual(Float32Array.from({ length: 30 }, (_, index) => 300 + index));
+    expect(volume.supportedVoxelCount).toBe(150);
+    expect(read).toHaveBeenCalledTimes(5);
+    expect(plan.frames[0]!.frame.windowCenter).toBe(0);
+    expect(plan.frames[0]!.frame.windowWidth).toBe(1);
+  });
+
+  it.each(['single', 'uniform'] as const)('keeps a legal %s informative width-one source window', async (mode) => {
+    const manifest = stack({ dims: [6, 5, 5] });
+    for (const frame of manifest.frames) {
+      frame.windowCenter = 10;
+      frame.windowWidth = 1;
+    }
+    const volume = await assembleNativeVolume(
+      planNativeVolume(manifest, {}, { decodedCacheBytes: 0 }),
+      async (frame) => ({
+        pixels: Float32Array.from({ length: frame.rows * frame.columns }, (_, index) =>
+          (mode === 'uniform' || frame.instanceNumber === 3) && index % 2 ? 20 : 0,
+        ),
+      }),
+    );
+    expect(volume.displayWindow).toEqual([9.5, 9.5]);
+    expect(volume.intensityRange).toEqual([0, 20]);
+  });
+
+  it('ignores flat frames, padding-only variation and invalid VOI when enclosing informative windows', async () => {
+    const manifest = stack({ dims: [6, 5, 7] });
+    for (const frame of manifest.frames) {
+      frame.windowCenter = frame.instanceNumber * 100;
+      frame.windowWidth = frame.instanceNumber === 3 ? 0 : 200;
+      if (frame.instanceNumber === 4 || frame.instanceNumber === 7) {
+        frame.windowCenter = 0;
+        frame.windowWidth = 20_000;
+      }
+    }
+    const volume = await assembleNativeVolume(
+      planNativeVolume(manifest, {}, { decodedCacheBytes: 0 }),
+      async (frame) => ({
+        pixels: Float32Array.from({ length: frame.rows * frame.columns }, (_, index) => {
+          if (frame.instanceNumber === 4) return index === 0 ? -32768 : 0;
+          if (frame.instanceNumber === 7) return 9;
+          return index;
+        }),
+        pixelPaddingValue: -32768,
+      }),
+    );
+    // Frames4/7 are flat after excluding padding; frame3 has no valid VOI.
+    expect(volume.displayWindow).toEqual([0, 699]);
+    expect(volume.supportedVoxelCount).toBe(6 * 5 * 7 - 1);
+  });
+
+  it.each(['roi', 'overview'] as const)(
+    'chooses VOI from actually loaded %s frames without changing source samples or geometry',
+    async (mode) => {
+      const manifest = stack({ dims: [12, 12, 9], spacing: [1, 1, 1], origin: [0, 0, 0] });
+      for (const frame of manifest.frames) {
+        frame.windowCenter = frame.instanceNumber * 100;
+        frame.windowWidth = 200;
+      }
+      const baseOptions = { decodedCacheBytes: 0, nativePlaneBytes: 0 };
+      const full = planNativeVolume(manifest, {}, baseOptions);
+      const plan =
+        mode === 'roi'
+          ? planNativeVolume(
+              manifest,
+              { roi: { mode: 'box', sourcePlane: 'axial', boundsMm: { min: [3, 3, 5], max: [7, 7, 7] } } },
+              baseOptions,
+            )
+          : planNativeVolume(manifest, {}, { ...baseOptions, budgetBytes: Math.floor(full.totalBytes * 0.2) });
+      const read = vi.fn(async (frame: SeriesFrameManifest['frames'][number]) => ({
+        pixels: Float32Array.from(
+          { length: frame.rows * frame.columns },
+          (_, index) => frame.instanceNumber * 1000 + index,
+        ),
+      }));
+      const volume = await assembleNativeVolume(plan, read);
+      const frames = plan.frames.filter(
+        ({ slice }) =>
+          slice >= plan.cropMin[2] &&
+          slice <= plan.cropMax[2] &&
+          (slice - plan.cropMin[2]) % plan.sourceStrides[2] === 0,
+      );
+      expect(volume.displayWindow).toEqual([
+        Math.min(...frames.map(({ frame }) => frame.instanceNumber * 100 - 100)),
+        Math.max(...frames.map(({ frame }) => frame.instanceNumber * 100 + 99)),
+      ]);
+      expect(volume.dims).toEqual(plan.dims);
+      expect(volume.originMm).toEqual(plan.originMm);
+      expect(volume.voxelSizeMm).toEqual(plan.voxelSizeMm);
+      expect(plan.overview).toBe(mode === 'overview');
+      if (mode === 'overview') expect(plan.sourceStrides[2]).toBeGreaterThan(1);
+      expect(read).toHaveBeenCalledTimes(frames.length);
+      for (let z = 0; z < volume.dims[2]; z++)
+        for (let y = 0; y < volume.dims[1]; y++)
+          for (let x = 0; x < volume.dims[0]; x++) {
+            const sourceX = plan.cropMin[0] + x * plan.sourceStrides[0];
+            const sourceY = plan.cropMin[1] + y * plan.sourceStrides[1];
+            const sourceZ = plan.cropMin[2] + z * plan.sourceStrides[2];
+            const index = (z * volume.dims[1] + y) * volume.dims[0] + x;
+            expect(volume.data[index]).toBe((sourceZ + 1) * 1000 + sourceY * 12 + sourceX);
+            expect(volume.observedSupport![index]).toBe(1);
+          }
+    },
+  );
+
+  it('preserves a common source VOI exactly without deriving a new window from source extrema', async () => {
+    const manifest = stack();
+    const volume = await assembleNativeVolume(
+      planNativeVolume(manifest, {}, { decodedCacheBytes: 0 }),
+      async (frame) => ({
+        pixels: Float32Array.from({ length: frame.rows * frame.columns }, (_, index) => index - 10),
+      }),
+    );
+    expect(volume.displayWindow).toEqual([-400, -1]);
+    expect(volume.intensityRange).toEqual([-10, 19]);
+  });
+
+  it('retains the first loaded frame VOI fallback when all loaded frames are flat', async () => {
+    const manifest = stack();
+    for (const frame of manifest.frames) {
+      frame.windowCenter = frame.instanceNumber * 100;
+      frame.windowWidth = 200;
+    }
+    const volume = await assembleNativeVolume(
+      planNativeVolume(manifest, {}, { decodedCacheBytes: 0 }),
+      async (frame) => ({ pixels: new Float32Array(frame.rows * frame.columns).fill(frame.instanceNumber) }),
+    );
+    expect(volume.displayWindow).toEqual([0, 199]);
+    expect(volume.intensityRange).toEqual([1, 4]);
+  });
+
+  it('uses the existing source-range fallback when informative frames have no VOI', async () => {
+    const manifest = stack();
+    for (const frame of manifest.frames) {
+      delete frame.windowCenter;
+      delete frame.windowWidth;
+    }
+    const volume = await assembleNativeVolume(
+      planNativeVolume(manifest, {}, { decodedCacheBytes: 0 }),
+      async (frame) => ({
+        pixels: Float32Array.from({ length: frame.rows * frame.columns }, (_, index) => index - 10),
+      }),
+    );
+    expect(volume.displayWindow).toEqual([-10, 19]);
+    expect(volume.intensityRange).toEqual(volume.displayWindow);
+  });
+
   it('budgets the largest exposed native plane and keeps prior raw, display, support and labels resident', async () => {
     const small = stack(),
       larger = stack({ dims: [1024, 512, 2] });

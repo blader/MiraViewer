@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import { getDB, resetDbForTests } from '../src/db/db';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { alignmentDisplayBaseline, DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
@@ -9,7 +10,10 @@ import {
   getSeriesFrameManifest,
   getStudies,
   savePanelSettings,
+  saveVolumeSegmentation,
+  getVolumeSegmentation,
 } from '../src/utils/localApi';
+import type { VolumeSegmentationRow } from '../src/db/schema';
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -25,6 +29,56 @@ describe('localApi', () => {
     vi.restoreAllMocks();
     await resetDbForTests();
     await resetDb();
+  });
+
+  it.each([
+    [undefined, undefined],
+    [0, false],
+    [152, true],
+  ] as const)(
+    'round trips mask-owned clipping %s and context %s, including explicit false and unknown legacy evidence',
+    async (clippedNativeVoxels, contextLimited) => {
+      const record: VolumeSegmentationRow = {
+        volumeKey: 'coverage',
+        dims: [2, 1, 1],
+        labels: Uint8Array.of(1, 0),
+        updatedAt: 1,
+        ...(clippedNativeVoxels !== undefined ? { clippedNativeVoxels } : {}),
+        ...(contextLimited !== undefined ? { contextLimited } : {}),
+      };
+      await saveVolumeSegmentation(record);
+      const restored = await getVolumeSegmentation(record.volumeKey);
+      expect(restored?.clippedNativeVoxels).toBe(clippedNativeVoxels);
+      expect(restored?.contextLimited).toBe(contextLimited);
+      expect(Array.from(restored!.labels)).toEqual([1, 0]);
+      if (clippedNativeVoxels === undefined) expect(restored).not.toHaveProperty('clippedNativeVoxels');
+      if (contextLimited === undefined) expect(restored).not.toHaveProperty('contextLimited');
+    },
+  );
+
+  it.each([
+    ...[null, '152', -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((value) => ({
+      field: 'clippedNativeVoxels' as const,
+      value,
+    })),
+    ...[null, 'false', 0, 1, {}].map((value) => ({ field: 'contextLimited' as const, value })),
+  ])('rejects malformed $field ($value) without overwriting or hiding saved work', async ({ field, value }) => {
+    const original: VolumeSegmentationRow = {
+      volumeKey: 'coverage',
+      dims: [1, 1, 1],
+      labels: Uint8Array.of(1),
+      clippedNativeVoxels: 152,
+      contextLimited: true,
+      updatedAt: 1,
+    };
+    await saveVolumeSegmentation(original);
+    const malformed = Object.assign({ ...original }, { [field]: value }) as VolumeSegmentationRow;
+    await expect(saveVolumeSegmentation(malformed)).rejects.toThrow(/invalid viewing-region coverage/i);
+    expect(await getVolumeSegmentation(original.volumeKey)).toStrictEqual(structuredClone(original));
+    const db = await getDB();
+    await db.put('volume_segmentations', malformed);
+    await expect(getVolumeSegmentation(original.volumeKey)).rejects.toThrow(/invalid viewing-region coverage/i);
+    expect((await db.get('volume_segmentations', original.volumeKey))?.[field]).toEqual(value);
   });
 
   it('builds comparison data from stored studies/series/instances', async () => {
@@ -277,7 +331,7 @@ describe('localApi', () => {
         pixelSpacing: '1\\1',
         rows: 16,
         columns: 16,
-        fileBlob: new Blob([new Uint8Array([index])]),
+        fileBlob: new NodeBlob([new Uint8Array(index + 1)]),
       });
     }
 
@@ -292,6 +346,11 @@ describe('localApi', () => {
     expect(manifest.frames).toHaveLength(24);
     expect(manifest.frames[0]?.physicalSlicePosition).toBe(0);
     expect(manifest.frames[23]?.physicalSlicePosition).toBe(23);
+    expect(manifest.frames.map((frame) => frame.dicomByteLength)).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+    expect(manifest.frames.every((frame) => !('fileBlob' in frame))).toBe(true);
     expect(instanceTransactions).toHaveLength(1);
+    const persisted = await db.get('instances', 'manifest-instance-00');
+    expect(persisted).not.toHaveProperty('dicomByteLength');
+    expect(persisted!.fileBlob.size).toBe(1);
   });
 });

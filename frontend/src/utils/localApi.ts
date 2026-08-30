@@ -19,6 +19,7 @@ import { parseSeriesDescription } from './dicomSeriesParsing';
 import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
 import { dot } from './svr/vec3';
+import { isSelectionContextValid, isSelectionCoverageValid } from './segmentation/selectionEditing';
 
 export type PatientSummary = NonNullable<ComparisonData['patients']>[number];
 export type ExaminationSummary = NonNullable<ComparisonData['examinations']>[string];
@@ -439,7 +440,7 @@ export type SeriesFrameManifest = {
   geometryReliable: boolean;
   sliceSpacingMm?: number;
   coverageMm?: number;
-  frames: Array<Omit<DicomInstance, 'fileBlob'>>;
+  frames: Array<Omit<DicomInstance, 'fileBlob'> & { dicomByteLength?: number }>;
 };
 
 export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesFrameManifest> {
@@ -471,9 +472,9 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
   const orderedUids: string[] = [];
   let cursor = await orderedIndex.openCursor(range);
   while (cursor) {
-    const { fileBlob: _fileBlob, ...metadata } = cursor.value;
-    void _fileBlob;
-    frames.push(metadata);
+    const { fileBlob, ...metadata } = cursor.value;
+    // Size metadata only: no Blob decoding, extra read or persisted schema field.
+    frames.push({ ...metadata, dicomByteLength: fileBlob?.size });
     orderedUids.push(metadata.sopInstanceUid);
     cursor = await cursor.continue();
   }
@@ -663,24 +664,41 @@ export async function deleteTumorGroundTruth(seriesUid: string, sopInstanceUid: 
 }
 
 export async function saveVolumeSegmentation(record: VolumeSegmentationRow): Promise<void> {
+  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
+    throw new Error('Volume segmentation has invalid viewing-region coverage. The saved selection is unchanged.');
   const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
   if (record.labels.length !== expectedVoxels) {
     throw new Error(`Volume segmentation does not match its geometry (${record.labels.length}/${expectedVoxels})`);
   }
-  const selectedPatient = await getSelectedPatientKey();
-  if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient) {
-    throw new Error('Cannot save a volume segmentation for another patient');
-  }
   const db = await getDB();
-  await db.put('volume_segmentations', record);
+  // Enqueue the write before any asynchronous patient check. IndexedDB owns
+  // ordering across viewers, including navigation away and immediate return.
+  const transaction = db.transaction(['app_state', 'volume_segmentations'], 'readwrite');
+  const write = transaction
+    .objectStore('app_state')
+    .get(SELECTED_PATIENT_STATE_KEY)
+    .then((selected) => {
+      const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
+      if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient)
+        throw new Error('Cannot save a volume segmentation for another patient');
+      return transaction.objectStore('volume_segmentations').put(record);
+    });
+  await Promise.all([write, transaction.done]);
 }
 
 export async function getVolumeSegmentation(volumeKey: string): Promise<VolumeSegmentationRow | null> {
   const db = await getDB();
-  const record = await db.get('volume_segmentations', volumeKey);
+  const transaction = db.transaction(['app_state', 'volume_segmentations']);
+  const [record, selected] = await Promise.all([
+    transaction.objectStore('volume_segmentations').get(volumeKey),
+    transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
+    transaction.done,
+  ]);
   if (!record) return null;
-  const selectedPatient = await getSelectedPatientKey();
+  const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
   if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient) return null;
+  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
+    throw new Error('The saved selection has invalid viewing-region coverage and cannot be safely restored.');
   const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
   return record.labels.length === expectedVoxels ? record : null;
 }

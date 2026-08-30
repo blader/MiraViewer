@@ -38,15 +38,20 @@ export type DecodedFrame = {
 };
 
 export type DecodedFrameResampleKernel = 'area' | 'lanczos3';
+export type DecodedFrameLoadOptions = { cache?: 'populate' | 'reuse-only' };
 
-/** The bounded Cornerstone cache is the sole owner of decoded DICOM image objects. */
-export function loadCornerstoneImage(imageId: string): ReturnType<typeof cornerstone.loadImage> {
+/** Reuse decoded images; by default the cache retains new images, while reuse-only callers own their lifetime. */
+export function loadCornerstoneImage(
+  imageId: string,
+  options?: DecodedFrameLoadOptions,
+): ReturnType<typeof cornerstone.loadImage> {
   const loaders = cornerstone as unknown as {
     loadImage: typeof cornerstone.loadImage;
     loadAndCacheImage?: typeof cornerstone.loadImage;
   };
 
-  const load = loaders.loadAndCacheImage ?? loaders.loadImage;
+  // loadImage still reuses cached objects, but does not retain new processing frames.
+  const load = options?.cache === 'reuse-only' ? loaders.loadImage : (loaders.loadAndCacheImage ?? loaders.loadImage);
   return load.call(cornerstone, imageId);
 }
 
@@ -138,12 +143,20 @@ export async function getDecodedFrame(seriesUid: string, instanceIndex: number):
 }
 
 /** Decode the accepted source identity, independent of later series ordering changes. */
-export function getDecodedFrameBySopInstanceUid(seriesUid: string, sopInstanceUid: string): Promise<DecodedFrame> {
-  return decodeFrameByImageId(seriesUid, `miradb:${sopInstanceUid}`);
+export function getDecodedFrameBySopInstanceUid(
+  seriesUid: string,
+  sopInstanceUid: string,
+  options?: DecodedFrameLoadOptions,
+): Promise<DecodedFrame> {
+  return decodeFrameByImageId(seriesUid, `miradb:${sopInstanceUid}`, options);
 }
 
-async function decodeFrameByImageId(seriesUid: string, imageId: string): Promise<DecodedFrame> {
-  const image = (await loadCornerstoneImage(imageId)) as unknown as DecodedCornerstoneImage;
+async function decodeFrameByImageId(
+  seriesUid: string,
+  imageId: string,
+  options?: DecodedFrameLoadOptions,
+): Promise<DecodedFrame> {
+  const image = (await loadCornerstoneImage(imageId, options)) as unknown as DecodedCornerstoneImage;
   const { rows, cols } = getImageDimensions(image);
   const decoded = decodeImageWithValidity(image, rows, cols);
 

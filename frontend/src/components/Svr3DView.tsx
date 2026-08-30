@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import cornerstone from 'cornerstone-core';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDB } from '../db/db';
@@ -22,7 +22,8 @@ import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../ut
 import type { SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
-import { estimateSvrSourceMemory, type SvrDecodedCacheInfo } from '../utils/svr/sourceMemory';
+import { estimateSvrSourceMemory } from '../utils/svr/sourceMemory';
+import { CORNERSTONE_MEMORY_FALLBACK_BYTES, measureCornerstoneImageMemory } from '../utils/cornerstoneMemory';
 import {
   estimateSvrPeakMemoryBytes,
   estimateSvrRegistrationBytes,
@@ -39,14 +40,16 @@ import {
   nativeReferenceSources,
   type SvrAcquisitionClassification,
 } from '../utils/svr/acquisitionProvenance';
-import {
-  nativeDecodedCacheBudgetBytes,
-  nativePlaneMemoryBytes,
-  planNativeVolume,
-  retainedSvrVolumeBytes,
-} from '../utils/svr/nativeVolume';
+import { nativePlaneMemoryBytes, planNativeVolume, retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
-import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
+import { createNativeSourceContext } from '../utils/svr/nativeSourceContext';
+import {
+  cropInteractiveSelectionContext,
+  planInteractiveSelectionContext,
+} from '../utils/svr/interactiveSelectionContext';
+import { admitInteractiveSelection, interactiveSelectionBudgetBytes } from '../utils/segmentation/interactiveAdmission';
+import { proposeInteractiveSelection } from '../utils/segmentation/interactiveSelection';
+import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
 import {
   cropEnhancementSource,
   enhancementContextFits,
@@ -54,7 +57,6 @@ import {
   prepareEnhancementMemory,
   type EnhancementSourceLoader,
 } from '../utils/svr/superResolutionRegion';
-import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
 import { retainedDerivedAlignmentBytes } from '../utils/derivedAlignmentFrame';
 import { clamp, clamp01, clampInt } from '../utils/math';
 
@@ -609,12 +611,7 @@ function planReconstruction(
   // Recomputing deliberately preserves the prior Float32 result and its
   // support evidence while both independent 3D GPU textures stay visible.
   const retainedBytes = retainedVolume ? retainedSvrVolumeBytes(retainedVolume) : 0;
-  let cacheInfo: SvrDecodedCacheInfo | undefined;
-  try {
-    cacheInfo = cornerstone.imageCache?.getCacheInfo?.();
-  } catch {
-    /* Reserve the default cache if telemetry is unavailable. */
-  }
+  const cacheMemory = measureCornerstoneImageMemory(cornerstone);
   const acceptedSourceTransforms = acceptedProvenance
     ? Object.fromEntries(acceptedProvenance.sources.map((source) => [source.seriesUid, source.transform]))
     : undefined;
@@ -625,7 +622,7 @@ function planReconstruction(
       { ...params, roi },
       {
         retainedBytes,
-        decodedCacheBytes: nativeDecodedCacheBudgetBytes(cacheInfo),
+        decodedCacheBytes: cacheMemory.bytes,
         nativePlaneBytes: nativePlaneMemoryBytes(nativeReferenceSources(manifests, nativeManifest)),
         transform: acceptedProvenance?.sources.find((source) => source.seriesUid === nativeManifest.seriesUid)
           ?.transform,
@@ -641,30 +638,42 @@ function planReconstruction(
 
   const evaluate = (targetVoxelSizeMm: number) => {
     const effectiveParams = { ...params, targetVoxelSizeMm };
-    const { sourceBytes, decodedSourceCacheBytes } = estimateSvrSourceMemory(manifests, effectiveParams, {
-      roi,
-      cacheInfo,
-      acceptedSourceTransforms,
-    });
+    const { sourceBytes, decodedSourceCacheBytes, sourceDecodeBytes } = estimateSvrSourceMemory(
+      manifests,
+      effectiveParams,
+      {
+        roi,
+        cacheMemory,
+        acceptedSourceTransforms,
+      },
+    );
     const { voxelCount, effectiveVoxelSizeMm } = estimateReconstructionGrid(manifests, effectiveParams, roi);
+    const residentBytes = retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests);
+    const decodePlan = estimateSvrPeakMemoryBytes({
+      voxelCount: 0,
+      sourceBytes,
+      iterations: 0,
+      retainedBytes: residentBytes + sourceDecodeBytes,
+    });
+    const reconstructionPlan = estimateSvrPeakMemoryBytes({
+      voxelCount,
+      sourceBytes,
+      iterations: effectiveParams.iterations,
+      retainedBytes: residentBytes,
+      // Reserve independently owned CPU/GPU labels for both the incoming
+      // result and any already-annotated retained reconstruction.
+      labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
+      registrationBytes:
+        roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
+          ? estimateSvrRegistrationBytes(voxelCount)
+          : 0,
+    });
 
     return {
       effectiveParams,
       effectiveVoxelSizeMm,
       sourceBytes,
-      memoryPlan: estimateSvrPeakMemoryBytes({
-        voxelCount,
-        sourceBytes,
-        iterations: effectiveParams.iterations,
-        retainedBytes: retainedBytes + decodedSourceCacheBytes + nativePlaneMemoryBytes(manifests),
-        // Reserve independently owned CPU/GPU labels for both the incoming
-        // result and any already-annotated retained reconstruction.
-        labelBytes: voxelCount * Uint8Array.BYTES_PER_ELEMENT * 2,
-        registrationBytes:
-          roi && effectiveParams.seriesRegistrationMode === 'roi-rigid' && !acceptedProvenance
-            ? estimateSvrRegistrationBytes(voxelCount)
-            : 0,
-      }),
+      memoryPlan: decodePlan.totalBytes > reconstructionPlan.totalBytes ? decodePlan : reconstructionPlan,
     };
   };
 
@@ -1234,7 +1243,7 @@ function useSvrReconstructionWorkspace({
   }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
 
   const refineRegion = useCallback(
-    (labels: SvrLabelVolume) => {
+    (labels: SvrLabelVolume, retainedBytes: number | (() => number) = 0) => {
       if (!canRun || !workspaceIdentity || !acceptedResult || !currentReadiness) return;
       const volume = acceptedResult.volume;
       const requested = regionalRefinementParameters(
@@ -1242,24 +1251,29 @@ function useSvrReconstructionWorkspace({
         selectionFocusRoi(volume, labels, effectiveRoiSeriesUid ?? undefined),
       );
       const roi = requested.roi!;
-      const planned = planReconstruction(
-        nativeSource
-          ? currentReadiness.manifests
-          : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
-        requested,
-        roi,
+      // Native regions cannot trade away source detail. The loader admits their
+      // exact grid once, after releasing idle copies and measuring live owners.
+      const effectiveParams = nativeSource
+        ? requested
+        : planReconstruction(
+            currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests,
+            requested,
+            roi,
+            volume,
+            null,
+            volume.sourceProvenance,
+          ).effectiveParams;
+      void run(selectedSeries, { ...effectiveParams, roi }, workspaceIdentity, {
         volume,
-        nativeSource,
-        volume.sourceProvenance,
-      );
-      setRoiWorld(roi);
-      setRoiRect(null);
-      setParams(requested);
-      void run(selectedSeries, { ...planned.effectiveParams, roi }, workspaceIdentity, { volume, labels }).then(
-        (outcome) => {
-          if (outcome.result) setGenerationCollapsed(true);
-        },
-      );
+        labels,
+        retainedBytes,
+      }).then((outcome) => {
+        if (!outcome.result) return;
+        setRoiWorld(roi);
+        setRoiRect(null);
+        setParams(requested);
+        setGenerationCollapsed(true);
+      });
     },
     [
       acceptedResult,
@@ -1282,12 +1296,7 @@ function useSvrReconstructionWorkspace({
     async (labels, options) => {
       if (!acceptedResult || isRunning) throw new Error('Wait for reconstruction to finish before enhancing a region.');
       const volume = acceptedResult.volume;
-      let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
-      try {
-        decodedCacheBytes = nativeDecodedCacheBudgetBytes(cornerstone.imageCache?.getCacheInfo?.());
-      } catch {
-        // Optional telemetry may be unavailable; retain the conservative cache reservation.
-      }
+      const decodedCacheBytes = measureCornerstoneImageMemory(cornerstone).bytes;
       const nativePlaneBytes = nativePlaneMemoryBytes(volume.sourceProvenance?.sources ?? []);
       // Raw aligned frames survive compare → 3D navigation independently of
       // Cornerstone's decoded presentation cache, and must remain reusable.
@@ -1313,6 +1322,7 @@ function useSvrReconstructionWorkspace({
           retainedBytes: additionalRetainedBytes + nativePlaneBytes,
           imageCache,
           protectedImageIds,
+          getEnabledElements: cornerstone.getEnabledElements,
         });
       if (!volume.nativeVoxelSizeMm) return cropAccepted();
       if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
@@ -1320,40 +1330,17 @@ function useSvrReconstructionWorkspace({
         throw new Error('The original source is unavailable. Reopen this examination before enhancing it.');
       }
       const retainedBytes = retainedSvrVolumeBytes(volume) + additionalRetainedBytes;
-      const sourceTransform = volume.sourceProvenance.sources.find(
-        (source) => source.seriesUid === nativeSource.seriesUid,
-      )?.transform;
-      if (!sourceTransform)
-        throw new Error('The accepted original source pose is unavailable. Reopen this examination.');
-      const planning = {
+      const context = createNativeSourceContext({
+        volume,
+        nativeSource,
+        selectedSeries,
+        parameters: acceptedResult.parameters ?? params,
         retainedBytes,
         decodedCacheBytes,
         nativePlaneBytes,
-        transform: sourceTransform,
-      };
-      // Metadata only: derive the complete acquired grid even when the accepted
-      // native volume is a small focus crop. This never allocates source pixels.
-      const extent = planNativeVolume(
-        nativeSource,
-        {
-          roi: { mode: 'box', sourcePlane: 'axial', boundsMm: volume.boundsMm },
-        },
-        planning,
-      );
-      const offsets = extent.sourceAxes.map((axis, outputAxis) =>
-        extent.sourceFlips[outputAxis] === 1
-          ? -extent.cropMin[axis]!
-          : -(extent.sourceDims[axis]! - 1 - extent.cropMax[axis]!),
-      ) as [number, number, number];
-      const sourceGrid = {
-        dims: extent.sourceAxes.map((axis) => extent.sourceDims[axis]!) as [number, number, number],
-        voxelSizeMm: extent.nativeVoxelSizeMm,
-        direction: extent.direction,
-        originMm: volumeVoxelToPatient(extent, offsets),
-      };
-      const roi = await enhancementSelectionRoi(volume, labels, options.signal, sourceGrid);
-      const requested: SvrParams = { ...(acceptedResult.parameters ?? params), roi };
-      const plan = planNativeVolume(nativeSource, requested, planning);
+      });
+      const roi = await enhancementSelectionRoi(volume, labels, options.signal, context.grid);
+      const plan = context.plan(roi);
       if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
       const count = plan.dims.reduce((product, axis) => product * axis, 1);
       await prepareEnhancementMemory(
@@ -1362,29 +1349,149 @@ function useSvrReconstructionWorkspace({
         imageCache,
         protectedImageIds,
         options.signal,
+        cornerstone.getEnabledElements,
       );
-      const result = await reconstructVolumeMultiPlane({
-        selectedSeries,
-        svrParams: requested,
-        acceptedProvenance: volume.sourceProvenance,
-        // Native assembly finishes before enhancement begins. Each phase admits
-        // its own peak; future worker/output buffers are not resident during decoding.
-        retainedBytes,
-        signal: options.signal,
-        onProgress: options.onProgress,
-      });
+      // Native assembly finishes before enhancement begins. Each phase admits
+      // its own peak; future worker/output buffers are not resident during decoding.
+      const source = await context.load(roi, options);
       // Browsing may have populated decoded frames while the native source loaded.
       // Re-admit the actual source and current cache before worker allocations.
       await prepareEnhancementMemory(
-        result.volume.data.length,
+        source.data.length,
         retainedBytes + nativePlaneBytes,
         imageCache,
         protectedImageIds,
         options.signal,
+        cornerstone.getEnabledElements,
       );
-      return result.volume;
+      return source;
     },
     [acceptedResult, isRunning, nativeSource, currentReadiness, params, selectedSeries],
+  );
+
+  // A mask edit does not change the source generation. Only accepted geometry,
+  // acquisition readiness, or reconstruction ownership can invalidate this job.
+  const selectionVolume = acceptedResult?.volume ?? null;
+  const selectionParameters = acceptedResult?.parameters ?? params;
+  const selectionOwner = useRef<{
+    volume: SvrVolume | null;
+    readiness: typeof currentReadiness;
+    running: boolean;
+  } | null>(null);
+  useLayoutEffect(() => {
+    selectionOwner.current = { volume: selectionVolume, readiness: currentReadiness, running: isRunning };
+    return () => {
+      selectionOwner.current = null;
+    };
+  }, [currentReadiness, isRunning, selectionVolume]);
+  const proposeSelection = useCallback<SelectionProposer>(
+    async (request) => {
+      const assertCurrent = () => {
+        if (request.signal.aborted) throw new DOMException('Interactive selection canceled.', 'AbortError');
+        const current = selectionOwner.current;
+        if (
+          !current ||
+          isRunning ||
+          current.running ||
+          current.volume !== selectionVolume ||
+          current.readiness !== currentReadiness ||
+          request.volume !== selectionVolume
+        )
+          throw new Error('The accepted MRI source changed. Your current selection and marks are unchanged.');
+      };
+      assertCurrent();
+      if (!selectionVolume || !nativeSource || !currentReadiness || !selectionVolume.sourceProvenance)
+        throw new Error(
+          'Original MRI source data is unavailable for this selection. Reopen the examination before suggesting a boundary.',
+        );
+
+      const budgetBytes = interactiveSelectionBudgetBytes(
+        typeof navigator === 'undefined'
+          ? undefined
+          : (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+      );
+      const measureOwners = () => {
+        assertCurrent();
+        const retainedBytes =
+          retainedSvrVolumeBytes(selectionVolume) + request.retainedBytes + retainedDerivedAlignmentBytes();
+        const nativePlaneBytes = nativePlaneMemoryBytes(selectionVolume.sourceProvenance?.sources ?? []);
+        const cache = measureCornerstoneImageMemory(cornerstone);
+        const maximum = cache.cacheInfo?.maximumSizeInBytes;
+        const capacity = Number.isFinite(maximum) && maximum! >= 0 ? maximum! : CORNERSTONE_MEMORY_FALLBACK_BYTES;
+        // Source preparation and inference can both overlap continued browsing.
+        // The assembler is non-inserting, but other viewers may fill the cache.
+        const cacheGrowthBytes = Math.max(0, capacity - cache.reservedPixelCacheBytes);
+        return { retainedBytes, nativePlaneBytes, decodedCacheBytes: cache.bytes, cacheGrowthBytes };
+      };
+      const createContext = (owners = measureOwners()) =>
+        createNativeSourceContext({
+          volume: selectionVolume,
+          nativeSource,
+          selectedSeries,
+          parameters: selectionParameters,
+          budgetBytes,
+          ...owners,
+        });
+      const context = createContext();
+      const plan = planInteractiveSelectionContext(selectionVolume, context.grid, request.seeds);
+      const admit = async () => {
+        const owners = measureOwners();
+        const sourceLoadPeakBytes =
+          createContext(owners).plan(plan.loaderRoi).memoryPlan.totalBytes + owners.cacheGrowthBytes;
+        const provider = await admitInteractiveSelection({
+          signal: request.signal,
+          retainedBytes:
+            owners.retainedBytes + owners.nativePlaneBytes + owners.decodedCacheBytes + owners.cacheGrowthBytes,
+          sourceLoadPeakBytes,
+          contextBytes: plan.contextBytes,
+          editingVoxels: selectionVolume.data.length,
+          width: plan.width,
+          height: plan.height,
+          frameCount: plan.frameCount,
+          conditioningFrames: plan.conditioningFrames,
+          literalMarkCount: request.seeds.foreground.length + request.seeds.background.length,
+        });
+        assertCurrent();
+        return provider;
+      };
+      const progress = (start: number, span: number) => (progress: { current: number; total: number }) => {
+        assertCurrent();
+        request.onProgress(start + (span * progress.current) / Math.max(1, progress.total));
+      };
+      await admit();
+      // Fixed per-acquisition modality range is independent of crop, display tone,
+      // and mask membership. It remains an explicit source-normalization policy.
+      const sourceRange = await context.intensityRange({ signal: request.signal, onProgress: progress(0, 0.1) });
+      assertCurrent();
+      const nativeContext = await (async () => {
+        const loaded = await createContext().load(plan.loaderRoi, {
+          signal: request.signal,
+          onProgress: progress(0.1, 0.2),
+        });
+        assertCurrent();
+        // Native patient-AABB assembly and exact model crop coexist during copying.
+        await admit();
+        return cropInteractiveSelectionContext(loaded, plan.grid, { signal: request.signal });
+      })();
+      assertCurrent();
+      // Browsing can populate decoded/raw frames during the yielding source copy.
+      const provider = await admit();
+      const proposal = await proposeInteractiveSelection(
+        // The selection hook enforces literal marks and retains only their
+        // connected components, so certified separated tails cannot contribute.
+        { nativeContext, sourceRange, provider, retainMarkedComponents: true },
+        {
+          ...request,
+          onProgress: (value) => {
+            assertCurrent();
+            request.onProgress(0.3 + 0.7 * value);
+          },
+        },
+      );
+      assertCurrent();
+      return proposal;
+    },
+    [currentReadiness, isRunning, nativeSource, selectedSeries, selectionParameters, selectionVolume],
   );
 
   return {
@@ -1437,6 +1544,7 @@ function useSvrReconstructionWorkspace({
     startReconstruction,
     refineRegion,
     loadEnhancementSource,
+    proposeSelection,
     status,
     stepRoiSlice,
     automaticallyAdjustedVoxelSpacing,
@@ -2013,8 +2121,9 @@ export function Svr3DView(props: Svr3DViewProps) {
       busy: isRunning,
       refineRegion: workspace.refineRegion,
       loadEnhancementSource: workspace.loadEnhancementSource,
+      proposeSelection: workspace.proposeSelection,
     }),
-    [acceptedResult, isRunning, workspace.refineRegion, workspace.loadEnhancementSource],
+    [acceptedResult, isRunning, workspace.refineRegion, workspace.loadEnhancementSource, workspace.proposeSelection],
   );
   const SourcesIcon = generationCollapsed ? ChevronRight : ChevronLeft;
 

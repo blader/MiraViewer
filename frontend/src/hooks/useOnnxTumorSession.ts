@@ -14,11 +14,8 @@ import { runTumorSegmentationOnnx } from '../utils/segmentation/onnx/tumorSegmen
 import { assertTumorModelGrid, prepareTumorModelInput } from '../utils/segmentation/onnx/volumeInput';
 import { formatMiB } from '../utils/svr/svrUtils';
 import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES } from '../utils/svr/svrMemoryPlan';
-import {
-  nativeDecodedCacheBudgetBytes,
-  nativePlaneMemoryBytes,
-  retainedSvrVolumeBytes,
-} from '../utils/svr/nativeVolume';
+import { CORNERSTONE_MEMORY_FALLBACK_BYTES, measureCornerstoneImageMemory } from '../utils/cornerstoneMemory';
+import { nativePlaneMemoryBytes, retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 
 const ONNX_TUMOR_MODEL_KEY = 'brats-tumor-v1';
 const ONNX_TUMOR_MANIFEST_KEY = `${ONNX_TUMOR_MODEL_KEY}:manifest`;
@@ -64,6 +61,8 @@ export type UseOnnxTumorSession = {
   initSession: () => void;
   runSegmentation: () => void;
   cancelSegmentation: () => void;
+  /** Release an idle runtime without deleting its verified cached model. */
+  releaseIdleSession: () => Promise<void>;
 };
 
 export function useOnnxTumorSession(
@@ -72,28 +71,46 @@ export function useOnnxTumorSession(
 ): UseOnnxTumorSession {
   const sessionRef = useRef<VerifiedOnnxSession | null>(null);
   const sessionPromiseRef = useRef<Promise<VerifiedOnnxSession> | null>(null);
+  const sessionReleaseRef = useRef<Promise<void> | null>(null);
   const modelGenerationRef = useRef(0);
   const modelWriteAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const releaseSession = useCallback((reason: string) => {
-    modelGenerationRef.current++;
-    modelWriteAbortRef.current?.abort();
-    modelWriteAbortRef.current = null;
-    sessionPromiseRef.current = null;
-    const session = sessionRef.current?.session;
-    sessionRef.current = null;
-
-    if (session) {
-      // Avoid leaking WebGPU/WASM resources if the user swaps/clears models.
-      void session.release().catch((e) => {
-        console.warn('[onnx] Failed to release session', { reason, e });
-      });
-    }
+  const releaseRuntime = useCallback((session: Ort.InferenceSession, reason: string) => {
+    const pending = Promise.all([sessionReleaseRef.current, Promise.resolve().then(() => session.release())]).then(
+      () => undefined,
+    );
+    sessionReleaseRef.current = pending;
+    void pending.then(
+      () => {
+        if (sessionReleaseRef.current === pending) sessionReleaseRef.current = null;
+      },
+      (error) => {
+        // Failed cleanup remains a live admission barrier, not a zero-byte owner.
+        console.warn('[onnx] Failed to release session', { reason, error });
+      },
+    );
+    return pending;
   }, []);
 
+  const releaseSession = useCallback(
+    (reason: string) => {
+      modelGenerationRef.current++;
+      modelWriteAbortRef.current?.abort();
+      modelWriteAbortRef.current = null;
+      // A superseded initializer still owns runtime memory until it actually settles.
+      const session = sessionRef.current?.session;
+      sessionRef.current = null;
+
+      return session ? releaseRuntime(session, reason) : (sessionReleaseRef.current ?? Promise.resolve());
+    },
+    [releaseRuntime],
+  );
+
   useEffect(() => {
-    return () => releaseSession('unmount');
+    return () => {
+      void releaseSession('unmount');
+    };
   }, [releaseSession]);
 
   const [status, setStatus] = useState<OnnxStatus>(() => ({
@@ -108,6 +125,41 @@ export function useOnnxTumorSession(
   const segRunIdRef = useRef(0);
   const inferenceTaskRef = useRef<Promise<void> | null>(null);
   const [segRunning, setSegRunning] = useState(false);
+  const releaseIdleSession = useCallback(async () => {
+    if (sessionPromiseRef.current || inferenceTaskRef.current || modelWriteAbortRef.current)
+      throw new Error(
+        'Wait for the other model operation to finish before suggesting a boundary. Your marks are unchanged.',
+      );
+    if (!sessionRef.current) {
+      if (sessionReleaseRef.current) await sessionReleaseRef.current;
+      return;
+    }
+    const released = releaseSession('interactive-selection');
+    const generation = modelGenerationRef.current;
+    setStatus((current) => ({
+      ...current,
+      sessionReady: false,
+      loading: true,
+      message: 'Releasing the idle model runtime…',
+    }));
+    try {
+      await released;
+      if (modelGenerationRef.current === generation)
+        setStatus((current) => ({
+          ...current,
+          loading: false,
+          message: 'Model cached; runtime released for interactive selection.',
+        }));
+    } catch (error) {
+      if (modelGenerationRef.current === generation)
+        setStatus((current) => ({
+          ...current,
+          loading: false,
+          error: 'The other model runtime could not release its memory. Reopen the viewer before trying again.',
+        }));
+      throw error;
+    }
+  }, [releaseSession]);
   const [unsafeFullResOverride, setUnsafeFullResOverride] = useState<{ volume: SvrVolume | null; allowed: boolean }>({
     volume: null,
     allowed: false,
@@ -165,26 +217,20 @@ export function useOnnxTumorSession(
     refreshCacheStatus();
   }, [refreshCacheStatus]);
 
-  const preflight = useMemo<OnnxPreflight | null>(() => {
+  const measurePreflight = useCallback((): OnnxPreflight | null => {
     if (!volume) return null;
     const [nx, ny, nz] = volume.dims;
     const nvox = nx * ny * nz;
     const logitsBytes = nvox * ONNX_PREFLIGHT_CLASS_COUNT * 4;
     const inputBytes = nvox * 4;
     const preprocessingBytes = nvox * 4;
-    let decodedCacheBytes = nativeDecodedCacheBudgetBytes();
-    try {
-      const cache = cornerstone.imageCache?.getCacheInfo?.();
-      // Long model operations may overlap continued interactive browsing,
-      // unlike the bounded non-inserting native assembly pass.
-      const maximum = cache?.maximumSizeInBytes;
-      decodedCacheBytes = Math.max(
-        nativeDecodedCacheBudgetBytes(cache),
-        Number.isFinite(maximum) && maximum! >= 0 ? maximum! : 256 * 1024 * 1024,
-      );
-    } catch {
-      // A missing optional cache API cannot make retained source frames free.
-    }
+    const cacheMemory = measureCornerstoneImageMemory(cornerstone);
+    // Long model operations may overlap continued interactive browsing,
+    // unlike the bounded non-inserting native assembly pass. Reserve remaining
+    // pixel capacity once, beside all currently retained parsed/display buffers.
+    const maximum = cacheMemory.cacheInfo?.maximumSizeInBytes;
+    const capacity = Number.isFinite(maximum) && maximum! >= 0 ? maximum! : CORNERSTONE_MEMORY_FALLBACK_BYTES;
+    const decodedCacheBytes = cacheMemory.bytes + Math.max(0, capacity - cacheMemory.reservedPixelCacheBytes);
     // The existing labels remain visible while inference builds their
     // replacement. Both overlap the immutable supported result and tensors.
     const inferencePlan = estimateSvrPeakMemoryBytes({
@@ -215,6 +261,7 @@ export function useOnnxTumorSession(
       blockedByDefault: estimatedPeakBytes > SVR_MEMORY_BUDGET_BYTES,
     };
   }, [volume]);
+  const preflight = useMemo(measurePreflight, [measurePreflight]);
 
   const uploadClick = useCallback(() => fileInputRef.current?.click(), []);
 
@@ -307,6 +354,8 @@ export function useOnnxTumorSession(
   );
 
   const ensureSession = useCallback(async (): Promise<VerifiedOnnxSession> => {
+    if (sessionReleaseRef.current)
+      throw new Error('Wait for the previous model runtime to release its memory before initializing another.');
     if (sessionRef.current) {
       return sessionRef.current;
     }
@@ -337,7 +386,7 @@ export function useOnnxTumorSession(
       }
 
       if (modelGenerationRef.current !== generation) {
-        await session.release().catch(() => undefined);
+        await releaseRuntime(session, 'superseded-initialization');
         throw new Error('Model changed during initialization');
       }
 
@@ -352,7 +401,7 @@ export function useOnnxTumorSession(
     } finally {
       if (sessionPromiseRef.current === pending) sessionPromiseRef.current = null;
     }
-  }, []);
+  }, [releaseRuntime]);
 
   const initSession = useCallback(() => {
     const generation = modelGenerationRef.current;
@@ -398,6 +447,7 @@ export function useOnnxTumorSession(
       return;
     }
 
+    const preflight = measurePreflight();
     if (preflight?.blockedByDefault) {
       const dims = `${preflight.nx}×${preflight.ny}×${preflight.nz}`;
       const msg =
@@ -470,7 +520,7 @@ export function useOnnxTumorSession(
       }
     })();
     inferenceTaskRef.current = inferenceTask;
-  }, [ensureSession, onLabels, preflight, volume]);
+  }, [ensureSession, onLabels, measurePreflight, volume]);
 
   const cancelSegmentation = useCallback(() => {
     if (!inferenceTaskRef.current) return;
@@ -496,5 +546,6 @@ export function useOnnxTumorSession(
     initSession,
     runSegmentation,
     cancelSegmentation,
+    releaseIdleSession,
   };
 }

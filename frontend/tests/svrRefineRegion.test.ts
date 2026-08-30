@@ -35,6 +35,37 @@ const selection = (source: SvrVolume): SvrLabelVolume => ({
 });
 
 describe('source-backed regional detail and annotation transfer', () => {
+  it.each([undefined, false, true])(
+    'preserves clipping and source-context %s when transferring a partial selection to a larger native grid',
+    async (contextLimited) => {
+      const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);
+      const target = volume([7, 7, 7], [1, 1, 1], [-2, -2, -2]);
+      const labels = {
+        ...selection(source),
+        clippedNativeVoxels: 152,
+        ...(contextLimited !== undefined ? { contextLimited } : {}),
+      };
+      const transferred = await transferSelectionAnnotations(source, labels, target, { targetSupported: () => true });
+      expect(transferred.clippedNativeVoxels).toBe(152);
+      expect(transferred.contextLimited).toBe(contextLimited);
+      if (contextLimited === undefined) expect(transferred).not.toHaveProperty('contextLimited');
+      expect(transferred.reviewState).toBe('draft');
+      expect(labels.clippedNativeVoxels).toBe(152);
+      expect(labels.contextLimited).toBe(contextLimited);
+    },
+  );
+
+  it.each([{ clippedNativeVoxels: -1 }, { contextLimited: null }, { contextLimited: 'false' }, { contextLimited: 0 }])(
+    'rejects malformed coverage %j before transferring any annotations',
+    async (invalid) => {
+      const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);
+      await expect(
+        transferSelectionAnnotations(source, Object.assign(selection(source), invalid) as SvrLabelVolume, source, {
+          targetSupported: () => true,
+        }),
+      ).rejects.toThrow(/invalid viewing-region coverage/i);
+    },
+  );
   it('refines the accepted solver settings without introducing registration into native geometry', () => {
     const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);
     const roi = selectionFocusRoi(source, selection(source), 'preview');
@@ -229,6 +260,97 @@ describe('source-backed regional detail and annotation transfer', () => {
     expect(labels.reviewState).toBe('reviewed');
     expect(labels.data).toEqual(original);
   });
+
+  it.each(['axial', 'coronal', 'sagittal'] as const)(
+    'preserves the exact last %s stroke plane independently of accumulated three-dimensional marks',
+    async (plane) => {
+      const source = volume([3, 3, 3], [1, 2, 3], [10, -20, 30]);
+      const target = volume([5, 5, 5], [0.5, 1, 1.5], [10, -20, 30]);
+      const labels = selection(source);
+      labels.data[26] = 1;
+      labels.seeds = {
+        foreground: Uint32Array.of(13, 26),
+        background: Uint32Array.of(0, 14),
+        lastStroke: { plane, slice: 1 },
+      };
+      const before = structuredClone(labels),
+        sourcePixels = source.data.slice(),
+        targetPixels = target.data.slice();
+      const withoutPlane = await resampleSelectionForRefinement(
+        source,
+        { ...labels, seeds: { foreground: labels.seeds.foreground, background: labels.seeds.background } },
+        target,
+      );
+      const result = await resampleSelectionForRefinement(source, labels, target);
+      expect(result.seeds!.lastStroke).toEqual({ plane, slice: 2 });
+      expect(result.seeds!.lastStroke).not.toBe(labels.seeds.lastStroke);
+      expect(result.data).toEqual(withoutPlane.data);
+      expect(result.seeds!.foreground).toEqual(withoutPlane.seeds!.foreground);
+      expect(result.seeds!.background).toEqual(withoutPlane.seeds!.background);
+      expect(structuredClone(labels)).toStrictEqual(before);
+      expect(source.data).toEqual(sourcePixels);
+      expect(target.data).toEqual(targetPixels);
+    },
+  );
+
+  it.each(['swapped', 'flipped'] as const)('maps the actual stroke section across %s axes', async (kind) => {
+    const source = volume([3, 3, 3], [1, 2, 3], [10, -20, 30]);
+    const target = volume([3, 3, 3], kind === 'swapped' ? [3, 2, 1] : [1, 2, 3], [10, -20, 30]);
+    target.direction = kind === 'swapped' ? [0, 0, 1, 0, 1, 0, 1, 0, 0] : [1, 0, 0, 0, 1, 0, 0, 0, -1];
+    if (kind === 'flipped') target.originMm = [10, -20, 36];
+    const labels = selection(source);
+    labels.data[1] = 1;
+    labels.seeds!.foreground = Uint32Array.of(1, 13);
+    labels.seeds!.lastStroke = { plane: 'axial', slice: 0 };
+    const result = await resampleSelectionForRefinement(source, labels, target);
+    expect(result.seeds!.lastStroke).toEqual(
+      kind === 'swapped' ? { plane: 'sagittal', slice: 0 } : { plane: 'axial', slice: 2 },
+    );
+    expect([...result.seeds!.foreground].sort((a, b) => a - b)).toEqual(kind === 'swapped' ? [9, 13] : [13, 19]);
+    expect([...result.seeds!.background]).toEqual(kind === 'swapped' ? [22] : [14]);
+    expect(labels.seeds!.lastStroke).toEqual({ plane: 'axial', slice: 0 });
+  });
+
+  it.each([
+    undefined,
+    null,
+    {},
+    { plane: 'unknown', slice: 1 },
+    { plane: 'axial', slice: 0.5 },
+    { plane: 'axial', slice: -1 },
+    { plane: 'axial', slice: 3 },
+  ])('does not invent a stroke plane from absent or invalid metadata %j', async (lastStroke) => {
+    const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);
+    const labels = selection(source);
+    Object.assign(labels.seeds!, { lastStroke });
+    const before = structuredClone(labels);
+    const result = await resampleSelectionForRefinement(source, labels, source);
+    expect(result.seeds).not.toHaveProperty('lastStroke');
+    expect(result.data).toEqual(labels.data);
+    expect(result.seeds!.foreground).toEqual(labels.seeds!.foreground);
+    expect(result.seeds!.background).toEqual(labels.seeds!.background);
+    expect(structuredClone(labels)).toStrictEqual(before);
+  });
+
+  it.each(['fractional', 'small-fractional', 'noncoplanar'] as const)(
+    'omits a %s target-plane mapping without changing categorical transfer',
+    async (kind) => {
+      const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);
+      const target = volume([3, 3, 3], [1, 1, 1], [0, 0, kind === 'fractional' ? 0.25 : 1e-8]);
+      if (kind === 'noncoplanar') {
+        const c = Math.SQRT1_2;
+        target.direction = [1, 0, 0, 0, c, -c, 0, c, c];
+        target.originMm = [0, 1, 1 - 2 * c];
+      }
+      const labels = selection(source);
+      const withoutPlane = await resampleSelectionForRefinement(source, labels, target);
+      labels.seeds!.lastStroke = { plane: 'axial', slice: 1 };
+      const result = await resampleSelectionForRefinement(source, labels, target);
+      expect(result.seeds).not.toHaveProperty('lastStroke');
+      expect(result).toEqual(withoutPlane);
+      expect(labels.seeds!.lastStroke).toEqual({ plane: 'axial', slice: 1 });
+    },
+  );
 
   it('omits unsupported unmarked labels but rejects lost explicit marks', async () => {
     const source = volume([3, 3, 3], [1, 1, 1], [0, 0, 0]);

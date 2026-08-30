@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "efficienttam-tiny512-onnx-v1",
+  "directory": "models/efficienttam-tiny512-v1",
+  "task": "interactive-binary-2d-tracking",
+  "input": { "dtype": "float32", "axes": "NCHW", "shape": [1, 3, 512, 512] },
+  "output": { "kind": "single-object-logits", "selectedWhen": "logit > 0" },
+  "opset": 17,
+  "totalModelBytes": 75004497,
+  "graphs": {
+    "encoder": {
+      "path": "encoder.onnx",
+      "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1",
+      "bytes": 25073825
+    },
+    "decoder": {
+      "path": "decoder.onnx",
+      "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd",
+      "bytes": 17824943
+    },
+    "memoryAttention": {
+      "path": "memory-attention.onnx",
+      "sha256": "e728f0c5c3e98739a4d4feecbdbac397ca95c691720e03bf5af05ac20e71642e",
+      "bytes": 26272975
+    },
+    "memoryEncoder": {
+      "path": "memory-encoder.onnx",
+      "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455",
+      "bytes": 5568818
+    }
+  },
+  "constants": {
+    "memoryPosition": {
+      "path": "memory-position.f32",
+      "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d",
+      "bytes": 262144,
+      "dtype": "float32-le",
+      "shape": [1, 64, 32, 32]
+    },
+    "temporalPositions": {
+      "path": "memory-temporal-positions.f32",
+      "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9",
+      "bytes": 1792,
+      "dtype": "float32-le",
+      "shape": [7, 1, 1, 64]
+    }
+  },
+  "notices": {
+    "license": {
+      "path": "LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "bytes": 11357
+    },
+    "attribution": {
+      "path": "NOTICE",
+      "sha256": "af5320b2f11b90f642b82d3ae49be3304f188d4bb5c73fa3a4199c84df790485",
+      "bytes": 1828
+    }
+  },
+  "upstream": {
+    "repository": "https://github.com/yformer/EfficientTAM",
+    "revision": "abcd061ebd3cc6e7527d152d75b890126aaa53f6",
+    "configuration": "configs/efficienttam/efficienttam_ti_512x512.yaml",
+    "license": "Apache-2.0",
+    "checkpoint": {
+      "repository": "https://huggingface.co/yunyangx/efficient-track-anything",
+      "revision": "9bdd8ab585b19ef95f9c9ed847ac9478301890b4",
+      "file": "efficienttam_ti_512x512.pt",
+      "sha256": "7d4d652a465f0081391050932f45d8a66768ccc99c8ea393ce8a5927e83f3b9b",
+      "bytes": 71620052
+    }
+  },
+  "exportProvenance": {
+    "graphContractSha256": "9b5fa2944ca06c0ac9b238205c57a9b5e9230412864f39965426206430b7d76f",
+    "torch": "2.13.0",
+    "onnx": "1.19.1"
+  }
+}

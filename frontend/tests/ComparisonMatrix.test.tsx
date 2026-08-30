@@ -6,7 +6,10 @@ import * as dicomIngestion from '../src/services/dicomIngestion';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { COMPARISON_UI_STORAGE_KEY } from '../src/utils/storageKeys';
 
-const { reloadComparisonData } = vi.hoisted(() => ({ reloadComparisonData: vi.fn() }));
+const { reloadComparisonData, updatePanelSetting } = vi.hoisted(() => ({
+  reloadComparisonData: vi.fn(),
+  updatePanelSetting: vi.fn(),
+}));
 
 vi.mock('../src/hooks/useComparisonData', async () => {
   const { useCallback, useState } = await vi.importActual<typeof ReactTypes>('react');
@@ -59,7 +62,7 @@ vi.mock('../src/hooks/usePanelSettings', () => ({
     panelSettings: new Map([['2024-01-01T00:00:00', { ...DEFAULT_PANEL_SETTINGS }]]),
     progress: 0,
     setProgress: vi.fn(),
-    updatePanelSetting: vi.fn(),
+    updatePanelSetting,
     batchUpdateSettings: vi.fn(),
   }),
 }));
@@ -88,14 +91,26 @@ vi.mock('../src/hooks/useGridLayout', () => ({
   }),
 }));
 
-vi.mock('../src/components/DicomViewer', () => ({
-  DicomViewer: ({ children }: { children?: ReactTypes.ReactNode }) => <div data-testid="dicom-viewer">{children}</div>,
-}));
+vi.mock('../src/components/DicomViewer', async () => {
+  const { useContext } = await vi.importActual<typeof ReactTypes>('react');
+  const { SharpSliceDisplayContext } = await import('../src/hooks/useSharpSliceDisplay');
+  return {
+    DicomViewer: ({ children }: { children?: ReactTypes.ReactNode }) => {
+      const display = useContext(SharpSliceDisplayContext);
+      return (
+        <div data-testid="dicom-viewer" data-sharp-slices={String(display.enabled)}>
+          {children}
+        </div>
+      );
+    },
+  };
+});
 
 describe('ComparisonMatrix', () => {
   beforeEach(() => {
     localStorage.clear();
     reloadComparisonData.mockClear();
+    updatePanelSetting.mockClear();
   });
 
   afterEach(() => {
@@ -173,5 +188,44 @@ describe('ComparisonMatrix', () => {
       rightSidebarOpen: false,
       alignmentOutputMode: 'native',
     });
+  });
+
+  it('makes sharp slices an explicit display-only opt-in and toggles back without changing alignment or panel settings', () => {
+    localStorage.setItem(COMPARISON_UI_STORAGE_KEY, JSON.stringify({ automaticAlignment: false }));
+    render(<ComparisonMatrix />);
+    const sharp = screen.getByRole('button', { name: 'Sharp slices (experimental)' });
+    expect(sharp).toHaveAttribute('aria-pressed', 'false');
+    expect(sharp).toHaveTextContent('Experimental');
+    expect(screen.getByTestId('dicom-viewer')).toHaveAttribute('data-sharp-slices', 'false');
+
+    fireEvent.click(sharp);
+    expect(sharp).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('dicom-viewer')).toHaveAttribute('data-sharp-slices', 'true');
+    expect(JSON.parse(localStorage.getItem(COMPARISON_UI_STORAGE_KEY) ?? '{}')).toMatchObject({
+      sharpSlices: true,
+      automaticAlignment: false,
+    });
+    fireEvent.click(sharp);
+    expect(sharp).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('dicom-viewer')).toHaveAttribute('data-sharp-slices', 'false');
+    expect(JSON.parse(localStorage.getItem(COMPARISON_UI_STORAGE_KEY) ?? '{}')).toMatchObject({
+      sharpSlices: false,
+      automaticAlignment: false,
+    });
+    expect(updatePanelSetting).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { stored: true, enabled: 'true' },
+    { stored: 'true', enabled: 'false' },
+    { stored: 1, enabled: 'false' },
+  ])('restores only an explicitly enabled sharp-display preference: $stored', ({ stored, enabled }) => {
+    localStorage.setItem(COMPARISON_UI_STORAGE_KEY, JSON.stringify({ sharpSlices: stored }));
+    render(<ComparisonMatrix />);
+    expect(screen.getByRole('button', { name: 'Sharp slices (experimental)' })).toHaveAttribute(
+      'aria-pressed',
+      enabled,
+    );
+    expect(screen.getByTestId('dicom-viewer')).toHaveAttribute('data-sharp-slices', enabled);
   });
 });

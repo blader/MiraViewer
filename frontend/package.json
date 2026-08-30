@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/verify-efficient-tam-assets.mjs && tsc -b && vite build && node scripts/verify-efficient-tam-assets.mjs dist/models/efficienttam-tiny512-v1",
     "lint": "eslint .",
     "doctor": "react-doctor . --no-telemetry --no-supply-chain --blocking warning",
     "doctor:score": "npm run doctor --silent && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url GIT_CONFIG_VALUE_0= REACT_DOCTOR_NO_TELEMETRY=1 react-doctor . --no-supply-chain --score",
@@ -28,7 +28,7 @@
     "idb": "^8.0.3",
     "jszip": "^3.10.1",
     "lucide-react": "^0.562.0",
-    "onnxruntime-web": "^1.23.2",
+    "onnxruntime-web": "1.23.2",
     "pako": "^2.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

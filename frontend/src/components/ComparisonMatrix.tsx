@@ -20,6 +20,7 @@ import { useComparisonWorkspaceNavigation } from '../hooks/useComparisonWorkspac
 import { usePanelSettings } from '../hooks/usePanelSettings';
 import { useComparisonAlignment } from '../hooks/useComparisonAlignment';
 import { AlignedBrowsingContext } from '../hooks/useAlignedFrame';
+import { SharpSliceDisplayContext } from '../hooks/useSharpSliceDisplay';
 import { AutomaticAlignmentStatus } from './comparison/AutomaticAlignmentStatus';
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
@@ -242,6 +243,22 @@ export function ComparisonMatrix() {
       )}
 
       <ComparisonInstrumentHeader
+        displayControls={
+          hasData && viewMode !== 'svr3d' ? (
+            <button
+              type="button"
+              className="instrument-context-button shrink-0"
+              style={{ color: uiState.sharpSlices ? 'var(--signal-metal)' : undefined }}
+              aria-pressed={uiState.sharpSlices}
+              aria-label="Sharp slices (experimental)"
+              title="Experimental synthesized detail between acquired slices. Toggle off to compare the original aligned image; alignment and measurements always use original MRI data."
+              onClick={() => setUiState({ ...uiState, sharpSlices: !uiState.sharpSlices })}
+            >
+              Sharp slices
+              <span className="text-[10px] text-[var(--text-tertiary)]">Experimental</span>
+            </button>
+          ) : null
+        }
         alignmentControls={
           workspaceNavigation.columns.length > 1 && viewMode !== 'svr3d' ? (
             <AutomaticAlignmentStatus
@@ -330,16 +347,20 @@ export function ComparisonMatrix() {
           ) : null}
 
           <AlignedBrowsingContext value={alignment.browsing}>
-            <ComparisonStage
-              data={data}
-              selectedSeqId={selectedSeqId}
-              hasData={Boolean(hasData)}
-              navigation={workspaceNavigation}
-              panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
-              onUseAcquired={useAcquiredImage}
-              onOpenUpload={() => setActiveDialog('upload')}
-              onOpenExaminations={() => setRightSidebarOpen(true)}
-            />
+            <SharpSliceDisplayContext
+              value={{ enabled: uiState.sharpSlices, suspended: interactionBlocked || isPlaying || isAligning }}
+            >
+              <ComparisonStage
+                data={data}
+                selectedSeqId={selectedSeqId}
+                hasData={Boolean(hasData)}
+                navigation={workspaceNavigation}
+                panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
+                onUseAcquired={useAcquiredImage}
+                onOpenUpload={() => setActiveDialog('upload')}
+                onOpenExaminations={() => setRightSidebarOpen(true)}
+              />
+            </SharpSliceDisplayContext>
           </AlignedBrowsingContext>
 
           {hasData && viewMode !== 'svr3d' ? (

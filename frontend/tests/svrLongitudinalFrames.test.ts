@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SeriesFrameManifest } from '../src/utils/localApi';
+import { deferred } from './helpers/deferred';
 
 const decode = vi.hoisted(() => ({
   load: vi.fn(async (imageId: string) => ({ imageId, rows: 12, columns: 16 })),
@@ -19,7 +20,9 @@ vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({
 }));
 
 import {
+  decodeLongitudinalReferenceFrame,
   densifyLongitudinalRegistration,
+  getLongitudinalReferencePlane,
   measureLongitudinalPlaneDrift,
   prepareDenseLongitudinalResliceInput,
   prepareLongitudinalReferenceInput,
@@ -45,6 +48,8 @@ function makeManifest(
     studyUid: `${seriesUid}-study`,
     patientKey: options.patientKey ?? 'same-patient',
     frameOfReferenceUid: `${seriesUid}-frame`,
+    ordering: 'physical',
+    geometryReliable: true,
     frames: Array.from({ length: count }, (_, index) => ({
       sopInstanceUid: `${seriesUid}-${index}`,
       seriesInstanceUid: seriesUid,
@@ -77,6 +82,235 @@ describe('svr/longitudinalFrames', () => {
     decode.resample.mockClear();
     denseWorker.run.mockReset();
   });
+
+  it.each([
+    [12, 16, 8, 0],
+    [11, 17, 9, 17.5],
+    [513, 487, 256, -23],
+    [1, 7, 4, 90],
+    [12, 16, 64, 0],
+  ])(
+    'builds the exact decoded reference geometry without pixels (%ix%i, limit%i, angle%s)',
+    async (rows, columns, limit, angleDeg) => {
+      const manifest = makeManifest('geometry-reference', 5, { angleDeg });
+      manifest.frames = manifest.frames.map((frame) => ({ ...frame, rows, columns }));
+      const frame = manifest.frames[2]!;
+      frame.spacingBetweenSlices = 2.25;
+      frame.frameOfReferenceUid = 'explicit-reference-frame';
+      const pixelRead = vi.fn(() => {
+        throw new Error('Geometry must not read source pixels');
+      });
+      Object.defineProperty(frame, 'pixels', { get: pixelRead });
+      Object.defineProperty(frame, 'fileBlob', { get: pixelRead });
+      const before = JSON.stringify(manifest);
+
+      const plane = getLongitudinalReferencePlane(manifest, 2, limit);
+      expect(decode.load).not.toHaveBeenCalled();
+      expect(decode.resample).not.toHaveBeenCalled();
+      expect(pixelRead).not.toHaveBeenCalled();
+      expect(plane).not.toHaveProperty('pixels');
+      expect(plane).not.toHaveProperty('valid');
+      expect(plane.frameOfReferenceUid).toBe('explicit-reference-frame');
+      expect(plane.spacingBetweenSlicesMm).toBe(2.25);
+      expect(JSON.stringify(manifest)).toBe(before);
+
+      // Independent center-of-native-footprint oracle, including rounded and minimum-two dimensions.
+      const scale = Math.min(1, limit / Math.max(rows, columns));
+      const expectedRows = Math.max(2, Math.round(rows * scale));
+      const expectedColumns = Math.max(2, Math.round(columns * scale));
+      const columnOffset = (3 * (columns / expectedColumns - 1)) / 2;
+      const rowOffset = (2 * (rows / expectedRows - 1)) / 2;
+      const angle = (angleDeg * Math.PI) / 180;
+      expect([plane.dsRows, plane.dsCols]).toEqual([expectedRows, expectedColumns]);
+      expect(plane.ippMm.x).toBeCloseTo(Math.cos(angle) * columnOffset, 10);
+      expect(plane.ippMm.y).toBeCloseTo(rowOffset, 10);
+      expect(plane.ippMm.z).toBeCloseTo(2 + Math.sin(angle) * columnOffset, 10);
+      expect(plane.rowSpacingDsMm).toBeCloseTo((2 * rows) / expectedRows, 10);
+      expect(plane.colSpacingDsMm).toBeCloseTo((3 * columns) / expectedColumns, 10);
+
+      const decoded = await decodeLongitudinalReferenceFrame(manifest, 2, limit);
+      const { pixels, valid, ...decodedPlane } = decoded;
+      expect(plane).toEqual(decodedPlane);
+      expect(pixels.length).toBe(expectedRows * expectedColumns);
+      expect(valid?.length).toBe(pixels.length);
+      expect(decode.load).toHaveBeenCalledOnce();
+      expect(pixelRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains inferred spacing and rejects missing or canceled geometry before decoding', () => {
+    const manifest = makeManifest('geometry-reference', 5);
+    const plane = getLongitudinalReferencePlane(manifest, 2, 8);
+    expect(plane.spacingBetweenSlicesMm).toBe(1);
+    expect(plane.frameOfReferenceUid).toBe(manifest.frameOfReferenceUid);
+    expect(() => getLongitudinalReferencePlane(manifest, 5, 8)).toThrow(/missing.*physical manifest/);
+    const controller = new AbortController();
+    controller.abort();
+    expect(() => getLongitudinalReferencePlane(manifest, 2, 8, controller.signal)).toThrow(/cancel/i);
+    expect(decode.load).not.toHaveBeenCalled();
+    expect(decode.resample).not.toHaveBeenCalled();
+  });
+
+  it('prepares identical target-only dense reslices from geometry or a transferred decoded reference', async () => {
+    const reference = makeManifest('geometry-reference', 15);
+    const target = makeManifest('geometry-target', 15);
+    const plane = getLongitudinalReferencePlane(reference, 7, 8);
+    const decoded = await decodeLongitudinalReferenceFrame(reference, 7, 8);
+    structuredClone(decoded, { transfer: [decoded.pixels.buffer, decoded.valid!.buffer] });
+    const options = {
+      refinePose: false as const,
+      maxDimension: 16,
+      referenceManifest: reference,
+      referenceSliceIndex: 7,
+    };
+    const rigid = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+    const center = { x: 0, y: 0, z: 0 };
+    decode.load.mockClear();
+    const fromDecoded = await prepareDenseLongitudinalResliceInput(target, decoded, rigid, center, options);
+    const fromGeometry = await prepareDenseLongitudinalResliceInput(target, plane, rigid, center, options);
+    expect(fromGeometry).toEqual(fromDecoded);
+    expect(fromGeometry.referencePlane).toEqual(plane);
+    expect(fromGeometry.referencePlane).not.toHaveProperty('pixels');
+    expect(fromGeometry.referencePlane).not.toHaveProperty('valid');
+    expect(decode.load.mock.calls.every(([id]) => id.startsWith('miradb:geometry-target-'))).toBe(true);
+    expect(decode.load).toHaveBeenCalledTimes(fromGeometry.sourceIndices.length * 2);
+    expect(decoded.pixels.byteLength).toBe(0);
+    expect(decoded.valid!.byteLength).toBe(0);
+  });
+
+  it('reuses a verified pose with geometry only, transferring target buffers but never decoding reference anatomy', async () => {
+    const reference = makeManifest('geometry-reference', 15);
+    const target = makeManifest('geometry-target', 15);
+    const plane = getLongitudinalReferencePlane(reference, 7, 8);
+    const before = JSON.stringify(plane);
+    const outputGrid = buildOutputPlaneGrid(reference.frames[7]!, {
+      frameOfReferenceUid: reference.frameOfReferenceUid,
+    });
+    denseWorker.run.mockImplementationOnce(async (input) => {
+      expect(input.referencePlane).toEqual(plane);
+      expect(input.referencePlane).not.toHaveProperty('pixels');
+      expect(input.referencePlane).not.toHaveProperty('valid');
+      expect(input.nativeReferenceSlices).toBeUndefined();
+      expect(input.nativeCandidatePoses).toBeUndefined();
+      structuredClone(input.targetSlices, {
+        transfer: input.targetSlices.flatMap((slice: { pixels: Float32Array; valid: Uint8Array }) => [
+          slice.pixels.buffer,
+          slice.valid.buffer,
+        ]),
+      });
+      return { ok: true, outputGrid, coverage: 1, contributingSourceSopInstanceUids: ['geometry-target-7'] };
+    });
+    const accepted = acceptedRegistration();
+    const result = await densifyLongitudinalRegistration(target, plane, accepted, {
+      refinePose: false,
+      outputGrid,
+      referenceManifest: reference,
+      referenceSliceIndex: 7,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.targetToReference).toBe(accepted.targetToReference);
+    expect(result.outputGrid).toEqual(outputGrid);
+    expect(result.contributingSourceSopInstanceUids).toEqual(['geometry-target-7']);
+    expect(decode.load.mock.calls.every(([id]) => id.startsWith('miradb:geometry-target-'))).toBe(true);
+    expect(decode.load).toHaveBeenCalledTimes(3);
+    expect(denseWorker.run).toHaveBeenCalledOnce();
+    expect(JSON.stringify(plane)).toBe(before);
+  });
+
+  it('discards canceled geometry-only reslicing before any worker or reference decoding', async () => {
+    const reference = makeManifest('geometry-reference', 15);
+    const target = makeManifest('geometry-target', 15);
+    const plane = getLongitudinalReferencePlane(reference, 7, 8);
+    const controller = new AbortController();
+    decode.load.mockImplementationOnce(async (imageId) => {
+      controller.abort();
+      return { imageId, rows: 12, columns: 16 };
+    });
+    const result = await densifyLongitudinalRegistration(target, plane, acceptedRegistration(), {
+      refinePose: false,
+      referenceManifest: reference,
+      referenceSliceIndex: 7,
+      signal: controller.signal,
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'cancelled' });
+    expect(decode.load).toHaveBeenCalledOnce();
+    expect(decode.resample).not.toHaveBeenCalled();
+    expect(denseWorker.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['resolves', 'rejects'] as const)(
+    'releases an aborted partial slab before its shared decoder %s and lets a new browse complete',
+    async (lateOutcome) => {
+      const reference = makeManifest('geometry-reference', 15);
+      const target = makeManifest('geometry-target', 15);
+      const controller = new AbortController();
+      const stalled = deferred<Awaited<ReturnType<typeof decode.load>>>();
+      const started = deferred<void>();
+      const staleImage = { imageId: 'miradb:geometry-target-7', rows: 12, columns: 16 };
+      const lateLoad = stalled.promise.then((image) => {
+        if (lateOutcome === 'rejects') throw new Error('Late shared decode failure');
+        return image;
+      });
+      decode.load.mockResolvedValueOnce({ ...staleImage, imageId: 'miradb:geometry-target-6' });
+      decode.load.mockImplementationOnce(() => {
+        started.resolve();
+        return lateLoad;
+      });
+      denseWorker.run.mockResolvedValue({ ok: true, coverage: 1 });
+      const settled = vi.fn();
+      const obsolete = densifyLongitudinalRegistration(
+        target,
+        getLongitudinalReferencePlane(reference, 7, 8),
+        acceptedRegistration(),
+        { refinePose: false, signal: controller.signal },
+      ).then((result) => {
+        settled(result);
+        return result;
+      });
+      await started.promise;
+
+      try {
+        expect(decode.resample).toHaveBeenCalledOnce();
+        expect(decode.load).toHaveBeenCalledTimes(2);
+        controller.abort();
+        await vi.waitFor(
+          () =>
+            expect(settled).toHaveBeenCalledWith({
+              ok: false,
+              reason: 'cancelled',
+              message: 'Longitudinal registration cancelled',
+            }),
+          { timeout: 100 },
+        );
+        expect(denseWorker.run).not.toHaveBeenCalled();
+
+        const next = await densifyLongitudinalRegistration(
+          target,
+          getLongitudinalReferencePlane(reference, 12, 8),
+          acceptedRegistration(),
+          { refinePose: false },
+        );
+        expect(next.ok).toBe(true);
+        expect(decode.resample).toHaveBeenCalledTimes(4);
+        expect(denseWorker.run).toHaveBeenCalledOnce();
+        expect(
+          denseWorker.run.mock.calls[0]![0].targetSlices.map(
+            (slice: { sopInstanceUid: string }) => slice.sopInstanceUid,
+          ),
+        ).toEqual(['geometry-target-11', 'geometry-target-12', 'geometry-target-13']);
+      } finally {
+        controller.abort();
+        stalled.resolve(staleImage);
+        await Promise.all([obsolete, lateLoad.catch(() => undefined)]);
+      }
+
+      expect(decode.resample).toHaveBeenCalledTimes(4);
+      expect(decode.resample.mock.calls.some(([image]) => image === staleImage)).toBe(false);
+      expect(denseWorker.run).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledOnce();
+    },
+  );
 
   it('prepares the same informative source slab independently of a low-information browsing position', async () => {
     const original = decode.resample.getMockImplementation()!;

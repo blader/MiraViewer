@@ -10,6 +10,7 @@ import { DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 import {
   clearDerivedAlignmentFrames,
   getDerivedAlignmentFrame,
+  getDerivedAlignmentFrameByImageId,
   setDerivedAlignmentFrame,
   type DerivedAlignmentReference,
 } from '../src/utils/derivedAlignmentFrame';
@@ -28,7 +29,10 @@ vi.mock('cornerstone-core', () => ({
   default: {
     enable: vi.fn(),
     disable: vi.fn(),
-    loadImage: vi.fn(async (imageId: string) => ({ imageId })),
+    loadImage: vi.fn(async (imageId: string) => {
+      const frame = getDerivedAlignmentFrameByImageId(imageId);
+      return { imageId, ...(frame && { derivedSource: new WeakRef(frame) }) };
+    }),
     displayImage: vi.fn(),
     getDefaultViewportForImage: vi.fn(() => ({})),
     resize: vi.fn(),
@@ -505,7 +509,7 @@ describe('DicomViewer aligned browsing', () => {
     const acceptedFrame = getDerivedAlignmentFrame('target-series', 4)!;
     const handle = createRef<DicomViewerHandle>();
     const { rerender } = render(viewer(context(), 4, handle));
-    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4'));
 
     const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
     const presentation = imageElement.parentElement!;
@@ -514,7 +518,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.transform).toContain('rotate(2deg)');
     expect(presentation.style.transform).toContain('matrix(1.04, -0.02, 0.01, 0.98, 0, 0)');
     expect(imageElement).toHaveAttribute('aria-label', 'Slice 5');
-    expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4');
+    expect(cornerstone.displayImage).toHaveBeenCalledOnce();
     const acceptedTransform = presentation.style.transform;
 
     await act(async () => {
@@ -532,7 +536,7 @@ describe('DicomViewer aligned browsing', () => {
     const completed = alignedResult(41, 6);
     completed.computedSettings = { ...completed.computedSettings, brightness: 92, contrast: 118, zoom: 1.03 };
     act(() => setDerivedAlignmentFrame(completed));
-    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:6'));
 
     expect(getImageIdForInstance).not.toHaveBeenCalled();
     expect(vi.mocked(cornerstone.loadImage).mock.calls.map(([imageId]) => imageId)).toEqual([
@@ -542,7 +546,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(0.92) contrast(1.18)');
     expect(presentation.style.transform).toContain('scale(1.03)');
     expect(imageElement).toHaveAttribute('aria-label', 'Slice 7');
-    expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:6');
+    expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
     expect(imageElement.closest('[aria-busy="true"]')).toBeNull();
   });
 
@@ -556,8 +560,9 @@ describe('DicomViewer aligned browsing', () => {
     const next = alignedResult(41, 4);
     next.computedSettings = { ...next.computedSettings, brightness: 80, contrast: 125, rotation: 10, zoom: 1.1 };
     act(() => setDerivedAlignmentFrame(next));
-    const nextImageId = getDerivedAlignmentFrame('target-series', 4)!.imageId;
-    const pendingImage = deferred<{ imageId: string }>();
+    const nextFrame = getDerivedAlignmentFrame('target-series', 4)!;
+    const nextImage = { imageId: nextFrame.imageId, derivedSource: new WeakRef(nextFrame) };
+    const pendingImage = deferred<typeof nextImage>();
     vi.mocked(cornerstone.loadImage).mockReturnValueOnce(pendingImage.promise);
 
     rerender(viewer(context({ sliceIndex: 41 }), 4));
@@ -568,7 +573,7 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(1.11) contrast(0.89)');
     expect(presentation.style.transform).toBe(acceptedTransform);
 
-    await act(async () => pendingImage.resolve({ imageId: nextImageId }));
+    await act(async () => pendingImage.resolve(nextImage));
 
     expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
     expect(presentation.style.filter).toBe('brightness(0.8) contrast(1.25)');

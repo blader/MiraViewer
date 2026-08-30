@@ -181,7 +181,7 @@ export interface AlignmentResult {
   date: string;
   seriesUid: string;
   bestSliceIndex: number;
-  /** Normalized mutual information (Studholme). Higher is better. */
+  /** Normalized mutual information (Studholme); zero for unscored presentation-only replay. Higher is better. */
   nmiScore: number;
   computedSettings: PanelSettings;
   slicesChecked: number; // For debugging/stats

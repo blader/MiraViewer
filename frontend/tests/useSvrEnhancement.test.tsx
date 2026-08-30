@@ -1,11 +1,19 @@
+import { useState } from 'react';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { useSvrEnhancement } from '../src/hooks/useSvrEnhancement';
+import { useSvrSelection } from '../src/hooks/useSvrSelection';
+import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
 import { runSuperResolution } from '../src/utils/svr/superResolutionWorker';
+import * as svrUtils from '../src/utils/svr/svrUtils';
+import {
+  ENHANCED_TEXTURE_BYTES_PER_VOXEL,
+  ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
+} from '../src/utils/svr/enhancedVolumeBinding';
 
 vi.mock('../src/utils/svr/superResolutionWorker', () => ({ runSuperResolution: vi.fn() }));
 const worker = vi.mocked(runSuperResolution);
@@ -83,9 +91,83 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('display-only learned MRI enhancement lifecycle', () => {
+  it('retains completed detail through confirming strokes and mark-only history, but not a changed selection', async () => {
+    vi.useFakeTimers();
+    // This case controls debounce time, not MessageChannel scheduling. Keep the
+    // actual connectivity algorithm while letting its cooperative yields settle.
+    vi.spyOn(svrUtils, 'yieldToMain').mockResolvedValue(undefined);
+    const source = volume();
+    const output = enhanced(source);
+    const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(source);
+    const grow = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
+      indices: Uint32Array.of(5, 6),
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 3, z: 3 } },
+      boundaryCount: 0,
+      domainVoxels: source.data.length,
+    });
+    worker.mockResolvedValue(output);
+    const { result } = renderHook(() => {
+      const [labels, setLabels] = useState<SvrLabelVolume | null>(null);
+      const selection = useSvrSelection(source, labels, setLabels, true);
+      const enhancement = useSvrEnhancement({ volume: source, labels, loadSource, blocked: selection.status.running });
+      return { labels, selection, enhancement };
+    });
+    act(() => result.current.selection.stroke(Uint32Array.of(5), 'include'));
+    await act(async () => vi.advanceTimersByTimeAsync(350));
+    expect(result.current.selection.status.running).toBe(false);
+    expect(result.current.labels!.data[6]).toBe(1);
+    await act(async () =>
+      expect(await result.current.enhancement.run(result.current.selection.prepareEnhancement)).toBe(true),
+    );
+    act(() => result.current.enhancement.setStrength(0.35));
+    const displayedMask = result.current.labels!.data;
+    const retainedBytes = result.current.enhancement.retainedBytes;
+
+    for (const [index, kind] of [
+      [6, 'include'],
+      [7, 'exclude'],
+    ] as const) {
+      act(() => {
+        result.current.selection.cancel(); // The real editor cancels at pointer-down.
+        result.current.selection.stroke(Uint32Array.of(index), kind);
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(1000));
+      expect(result.current.labels!.data).toBe(displayedMask);
+      expect(result.current.labels!.reviewState).toBe('draft');
+      expect(result.current.enhancement).toMatchObject({
+        result: output,
+        source,
+        enabled: true,
+        strength: 0.35,
+        retainedBytes,
+        running: false,
+      });
+      expect(result.current.enhancement.result).toBe(output);
+    }
+    expect(result.current.labels!.seeds).toEqual({ foreground: Uint32Array.of(5, 6), background: Uint32Array.of(7) });
+    for (const direction of ['undo', 'redo'] as const) {
+      act(() => result.current.selection.travel(direction));
+      expect(result.current.labels!.data).toBe(displayedMask);
+      expect(result.current.enhancement.result).toBe(output);
+      expect(result.current.enhancement.strength).toBe(0.35);
+      expect(result.current.labels!.seeds!.background).toHaveLength(direction === 'undo' ? 0 : 1);
+    }
+    expect(grow).toHaveBeenCalledOnce();
+    expect(worker).toHaveBeenCalledOnce();
+    expect(loadSource).toHaveBeenCalledOnce();
+
+    act(() => result.current.selection.stroke(Uint32Array.of(6), 'exclude'));
+    expect(result.current.labels!.data).not.toBe(displayedMask);
+    expect(displayedMask[6]).toBe(1);
+    expect(result.current.labels!.data[6]).toBe(0);
+    expect(result.current.enhancement.result).toBeNull();
+    act(() => result.current.selection.cancel());
+  });
+
   it('prepares disposable memory before loading and counts only the resources that remain', async () => {
     const native = volume();
     const prepareMemory = vi.fn(() => 1234);
@@ -128,8 +210,72 @@ describe('display-only learned MRI enhancement lifecycle', () => {
     await act(async () => {
       await result.current.run(6789);
     });
-    expect(loadSource.mock.calls[1]![1].retainedBytes).toBe(6789 + output.data.length * 10);
+    expect(loadSource.mock.calls[1]![1].retainedBytes).toBe(
+      6789 +
+        native.data.byteLength +
+        native.observedSupport!.byteLength +
+        output.data.byteLength +
+        output.observedSupport.byteLength +
+        output.data.length * ENHANCED_TEXTURE_BYTES_PER_VOXEL +
+        native.data.length * ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL,
+    );
   });
+
+  it.each(['independent', 'accepted-source', 'mask-support', 'shared-result-buffer'] as const)(
+    'counts completed CPU/GPU owners without charging shared MRI or annotations twice (%s)',
+    async (ownership) => {
+      const base = volume(),
+        labels = selection(base);
+      const native = ownership === 'accepted-source' ? base : volume();
+      if (ownership === 'mask-support') native.observedSupport = labels.data;
+      const output = enhanced(native);
+      if (ownership === 'shared-result-buffer')
+        output.observedSupport = new Uint8Array(output.data.buffer, 0, output.data.length);
+      const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(native);
+      worker.mockResolvedValue(output);
+      const { result, rerender } = setup({ volume: base, labels, loadSource });
+      await act(async () => {
+        await result.current.run();
+      });
+      const cpuSource =
+        ownership === 'accepted-source'
+          ? 0
+          : native.data.byteLength + (ownership === 'mask-support' ? 0 : native.observedSupport!.byteLength);
+      const cpuOutput =
+        output.data.byteLength + (ownership === 'shared-result-buffer' ? 0 : output.observedSupport.byteLength);
+      const bytes =
+        cpuSource +
+        cpuOutput +
+        output.data.length * ENHANCED_TEXTURE_BYTES_PER_VOXEL +
+        native.data.length * ORIGINAL_ROI_TEXTURE_BYTES_PER_VOXEL;
+      expect(result.current.retainedBytes).toBe(bytes);
+      act(() => {
+        result.current.setEnabled(false);
+        result.current.setStrength(0.35);
+      });
+      expect(result.current.retainedBytes).toBe(bytes);
+      rerender({ volume: base, labels, loadSource, blocked: true });
+      expect(result.current).toMatchObject({
+        result: output,
+        source: native,
+        enabled: false,
+        strength: 0.35,
+        retainedBytes: bytes,
+        running: false,
+      });
+      await act(async () => {
+        expect(await result.current.run()).toBe(false);
+      });
+      rerender({ volume: base, labels, loadSource, blocked: false });
+      expect(result.current.result).toBe(output);
+      expect(result.current.source).toBe(native);
+      expect(result.current.retainedBytes).toBe(bytes);
+      expect(worker).toHaveBeenCalledOnce();
+      expect(loadSource).toHaveBeenCalledOnce();
+      act(() => result.current.clear());
+      expect(result.current.retainedBytes).toBe(0);
+    },
+  );
 
   it.each([-1, NaN, Infinity, 0.5])(
     'rejects an invalid additional retained budget %s before loading',

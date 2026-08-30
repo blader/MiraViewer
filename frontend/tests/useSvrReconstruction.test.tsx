@@ -1,13 +1,17 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SvrProgress, SvrResult, SvrSelectedSeries } from '../src/types/svr';
+import type { SvrLabelVolume, SvrProgress, SvrResult, SvrSelectedSeries } from '../src/types/svr';
 
 const mocks = vi.hoisted(() => ({
   reconstructVolumeMultiPlane: vi.fn(),
+  retainedAlignmentBytes: vi.fn(),
 }));
 
 vi.mock('../src/utils/svr/reconstructVolume', () => ({
   reconstructVolumeMultiPlane: mocks.reconstructVolumeMultiPlane,
+}));
+vi.mock('../src/utils/derivedAlignmentFrame', () => ({
+  retainedDerivedAlignmentBytes: mocks.retainedAlignmentBytes,
 }));
 
 import { useSvrReconstruction } from '../src/hooks/useSvrReconstruction';
@@ -48,6 +52,7 @@ function volume(value: number): SvrResult {
 describe('useSvrReconstruction', () => {
   beforeEach(() => {
     mocks.reconstructVolumeMultiPlane.mockReset();
+    mocks.retainedAlignmentBytes.mockReset().mockReturnValue(0);
   });
 
   afterEach(() => {
@@ -231,6 +236,96 @@ describe('useSvrReconstruction', () => {
       acceptedProvenance: previous.volume.sourceProvenance,
     });
   });
+
+  it.each(['same-array', 'shared-buffer', 'distinct-buffer', 'larger-shared-backing'] as const)(
+    'counts live refinement history, alignment and transferred mask ownership once (%s)',
+    async (ownership) => {
+      const previous = volume(1);
+      const buffer = new ArrayBuffer(ownership === 'larger-shared-backing' ? 8 : 1);
+      const initial: SvrLabelVolume = { data: new Uint8Array(buffer, 0, 1), dims: [1, 1, 1], meta: [] };
+      initial.data[0] = 1;
+      previous.initialSelection = initial;
+      const labels = {
+        ...initial,
+        data:
+          ownership === 'same-array'
+            ? initial.data
+            : ownership === 'distinct-buffer'
+              ? initial.data.slice()
+              : new Uint8Array(buffer, ownership === 'larger-shared-backing' ? 1 : 0, 1),
+      };
+      labels.data[0] = 1;
+      const history = new Uint32Array(12);
+      const prepare = vi.fn(() => {
+        expect(mocks.reconstructVolumeMultiPlane).toHaveBeenCalledOnce();
+        return history.buffer.byteLength;
+      });
+      mocks.retainedAlignmentBytes.mockReturnValue(64);
+      mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(previous).mockResolvedValueOnce(volume(2));
+      const { result } = renderHook(() => useSvrReconstruction());
+      await act(async () => {
+        await result.current.run(selectedSeries);
+        await result.current.run(selectedSeries, undefined, 'patient', {
+          volume: previous.volume,
+          labels,
+          retainedBytes: prepare,
+        });
+      });
+      const extraMaskBytes = ownership === 'distinct-buffer' ? 1 : ownership === 'larger-shared-backing' ? 7 : 0;
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(mocks.retainedAlignmentBytes).toHaveBeenCalledOnce();
+      expect(mocks.reconstructVolumeMultiPlane.mock.calls[1]![0].retainedBytes).toBe(
+        retainedSvrVolumeBytes(previous.volume) + history.buffer.byteLength + 64 + extraMaskBytes,
+      );
+      expect(previous.initialSelection).toBe(initial);
+      expect(initial.data[0]).toBe(1);
+      expect(labels.data[0]).toBe(1);
+      expect(result.current.status).toBe('ready');
+    },
+  );
+
+  it.each(['pending', 'invalid'] as const)(
+    'preserves accepted annotations when retained-memory preparation is %s',
+    async (reason) => {
+      const previous = volume(1);
+      const labels: SvrLabelVolume = {
+        data: Uint8Array.of(1),
+        dims: [1, 1, 1],
+        meta: [],
+        reviewState: 'draft',
+        seeds: { foreground: Uint32Array.of(0), background: new Uint32Array() },
+      };
+      previous.initialSelection = labels;
+      const before = {
+        ...labels,
+        data: labels.data.slice(),
+        seeds: { foreground: labels.seeds!.foreground.slice(), background: labels.seeds!.background.slice() },
+      };
+      const prepare = vi.fn(() => {
+        if (reason === 'pending') throw new Error('Wait for the boundary suggestion to finish.');
+        return Number.NaN;
+      });
+      mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(previous);
+      const { result } = renderHook(() => useSvrReconstruction());
+      await act(async () => {
+        await result.current.run(selectedSeries);
+        await result.current.run(selectedSeries, undefined, 'patient', {
+          volume: previous.volume,
+          labels,
+          retainedBytes: prepare,
+        });
+      });
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(mocks.reconstructVolumeMultiPlane).toHaveBeenCalledOnce();
+      expect(mocks.retainedAlignmentBytes).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('failed');
+      expect(result.current.isRunning).toBe(false);
+      expect(result.current.error).toMatch(reason === 'pending' ? /boundary suggestion/ : /valid retained-memory/);
+      expect(result.current.result).toBe(previous);
+      expect(previous.initialSelection).toBe(labels);
+      expect(labels).toEqual(before);
+    },
+  );
 
   it('never lets a superseded operation replace a newer accepted result', async () => {
     let resolveFirst: ((result: SvrResult) => void) | undefined;

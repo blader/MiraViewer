@@ -1,4 +1,6 @@
-import type { SvrLabelVolume, SvrVolume } from '../../types/svr';
+import type { SvrLabelVolume, SvrSelectionSeeds, SvrVolume } from '../../types/svr';
+import { mapInteractivePlane } from '../segmentation/interactiveGeometry';
+import { isSelectionContextValid, isSelectionCoverageValid } from '../segmentation/selectionEditing';
 import { IDENTITY_DIRECTION, patientToVolumeVoxel, volumeVoxelToPatient } from './volumeGeometry';
 import { yieldToMain } from './svrUtils';
 
@@ -47,6 +49,8 @@ export async function transferSelectionAnnotations(
     if (signal?.aborted) throw new DOMException('Selection transfer canceled.', 'AbortError');
   };
   abort();
+  if (!isSelectionCoverageValid(labels.clippedNativeVoxels) || !isSelectionContextValid(labels.contextLimited))
+    throw new Error('The selection has invalid viewing-region coverage; its original remains unchanged.');
   const sourceCount = validateGrid(source),
     targetCount = validateGrid(target);
   if (
@@ -150,11 +154,24 @@ export async function transferSelectionAnnotations(
     }
   }
   abort();
+  const seeds: SvrSelectionSeeds = {
+    foreground: Uint32Array.from(foreground),
+    background: Uint32Array.from(background),
+  };
+  if (inputMarks?.lastStroke) {
+    try {
+      seeds.lastStroke = mapInteractivePlane(source, target, inputMarks.lastStroke);
+    } catch {
+      // Categorical marks can survive a transfer whose original editing section has no exact target plane.
+    }
+  }
   return {
     data,
     dims: target.dims,
     meta: labels.meta,
     reviewState: 'draft',
-    seeds: { foreground: Uint32Array.from(foreground), background: Uint32Array.from(background) },
+    seeds,
+    ...(labels.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: labels.clippedNativeVoxels } : {}),
+    ...(labels.contextLimited !== undefined ? { contextLimited: labels.contextLimited } : {}),
   };
 }
