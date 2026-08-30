@@ -699,75 +699,6 @@ function SelectionHistoryControls({
   );
 }
 
-function SelectionActions({
-  selection,
-  editing,
-  disabled,
-  hasSelection,
-  tool,
-  onToolChange,
-  radiusMm,
-  onRadiusChange,
-  autoFill,
-  onAutoFillChange,
-  onStopAutoFill,
-}: {
-  selection: ReturnType<typeof useSvrSelection>;
-  editing: boolean;
-  disabled: boolean;
-  hasSelection: boolean;
-  tool: Tool;
-  onToolChange: (tool: Tool) => void;
-  radiusMm: number;
-  onRadiusChange: (radiusMm: number) => void;
-  autoFill: boolean;
-  onAutoFillChange: (enabled: boolean) => void;
-  onStopAutoFill: () => void;
-}) {
-  if (!editing && !selection.status.running) return null;
-  return (
-    <div className="svr-selection-actions">
-      {editing ? (
-        <>
-          <SelectionBrushControls
-            tool={tool}
-            onToolChange={onToolChange}
-            radiusMm={radiusMm}
-            onRadiusChange={onRadiusChange}
-            disabled={disabled}
-          />
-          <SelectionHistoryControls selection={selection} disabled={disabled} hasSelection={hasSelection} />
-        </>
-      ) : null}
-      <div className="svr-selection-commit-actions">
-        {editing ? (
-          <label
-            className="svr-selection-autofill"
-            title="Fill nearby tissue after a brush stroke, keeping every Add and Remove mark. Turn off to edit only what you paint."
-          >
-            <input
-              type="checkbox"
-              checked={autoFill}
-              disabled={disabled}
-              onChange={(event) => onAutoFillChange(event.currentTarget.checked)}
-            />
-            Auto-fill
-          </label>
-        ) : null}
-        {selection.status.running ? (
-          <button type="button" onClick={onStopAutoFill}>
-            Stop
-          </button>
-        ) : editing && selection.status.error && selection.included > 0 && autoFill ? (
-          <button type="button" disabled={disabled} onClick={() => void selection.grow()}>
-            Retry boundary
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 export function SvrSegmentationEditor({
   onChange,
   disabled = false,
@@ -917,27 +848,56 @@ export function SvrSegmentationEditor({
                   : 'Select tissue'}
           </button>
         </div>
-        <SelectionActions
-          selection={selection}
-          editing={editing}
-          disabled={disabled}
-          hasSelection={hasSelection}
-          tool={tool}
-          onToolChange={(nextTool) => {
-            setTool(nextTool);
-            if (nextTool !== 'navigate') onVisualizationModeChange('overlay');
-          }}
-          radiusMm={radiusMm}
-          onRadiusChange={setRadiusMm}
-          autoFill={autoFill}
-          onAutoFillChange={(enabled) => {
-            if (disabled) return;
-            setAutoFill(enabled);
-            if (!enabled) selection.cancel();
-            else if (selection.included > 0 && !reviewed) void selection.grow();
-          }}
-          onStopAutoFill={stopAutoFill}
-        />
+        {editing || selection.status.running ? (
+          <div className="svr-selection-actions">
+            {editing ? (
+              <>
+                <SelectionBrushControls
+                  tool={tool}
+                  onToolChange={(nextTool) => {
+                    setTool(nextTool);
+                    if (nextTool !== 'navigate') onVisualizationModeChange('overlay');
+                  }}
+                  radiusMm={radiusMm}
+                  onRadiusChange={setRadiusMm}
+                  disabled={disabled}
+                />
+                <SelectionHistoryControls selection={selection} disabled={disabled} hasSelection={hasSelection} />
+              </>
+            ) : null}
+            <div className="svr-selection-commit-actions">
+              {editing ? (
+                <label
+                  className="svr-selection-autofill"
+                  title="Fill nearby tissue after a brush stroke, keeping every Add and Remove mark. Turn off to edit only what you paint."
+                >
+                  <input
+                    type="checkbox"
+                    checked={autoFill}
+                    disabled={disabled}
+                    onChange={(event) => {
+                      const enabled = event.currentTarget.checked;
+                      if (disabled) return;
+                      setAutoFill(enabled);
+                      if (!enabled) selection.cancel();
+                      else if (selection.included > 0 && !reviewed) void selection.grow();
+                    }}
+                  />
+                  Auto-fill
+                </label>
+              ) : null}
+              {selection.status.running ? (
+                <button type="button" onClick={stopAutoFill}>
+                  Stop
+                </button>
+              ) : editing && selection.status.error && selection.included > 0 && autoFill ? (
+                <button type="button" disabled={disabled} onClick={() => void selection.grow()}>
+                  Retry boundary
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div className="svr-selection-guidance" role="status" aria-live="polite">
           {disabled
             ? (disabledReason ?? 'Editing is temporarily unavailable.')

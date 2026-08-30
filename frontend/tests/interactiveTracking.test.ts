@@ -1,6 +1,7 @@
 import { Tensor } from 'onnxruntime-web';
 import type * as Ort from 'onnxruntime-web';
 import { describe, expect, it, vi } from 'vitest';
+import { deferred } from './helpers/deferred';
 import { prepareTrackingFrame } from '../src/utils/segmentation/interactiveFrame';
 import {
   createTrackingController,
@@ -30,16 +31,6 @@ function entry(index: number): TrackingMemoryEntry {
     memory: storeBfloat16(new Float32Array(MEMORY_VALUES).fill(index + 1)),
     pointer: Float32Array.from({ length: 256 }, (_, channel) => 10000 * index + channel),
   };
-}
-
-function deferred<T = void>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
 }
 
 function fakeRuntime(onRun?: (name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) => void | Promise<void>) {
@@ -246,7 +237,7 @@ describe('consumer-certified directional prefixes', () => {
   it('does not convert cancellation during an awaited barrier callback into successful completion', async () => {
     const runtime = fakeRuntime();
     const gate = deferred<TrackingFrameDecision>(),
-      reached = deferred();
+      reached = deferred<void>();
     const abort = new AbortController();
     const run = runtime.controller.run(
       options({
@@ -702,8 +693,8 @@ describe('complete literal-prompt snapshot tracking', () => {
   );
 
   it('shares stream ownership across run APIs and waits for an active graph before disposing', async () => {
-    const entered = deferred();
-    const settled = deferred();
+    const entered = deferred<void>();
+    const settled = deferred<void>();
     const runtime = fakeRuntime(async () => {
       entered.resolve();
       await settled.promise;
@@ -945,8 +936,8 @@ describe('single-conditioning-plane tracking lifecycle', () => {
   });
 
   it('waits for an active graph before disposing sessions and rejects concurrent/reentrant work', async () => {
-    const entered = deferred();
-    const settled = deferred();
+    const entered = deferred<void>();
+    const settled = deferred<void>();
     const runtime = fakeRuntime(async () => {
       entered.resolve();
       await settled.promise;
@@ -969,7 +960,7 @@ describe('single-conditioning-plane tracking lifecycle', () => {
   });
 
   it('keeps the source operation owned until its cancellation settles and ignores the stale plane', async () => {
-    const entered = deferred();
+    const entered = deferred<void>();
     const source = deferred<Float32Array>();
     const runtime = fakeRuntime();
     const abort = new AbortController();

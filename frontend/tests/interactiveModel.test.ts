@@ -14,13 +14,16 @@ const tensor = vi.fn();
 const env: { wasm: { numThreads: number; proxy?: boolean } } = { wasm: { numThreads: 8 } };
 const controller: TrackingController = { run: vi.fn(), runSnapshot: vi.fn(), dispose: vi.fn() };
 const sessions: { run: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }[] = [];
+const threadCounts: number[] = [];
 
 beforeEach(() => {
   vi.resetAllMocks();
   env.wasm.numThreads = 8;
   delete env.wasm.proxy;
   sessions.length = 0;
+  threadCounts.length = 0;
   create.mockImplementation(async () => {
+    threadCounts.push(env.wasm.numThreads);
     const session = { run: vi.fn(), release: vi.fn().mockResolvedValue(undefined) };
     sessions.push(session);
     return session;
@@ -106,14 +109,8 @@ describe('interactive model setup ownership', () => {
 
   it('explicitly configures four diagnostic threads before every graph without changing its provider', async () => {
     const platform = fourThreadPlatform();
-    const counts: number[] = [];
-    const createSession = create.getMockImplementation()!;
-    create.mockImplementation(async (...args) => {
-      counts.push(env.wasm.numThreads);
-      return createSession(...args);
-    });
     expect(await createInteractiveTrackingModel({ provider: 'wasm', wasmThreads: 4 })).toBe(controller);
-    expect(counts).toEqual([4, 4, 4, 4]);
+    expect(threadCounts).toEqual([4, 4, 4, 4]);
     expect(create.mock.calls.every(([, options]) => options.executionProviders[0] === 'wasm')).toBe(true);
     expect(platform.postMessage).toHaveBeenCalledWith(expect.any(SharedArrayBuffer));
     expect(platform.closeFirst).toHaveBeenCalledOnce();
@@ -126,14 +123,8 @@ describe('interactive model setup ownership', () => {
     async (hardwareConcurrency) => {
       const platform = fourThreadPlatform();
       vi.stubGlobal('navigator', { hardwareConcurrency });
-      const counts: number[] = [];
-      const createSession = create.getMockImplementation()!;
-      create.mockImplementation(async (...args) => {
-        counts.push(env.wasm.numThreads);
-        return createSession(...args);
-      });
       expect(await createInteractiveTrackingModel({ provider: 'wasm', wasmThreads: 'auto' })).toBe(controller);
-      expect(counts).toEqual([4, 4, 4, 4]);
+      expect(threadCounts).toEqual([4, 4, 4, 4]);
       expect(create.mock.calls.every(([, options]) => options.executionProviders[0] === 'wasm')).toBe(true);
       expect(platform.postMessage).toHaveBeenCalledOnce();
       expect(platform.closeFirst).toHaveBeenCalledOnce();
@@ -149,14 +140,8 @@ describe('interactive model setup ownership', () => {
     async (hardwareConcurrency) => {
       const platform = fourThreadPlatform();
       vi.stubGlobal('navigator', { hardwareConcurrency });
-      const counts: number[] = [];
-      const createSession = create.getMockImplementation()!;
-      create.mockImplementation(async (...args) => {
-        counts.push(env.wasm.numThreads);
-        return createSession(...args);
-      });
       await createInteractiveTrackingModel({ provider: 'wasm', wasmThreads: 'auto' });
-      expect(counts).toEqual([1, 1, 1, 1]);
+      expect(threadCounts).toEqual([1, 1, 1, 1]);
       expect(platform.postMessage).not.toHaveBeenCalled();
     },
   );
@@ -344,12 +329,6 @@ describe('interactive model setup ownership', () => {
   it.each(['wasm', 'hybrid', 'gpu-memory', 'webgpu'] as const)(
     'sets one WASM thread before any %s graph initializes in the dedicated runtime',
     async (provider) => {
-      const threadCounts: number[] = [];
-      const createSession = create.getMockImplementation()!;
-      create.mockImplementation(async (...args) => {
-        threadCounts.push(env.wasm.numThreads);
-        return createSession(...args);
-      });
       await createInteractiveTrackingModel({ provider });
       expect(threadCounts).toEqual([1, 1, 1, 1]);
       expect(env.wasm.numThreads).toBe(1);

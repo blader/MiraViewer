@@ -342,10 +342,9 @@ export function useSvrSelection(
       const edit = record(
         next,
         {
+          ...description(previous),
           meta: SELECTION_LABEL_META,
           reviewState: 'draft',
-          ...(previous?.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: previous.clippedNativeVoxels } : {}),
-          ...(previous?.contextLimited !== undefined ? { contextLimited: previous.contextLimited } : {}),
           seeds: {
             foreground: Uint32Array.from(foreground),
             background: Uint32Array.from(background),

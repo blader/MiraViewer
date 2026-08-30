@@ -8,6 +8,7 @@ import { reconstructVolumeMultiPlane } from '../src/utils/svr/reconstructVolume'
 import { MAX_SR_OUTPUT_VOXELS } from '../src/utils/svr/superResolutionTypes';
 import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { patientToVolumeVoxel, physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
+import { deferred } from './helpers/deferred';
 
 const sourceReads = vi.hoisted(() => ({ load: vi.fn(), populate: vi.fn(), revision: vi.fn(), patient: vi.fn() }));
 vi.mock('cornerstone-core', () => ({
@@ -294,18 +295,13 @@ describe('accepted native source context', () => {
       const f = fixture();
       const context = createNativeSourceContext(f.options);
       const controller = new AbortController();
-      let finish!: (value: Awaited<ReturnType<typeof reconstructVolumeMultiPlane>>) => void;
-      reconstruct.mockImplementation(
-        () =>
-          new Promise((resolve) => {
-            finish = resolve;
-          }),
-      );
+      const completion = deferred<Awaited<ReturnType<typeof reconstructVolumeMultiPlane>>>();
+      reconstruct.mockReturnValue(completion.promise);
       const pending = context.load(f.roi, { signal: controller.signal });
       const rejected = expect(pending).rejects.toThrow(kind === 'cancel' ? /SVR cancelled/ : /source changed/);
       if (kind === 'cancel') controller.abort();
       else f.nativeSource.frames[0]!.pixelPaddingValue = -1;
-      finish({ volume: f.volume });
+      completion.resolve({ volume: f.volume });
       await rejected;
     },
   );

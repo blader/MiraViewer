@@ -58,11 +58,8 @@ async function flush() {
   await Promise.resolve();
   await Promise.resolve();
 }
-async function deliver(worker: MockWorker, requestId: number, direction: 1 | -1) {
-  worker.respond({ type: 'read-frame', requestId, index: 0, direction });
-  await flush();
-  worker.respond({ type: 'frame', requestId: requestId + 1, frame: frame(0, direction) });
-  await flush();
+function deliver(worker: MockWorker, requestId: number, direction: 1 | -1) {
+  return deliverAt(worker, requestId, 0, direction, 0);
 }
 
 async function deliverAt(worker: MockWorker, requestId: number, index: number, direction: 1 | -1, anchor = 3) {
@@ -75,6 +72,14 @@ async function deliverAt(worker: MockWorker, requestId: number, index: number, d
   });
   await flush();
 }
+
+const adjacentFrames = (anchor = 3) =>
+  [
+    [anchor, 1],
+    [anchor + 1, 1],
+    [anchor, -1],
+    [anchor - 1, -1],
+  ] as const;
 
 let runner: InteractiveTrackingWorker;
 beforeEach(() => {
@@ -103,12 +108,7 @@ describe('dedicated interactive tracking transport', () => {
       job: { frameCount: 7, anchorIndex: 3, allowDirectionStop: true, sourceRange: [0, 3] },
     });
     let id = 1;
-    for (const [index, direction] of [
-      [3, 1],
-      [4, 1],
-      [3, -1],
-      [2, -1],
-    ] as const) {
+    for (const [index, direction] of adjacentFrames()) {
       await deliverAt(worker, id, index, direction);
       id += 2;
     }
@@ -143,12 +143,7 @@ describe('dedicated interactive tracking transport', () => {
     );
     const worker = MockWorker.instances[0];
     let id = 1;
-    for (const [index, direction] of [
-      [3, 1],
-      [4, 1],
-      [3, -1],
-      [2, -1],
-    ] as const) {
+    for (const [index, direction] of adjacentFrames()) {
       await deliverAt(worker, id, index, direction);
       id += 2;
     }
@@ -216,12 +211,7 @@ describe('dedicated interactive tracking transport', () => {
     );
     const worker = MockWorker.instances[0];
     let id = 1;
-    for (const [index, direction] of [
-      [1, 1],
-      [2, 1],
-      [1, -1],
-      [0, -1],
-    ] as const) {
+    for (const [index, direction] of adjacentFrames(1)) {
       await deliverAt(worker, id, index, direction, 1);
       id += 2;
     }
@@ -285,12 +275,7 @@ describe('dedicated interactive tracking transport', () => {
     const rejected = expect(run).rejects.toThrow(/before every source plane/);
     const worker = MockWorker.instances[0];
     let id = 1;
-    for (const [index, direction] of [
-      [3, 1],
-      [4, 1],
-      [3, -1],
-      [2, -1],
-    ] as const) {
+    for (const [index, direction] of adjacentFrames()) {
       await deliverAt(worker, id, index, direction);
       id += 2;
     }
@@ -564,7 +549,7 @@ describe('dedicated interactive tracking transport', () => {
     const onFrame = vi.fn();
     const run = runner.run(options({ frameCount: 4, anchorIndex: 2, readFrame, onFrame }));
     const worker = MockWorker.instances[0];
-    let requestId = 0;
+    let requestId = 1;
     for (const [index, direction] of [
       [2, 1],
       [3, 1],
@@ -572,14 +557,8 @@ describe('dedicated interactive tracking transport', () => {
       [1, -1],
       [0, -1],
     ] as const) {
-      worker.respond({ type: 'read-frame', requestId: ++requestId, index, direction });
-      await flush();
-      worker.respond({
-        type: 'frame',
-        requestId: ++requestId,
-        frame: { ...frame(index, direction), initial: index === 2 },
-      });
-      await flush();
+      await deliverAt(worker, requestId, index, direction, 2);
+      requestId += 2;
     }
     worker.respond({ type: 'done', completedFrames: 5 });
     await expect(run).resolves.toEqual({ completedFrames: 5 });

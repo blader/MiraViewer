@@ -109,6 +109,19 @@ function requestFor(worker: MockWorker) {
   return { source, request };
 }
 
+function completeForeground(
+  worker: MockWorker,
+  request: Extract<SeededWorkerRequest, { type: 'run' }>,
+  domainVoxels: number,
+  boundaryCount = 0,
+) {
+  worker.respond({
+    type: 'done',
+    id: request.id,
+    result: { indices: request.foreground.slice(), bounds: request.bounds!, boundaryCount, domainVoxels },
+  });
+}
+
 let runner: SeededVolumeWorker;
 beforeEach(() => {
   MockWorker.instances = [];
@@ -222,11 +235,7 @@ describe('SeededVolumeWorker', () => {
     expect(runner.residentSourceBytes).toBe(count * 5);
     expect(volume.byteLength).toBe(160 * 160 * 100 * 4);
     expect(input.observedSupport!.byteLength).toBe(volume.length);
-    worker.respond({
-      type: 'done',
-      id: request.id,
-      result: { indices: request.foreground.slice(), bounds: request.bounds!, boundaryCount: 1, domainVoxels: count },
-    });
+    completeForeground(worker, request, count, 1);
     await expect(pending).resolves.toEqual({
       indices: input.foreground,
       bounds,
@@ -249,16 +258,7 @@ describe('SeededVolumeWorker', () => {
     const initial = runner.run(input);
     const worker = MockWorker.instances[0]!;
     const { source, request } = requestFor(worker);
-    worker.respond({
-      type: 'done',
-      id: request.id,
-      result: {
-        indices: request.foreground.slice(),
-        bounds: request.bounds!,
-        boundaryCount: 0,
-        domainVoxels: source.volume.length,
-      },
-    });
+    completeForeground(worker, request, source.volume.length);
     await initial;
     const corrected = runner.run({
       ...input,
@@ -284,31 +284,13 @@ describe('SeededVolumeWorker', () => {
     const first = runner.run(input);
     const old = MockWorker.instances[0]!;
     const oldRequest = requestFor(old).request;
-    old.respond({
-      type: 'done',
-      id: oldRequest.id,
-      result: {
-        indices: oldRequest.foreground.slice(),
-        bounds: oldRequest.bounds!,
-        boundaryCount: 0,
-        domainVoxels: 486,
-      },
-    });
+    completeForeground(old, oldRequest, 486);
     await first;
     const same = runner.run({ ...input, bounds: structuredClone(input.bounds) });
     expect(MockWorker.instances).toHaveLength(1);
     expect(old.messages.map((message) => message.type)).toEqual(['init', 'run', 'run']);
     const sameRequest = requestFor(old).request;
-    old.respond({
-      type: 'done',
-      id: sameRequest.id,
-      result: {
-        indices: sameRequest.foreground.slice(),
-        bounds: sameRequest.bounds!,
-        boundaryCount: 0,
-        domainVoxels: 486,
-      },
-    });
+    completeForeground(old, sameRequest, 486);
     await same;
 
     input.bounds!.min.x = 3;
@@ -320,11 +302,7 @@ describe('SeededVolumeWorker', () => {
     const request = requestFor(current).request;
     expect(request.foreground).not.toEqual(oldRequest.foreground);
     old.respond({ type: 'done', id: request.id, result: result([0]) });
-    current.respond({
-      type: 'done',
-      id: request.id,
-      result: { indices: request.foreground.slice(), bounds: request.bounds!, boundaryCount: 0, domainVoxels: 486 },
-    });
+    completeForeground(current, request, 486);
     await expect(moved).resolves.toMatchObject({ indices: input.foreground, bounds: input.bounds });
   });
 
