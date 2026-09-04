@@ -1,0 +1,537 @@
+{
+  "scope": "Pre-reduction implementation acceptance; no claim of final-head CI, review or merge clearance",
+  "fixture": "Synthetic DICOM only; MIRAVIEWER_ overrides removed before test/browser launch",
+  "source": {
+    "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+    "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+    "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "unitSuite": {
+    "path": "frontend/tmp/durable-identity-full-01-source.json",
+    "sha256": "c4dda0c9692ea261bb2b2ceff0d5ea5d63475330d637294fdf1c004e5293b5e3",
+    "startedAt": "2026-09-04T11:11:44.271Z",
+    "finishedAt": "2026-09-04T11:13:05.342Z",
+    "args": [
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "--maxWorkers=2",
+      "--reporter=json",
+      "--outputFile=tmp/durable-identity-full-01.json"
+    ],
+    "before": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "f89c153fadf3e86f0caa650a0d59a65d42aea14a56a54b9aee183d53f9ffb800",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "after": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "f89c153fadf3e86f0caa650a0d59a65d42aea14a56a54b9aee183d53f9ffb800",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceUnchanged": true,
+    "exitCode": 0,
+    "result": {
+      "passed": 3254,
+      "failed": 0,
+      "skipped": 54
+    },
+    "rawResults": {
+      "path": "frontend/tmp/durable-identity-full-01.json",
+      "sha256": "25b660ca66a0299fd67370090116391b4223d863b540cade366d557f060a9fdb"
+    },
+    "freshness": "Before browser-fixture-only lint cleanup; application fingerprint matches the later checks"
+  },
+  "typecheck": {
+    "path": "frontend/tmp/durable-grid-types-03-source.json",
+    "sha256": "f4e520b82f3476527fa665e937ced5b993bb1366d5ae5f2535e9cad0561444e4",
+    "startedAt": "2026-09-04T11:15:40.090Z",
+    "finishedAt": "2026-09-04T11:15:44.677Z",
+    "args": ["node_modules/typescript/bin/tsc", "-b"],
+    "before": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "after": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceUnchanged": true,
+    "exitCode": 0
+  },
+  "lint": {
+    "path": "frontend/tmp/durable-grid-lint-02-source.json",
+    "sha256": "a8b88e2919ddbe3595bf086766ea2311c1f306d96bc8f7f907de962d135c6242",
+    "startedAt": "2026-09-04T11:15:44.704Z",
+    "finishedAt": "2026-09-04T11:15:56.385Z",
+    "args": ["node_modules/eslint/bin/eslint.js", ".", "--max-warnings=0"],
+    "before": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "after": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceUnchanged": true,
+    "exitCode": 0
+  },
+  "browser": {
+    "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/candidate-workflow-run.json",
+    "sha256": "44428a036fb22df29cfcea76f06f70711f825e2762b61c59d9af8a3f4c4d1162",
+    "startedAt": "2026-09-04T11:16:50.344Z",
+    "finishedAt": "2026-09-04T11:17:42.267Z",
+    "exitCode": 0,
+    "sourceUnchanged": true,
+    "fullSourceMatch": false,
+    "sourceBefore": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceAfter": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "ee77808482d06c711ac37e27fdc287f10a07868cf3250e77e78941f935c19580",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "builtSource": {
+      "head": "41fd165be8aeac9b472895bf08f62336e7fc3395",
+      "sourceSha256": "f89c153fadf3e86f0caa650a0d59a65d42aea14a56a54b9aee183d53f9ffb800",
+      "applicationSourceSha256": "198bfb1734151c2db23b3faf59ebc6f7168ed66445503c2e7084494ffa348460",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T11:10:11.596Z",
+      "fixture": "synthetic only"
+    },
+    "stats": {
+      "startTime": "2026-09-04T11:16:50.783Z",
+      "duration": 50430.832,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "channel": "installed headed Chrome",
+    "version": "152.0.7977.82",
+    "route": "http://127.0.0.1:43134/",
+    "mode": "normal production, not Storybook or acceptance-probe build"
+  },
+  "roundTrip": {
+    "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-receipt.json",
+    "sha256": "2f95e271248b7b75dd7878a2be854807a8b92e31b28678e39004a68843c4e543",
+    "datasetRevisions": {
+      "original": 24,
+      "imported": 48,
+      "restored": 49
+    },
+    "importPreservedToken": true,
+    "restoreRotatedToken": true,
+    "restoredImagesMatchImported": true,
+    "importedSourceImages": [
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.1",
+        "sha256": "679d58628b5b7d5fc7a8d7b5aa926d9bdd481d6bff05f0c9a59fa622d820c070"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.10",
+        "sha256": "546bfa4981378672af3a6e412f8f2fcf8cda3e0129c86ee35ca8132d8d4e6443"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.11",
+        "sha256": "905199e4b9aa97f6b1d6eb34d8ef43383fc62638488f9bc405aa4e6af3554196"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.12",
+        "sha256": "9726f6c7387381813fdbb8cf6da073a278cf09477549e5361e76eacadda777a4"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.13",
+        "sha256": "4fcad84ede1a04413e4ebafce9ff6c38baccdc8c6da5f54fbaa5f0f188caf0d0"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.14",
+        "sha256": "bcff0d5677cc189f198befc72b2ee4676bf909943b23eea587cf4cb906a1dfcf"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.15",
+        "sha256": "d8d290d0f0d2de08840b0f5ddc6d7e16e58110be6c321ea97ceb2ac8edce71f8"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.16",
+        "sha256": "372b57bf09abe1b2fa57ef30b31c8f0bd80ca33a954105a1f77b6941361aeecb"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.17",
+        "sha256": "948ba71cdadb515bfc114aae4efdc88d15e2365a8a5a076a5efca755bc9a1bc1"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.18",
+        "sha256": "3d5b4e2da58ea6f7ca19c7e542ea2aee23a0c39a3a74a6f73c7a69bd1ee8c504"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.19",
+        "sha256": "b5a3eee5ec8725c0cd3aa2fc96068e837c9247aca215082f4e983f303577d6cb"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.2",
+        "sha256": "10736aa63073a7156d085d5f8ed21912787d5a461f4882ad4bc15e23719bb103"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.20",
+        "sha256": "4313dcb158e95dd69d00850c8dfc5d37b0995fa15c0f2d61c90c3b925bf8a903"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.21",
+        "sha256": "0efde0dab278e0fc1274631e18f4726af360b6b8d41c4e08c59a0df1f9543c30"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.22",
+        "sha256": "f616081d5dca53cde22f9b2d9f87f5e885bb2fe16a7523da81e3a9ec8b3bbe43"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.23",
+        "sha256": "1d96c905075fa8ca7be630de79000de3e83d371b1b403385c10dad7f29b498fa"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.24",
+        "sha256": "e4a5a721cef25c5cda68b020ef2539775f1a04a11452888ca45a19a81c936f27"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.3",
+        "sha256": "0926863997ce75b30ebc23581e71ab5048a223d0b64ad789687670346df71437"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.4",
+        "sha256": "c9d6ad1cd0738c087c6ac16ef4bdbfa71a8dadf1374de138e76e4c7cdef9d9de"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.5",
+        "sha256": "6c4fd3cd175624ba14c5190c2c1c81e4eeb845667921a0f9871c4f811f55aa5e"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.6",
+        "sha256": "74f93090b0d91c8fde52df85b3c9098721ded46f433932f1a5119b5e4b5d7d45"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.7",
+        "sha256": "752e092f2e8b60d5525abec33e3c6afc4dbf483adc60b46ac3fbdb1318eb035c"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.8",
+        "sha256": "cfbcd00ddeeebc0cc591f2ff73d366f0c102428b0d5fdc6e0f154501f1c22f02"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20360904.1.1.9",
+        "sha256": "35a12f82691e8c072e43a116cacbbf82f8a6408d1ab959da7e184d8c3ea55e98"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.1",
+        "sha256": "96b7ef0f8e5c91bcd62e7e8cdadd6c6a5343cdc98205992940eefc8f336819b3"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.10",
+        "sha256": "6b157ac86480e022732cc59d5d63f12cae234dbf19ed8aa9a064593d5d838fcb"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.11",
+        "sha256": "3b6a4457cab5f6f61f96a69ae23a22e92e7cd8cebbb236e2751df3c1e48b3e20"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.12",
+        "sha256": "2b5128bca652ab0e16c3771b9395d4cce1a9c9a0beef04a51b43eb6dde5085e7"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.13",
+        "sha256": "25f3d1fedb5530c6f14a1514652a8c14fd0b1767f982a536af94c3a9d74d4c86"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.14",
+        "sha256": "91ba72d87f9b65e1ef8a69850c3a2113ead9b5d08c338644bbf1ada3577d60c4"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.15",
+        "sha256": "aa7126fee5e35a226310a99a0750d96a52bd27717e46e32b89edb10c92cedf6b"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.16",
+        "sha256": "11cbf850758e46649f8cc3adfde41f71f0f9bf3284f9f1bb382517cf1403ae77"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.17",
+        "sha256": "da44a692767eae1052f1e3c2de2d9cd0ddbb029627e78f9124ca65a0c088f256"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.18",
+        "sha256": "79f804cac8e4e2e15121b14c6840a2a49d22aaaa6fd916ae6ef25aabbcf5600d"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.19",
+        "sha256": "42ead70fb9c106ca8ab7c6ca867b13a5aa1f057846601de4ffe69d8f511dc254"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.2",
+        "sha256": "b19e558e85571bd2fab397c77f3d5877e7f73446d70d16c42715fb10bd72350c"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.20",
+        "sha256": "674e8b105c52bac10af7eaa41b1d9b6f56381354eb58edaa5f5dffc30026d25d"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.21",
+        "sha256": "7a1f1f4b28a91c41d92f7dd2ded4c9d330a44cb593eb340faf152e92cd5e0b5b"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.22",
+        "sha256": "97e9ef4c9b3cb263419f9356459d752cc98a9dfce6ca60aff5a3fdb23695f6b5"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.23",
+        "sha256": "9ba15d750c1bfd5c7ccc0b9427634a296c0b5ba1f63666f180e559441e5525af"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.24",
+        "sha256": "0949ff3fa8feff2cab4b68fd21954245531b4eb18a276cbc4721edb18cbe2508"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.3",
+        "sha256": "0f38de2f5ba3b803d23d5b86c11d04174457eb156fc5e347f51daa69d1933620"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.4",
+        "sha256": "573ea90f29ed72957a704bb3720aa373c5619f629b2d6dea8b64d08763d32412"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.5",
+        "sha256": "aa882f149b5caa88b86be2dc888810cd4922dc5a1b5868ee44bed7133b7dd711"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.6",
+        "sha256": "2dac935ae89e0cfd63b1f720cb66a4c01c6e169cfbaf950230844857d34d9348"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.7",
+        "sha256": "d1da96d813ffb53d83f6f48aba04cfbed895e10095eb165938ee416ed6e43828"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.8",
+        "sha256": "76895d94df7abf601022338c9fce8c099e3ce3deabf90db01438a84d80511829"
+      },
+      {
+        "sopInstanceUid": "1.2.826.0.1.3680043.10.543.20370904.1.1.9",
+        "sha256": "9384dc7273d675215ebe503c432084e9a188f71b6f37c491591d470d39445685"
+      }
+    ],
+    "reviewed": {
+      "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-34eaa955324d85f1\"}",
+      "dims": [36, 36, 24],
+      "modelKey": "manual-seeded-v1",
+      "reviewState": "reviewed",
+      "labelBytes": 31104,
+      "selectedCount": 13,
+      "labelsSha256": "2e0be2fc085136c6038c220659abf4115f85c39619ff40781fdb0243650faabf",
+      "seeds": {
+        "foreground": [
+          16146, 16181, 16182, 16183, 16216, 16217, 16218, 16219, 16220, 16253,
+          16254, 16255, 16290
+        ],
+        "background": [
+          16159, 16194, 16195, 16196, 16229, 16230, 16231, 16232, 16233, 16266,
+          16267, 16268, 16303
+        ],
+        "lastStroke": {
+          "plane": "axial",
+          "slice": 12
+        }
+      }
+    },
+    "legacy": {
+      "volumeKey": "{\"patient\":\"SVR-SYNTHETIC-ONLY\",\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"revision\":24,\"reconstruction\":\"native-v1-f94383bb\"}",
+      "dims": [36, 36, 24],
+      "modelKey": "manual-seeded-v1",
+      "reviewState": "reviewed",
+      "labelBytes": 31104,
+      "selectedCount": 13,
+      "labelsSha256": "2e0be2fc085136c6038c220659abf4115f85c39619ff40781fdb0243650faabf",
+      "seeds": {
+        "foreground": [
+          16146, 16181, 16182, 16183, 16216, 16217, 16218, 16219, 16220, 16253,
+          16254, 16255, 16290
+        ],
+        "background": [
+          16159, 16194, 16195, 16196, 16229, 16230, 16231, 16232, 16233, 16266,
+          16267, 16268, 16303
+        ],
+        "lastStroke": {
+          "plane": "axial",
+          "slice": 12
+        }
+      }
+    },
+    "edited": [
+      {
+        "volumeKey": "{\"patient\":\"SVR-SYNTHETIC-ONLY\",\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"revision\":24,\"reconstruction\":\"native-v1-f94383bb\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "reviewed",
+        "labelBytes": 31104,
+        "selectedCount": 13,
+        "labelsSha256": "2e0be2fc085136c6038c220659abf4115f85c39619ff40781fdb0243650faabf",
+        "seeds": {
+          "foreground": [
+            16146, 16181, 16182, 16183, 16216, 16217, 16218, 16219, 16220,
+            16253, 16254, 16255, 16290
+          ],
+          "background": [
+            16159, 16194, 16195, 16196, 16229, 16230, 16231, 16232, 16233,
+            16266, 16267, 16268, 16303
+          ],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 12
+          }
+        }
+      },
+      {
+        "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-34eaa955324d85f1\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "reviewed",
+        "labelBytes": 31104,
+        "selectedCount": 26,
+        "labelsSha256": "533c5ca18c56bf0f94baaf0ebae3741f80850b9e754fe087828b3f3c4d68e5cc",
+        "seeds": {
+          "foreground": [
+            16146, 16181, 16182, 16183, 16216, 16217, 16218, 16219, 16220,
+            16253, 16254, 16255, 16290, 16137, 16172, 16173, 16174, 16207,
+            16208, 16209, 16210, 16211, 16244, 16245, 16246, 16281
+          ],
+          "background": [
+            16159, 16194, 16195, 16196, 16229, 16230, 16231, 16232, 16233,
+            16266, 16267, 16268, 16303
+          ],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 12
+          }
+        }
+      }
+    ],
+    "cleared": [
+      {
+        "volumeKey": "{\"patient\":\"SVR-SYNTHETIC-ONLY\",\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"revision\":24,\"reconstruction\":\"native-v1-f94383bb\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "reviewed",
+        "labelBytes": 31104,
+        "selectedCount": 13,
+        "labelsSha256": "2e0be2fc085136c6038c220659abf4115f85c39619ff40781fdb0243650faabf",
+        "seeds": {
+          "foreground": [
+            16146, 16181, 16182, 16183, 16216, 16217, 16218, 16219, 16220,
+            16253, 16254, 16255, 16290
+          ],
+          "background": [
+            16159, 16194, 16195, 16196, 16229, 16230, 16231, 16232, 16233,
+            16266, 16267, 16268, 16303
+          ],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 12
+          }
+        }
+      },
+      {
+        "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370904.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370904.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370904.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-34eaa955324d85f1\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "draft",
+        "labelBytes": 31104,
+        "selectedCount": 0,
+        "labelsSha256": "af1f0d77b292e75400fbe12884fa343bc75561e92728b68609eb4db0f69bfade"
+      }
+    ],
+    "errors": []
+  },
+  "captures": [
+    {
+      "file": "durable-grid-recovered-desktop.png",
+      "sha256": "ca65a7795c82265c72eef982d4a88ef6c16de9c86f117b19880b9c9a4fac67fe",
+      "inspectedSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-01/candidate-identity-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-identity/durable-grid-recovered-desktop.png",
+      "laterSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-recovered-desktop.png",
+      "laterBytesMatch": true,
+      "inspection": "Individual original-detail view followed by immediate user-visible report",
+      "verdict": "PASS - visible static selection state only; not lower-page layout, motion or anatomy"
+    },
+    {
+      "file": "durable-grid-restored-desktop.png",
+      "sha256": "0ea87aeb7cecf9c92baf64f843c03aebd92c2f08ed68a36f3b859dd98295aeec",
+      "inspectedSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-01/candidate-identity-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-identity/durable-grid-restored-desktop.png",
+      "laterSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-restored-desktop.png",
+      "laterBytesMatch": true,
+      "inspection": "Individual original-detail view followed by immediate user-visible report",
+      "verdict": "PASS - visible static selection state only; not lower-page layout, motion or anatomy"
+    },
+    {
+      "file": "durable-grid-cleared-reopened.png",
+      "sha256": "093a2c9b3b2a4ba6d276270090e2afe1d4b20eb3840129e705156ef64841350c",
+      "inspectedSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-01/candidate-identity-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-identity/durable-grid-cleared-reopened.png",
+      "laterSource": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-cleared-reopened.png",
+      "laterBytesMatch": true,
+      "inspection": "Individual original-detail view followed by immediate user-visible report",
+      "verdict": "PASS - visible static selection state only; not lower-page layout, motion or anatomy"
+    }
+  ],
+  "preservedEarlierResults": [
+    {
+      "path": "frontend/tmp/durable-identity-before-01.json",
+      "sha256": "dfb6e459d95cbf0f0faf1de56e5d33f908b86d942946798f0a9b8f6da3f0267a",
+      "passed": 0,
+      "failed": 4,
+      "skipped": 135
+    },
+    {
+      "path": "frontend/tmp/durable-grid-before-01.json",
+      "sha256": "cc181bcb5b647971c6f882c6368a7aea9a0d2f9437e898f66f3c2cb97afa3cd2",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 43
+    },
+    {
+      "path": "frontend/tmp/durable-grid-focused-01.json",
+      "sha256": "a0531ae476701ece809e91886ad3398aa05ad81b0e2003e6bdfd3c7c4991c83d",
+      "passed": 358,
+      "failed": 3,
+      "skipped": 0
+    },
+    {
+      "path": "frontend/tmp/durable-grid-focused-02.json",
+      "sha256": "3dd581d33f680587a248b456268ab0919bc346c5023b4cd1a8f949c76c3fac1a",
+      "passed": 360,
+      "failed": 1,
+      "skipped": 0
+    }
+  ],
+  "cleanup": {
+    "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-02/inspection-audit.json",
+    "sha256": "b4ace8e829f32844dd7fa7e6718f434e2a60570cde51c32140de09c2bf7470fe",
+    "at": "2026-09-04T11:17:46.643Z",
+    "receiptCount": 29,
+    "currentBatch": "CLEAR",
+    "staleOwned": "CLEAR",
+    "preservation": "CLEAR - read-only audit; no process, browser, profile, source, or private artifact changed.",
+    "port43134": "free",
+    "cleanup": "CLOSED"
+  }
+}

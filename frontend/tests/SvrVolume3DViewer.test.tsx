@@ -11,7 +11,12 @@ import type { VolumeSegmentationRow } from '../src/db/schema';
 import { DatasetReplacedError } from '../src/db/db';
 import { SavedSelectionChangedError } from '../src/db/volumeSegmentations';
 import type { DecodedFrame } from '../src/utils/decodedFrame';
-import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../src/utils/localApi';
+import {
+  deleteVolumeSegmentation,
+  getVolumeSegmentation,
+  getVolumeSegmentationSnapshot,
+  saveVolumeSegmentation,
+} from '../src/utils/localApi';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import { SVR3D_FOCAL_Z } from '../src/utils/svr/glRaymarch';
 import { makeNativePlaneData, makeVolumePlaneData, nativeDisplayWindow } from '../src/utils/svr/nativePlane';
@@ -109,10 +114,7 @@ vi.mock('../src/utils/localApi', () => {
   return {
     deleteVolumeSegmentation: vi.fn(async () => undefined),
     getVolumeSegmentation,
-    getVolumeSegmentationSnapshot: async (key: string) => {
-      const record = await getVolumeSegmentation(key);
-      return { record, revision: record ? 'saved-revision' : null, datasetToken: 'test-dataset-token' };
-    },
+    getVolumeSegmentationSnapshot: vi.fn(),
     saveVolumeSegmentation: vi.fn(async () => undefined),
   };
 });
@@ -499,6 +501,12 @@ beforeEach(() => {
   });
   vi.mocked(useSvrNativePlane).mockReset().mockReturnValue({ plane: null, loading: false, error: null });
   vi.mocked(getVolumeSegmentation).mockReset().mockResolvedValue(null);
+  vi.mocked(getVolumeSegmentationSnapshot)
+    .mockReset()
+    .mockImplementation(async (key: string) => {
+      const record = await getVolumeSegmentation(key);
+      return { record, revision: record ? 'saved-revision' : null, datasetToken: 'test-dataset-token' };
+    });
   vi.mocked(saveVolumeSegmentation).mockReset().mockResolvedValue(undefined);
   vi.mocked(findTransferableSelection).mockReset().mockResolvedValue({
     candidate: null,
@@ -2621,6 +2629,56 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry saving' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument());
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(unsaved);
+  });
+
+  it('keeps recovered work read-only until editing and retains the original-write guard through a failed save', async () => {
+    const { volume } = nativeViewerFixture('axial');
+    const scope = { ...identity, seriesUids: ['native-source'], frameOfReferenceUid: 'frame', datasetRevision: 1 };
+    const labels = new Uint8Array(volume.data.length);
+    labels[30] = 1;
+    const legacySource = { volumeKey: 'legacy-grid', revision: 'legacy-revision', updatedAt: 1 };
+    vi.mocked(getVolumeSegmentationSnapshot).mockResolvedValueOnce({
+      record: {
+        volumeKey: legacySource.volumeKey,
+        dims: volume.dims,
+        labels,
+        updatedAt: 1,
+        classMetadata: SELECTION_LABEL_META,
+        seeds: { foreground: Uint32Array.of(30), background: Uint32Array.of(32) },
+        reviewState: 'reviewed',
+      },
+      revision: null,
+      datasetToken: 'test-dataset-token',
+      legacySource,
+    });
+    vi.mocked(saveVolumeSegmentation).mockRejectedValueOnce(new Error('quota'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(<SvrVolume3DViewer volume={volume} volumeIdentity={scope} />);
+    openSelectionEditor();
+    await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
+    expect(saveVolumeSegmentation).not.toHaveBeenCalled();
+    const currentKey = vi.mocked(getVolumeSegmentationSnapshot).mock.lastCall![0];
+    expect(JSON.parse(currentKey)).toMatchObject({ version: 2, study: 'study', series: ['native-source'] });
+    expect(vi.mocked(getVolumeSegmentationSnapshot).mock.lastCall![1]).toMatchObject({
+      patientKey: 'patient',
+      datasetRevision: 1,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry saving' })).toBeInTheDocument());
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![1]).toMatchObject({ expectedRevision: null, legacySource });
+    const unsaved = vi.mocked(saveVolumeSegmentation).mock.lastCall![0];
+    expect(unsaved.volumeKey).toBe(currentKey);
+    expect(unsaved.labels!.some(Boolean)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry saving' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument());
+    const committed = vi.mocked(saveVolumeSegmentation).mock.lastCall!;
+    expect(committed[0].labels).toBe(unsaved.labels);
+    expect(committed[1]).toMatchObject({ expectedRevision: null, legacySource });
+    fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
+    await waitFor(() => expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels![30]).toBe(1));
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![1]!.expectedRevision).toBe(committed[1]!.revision);
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![1]!.legacySource).toBeUndefined();
+    expect(deleteVolumeSegmentation).not.toHaveBeenCalled();
   });
 
   it.each([SavedSelectionChangedError, DatasetReplacedError])(

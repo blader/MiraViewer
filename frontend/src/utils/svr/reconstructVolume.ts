@@ -19,7 +19,12 @@ import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomG
 import { computeSvrDownsampleSize } from './downsample';
 import { filterSvrManifestFramesForRoi, getSvrSourceCropWindow } from './sliceRoiCrop';
 import { classifySvrAcquisitions, nativeReferenceSources } from './acquisitionProvenance';
-import { assembleNativeVolume, nativePlaneMemoryBytes, planNativeVolume } from './nativeVolume';
+import {
+  assembleNativeVolume,
+  nativePlaneMemoryBytes,
+  nativeVolumeFingerprint,
+  planNativeVolume,
+} from './nativeVolume';
 import { IDENTITY_PATIENT_TRANSFORM, snapshotPatientTransform } from './volumeGeometry';
 import { dot } from './vec3';
 import { debugSvrLog, isDebugSvrEnabled } from '../debugSvr';
@@ -704,19 +709,7 @@ export async function reconstructVolumeMultiPlane(params: {
       },
     );
     await assertSvrIdentityUnchanged(datasetRevision, selectedPatientKey, 'during native volume loading');
-    let hash = 2166136261;
-    const identity = JSON.stringify([
-      datasetRevision,
-      primary.series.seriesUid,
-      contributing,
-      plan.dims,
-      plan.originMm,
-      plan.direction,
-      plan.voxelSizeMm,
-      transform,
-    ]);
-    for (let index = 0; index < identity.length; index++) hash = Math.imul(hash ^ identity.charCodeAt(index), 16777619);
-    const fingerprint = `native-v1-${(hash >>> 0).toString(16)}`;
+    const fingerprint = nativeVolumeFingerprint(primary.series.seriesUid, contributing, plan, transform);
     volume.reconstructionFingerprint = fingerprint;
     volume.sourceProvenance = provenance(
       classification.mode === 'native-3d' ? 'native-3d' : 'source-stack',

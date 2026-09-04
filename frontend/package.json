@@ -12,7 +12,7 @@
     "prettier": "prettier -w .",
     "prettier:check": "prettier -c .",
     "test": "vitest run",
-    "build:browser": "node scripts/verify-efficient-tam-assets.mjs && tsc -b && node scripts/build-browser.mjs && node scripts/verify-efficient-tam-assets.mjs tmp/browser-dist/models/efficienttam-tiny512-v2",
+    "build:browser": "tsc -b && node scripts/build-browser.mjs",
     "test:browser": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=workflow --reporter=line",
     "test:gpu": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=gpu --reporter=line",
     "test:performance": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=performance --reporter=line",

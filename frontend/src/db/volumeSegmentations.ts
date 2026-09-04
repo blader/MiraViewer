@@ -1,12 +1,13 @@
 import type { IDBPObjectStore } from 'idb';
 import {
   DATASET_TOKEN_STATE_KEY,
+  DATASET_REVISION_STATE_KEY,
   DatasetReplacedError,
   getDB,
   newDatasetToken,
   SELECTED_PATIENT_STATE_KEY,
 } from './db';
-import { getPatientIdentityKeys } from './patientIdentity';
+import { getPatientIdentityAliases, getPatientIdentityKeys } from './patientIdentity';
 import type { MiraDB, StoredVolumeSegmentationRow, VolumeSegmentationChunk, VolumeSegmentationRow } from './schema';
 import {
   isSelectionContextValid,
@@ -82,32 +83,78 @@ export type VolumeSegmentationSnapshot = {
   record: VolumeSegmentationRow | null;
   revision: string | null;
   datasetToken: string;
+  legacySource?: { volumeKey: string; revision: string; updatedAt: number };
 };
 
-export async function getVolumeSegmentationSnapshot(volumeKey: string): Promise<VolumeSegmentationSnapshot> {
+export type VolumeSegmentationLookup = {
+  studyUid: string;
+  patientKey: string;
+  datasetRevision: number;
+  matches: (record: StoredVolumeSegmentationRow, patientAliases: readonly string[]) => boolean;
+};
+
+export async function getVolumeSegmentationSnapshot(
+  volumeKey: string,
+  lookup?: VolumeSegmentationLookup,
+): Promise<VolumeSegmentationSnapshot> {
+  const source = lookup && { ...lookup };
   const db = await getDB();
   const tx = db.transaction(STORES);
-  const [stored, selected, token, studies] = await Promise.all([
+  const [current, selected, token, studies, datasetRevision] = await Promise.all([
     tx.objectStore('volume_segmentations').get(volumeKey),
     tx.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
     tx.objectStore('app_state').get(DATASET_TOKEN_STATE_KEY),
     tx.objectStore('studies').getAll(),
+    source ? tx.objectStore('app_state').get(DATASET_REVISION_STATE_KEY) : undefined,
   ]);
   if (typeof token?.value !== 'string') throw new DatasetReplacedError();
   const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
-  const sourcePatient = stored?.studyUid ? getPatientIdentityKeys(studies).get(stored.studyUid) : undefined;
+  const identities = getPatientIdentityKeys(studies);
+  let stored = current;
+  let legacySource: VolumeSegmentationSnapshot['legacySource'];
+  let aliases: readonly string[] = [];
+  if (source) {
+    if (
+      (datasetRevision?.value ?? 0) !== source.datasetRevision ||
+      selectedPatient !== source.patientKey ||
+      identities.get(source.studyUid) !== source.patientKey
+    )
+      throw new SavedSelectionChangedError();
+    aliases = getPatientIdentityAliases(studies.find((study) => study.studyInstanceUid === source.studyUid)!);
+    if (stored && !source.matches(stored, aliases)) throw new SavedSelectionChangedError();
+    if (!stored) {
+      // Only a unique exact match can project automatically. Chunk payloads are
+      // read after choosing it, not while scanning metadata on other grids.
+      let cursor = await tx.objectStore('volume_segmentations').index('by-study').openCursor(source.studyUid);
+      while (cursor) {
+        if (source.matches(cursor.value, aliases)) {
+          if (stored) {
+            stored = undefined;
+            break;
+          }
+          stored = cursor.value;
+        }
+        cursor = await cursor.continue();
+      }
+      if (stored)
+        legacySource = { volumeKey: stored.volumeKey, revision: revisionOf(stored)!, updatedAt: stored.updatedAt };
+    }
+  }
+  const sourcePatient = stored?.studyUid ? identities.get(stored.studyUid) : undefined;
   const owner = sourcePatient ?? stored?.patientKey;
-  const visible = stored && !(owner && selectedPatient && owner !== selectedPatient);
+  const visible = owner && selectedPatient && owner !== selectedPatient ? undefined : stored;
   const record = visible
-    ? await readStoredVolumeSegmentation(stored, tx.objectStore('volume_segmentation_chunks'))
+    ? await readStoredVolumeSegmentation(visible, tx.objectStore('volume_segmentation_chunks'))
     : null;
   if (record && record.labels.length !== voxelCount(record))
     throw new Error('The saved selection does not match its reconstruction geometry.');
+  if (record && source && !source.matches(record, aliases)) throw new SavedSelectionChangedError();
   await tx.done;
   return {
     record: record && sourcePatient ? { ...record, patientKey: sourcePatient } : record,
-    revision: visible ? revisionOf(stored) : null,
+    revision: visible && !legacySource ? revisionOf(visible) : null,
     datasetToken: token.value,
+    ...(legacySource && { legacySource }),
   };
 }
 
@@ -120,6 +167,7 @@ export type VolumeSegmentationWrite = {
   revision: string;
   datasetToken: string;
   patch?: SelectionPatch;
+  legacySource?: VolumeSegmentationSnapshot['legacySource'];
 };
 
 /**
@@ -128,19 +176,27 @@ export type VolumeSegmentationWrite = {
  * only touched chunks; metadata and those chunks commit atomically.
  */
 export async function saveVolumeSegmentation(
-  record: VolumeSegmentationRow,
+  record: Omit<VolumeSegmentationRow, 'labels'> & { labels: Uint8Array | null },
   change?: VolumeSegmentationWrite,
 ): Promise<void> {
   const count = voxelCount(record);
-  if (record.labels.length !== count) throw new Error('Volume segmentation does not match its geometry.');
+  if (record.labels && record.labels.length !== count)
+    throw new Error('Volume segmentation does not match its geometry.');
   const { labels, ...description } = record;
   const metadata = structuredClone(description);
   const { volumeKey } = metadata;
-  const guard = change ? { expectedRevision: change.expectedRevision, datasetToken: change.datasetToken } : undefined;
+  const guard = change
+    ? {
+        expectedRevision: change.expectedRevision,
+        datasetToken: change.datasetToken,
+        ...(change.legacySource && { legacySource: { ...change.legacySource } }),
+      }
+    : undefined;
   const patch = change?.patch;
   if (
     patch &&
-    (patch.indices.length !== patch.before.length ||
+    (!labels ||
+      patch.indices.length !== patch.before.length ||
       patch.indices.length !== patch.after.length ||
       patch.indices.some((index, offset) => index >= count || labels[index] !== patch.after[offset]))
   )
@@ -148,12 +204,12 @@ export async function saveVolumeSegmentation(
   // A dense proposal can cost six bytes per changed voxel as a reversible
   // patch. Do not duplicate that payload when one full checkpoint is smaller.
   const captured =
-    patch && patch.indices.byteLength + patch.before.byteLength + patch.after.byteLength < count
+    patch && !guard?.legacySource && patch.indices.byteLength + patch.before.byteLength + patch.after.byteLength < count
       ? { indices: patch.indices.slice(), before: patch.before.slice(), after: patch.after.slice() }
       : undefined;
 
   const fullChunks: VolumeSegmentationChunk[] = [];
-  if (!captured) {
+  if (labels && !captured) {
     for (let offset = 0; offset < count; offset += SELECTION_CHUNK_BYTES) {
       const data = labels.subarray(offset, offset + SELECTION_CHUNK_BYTES);
       if (data.some(Boolean)) fullChunks.push({ volumeKey, offset, data: data.slice() });
@@ -173,6 +229,16 @@ export async function saveVolumeSegmentation(
     ]);
     if (guard && token?.value !== guard.datasetToken) throw new DatasetReplacedError();
     if (guard && revisionOf(previous) !== guard.expectedRevision) throw new SavedSelectionChangedError();
+    if (guard?.legacySource && !previous) {
+      const original = await tx.objectStore('volume_segmentations').get(guard.legacySource.volumeKey);
+      if (
+        !original ||
+        revisionOf(original) !== guard.legacySource.revision ||
+        original.updatedAt !== guard.legacySource.updatedAt ||
+        original.studyUid !== metadata.studyUid
+      )
+        throw new SavedSelectionChangedError();
+    }
     const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
     const sourcePatient = metadata.studyUid ? getPatientIdentityKeys(studies).get(metadata.studyUid) : undefined;
     if (metadata.studyUid && !sourcePatient) throw new SavedSelectionChangedError();

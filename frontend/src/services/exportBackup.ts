@@ -12,8 +12,9 @@ import {
   SELECTED_PATIENT_STATE_KEY,
   SELECTED_PATIENT_STUDY_STATE_KEY,
 } from '../db/db';
-import { getPatientIdentityAliases, getPatientIdentityKeys, studyIdentityConflict } from '../db/patientIdentity';
-import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
+import { getPatientIdentityKeys, studyIdentityConflict } from '../db/patientIdentity';
+import { acquisitionChoiceKey, getSeriesSequenceCombo } from '../db/comparisonIdentity';
+import { panelSettingsForExport } from '../db/panelSettings';
 import { initializeComparisonState } from '../db/comparisonState';
 import { readStoredVolumeSegmentation, SELECTION_CHUNK_BYTES, volumeChunkRange } from '../db/volumeSegmentations';
 import type {
@@ -217,7 +218,8 @@ async function buildSnapshotZip(
   const patientKeys = new Set(studies.map((study) => identityByStudy.get(study.studyInstanceUid)!));
   if (patientKeys.size > 1) throw new Error('A backup cannot combine examinations from different patients.');
   const selectedPatientKey = patientKeys.values().next().value as string | undefined;
-  const series = (await db.getAll('series')).filter((item) => selectedStudies.has(item.studyInstanceUid));
+  const allSeries = await db.getAll('series');
+  const series = allSeries.filter((item) => selectedStudies.has(item.studyInstanceUid));
   const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
   const selectedSeriesByUid = new Map(series.map((item) => [item.seriesInstanceUid, item]));
 
@@ -233,27 +235,12 @@ async function buildSnapshotZip(
     }
   }
 
-  const panelSettings = (await db.getAll('panel_settings')).flatMap((row) => {
-    if (row.source)
-      return selectedStudies.has(row.source.studyUid) && selectedSeries.has(row.source.seriesUid) ? [row] : [];
-    const settings = Object.fromEntries(
-      Object.entries(row.settings).filter(([date]) =>
-        studies.some((study) => {
-          const scopeMatches =
-            !row.comboId.includes('::') ||
-            getPatientIdentityAliases(study).some((key) => row.comboId.startsWith(`${key}::`));
-          const timestamp = formatStudyDate(study);
-          return (
-            scopeMatches &&
-            (date === timestamp ||
-              date === `${timestamp}#${study.studyInstanceUid}` ||
-              (!study.studyTime && date === timestamp.split('T')[0]))
-          );
-        }),
-      ),
-    );
-    return Object.keys(settings).length ? [{ ...row, settings }] : [];
-  });
+  const panelSettings = panelSettingsForExport(
+    await db.getAll('panel_settings'),
+    allStudies,
+    allSeries,
+    selectedStudies,
+  );
   const tumorSegmentations = (await db.getAll('tumor_segmentations')).filter((row) => selectedStudies.has(row.studyId));
   const tumorGroundTruth = (await db.getAll('tumor_ground_truth')).filter((row) => selectedStudies.has(row.studyId));
 

@@ -2,15 +2,18 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
-import type { DicomInstance } from '../../src/db/schema';
+import type { DicomInstance, StoredVolumeSegmentationRow, VolumeSegmentationChunk } from '../../src/db/schema';
 import { createSyntheticCustomModel } from '../helpers/customTumorModel';
 import { createHash } from 'node:crypto';
 import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
+import { CUSTOM_MODEL_INIT_TIMEOUT_MS } from '../../src/utils/segmentation/onnx/customModelWorker';
 
 declare global {
   interface Window {
     replayWorkerStarts: number;
     customInferenceStarted: boolean;
+    customInferenceAction?: () => void;
+    customInferenceActionAt: number;
     finishPanelWriteAudit: () => { writeStores: string[][]; sourceCatalogReads: number };
     alignmentRequests: {
       type: string;
@@ -22,6 +25,36 @@ declare global {
     }[];
   }
 }
+
+test.beforeAll(async ({ browser }, info) => {
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    const graphics = await page.evaluate(() => {
+      const gl = document.createElement('canvas').getContext('webgl2', { powerPreference: 'high-performance' });
+      if (!gl) return null;
+      const debug = gl.getExtension('WEBGL_debug_renderer_info');
+      const result = {
+        version: gl.getParameter(gl.VERSION),
+        vendor: gl.getParameter(debug?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR),
+        renderer: gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER),
+      };
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      return result;
+    });
+    await attachReceipt(info, 'browser-environment', {
+      browser: browser.version(),
+      platform: process.platform,
+      channel: info.project.use.channel,
+      headless: info.project.use.headless,
+      graphics,
+      scope: 'Runtime metadata from a disposable context in the workflow browser, not performance evidence.',
+    });
+    expect(graphics, 'The workflow browser must provide WebGL2 for its 3D scenarios').not.toBeNull();
+  } finally {
+    await context.close();
+  }
+});
 
 async function readSaved(page: Page) {
   return page.evaluate(async () => {
@@ -410,6 +443,235 @@ test('upgrades a legacy database for physical viewing and preserves original byt
   });
 });
 
+test('keeps exact source-bound selections through unrelated import, legacy recovery, editing and fresh-context restore', async ({
+  page,
+  browser,
+}, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await importComparisonExaminations(
+    page,
+    null,
+    [{ studyDate: '20370904', studyUid: '1.2.826.0.1.3680043.10.543.20370904.1' }],
+    true,
+  );
+  const openVolume = async (target: Page) => {
+    await target.getByRole('button', { name: '3D', exact: true }).click();
+    await target.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+    await expect(target.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+  };
+  await openVolume(page);
+  await openSelectionAndVerifyPixels(page);
+  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
+  const mark = async (target: Page, kind: 'Add' | 'Remove', x: number) => {
+    await target.getByRole('button', { name: kind, exact: true }).click();
+    const canvas = target.getByRole('application', { name: /^Axial reconstructed slice/ });
+    const box = (await canvas.boundingBox())!;
+    await canvas.click({ position: { x: box.width * x, y: box.height * 0.5 } });
+  };
+  await mark(page, 'Add', 0.5);
+  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
+  await mark(page, 'Remove', 0.65);
+  await expect
+    .poll(async () => (await savedVolumeSelection(page))[0]?.seeds?.background.length ?? 0)
+    .toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.reviewState).toBe('reviewed');
+  const reviewed = (await savedVolumeSelection(page))[0]!;
+  const original = await metadataSnapshot(page);
+
+  // Downgrade only this isolated synthetic selection to the historical dense
+  // key/fingerprint format while the application is unmounted. This is fixture
+  // setup, not a production migration or a replacement for the actual reopen.
+  await page.route('**/legacy-selection-bootstrap', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic selection fixture</title>' }),
+  );
+  try {
+    await page.goto('/legacy-selection-bootstrap');
+  } finally {
+    await page.unroute('**/legacy-selection-bootstrap');
+  }
+  const legacyKey = await page.evaluate(async (currentKey) => {
+    const read = <T>(request: IDBRequest<T>) =>
+      new Promise<T>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const db = await read(indexedDB.open('MiraViewerDB'));
+    try {
+      const tx = db.transaction(['volume_segmentations', 'volume_segmentation_chunks'], 'readwrite');
+      const complete = new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
+      const heads = tx.objectStore('volume_segmentations');
+      const row = (await read(heads.get(currentKey))) as StoredVolumeSegmentationRow;
+      if ('labels' in row || !row.geometry) throw new Error('Expected a current, source-verified chunked selection.');
+      const { storage, revision, labelBytes, chunkCount, ...record } = row;
+      const chunks = tx.objectStore('volume_segmentation_chunks');
+      const range = IDBKeyRange.bound([currentKey, 0], [currentKey, Number.MAX_SAFE_INTEGER]);
+      const payloads = (await read(chunks.getAll(range))) as VolumeSegmentationChunk[];
+      if (storage !== 'chunks-v1' || !revision || payloads.length !== chunkCount)
+        throw new Error('Incomplete fixture selection.');
+      const labels = new Uint8Array(labelBytes);
+      for (const chunk of payloads) labels.set(chunk.data, chunk.offset);
+      const geometry = row.geometry;
+      const primary = geometry.sourceProvenance.sources.find(
+        (source) => source.seriesUid === geometry.sourceProvenance.primarySeriesUid,
+      )!;
+      const input = JSON.stringify([
+        record.datasetRevision,
+        primary.seriesUid,
+        primary.sopInstanceUids,
+        record.dims,
+        geometry.originMm,
+        geometry.direction,
+        record.voxelSizeMm,
+        primary.transform,
+      ]);
+      let hash = 2166136261;
+      for (let i = 0; i < input.length; i++) hash = Math.imul(hash ^ input.charCodeAt(i), 16777619);
+      const reconstruction = `native-v1-${(hash >>> 0).toString(16)}`;
+      const volumeKey = JSON.stringify({
+        patient: record.patientKey,
+        study: record.studyUid,
+        series: record.seriesUids,
+        frame: record.frameOfReferenceUid,
+        dims: record.dims,
+        spacing: record.voxelSizeMm,
+        origin: geometry.originMm,
+        direction: geometry.direction,
+        revision: record.datasetRevision,
+        reconstruction,
+      });
+      await read(
+        heads.put({
+          ...record,
+          volumeKey,
+          labels,
+          geometry: { ...geometry, reconstructionFingerprint: reconstruction },
+        }),
+      );
+      await read(heads.delete(currentKey));
+      await read(chunks.delete(range));
+      await complete;
+      return volumeKey;
+    } finally {
+      db.close();
+    }
+  }, reviewed.volumeKey);
+  const legacy = (await savedVolumeSelection(page))[0]!;
+  expect(legacy).toEqual({ ...reviewed, volumeKey: legacyKey });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Import additional scans' }).click();
+  const intake = page.getByRole('dialog', { name: 'Import scans' });
+  await intake.getByLabel('Select DICOM image files').setInputFiles(
+    await Promise.all(
+      createSyntheticSvrDicomFiles({
+        orientations: 1,
+        studyUid: '1.2.826.0.1.3680043.10.543.20360904.1',
+        studyDate: '20360904',
+        pixelPaddingValue: null,
+      }).map(async (file) => ({
+        name: file.name,
+        mimeType: file.type,
+        buffer: Buffer.from(await file.arrayBuffer()),
+      })),
+    ),
+  );
+  await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
+  await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
+  await intake.getByRole('button', { name: 'Done', exact: true }).click();
+  const imported = await metadataSnapshot(page);
+  expect(imported.revision).toBeGreaterThan(original.revision);
+  expect(imported.token).toBe(original.token);
+  await openVolume(page);
+  await expect(page.getByText(/Reviewed selection ·/)).toBeVisible();
+  await page.getByRole('button', { name: 'Edit selection', exact: true }).click();
+  await expectGrayscalePixels(page.getByRole('application', { name: /^Axial reconstructed slice/ }));
+  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
+  expect(await savedVolumeSelection(page)).toEqual([legacy]);
+  await capture(page, info, 'durable-grid-recovered-desktop');
+  await mark(page, 'Add', 0.4);
+  await expect.poll(async () => (await savedVolumeSelection(page)).length).toBe(2);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect
+    .poll(
+      async () => (await savedVolumeSelection(page)).find((row) => row.volumeKey === reviewed.volumeKey)?.reviewState,
+    )
+    .toBe('reviewed');
+  const edited = await savedVolumeSelection(page);
+  const canonical = edited.find((row) => row.volumeKey === reviewed.volumeKey)!;
+  expect(canonical.selectedCount).toBeGreaterThan(reviewed.selectedCount);
+  expect(canonical.seeds!.foreground).toEqual(expect.arrayContaining(reviewed.seeds!.foreground));
+  expect(canonical.seeds!.background).toEqual(reviewed.seeds!.background);
+  expect(edited.find((row) => row.volumeKey === legacyKey)).toEqual(legacy);
+  await page.getByRole('button', { name: 'Application menu' }).click();
+  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
+  const pending = page.waitForEvent('download');
+  await page.getByRole('dialog').getByRole('button', { name: 'Export', exact: true }).click();
+  const download = await pending;
+  const archive = info.outputPath('synthetic-durable-selection-backup.zip');
+  await download.saveAs(archive);
+  expect(await download.failure()).toBeNull();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  let restoredSnapshot: Awaited<ReturnType<typeof metadataSnapshot>>;
+  let cleared: Awaited<ReturnType<typeof savedVolumeSelection>>;
+  try {
+    const restored = await context.newPage();
+    restored.on('pageerror', (error) => errors.push(error.message));
+    await restored.goto(new URL('/', page.url()).href);
+    await restored.getByRole('button', { name: 'Import scans', exact: true }).click();
+    const restore = restored.getByRole('dialog', { name: 'Import scans' });
+    await restore.getByLabel('Select a complete backup or image archive').setInputFiles(archive);
+    await restore.getByRole('checkbox').check();
+    await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+    await expect(restore.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
+    await restore.getByRole('button', { name: 'Done', exact: true }).click();
+    restoredSnapshot = await metadataSnapshot(restored);
+    expect(restoredSnapshot.frames).toEqual(imported.frames);
+    expect(restoredSnapshot.token).not.toBe(imported.token);
+    expect(await savedVolumeSelection(restored)).toEqual(edited);
+    await openVolume(restored);
+    await expect(restored.getByText(/Reviewed selection ·/)).toBeVisible();
+    await restored.getByRole('button', { name: 'Edit selection', exact: true }).click();
+    await capture(restored, info, 'durable-grid-restored-desktop');
+    await restored.getByRole('button', { name: 'Clear selection' }).click();
+    await expect
+      .poll(
+        async () =>
+          (await savedVolumeSelection(restored)).find((row) => row.volumeKey === canonical.volumeKey)?.selectedCount,
+      )
+      .toBe(0);
+    cleared = await savedVolumeSelection(restored);
+    expect(cleared.find((row) => row.volumeKey === legacyKey)).toEqual(legacy);
+    expect(cleared.find((row) => row.volumeKey === canonical.volumeKey)?.seeds).toBeUndefined();
+    await restored.reload();
+    await openVolume(restored);
+    await expect(restored.getByRole('button', { name: 'Select tissue', exact: true })).toBeEnabled();
+    expect(await savedVolumeSelection(restored)).toEqual(cleared);
+    await openSelectionAndVerifyPixels(restored);
+    await capture(restored, info, 'durable-grid-cleared-reopened');
+  } finally {
+    await context.close();
+  }
+  expect(errors).toEqual([]);
+  await attachReceipt(info, 'durable-grid-receipt', {
+    build: await (await page.request.get('/browser-build.json')).json(),
+    browser: browser.version(),
+    original,
+    imported,
+    restored: restoredSnapshot!,
+    reviewed,
+    legacy,
+    edited,
+    cleared: cleared!,
+    errors,
+    scope:
+      'Normal production application and synthetic DICOM only. Exact reviewed labels and literal marks survive a historical native key, unrelated import, guarded editing and fresh-context ZIP restoration. Clear persists while the legacy original remains intact. No anatomical or performance claim.',
+  });
+});
+
 test('backup controls show per-file limits and a reachable direct-save action', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -464,7 +726,10 @@ test('normal custom-model controls save a real draft, cancel and replace active 
         super(url, options);
         if (String(url).includes('customModel.worker'))
           this.addEventListener('message', (event) => {
-            if (event.data?.type === 'inference') window.customInferenceStarted = true;
+            if (event.data?.type === 'inference') {
+              window.customInferenceStarted = true;
+              window.customInferenceAction?.();
+            }
           });
       }
     };
@@ -484,27 +749,42 @@ test('normal custom-model controls save a real draft, cancel and replace active 
   await page.getByRole('button', { name: 'Show 3D settings', exact: true }).click();
   const custom = page.locator('details').filter({ has: page.locator('summary', { hasText: /^Custom model$/ }) });
   await custom.locator('summary').first().click();
-  const upload = async (kind: 'small' | 'slow') => {
-    const files = await createSyntheticCustomModel(kind);
-    await custom.locator('input[type=file]').setInputFiles(
-      await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          mimeType: file.type,
-          buffer: Buffer.from(await file.arrayBuffer()),
-        })),
-      ),
-    );
-    await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
-  };
-  const start = async () => {
-    await page.evaluate(() => {
+  const files = await createSyntheticCustomModel('small');
+  await custom.locator('input[type=file]').setInputFiles(
+    await Promise.all(
+      files.map(async (file) => ({
+        name: file.name,
+        mimeType: file.type,
+        buffer: Buffer.from(await file.arrayBuffer()),
+      })),
+    ),
+  );
+  await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
+  const start = async (onInference?: string) => {
+    await page.evaluate((action) => {
       window.customInferenceStarted = false;
+      window.customInferenceAction = action
+        ? () => {
+            const buttons = [...document.querySelectorAll('button')].filter(
+              (button) => button.textContent?.trim() === action,
+            );
+            if (buttons.length !== 1 || buttons[0]!.disabled)
+              throw new Error(`Inference action unavailable: ${action}`);
+            window.customInferenceActionAt = performance.now();
+            buttons[0]!.click();
+          }
+        : undefined;
+    }, onInference);
+    // Exercise keyboard activation without waiting for two GPU animation frames
+    // between the completed draft and the next operation.
+    await custom.getByRole('button', { name: 'Suggest with model' }).press('Enter');
+    // Initialization has its own product deadline. Observe the worker signal
+    // independently of software-rendered animation frames.
+    await page.waitForFunction(() => window.customInferenceStarted, undefined, {
+      timeout: CUSTOM_MODEL_INIT_TIMEOUT_MS,
+      polling: 100,
     });
-    await custom.getByRole('button', { name: 'Suggest with model' }).click();
-    await page.waitForFunction(() => window.customInferenceStarted);
   };
-  await upload('small');
   await start();
   await expect(page.getByRole('status').filter({ hasText: /Segmentation complete.*runtime released/ })).toBeVisible();
   await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
@@ -513,13 +793,12 @@ test('normal custom-model controls save a real draft, cancel and replace active 
   expect(draft[0]!.reviewState).toBe('draft');
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
 
-  await upload('slow');
-  await start();
-  const cancelStarted = performance.now();
-  await page.getByRole('button', { name: 'Cancel model suggestion' }).click();
+  // Use the real inference-start event, not an artificially slow model, to
+  // exercise both ordinary actions before a valid result can finish.
+  await start('Cancel model suggestion');
   await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
-  const cancelToReadyMs = performance.now() - cancelStarted;
+  const cancelToReadyMs = await page.evaluate(() => performance.now() - window.customInferenceActionAt);
   await expect(
     page.getByRole('status').filter({ hasText: /Model suggestion canceled.*worker was stopped/ }),
   ).toBeInViewport();
@@ -528,9 +807,10 @@ test('normal custom-model controls save a real draft, cancel and replace active 
 
   // The ordinary reconstruction action must also retire custom inference before
   // admitting another source image, not wait for its React busy-state effect.
-  await start();
+  // Trigger its real button at inference start: a fast model can otherwise
+  // finish legitimately between the two Playwright clicks before replacement.
   await page.getByRole('button', { name: 'Show reconstruction sources and controls' }).click();
-  await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+  await start('Open 3D volume');
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
   await expect(page.getByRole('button', { name: 'Show reconstruction sources and controls' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
@@ -546,6 +826,8 @@ test('normal custom-model controls save a real draft, cancel and replace active 
     draft,
     reopened: await savedVolumeSelection(page),
     cancelToReadyMs,
+    actionInput:
+      'Cancel and reconstruction buttons are invoked at real inference start; not trusted-pointer latency evidence.',
     workers,
     errors,
     scope:

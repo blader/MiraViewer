@@ -5,6 +5,7 @@ const owner = createHash('sha256')
   .update(import.meta.url)
   .digest('hex')
   .slice(0, 12);
+const launchArgs = [`--miraviewer-browser-acceptance=${owner}-${process.pid}`];
 
 // A disposable browser profile and a separately built origin. Never attach to a
 // user's MRI database or reuse another workspace's running server.
@@ -24,12 +25,24 @@ export default defineConfig({
     viewport: { width: 1440, height: 1000 },
     headless: true,
     actionTimeout: 15_000,
-    launchOptions: { args: [`--miraviewer-browser-acceptance=${owner}-${process.pid}`] },
+    launchOptions: { args: launchArgs },
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },
   projects: [
-    { name: 'workflow', testMatch: 'workflow.spec.ts' },
+    // Exercise the regular browser implementation, not the separate headless shell.
+    {
+      name: 'workflow',
+      testMatch: 'workflow.spec.ts',
+      use: {
+        channel: 'chromium',
+        // The isolated CI job supplies Xvfb and Mesa. Select OpenGL and admit
+        // its software driver, which Chromium otherwise blocks for WebGL2.
+        ...(process.env.CI && process.platform === 'linux'
+          ? { launchOptions: { args: [...launchArgs, '--use-angle=gl', '--ignore-gpu-blocklist'] } }
+          : {}),
+      },
+    },
     { name: 'gpu', testMatch: 'gpu.spec.ts' },
     { name: 'performance', testMatch: 'performance.spec.ts' },
     { name: 'inference', testMatch: 'inference.spec.ts' },

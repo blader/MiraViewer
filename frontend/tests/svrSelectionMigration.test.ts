@@ -1,15 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DATASET_REVISION_STATE_KEY, deleteAllStoredMriData, getDB, SELECTED_PATIENT_STATE_KEY } from '../src/db/db';
+import {
+  DATASET_REVISION_STATE_KEY,
+  DATASET_TOKEN_STATE_KEY,
+  deleteAllStoredMriData,
+  getDB,
+  SELECTED_PATIENT_STATE_KEY,
+} from '../src/db/db';
+import { getVolumeSegmentationSnapshot, saveVolumeSegmentation } from '../src/db/volumeSegmentations';
 import type { VolumeSegmentationRow } from '../src/db/schema';
 import type { SvrVolume } from '../src/types/svr';
 import {
   captureSelectionGeometry,
+  exactSelectionLookup,
   findTransferableSelection,
+  selectionVolumeKey,
   transferSavedSelection,
   type SavedSelectionIdentity,
 } from '../src/utils/svr/selectionMigration';
 import { IDENTITY_DIRECTION, IDENTITY_PATIENT_TRANSFORM, physicalVolumeBounds } from '../src/utils/svr/volumeGeometry';
 import * as scheduling from '../src/utils/svr/svrUtils';
+import { nativeVolumeFingerprint } from '../src/utils/svr/nativeVolume';
 
 const identity: Required<SavedSelectionIdentity> = {
   patientKey: 'patient',
@@ -135,6 +145,220 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe('exact source-grid recovery', () => {
+  it.each(['dense', 'chunks'])(
+    'recovers %s legacy work after regrouping without writing, copies on edit, and keeps Clear cleared',
+    async (storage) => {
+      const source = volume();
+      const saved = record(source);
+      if (storage === 'dense') await put(saved);
+      else await saveVolumeSegmentation(saved);
+      const db = await getDB();
+      const original = await db.get('volume_segmentations', saved.volumeKey);
+      await db.put('studies', {
+        ...(await db.get('studies', 'study'))!,
+        studyInstanceUid: 'unrelated-study',
+        patientName: 'Another synthetic patient',
+      });
+      const scope = { ...identity, patientKey: 'patient#study', datasetRevision: 8 };
+      await db.put('app_state', { key: SELECTED_PATIENT_STATE_KEY, value: scope.patientKey });
+      await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: scope.datasetRevision });
+      const current = volume();
+      Object.assign(current.sourceProvenance!, {
+        patientKey: scope.patientKey,
+        datasetRevision: scope.datasetRevision,
+      });
+      const currentKey = selectionVolumeKey(current, scope)!;
+      expect(currentKey).toBe(selectionVolumeKey(source, identity));
+      const lookup = exactSelectionLookup(current, scope)!;
+      const snapshot = await getVolumeSegmentationSnapshot(currentKey, lookup);
+      expect(snapshot.record).toMatchObject({ reviewState: 'reviewed', patientKey: scope.patientKey });
+      expect([...snapshot.record!.labels]).toEqual([...saved.labels]);
+      expect([...snapshot.record!.seeds!.foreground]).toEqual([...saved.seeds!.foreground]);
+      expect([...snapshot.record!.seeds!.background]).toEqual([...saved.seeds!.background]);
+      expect(snapshot.revision).toBeNull();
+      expect(snapshot.legacySource).toMatchObject({ volumeKey: saved.volumeKey, updatedAt: saved.updatedAt });
+      expect(await db.get('volume_segmentations', currentKey)).toBeUndefined();
+      expect(await db.get('volume_segmentations', saved.volumeKey)).toStrictEqual(original);
+
+      const labels = saved.labels.slice();
+      labels[14] = 1;
+      const edited = {
+        ...saved,
+        ...scope,
+        seriesUids: [...scope.seriesUids],
+        volumeKey: currentKey,
+        labels,
+        geometry: captureSelectionGeometry(current),
+        seeds: { ...saved.seeds!, foreground: Uint32Array.of(13, 14) },
+        updatedAt: 200,
+      };
+      await saveVolumeSegmentation(edited, {
+        ...snapshot,
+        expectedRevision: null,
+        revision: 'first-edit',
+        patch: { indices: Uint32Array.of(14), before: Uint8Array.of(0), after: Uint8Array.of(1) },
+      });
+      const reopened = await getVolumeSegmentationSnapshot(currentKey, lookup);
+      expect([...reopened.record!.labels]).toEqual([...labels]);
+      expect(reopened.record!.seeds).toEqual(structuredClone(edited.seeds));
+      expect(reopened.legacySource).toBeUndefined();
+      expect(reopened.revision).toBe('first-edit');
+      expect(await db.get('volume_segmentations', saved.volumeKey)).toStrictEqual(original);
+
+      await saveVolumeSegmentation(
+        { ...edited, labels: null, seeds: undefined, reviewState: 'draft' },
+        {
+          datasetToken: reopened.datasetToken,
+          expectedRevision: reopened.revision,
+          revision: 'cleared',
+        },
+      );
+      const cleared = await getVolumeSegmentationSnapshot(currentKey, lookup);
+      expect([...cleared.record!.labels]).toEqual(Array(labels.length).fill(0));
+      expect(cleared.record!.seeds).toBeUndefined();
+      expect(cleared.revision).toBe('cleared');
+      expect(cleared.legacySource).toBeUndefined();
+      expect(await db.get('volume_segmentations', currentKey)).toMatchObject({ storage: 'chunks-v1', chunkCount: 0 });
+      expect(await db.get('volume_segmentations', saved.volumeKey)).toStrictEqual(original);
+    },
+  );
+
+  it('verifies historical native fingerprints against their original revision, not the current epoch', async () => {
+    const old = volume();
+    const primary = old.sourceProvenance!.sources[0]!;
+    old.reconstructionFingerprint = nativeVolumeFingerprint(
+      primary.seriesUid,
+      primary.contributingSopInstanceUids,
+      old,
+      primary.transform,
+      7,
+    );
+    old.sourceProvenance!.fingerprint = old.reconstructionFingerprint;
+    const saved = record(old);
+    await put(saved);
+    const current = volume();
+    current.reconstructionFingerprint = nativeVolumeFingerprint(
+      primary.seriesUid,
+      primary.contributingSopInstanceUids,
+      current,
+      primary.transform,
+    );
+    const scope = { ...identity, datasetRevision: 8 };
+    Object.assign(current.sourceProvenance!, { fingerprint: current.reconstructionFingerprint, datasetRevision: 8 });
+    await (await getDB()).put('app_state', { key: DATASET_REVISION_STATE_KEY, value: 8 });
+    const snapshot = await getVolumeSegmentationSnapshot(
+      selectionVolumeKey(current, scope)!,
+      exactSelectionLookup(current, scope),
+    );
+    expect([...snapshot.record!.labels]).toEqual([...saved.labels]);
+    expect(snapshot.record?.reviewState).toBe('reviewed');
+    expect(snapshot.legacySource?.volumeKey).toBe(saved.volumeKey);
+  });
+
+  it.each([
+    'source',
+    'pose',
+    'origin',
+    'dims',
+    'spacing',
+    'kind',
+    'reconstruction',
+    'unknown-geometry',
+    'hard-marks',
+    'patient',
+    'revision',
+  ])('retains incompatible %s evidence without assigning it to the current grid', async (difference) => {
+    const current = volume();
+    const saved = record();
+    if (difference === 'source') saved.geometry!.sourceProvenance.sources[0]!.sopInstanceUids[0] = 'replaced-frame';
+    if (difference === 'pose') saved.geometry!.sourceProvenance.sources[0]!.transform.translationMm[0] = 0.0000001;
+    if (difference === 'origin') saved.geometry!.originMm[0] = 0.0000001;
+    if (difference === 'dims') saved.dims = [1, 9, 3];
+    if (difference === 'spacing') saved.voxelSizeMm = [1, 3, 4];
+    if (difference === 'kind') saved.geometry!.sourceProvenance.sources[0]!.kind = 'derived';
+    if (difference === 'reconstruction') {
+      saved.geometry!.reconstructionFingerprint = 'native-v1-unverified';
+      saved.volumeKey = JSON.stringify({ ...JSON.parse(saved.volumeKey), reconstruction: 'native-v1-unverified' });
+    }
+    if (difference === 'unknown-geometry') saved.geometry = undefined;
+    if (difference === 'hard-marks') saved.seeds!.foreground = Uint32Array.of(12);
+    if (difference === 'patient') saved.patientKey = 'patient#another-study';
+    if (difference === 'revision') saved.datasetRevision = 6;
+    await put(saved);
+    const snapshot = await getVolumeSegmentationSnapshot(
+      selectionVolumeKey(current, identity)!,
+      exactSelectionLookup(current, identity),
+    );
+    expect(snapshot.record).toBeNull();
+    expect(snapshot.legacySource).toBeUndefined();
+    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+  });
+
+  it('does not choose between two equivalent legacy records', async () => {
+    const current = volume();
+    const first = record();
+    const otherScope = { ...identity, datasetRevision: 6 };
+    const second = { ...record(current, 200), datasetRevision: 6, volumeKey: key(current, otherScope) };
+    await put(first);
+    await put(second);
+    const snapshot = await getVolumeSegmentationSnapshot(
+      selectionVolumeKey(current, identity)!,
+      exactSelectionLookup(current, identity),
+    );
+    expect(snapshot.record).toBeNull();
+    expect(snapshot.legacySource).toBeUndefined();
+    expect(await (await getDB()).count('volume_segmentations')).toBe(2);
+  });
+
+  it.each(['legacy-revision', 'legacy-updatedAt', 'legacy-deleted', 'target-created', 'dataset-token'])(
+    'rejects a canonical copy atomically when %s changes after discovery',
+    async (change) => {
+      const current = volume();
+      const saved = record();
+      await saveVolumeSegmentation(saved);
+      const currentKey = selectionVolumeKey(current, identity)!;
+      const snapshot = await getVolumeSegmentationSnapshot(currentKey, exactSelectionLookup(current, identity));
+      const db = await getDB();
+      const old = (await db.get('volume_segmentations', saved.volumeKey))!;
+      if (change === 'legacy-revision') await db.put('volume_segmentations', { ...old, revision: 'changed' });
+      if (change === 'legacy-updatedAt') await db.put('volume_segmentations', { ...old, updatedAt: 101 });
+      if (change === 'legacy-deleted') await db.delete('volume_segmentations', saved.volumeKey);
+      if (change === 'target-created')
+        await saveVolumeSegmentation({ ...saved, volumeKey: currentKey, updatedAt: 300 });
+      if (change === 'dataset-token')
+        await db.put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'replaced-dataset' });
+      const before = await db.get('volume_segmentations', currentKey);
+      await expect(
+        saveVolumeSegmentation(
+          { ...saved, volumeKey: currentKey },
+          {
+            ...snapshot,
+            expectedRevision: null,
+            revision: 'stale-copy',
+          },
+        ),
+      ).rejects.toThrow(/changed|replaced/i);
+      expect(await db.get('volume_segmentations', currentKey)).toStrictEqual(before);
+    },
+  );
+
+  it('rejects a stale live source scope and never reads chunk payloads from a different grid', async () => {
+    const current = volume();
+    const elsewhere = record(targetVolume());
+    await saveVolumeSegmentation(elsewhere);
+    const db = await getDB();
+    const head = (await db.get('volume_segmentations', elsewhere.volumeKey))!;
+    // Reading this payload would fail; discovery must reject its geometry first.
+    await db.put('volume_segmentations', { ...head, chunkCount: 999 });
+    const currentKey = selectionVolumeKey(current, identity)!;
+    const lookup = exactSelectionLookup(current, identity)!;
+    expect((await getVolumeSegmentationSnapshot(currentKey, lookup)).record).toBeNull();
+    await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: 8 });
+    await expect(getVolumeSegmentationSnapshot(currentKey, lookup)).rejects.toThrow(/changed/i);
+  });
+});
+
 describe('saved selection discovery and explicit draft transfer', () => {
   it('captures accepted metadata without MRI pixels and without changing the volume', () => {
     const current = volume();
@@ -177,10 +401,55 @@ describe('saved selection discovery and explicit draft transfer', () => {
     );
   });
 
+  it.each([7, 8])(
+    'keeps source-owned saved grids visible after patient regrouping at revision %s',
+    async (revision) => {
+      const saved = record();
+      await put(saved);
+      const db = await getDB();
+      await db.put('studies', {
+        ...(await db.get('studies', 'study'))!,
+        studyInstanceUid: 'another-study',
+        patientName: 'Another synthetic patient',
+      });
+      const scope = { ...identity, patientKey: 'patient#study', datasetRevision: revision };
+      await db.put('app_state', { key: SELECTED_PATIENT_STATE_KEY, value: scope.patientKey });
+      await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: revision });
+      const target = targetVolume();
+      Object.assign(target.sourceProvenance!, { patientKey: scope.patientKey, datasetRevision: revision });
+      const found = await findTransferableSelection(target, scope, key(target, scope));
+      expect(found.retainedCount).toBe(1);
+      if (revision === saved.datasetRevision) {
+        expect(found.candidate?.record.volumeKey).toBe(saved.volumeKey);
+        const copied = await transferSavedSelection(found.candidate!, target, scope, key(target, scope));
+        expect(copied.seeds!.foreground).toContain(62);
+        expect(copied.seeds!.background).toEqual(Uint32Array.of(0));
+        expect(copied.reviewState).toBe('draft');
+      } else {
+        expect(found.candidate).toBeNull();
+        expect(found.unavailableCount).toBe(1);
+      }
+      expect(await db.get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    },
+  );
+
+  it('finds the original source-owned grid when a restored subset no longer needs split patient grouping', async () => {
+    const previousScope = { ...identity, patientKey: 'patient#study' };
+    const saved = { ...record(), patientKey: previousScope.patientKey, volumeKey: key(volume(), previousScope) };
+    await put(saved);
+    const target = targetVolume();
+    const found = await findTransferableSelection(target, identity, key(target));
+    expect(found.candidate?.record.volumeKey).toBe(saved.volumeKey);
+    const copied = await transferSavedSelection(found.candidate!, target, identity, key(target));
+    expect(copied.seeds!.foreground).toContain(62);
+    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+  });
+
   it('never offers other patients, examinations, frames, source sets, or dataset revisions', async () => {
     const source = volume();
     const scopes = [
       { ...identity, patientKey: 'other' },
+      { ...identity, patientKey: 'patient#another-study' },
       { ...identity, studyUid: 'other' },
       { ...identity, frameOfReferenceUid: 'other' },
       { ...identity, seriesUids: ['other'] },

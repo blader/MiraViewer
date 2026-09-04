@@ -8,7 +8,7 @@ import { getSeriesFrameManifest, setSelectedPatientKey } from '../src/utils/loca
 import * as computeCore from '../src/utils/svr/svrComputeCore';
 import { estimateSvrSourceMemory } from '../src/utils/svr/sourceMemory';
 import { createNativeSourceContext } from '../src/utils/svr/nativeSourceContext';
-import { nativePlaneMemoryBytes, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
+import { nativePlaneMemoryBytes, nativeVolumeFingerprint, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
 import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { deferred } from './helpers/deferred';
 
@@ -225,6 +225,40 @@ describe('SVR canonical source admission and acquired support', () => {
     const result = await reconstruct([axial, coronal]);
     expect(result.parameters).toEqual(params);
     expect(result.volume.data.length).toBeGreaterThan(0);
+  });
+
+  it('keeps unchanged native source content stable across unrelated dataset revisions and distinguishes replaced frames', async () => {
+    const source = await seedSeries({
+      seriesUid: 'durable-native',
+      count: 3,
+      acquisitionMetadata: { mrAcquisitionType: '3D' },
+    });
+    await setSelectedPatientKey('patient-one');
+    const original = (await reconstruct([source])).volume;
+    const primary = original.sourceProvenance!.sources[0]!;
+    // Captured from the original constructor before removing its epoch coupling.
+    expect(
+      nativeVolumeFingerprint(primary.seriesUid, primary.contributingSopInstanceUids, original, primary.transform, 0),
+    ).toBe('native-v1-702a1fb5');
+    const db = await getDB();
+    await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: 1 });
+    const refreshed = (await reconstruct([source])).volume;
+    expect(refreshed.data).toEqual(original.data);
+    expect(refreshed.observedSupport).toEqual(original.observedSupport);
+    expect(refreshed.originMm).toEqual(original.originMm);
+    expect(refreshed.sourceProvenance!.datasetRevision).not.toBe(original.sourceProvenance!.datasetRevision);
+    expect(refreshed.reconstructionFingerprint).toBe(original.reconstructionFingerprint);
+
+    const previous = (await db.get('instances', 'durable-native.0'))!;
+    await db.delete('instances', previous.sopInstanceUid);
+    await db.put('instances', { ...previous, sopInstanceUid: 'durable-native.replaced' });
+    images.set('miradb:durable-native.replaced', {
+      ...images.get('miradb:durable-native.0')!,
+      getPixelData: () => Int16Array.of(11, 12, 13, 14),
+    });
+    const replaced = (await reconstruct([source])).volume;
+    expect(replaced.reconstructionFingerprint).not.toBe(refreshed.reconstructionFingerprint);
+    expect(replaced.data).not.toEqual(refreshed.data);
   });
 
   it('rejects source series from separate examinations of the same patient', async () => {

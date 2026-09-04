@@ -7,6 +7,7 @@ import { assertNotAborted, yieldToMain } from './svrUtils';
 import { CORNERSTONE_MEMORY_FALLBACK_BYTES } from '../cornerstoneMemory';
 import {
   IDENTITY_PATIENT_TRANSFORM,
+  IDENTITY_DIRECTION,
   patientToVolumeVoxel,
   physicalVolumeBounds,
   rotatePoint,
@@ -45,6 +46,36 @@ export type NativeVolumePlanOptions = {
   transform?: SvrPatientTransform;
   nativePlaneBytes?: number;
 };
+
+/** Source/grid identity is stable across unrelated imports; the optional epoch checks historical v1 keys only. */
+export function nativeVolumeFingerprint(
+  seriesUid: string,
+  sopInstanceUids: readonly string[],
+  grid: Pick<SvrVolume, 'dims' | 'originMm' | 'direction' | 'voxelSizeMm'>,
+  transform: SvrPatientTransform,
+  legacyRevision?: number,
+): string {
+  const identity = JSON.stringify([
+    ...(legacyRevision === undefined ? [] : [legacyRevision]),
+    seriesUid,
+    sopInstanceUids,
+    grid.dims,
+    grid.originMm,
+    grid.direction ?? IDENTITY_DIRECTION,
+    grid.voxelSizeMm,
+    transform,
+  ]);
+  let first = 2166136261;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < identity.length; index++) {
+    const value = identity.charCodeAt(index);
+    first = Math.imul(first ^ value, 16777619);
+    second = Math.imul(second ^ value, 0x85ebca6b);
+  }
+  return legacyRevision === undefined
+    ? `native-v2-${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}`
+    : `native-v1-${(first >>> 0).toString(16)}`;
+}
 
 /** Converted cache, one decode/display transition, and up to three future raw browsing frames. */
 export function nativePlaneMemoryBytes(
