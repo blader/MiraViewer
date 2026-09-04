@@ -1,0 +1,58 @@
+name: Frontend acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Lint, unit tests, production browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      PLAYWRIGHT_HTML_OPEN: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Record source and model identity
+        run: |
+          mkdir -p tmp
+          node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { sourceRevision } from "./scripts/build-browser.mjs"; writeFileSync("tmp/ci-source.json", JSON.stringify({ ...sourceRevision(), node: process.version, fixture: "synthetic only" }, null, 2));'
+      - run: npm run lint -- --max-warnings=0
+      - run: npm run test -- --maxWorkers=2 --reporter=json --outputFile=tmp/ci-unit-results.json
+      - name: Build the shipped application and verify model assets
+        run: npm run build:browser -- --production
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise import, editing, recovery and backup in the actual app
+        run: npx playwright test --project=workflow --reporter=line,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: tmp/browser-results/results.json
+      - name: Verify checks did not change source
+        run: git diff --exit-code
+      # Fresh hosted runners contain no private MRI, local profiles or private model overrides.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: synthetic-acceptance-${{ github.sha }}
+          path: |
+            frontend/tmp/ci-source.json
+            frontend/tmp/ci-unit-results.json
+            frontend/tmp/browser-dist/browser-build.json
+            frontend/tmp/browser-results/
+          retention-days: 30

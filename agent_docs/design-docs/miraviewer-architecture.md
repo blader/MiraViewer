@@ -155,6 +155,7 @@ For a fresh checkout, run `git lfs install` and `git lfs pull`, then `cd fronten
 | `npm run check`                                               | Lint and Vitest using the repository's configured pool.                                                                                        |
 | `npm run build`                                               | Verify pinned model assets, typecheck app/config/browser harness project references, build production output, then verify copied model assets. |
 | `npm run build:browser`                                       | Build app plus acceptance-only probes with source/model fingerprints into `tmp/browser-dist`.                                                  |
+| `npm run build:browser -- --production`                       | Build the normal production application, without probes, into the same isolated acceptance directory; verify source and copied model assets. |
 | `npm run test:browser`                                        | Isolated built-app import, navigation, outline, reload and fresh-context restore.                                                              |
 | `npm run test:gpu`                                            | Actual production-shader pixel checks; the receipt identifies the renderer.                                                                    |
 | `npm run test:performance`                                    | Worker responsiveness, derived-frame storage, sparse editing and multi-GiB backup round trips; allow several GiB of temporary disk.            |
@@ -163,6 +164,8 @@ For a fresh checkout, run `git lfs install` and `git lfs pull`, then `cd fronten
 | `npm run package:zip`                                         | Build `release/MiraViewer.zip`, including the local HTTP launcher.                                                                             |
 
 Browser checks require the Playwright Chromium installation (`npx playwright install chromium`). Run `build:browser` after source changes: the harness rejects stale output. It uses a disposable profile and strict port 43134, never an existing user's MRI origin. Scripts set `PLAYWRIGHT_HTML_OPEN=never` and a terminal reporter. For direct Playwright calls, preserve both settings. Receipts live under `tmp/browser-results`; preserve originals in ignored `artifacts/` before another run replaces temporary output. Only curated, path-scrubbed receipts and explicitly reviewed synthetic images belong in `agent_docs/evidence/`. `.baton/`, raw process traces and generated fixture directories remain local. Production/offline builds omit the probe entrypoint.
+
+The repository's [frontend acceptance workflow](../../.github/workflows/frontend.yml) defines a serial hosted-runner gate for lint, the complete default unit suite, production type/build checks and the synthetic normal-app browser workflows. It checks out pinned public model assets through Git LFS, uses read-only repository permissions, and uploads source/model identity plus JSON results and synthetic captures. It does not load private fixtures or alter branch protection. The production build option is for `test:browser`; GPU, performance and pinned-inference probes still require the default `build:browser` mode. A configured workflow is not a passing release gate: inspect the exact commit's completed run and receipts.
 
 Use one heavyweight local build/test/model run at a time on shared workstations. Unit tests prove their exercised contracts, not real browser/GPU/model behavior. A SwiftShader pass is software pixel evidence. Synthetic model fixtures prove execution, lifecycle and measured output parity, not anatomical segmentation quality. Exact receipts and any skipped gates belong in the implementation ledger.
 
@@ -182,7 +185,7 @@ Legacy source metadata is enriched on demand, not by a full database-open payloa
 
 The focus preview consumes prepared source manifests rather than independently reading stale ordering and geometry. Same-source refresh retains valid presentation and focus intent; source/patient replacement retires it. Preparation retains valid individual manifests even if another selected source fails, allowing inspection without enabling reconstruction or labeling a rejected group verified.
 
-Legacy volume-key migration and broader warm native rendering remain active audit work. Sparse edit persistence and the source-owned settings/acquisition picker have their own linked regression and browser evidence. The implementation ledger is the status authority; old plans and old test totals are historical evidence.
+Exact source-grid recovery is implemented; unverifiable or competing legacy grids remain preserved without automatic assignment. Broader warm native rendering, startup/host parity and CI rollout remain active audit work. Sparse edit persistence and the source-owned settings/acquisition picker have their own linked regression and browser evidence. The implementation ledger is the status authority; old plans and old test totals are historical evidence.
 
 ## Private fixtures
 

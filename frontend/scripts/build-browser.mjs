@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
+import { verifyEfficientTamAssets } from './verify-efficient-tam-assets.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -39,17 +41,23 @@ export function sourceRevision() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { values } = parseArgs({ options: { production: { type: 'boolean', default: false } } });
+  const mode = values.production ? 'production' : 'browser-test';
+  const outDir = resolve(root, 'tmp/browser-dist');
   const before = sourceRevision();
+  const assets = await verifyEfficientTamAssets();
   const { build } = await import('vite');
-  await build({ root, mode: 'browser-test', build: { outDir: 'tmp/browser-dist', emptyOutDir: true } });
+  await build({ root, mode, build: { outDir, emptyOutDir: true } });
+  await verifyEfficientTamAssets(resolve(outDir, relative(resolve(root, 'public'), assets.directory)));
   const after = sourceRevision();
   if (JSON.stringify(before) !== JSON.stringify(after))
     throw new Error('Source changed during browser build. Rebuild before testing.');
   writeFileSync(
-    resolve(root, 'tmp/browser-dist/browser-build.json'),
+    resolve(outDir, 'browser-build.json'),
     JSON.stringify(
       {
         ...after,
+        mode,
         builtAt: new Date().toISOString(),
         fixture: 'synthetic only',
       },
