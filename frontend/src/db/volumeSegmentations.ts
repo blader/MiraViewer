@@ -112,6 +112,7 @@ export async function getVolumeSegmentationSnapshot(
   const identities = getPatientIdentityKeys(studies);
   let stored = current;
   let legacySource: VolumeSegmentationSnapshot['legacySource'];
+  let aliases: readonly string[] = [];
   if (source) {
     if (
       (datasetRevision?.value ?? 0) !== source.datasetRevision ||
@@ -119,7 +120,7 @@ export async function getVolumeSegmentationSnapshot(
       identities.get(source.studyUid) !== source.patientKey
     )
       throw new SavedSelectionChangedError();
-    const aliases = getPatientIdentityAliases(studies.find((study) => study.studyInstanceUid === source.studyUid)!);
+    aliases = getPatientIdentityAliases(studies.find((study) => study.studyInstanceUid === source.studyUid)!);
     if (stored && !source.matches(stored, aliases)) throw new SavedSelectionChangedError();
     if (!stored) {
       // Only a unique exact match can project automatically. Chunk payloads are
@@ -147,15 +148,7 @@ export async function getVolumeSegmentationSnapshot(
     : null;
   if (record && record.labels.length !== voxelCount(record))
     throw new Error('The saved selection does not match its reconstruction geometry.');
-  if (
-    record &&
-    source &&
-    !source.matches(
-      record,
-      getPatientIdentityAliases(studies.find((study) => study.studyInstanceUid === source.studyUid)!),
-    )
-  )
-    throw new SavedSelectionChangedError();
+  if (record && source && !source.matches(record, aliases)) throw new SavedSelectionChangedError();
   await tx.done;
   return {
     record: record && sourcePatient ? { ...record, patientKey: sourcePatient } : record,

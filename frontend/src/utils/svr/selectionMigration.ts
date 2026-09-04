@@ -1,7 +1,7 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY } from '../../db/db';
 import { getPatientIdentityAliases, getPatientIdentityKeys } from '../../db/patientIdentity';
 import { readStoredVolumeSegmentation, type VolumeSegmentationLookup } from '../../db/volumeSegmentations';
-import type { VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db/schema';
+import type { StoredVolumeSegmentationRow, VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db/schema';
 import type { SvrLabelMeta, SvrLabelVolume, SvrVolume } from '../../types/svr';
 import { IDENTITY_DIRECTION } from './volumeGeometry';
 import { transferSelectionAnnotations } from './annotationTransfer';
@@ -174,6 +174,20 @@ function matchesScope(
   );
 }
 
+function matchesRecordScope(
+  record: StoredVolumeSegmentationRow,
+  identity: RequiredIdentity,
+  patientAliases: readonly string[],
+): boolean {
+  return (
+    patientAliases.includes(record.patientKey ?? '') &&
+    record.studyUid === identity.studyUid &&
+    record.frameOfReferenceUid === identity.frameOfReferenceUid &&
+    stringSet(record.seriesUids) &&
+    sameSet(record.seriesUids, identity.seriesUids)
+  );
+}
+
 function matchesVolume(volume: SvrVolume, identity: RequiredIdentity, key: KeyGeometry | null): boolean {
   const provenance = volume.sourceProvenance;
   const selectedSources = new Set(identity.seriesUids);
@@ -261,20 +275,18 @@ export function exactSelectionLookup(
   const geometry = captureSelectionGeometry(volume);
   if (!completeIdentity(identity) || !geometry || !currentKey || parseKey(currentKey)?.version !== 2) return undefined;
   const scope = { ...identity, seriesUids: [...identity.seriesUids] };
-  const grid = { dims: [...volume.dims], spacing: [...volume.voxelSizeMm] };
-  const primary = volume.sourceProvenance!.sources.find(
+  const primary = geometry.sourceProvenance.sources.find(
     (source) => source.seriesUid === geometry.sourceProvenance.primarySeriesUid,
   )!;
-  const contributing = [...primary.contributingSopInstanceUids];
-  const nativeGrid = {
+  const contributing = [
+    ...volume.sourceProvenance!.sources.find((source) => source.seriesUid === primary.seriesUid)!
+      .contributingSopInstanceUids,
+  ];
+  const grid = {
+    ...geometry,
     dims: [...volume.dims] as SvrVolume['dims'],
-    originMm: geometry.originMm,
-    direction: geometry.direction,
     voxelSizeMm: [...volume.voxelSizeMm] as SvrVolume['voxelSizeMm'],
   };
-  const primaryTransform = geometry.sourceProvenance.sources.find(
-    (source) => source.seriesUid === primary.seriesUid,
-  )!.transform;
   return {
     studyUid: scope.studyUid,
     patientKey: scope.patientKey,
@@ -285,19 +297,15 @@ export function exactSelectionLookup(
       if (
         !key ||
         !matchesScope(key, scope, false, patientAliases) ||
-        !patientAliases.includes(record.patientKey ?? '') ||
-        record.studyUid !== scope.studyUid ||
-        record.frameOfReferenceUid !== scope.frameOfReferenceUid ||
-        !stringSet(record.seriesUids) ||
-        !sameSet(record.seriesUids, scope.seriesUids) ||
+        !matchesRecordScope(record, scope, patientAliases) ||
         !Number.isFinite(record.updatedAt) ||
         !validGeometry(previous) ||
         !finiteArray(record.dims, 3) ||
         !finiteArray(record.voxelSizeMm, 3) ||
         !sameArray(record.dims, grid.dims) ||
         !sameArray(key.dims, grid.dims) ||
-        !sameArray(record.voxelSizeMm, grid.spacing) ||
-        !sameArray(key.spacing, grid.spacing) ||
+        !sameArray(record.voxelSizeMm, grid.voxelSizeMm) ||
+        !sameArray(key.spacing, grid.voxelSizeMm) ||
         !sameArray(previous.originMm, geometry.originMm) ||
         !sameArray(key.origin, geometry.originMm) ||
         !sameArray(previous.direction, geometry.direction) ||
@@ -317,13 +325,7 @@ export function exactSelectionLookup(
           Number.isSafeInteger(record.datasetRevision) &&
           record.datasetRevision! >= 0 &&
           previous.reconstructionFingerprint ===
-            nativeVolumeFingerprint(
-              primary.seriesUid,
-              contributing,
-              nativeGrid,
-              primaryTransform,
-              record.datasetRevision,
-            ),
+            nativeVolumeFingerprint(primary.seriesUid, contributing, grid, primary.transform, record.datasetRevision),
         )
       );
     },
@@ -385,11 +387,7 @@ function transferable(
     !closeArray(key.direction, geometry.direction) ||
     key.reconstruction !== geometry.reconstructionFingerprint ||
     record.datasetRevision !== identity.datasetRevision ||
-    !patientAliases.includes(record.patientKey ?? '') ||
-    record.studyUid !== identity.studyUid ||
-    record.frameOfReferenceUid !== identity.frameOfReferenceUid ||
-    !stringSet(record.seriesUids) ||
-    !sameSet(record.seriesUids, identity.seriesUids) ||
+    !matchesRecordScope(record, identity, patientAliases) ||
     !Number.isFinite(record.updatedAt)
   )
     return false;
@@ -461,20 +459,9 @@ export async function findTransferableSelection(
     ? captureSelectionGeometry(volume)
     : undefined;
   await inspectSavedSelections(identity, (record, patientAliases) => {
-    if (
-      record.volumeKey === currentVolumeKey ||
-      !patientAliases.includes(record.patientKey ?? '') ||
-      record.studyUid !== identity.studyUid
-    )
-      return;
+    if (record.volumeKey === currentVolumeKey || !matchesRecordScope(record, identity, patientAliases)) return;
     const key = parseKey(record.volumeKey);
-    if (
-      record.frameOfReferenceUid !== identity.frameOfReferenceUid ||
-      !stringSet(record.seriesUids) ||
-      !sameSet(record.seriesUids, identity.seriesUids) ||
-      (key && !matchesScope(key, identity, false, patientAliases))
-    )
-      return;
+    if (key && !matchesScope(key, identity, false, patientAliases)) return;
     result.retainedCount++;
     if (target && transferable(record, target, identity, patientAliases)) {
       if (!result.candidate || record.updatedAt > result.candidate.record.updatedAt)
