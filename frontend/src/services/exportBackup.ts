@@ -12,6 +12,7 @@ import {
 import { getPatientIdentityAliases, getPatientIdentityKeys, studyIdentityConflict } from '../db/patientIdentity';
 import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
 import { initializeComparisonState } from '../db/comparisonState';
+import { readStoredVolumeSegmentation, volumeChunkRange } from '../db/volumeSegmentations';
 import type {
   AppStateRow,
   DerivedAlignmentFrameRow,
@@ -267,10 +268,16 @@ export async function exportStudiesToZip(
   const tumorGroundTruth = (await db.getAll('tumor_ground_truth')).filter((row) => selectedStudies.has(row.studyId));
 
   const volumeSegmentations: SnapshotVolume[] = [];
-  for (const row of await db.getAll('volume_segmentations')) {
-    if (row.studyUid && !selectedStudies.has(row.studyUid)) continue;
-    if (!row.studyUid && row.patientKey && selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
-    if (row.seriesUids?.length && !row.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
+  for (const key of await db.getAllKeys('volume_segmentations')) {
+    const transaction = db.transaction(['volume_segmentations', 'volume_segmentation_chunks']);
+    const stored = await transaction.objectStore('volume_segmentations').get(key);
+    if (!stored) continue;
+    if (stored.studyUid && !selectedStudies.has(stored.studyUid)) continue;
+    if (!stored.studyUid && stored.patientKey && selectedPatientKey && stored.patientKey !== selectedPatientKey)
+      continue;
+    if (stored.seriesUids?.length && !stored.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
+    const row = await readStoredVolumeSegmentation(stored, transaction.objectStore('volume_segmentation_chunks'));
+    await transaction.done;
     const { labels, seeds: savedSeeds, ...metadata } = row;
     if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
       throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
@@ -587,6 +594,7 @@ export async function restoreSnapshot(
       'tumor_segmentations',
       'tumor_ground_truth',
       'volume_segmentations',
+      'volume_segmentation_chunks',
       'derived_alignment_frames',
       'app_state',
     ],
@@ -625,7 +633,10 @@ export async function restoreSnapshot(
   for (const row of manifest.records.panelSettings) await tx.objectStore('panel_settings').put(row);
   for (const row of manifest.records.tumorSegmentations) await tx.objectStore('tumor_segmentations').put(row);
   for (const row of manifest.records.tumorGroundTruth) await tx.objectStore('tumor_ground_truth').put(row);
-  for (const row of volumes) await tx.objectStore('volume_segmentations').put(row);
+  for (const row of volumes) {
+    await tx.objectStore('volume_segmentation_chunks').delete(volumeChunkRange(row.volumeKey));
+    await tx.objectStore('volume_segmentations').put(row);
+  }
   let archivedRevision = 0;
   for (const row of manifest.records.appState) {
     if (row.key.startsWith('acquisition:') && !ownsAcquisitionChoice(row, seriesByUid)) continue;

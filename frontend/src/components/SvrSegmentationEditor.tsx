@@ -65,12 +65,15 @@ function useSelectionSlice({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 400, height: 320 });
-  const [draftState, setDraft] = useState<{ scope: StrokeScope; indices: ReadonlySet<number> } | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  const paintRef = useRef<(() => void) | null>(null);
+  const paintFrame = useRef<number | null>(null);
   const strokeRef = useRef<{
     pointer: number;
     previous: VoxelPoint;
     indices: Set<number>;
+    pending: number[];
+    paintedSource?: HTMLCanvasElement;
     kind: Tool;
     scope: StrokeScope;
   } | null>(null);
@@ -86,7 +89,6 @@ function useSelectionSlice({
     () => ({ volume, labels: strokeLabels, plane, slice, tool, disabled }),
     [volume, strokeLabels, plane, slice, tool, disabled],
   );
-  const draft = draftState?.scope === scope ? draftState.indices : null;
   const maxSlice = dimensions[axes.slice] - 1;
   const rowCursor = axes.flipRows ? rows - 1 - cursor[axes.row] : cursor[axes.row];
   const fit = Math.min(size.width / (columns * spacing[axes.column]), size.height / (rows * spacing[axes.row]));
@@ -116,40 +118,54 @@ function useSelectionSlice({
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!canvas || !context) return;
-    const ratio = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.round(size.width * ratio);
-    canvas.height = Math.round(size.height * ratio);
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    context.fillStyle = '#000';
-    context.fillRect(0, 0, size.width, size.height);
+  const columnStride = axes.column === 'x' ? 1 : volume.dims[0];
+  const rowStride = axes.row === 'y' ? volume.dims[0] : volume.dims[0] * volume.dims[1];
+  const sliceStride = axes.slice === 'x' ? 1 : axes.slice === 'y' ? volume.dims[0] : volume.dims[0] * volume.dims[1];
+  const [windowLow, windowHigh] = windowRange;
+  // Source pixels are independent of marks, mask edits, crosshair movement in
+  // this section, zoom and pointer events. Keep the calibrated raster at native
+  // resolution; the display canvas only composites/scales retained layers.
+  const grayscale = useMemo(() => {
     const source = document.createElement('canvas');
     source.width = columns;
     source.height = rows;
     const sourceContext = source.getContext('2d');
-    if (!sourceContext) return;
+    if (!sourceContext) return null;
     const image = sourceContext.createImageData(columns, rows);
-    const strides = { x: 1, y: volume.dims[0], z: volume.dims[0] * volume.dims[1] };
+    const width = windowHigh - windowLow;
     for (let row = 0; row < rows; row++)
       for (let column = 0; column < columns; column++) {
-        const point = { ...cursor, [axes.column]: column, [axes.row]: axes.flipRows ? rows - 1 - row : row };
-        const index = voxelIndex(point, volume.dims);
+        const index = slice * sliceStride + (axes.flipRows ? rows - 1 - row : row) * rowStride + column * columnStride;
         const offset = (row * columns + column) * 4;
         const supported = !volume.observedSupport || Boolean(volume.observedSupport[index]);
-        const width = windowRange[1] - windowRange[0];
         const normalized =
-          width > 0
-            ? clamp((volume.data[index]! - windowRange[0]) / width, 0, 1)
-            : volume.data[index]! > windowRange[0]
-              ? 1
-              : 0;
+          width > 0 ? clamp((volume.data[index]! - windowLow) / width, 0, 1) : volume.data[index]! > windowLow ? 1 : 0;
         const gray =
           supported && Number.isFinite(volume.data[index])
             ? Math.round((volume.displayInvert ? 1 - normalized : normalized) * 255)
             : 0;
+        image.data[offset] = image.data[offset + 1] = image.data[offset + 2] = gray;
+        image.data[offset + 3] = 255;
+      }
+    sourceContext.putImageData(image, 0, 0);
+    return { source, image };
+  }, [axes.flipRows, columnStride, columns, rowStride, rows, slice, sliceStride, volume, windowHigh, windowLow]);
+
+  const annotations = useMemo(() => {
+    if (!grayscale) return null;
+    const source = document.createElement('canvas');
+    source.width = columns;
+    source.height = rows;
+    const context = source.getContext('2d');
+    if (!context) return null;
+    const image = context.createImageData(columns, rows);
+    image.data.set(grayscale.image.data);
+    let visible = false;
+    for (let row = 0; row < rows; row++)
+      for (let column = 0; column < columns; column++) {
+        const index = slice * sliceStride + (axes.flipRows ? rows - 1 - row : row) * rowStride + column * columnStride;
+        const offset = (row * columns + column) * 4;
+        const supported = !volume.observedSupport || Boolean(volume.observedSupport[index]);
         let color: readonly number[] | null = null;
         let alpha = 0;
         if (showMask && labels?.data[index]) {
@@ -158,14 +174,14 @@ function useSelectionSlice({
             column === columns - 1 ||
             row === 0 ||
             row === rows - 1 ||
-            !labels.data[index - strides[axes.column]] ||
-            !labels.data[index + strides[axes.column]] ||
-            !labels.data[index - strides[axes.row]] ||
-            !labels.data[index + strides[axes.row]];
+            !labels.data[index - columnStride] ||
+            !labels.data[index + columnStride] ||
+            !labels.data[index - rowStride] ||
+            !labels.data[index + rowStride];
           color = TISSUE_COLOR;
           alpha = edge ? 0.9 : 0.1;
         }
-        const mark = draft?.has(index) ? (tool === 'include' ? 1 : 2) : marks.get(index);
+        const mark = marks.get(index);
         if (mark) {
           color = mark === 1 ? TISSUE_COLOR : EXCLUDED_COLOR;
           alpha = 0.85;
@@ -174,47 +190,123 @@ function useSelectionSlice({
           color = EXCLUDED_COLOR;
           alpha = 0.06;
         }
+        if (!color) continue;
+        visible = true;
+        const gray = grayscale.image.data[offset]!;
+        // Composite at native resolution before display scaling, preserving
+        // the old interpolation at contour edges and literal-mark priority.
         for (let channel = 0; channel < 3; channel++)
-          image.data[offset + channel] = color ? Math.round(gray * (1 - alpha) + color[channel]! * alpha) : gray;
-        image.data[offset + 3] = 255;
+          image.data[offset + channel] = Math.round(gray * (1 - alpha) + color[channel]! * alpha);
       }
-    sourceContext.putImageData(image, 0, 0);
-    context.imageSmoothingEnabled = true;
-    context.drawImage(source, left, top, columns * pixelWidth, rows * pixelHeight);
-    const crossX = left + (cursor[axes.column] + 0.5) * pixelWidth;
-    const crossY = top + (rowCursor + 0.5) * pixelHeight;
-    context.strokeStyle = 'rgba(225,230,220,0.35)';
-    context.lineWidth = 1;
-    context.setLineDash([3, 5]);
-    context.beginPath();
-    context.moveTo(0, crossY);
-    context.lineTo(crossX - 8, crossY);
-    context.moveTo(crossX + 8, crossY);
-    context.lineTo(size.width, crossY);
-    context.moveTo(crossX, 0);
-    context.lineTo(crossX, crossY - 8);
-    context.moveTo(crossX, crossY + 8);
-    context.lineTo(crossX, size.height);
-    context.stroke();
+    if (!visible) return null;
+    context.putImageData(image, 0, 0);
+    return source;
   }, [
-    axes,
+    axes.flipRows,
+    columnStride,
+    columns,
+    grayscale,
+    labels,
+    marks,
+    rowStride,
+    rows,
+    showMask,
+    slice,
+    sliceStride,
+    volume,
+  ]);
+
+  const draftLayer = useMemo(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = columns;
+    canvas.height = rows;
+    return canvas;
+  }, [columns, rows]);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context || !grayscale) return;
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(size.width * ratio);
+    canvas.height = Math.round(size.height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const paint = () => {
+      context.fillStyle = '#000';
+      context.fillRect(0, 0, size.width, size.height);
+      context.imageSmoothingEnabled = true;
+      const draw = (layer: HTMLCanvasElement) =>
+        context.drawImage(layer, left, top, columns * pixelWidth, rows * pixelHeight);
+      const base = annotations ?? grayscale.source;
+      const stroke = strokeRef.current;
+      if (stroke?.scope === scope && stroke.kind !== 'navigate') {
+        const draftContext = draftLayer.getContext('2d');
+        if (draftContext) {
+          const recolor = stroke.paintedSource !== base;
+          if (recolor) draftContext.drawImage(base, 0, 0);
+          const color = stroke.kind === 'include' ? TISSUE_COLOR : EXCLUDED_COLOR;
+          for (const index of recolor ? stroke.indices : stroke.pending) {
+            const column = Math.floor(index / columnStride) % columns;
+            const sourceRow = Math.floor(index / rowStride) % rows;
+            const row = axes.flipRows ? rows - 1 - sourceRow : sourceRow;
+            const gray = grayscale.image.data[(row * columns + column) * 4]!;
+            draftContext.fillStyle = `rgb(${color.map((channel) => Math.round(gray * 0.15 + channel * 0.85)).join(',')})`;
+            draftContext.fillRect(column, row, 1, 1);
+          }
+          stroke.pending.length = 0;
+          stroke.paintedSource = base;
+        }
+        draw(draftLayer);
+      } else draw(base);
+      const crossX = left + (cursor[axes.column] + 0.5) * pixelWidth;
+      const crossY = top + (rowCursor + 0.5) * pixelHeight;
+      context.strokeStyle = 'rgba(225,230,220,0.35)';
+      context.lineWidth = 1;
+      context.setLineDash([3, 5]);
+      context.beginPath();
+      context.moveTo(0, crossY);
+      context.lineTo(crossX - 8, crossY);
+      context.moveTo(crossX + 8, crossY);
+      context.lineTo(size.width, crossY);
+      context.moveTo(crossX, 0);
+      context.lineTo(crossX, crossY - 8);
+      context.moveTo(crossX, crossY + 8);
+      context.lineTo(crossX, size.height);
+      context.stroke();
+    };
+    paintRef.current = paint;
+    paint();
+    return () => {
+      paintRef.current = null;
+      if (paintFrame.current !== null) cancelAnimationFrame(paintFrame.current);
+      paintFrame.current = null;
+    };
+  }, [
+    annotations,
+    axes.column,
+    axes.flipRows,
+    columnStride,
     columns,
     cursor,
-    draft,
-    labels,
+    draftLayer,
+    grayscale,
     left,
-    marks,
     pixelHeight,
     pixelWidth,
     rowCursor,
+    rowStride,
     rows,
-    showMask,
+    scope,
     size,
-    tool,
     top,
-    volume,
-    windowRange,
   ]);
+
+  const schedulePaint = () => {
+    if (paintFrame.current !== null) return;
+    paintFrame.current = requestAnimationFrame(() => {
+      paintFrame.current = null;
+      paintRef.current?.();
+    });
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -248,9 +340,12 @@ function useSelectionSlice({
     if (!point) return;
     if (stroke.kind === 'navigate') setCursor(point);
     else {
-      for (const index of physicalBrushIndices(volume, plane, stroke.previous, point, radiusMm))
+      for (const index of physicalBrushIndices(volume, plane, stroke.previous, point, radiusMm)) {
+        if (stroke.indices.has(index)) continue;
         stroke.indices.add(index);
-      setDraft({ scope, indices: new Set(stroke.indices) });
+        stroke.pending.push(index);
+      }
+      schedulePaint();
     }
     stroke.previous = point;
   };
@@ -259,7 +354,7 @@ function useSelectionSlice({
     if (!stroke || stroke.pointer !== event.pointerId) return;
     if (!cancelled) move(event);
     strokeRef.current = null;
-    setDraft(null);
+    schedulePaint();
     if (event.currentTarget.hasPointerCapture?.(event.pointerId))
       event.currentTarget.releasePointerCapture(event.pointerId);
     if (!cancelled && stroke.scope === scope && stroke.kind !== 'navigate')
@@ -269,7 +364,7 @@ function useSelectionSlice({
     if (event.key === 'Escape' && strokeRef.current) {
       const pointer = strokeRef.current.pointer;
       strokeRef.current = null;
-      setDraft(null);
+      schedulePaint();
       if (event.currentTarget.hasPointerCapture?.(pointer)) event.currentTarget.releasePointerCapture(pointer);
       event.preventDefault();
       event.stopPropagation();
@@ -393,7 +488,14 @@ function SelectionSlice(props: SliceProps) {
             event.preventDefault();
             event.currentTarget.focus();
             event.currentTarget.setPointerCapture?.(event.pointerId);
-            strokeRef.current = { pointer: event.pointerId, previous: point, indices: new Set(), kind: tool, scope };
+            strokeRef.current = {
+              pointer: event.pointerId,
+              previous: point,
+              indices: new Set(),
+              pending: [],
+              kind: tool,
+              scope,
+            };
             move(event);
           }}
           onPointerMove={(event) => {
@@ -439,14 +541,16 @@ function SelectionNativeDetail({
   disabled,
   hasSelection,
   running,
+  onRefine,
 }: {
   disabled: boolean;
   hasSelection: boolean;
   running: boolean;
+  onRefine?: () => void;
 }) {
-  const { volume, labels, refineRegion, busy } = useSvrImaging();
+  const { volume, labels, busy } = useSvrImaging();
   if (!volume?.nativeVoxelSizeMm || hasNativeDetail(volume)) return null;
-  const unavailable = disabled || busy || running || !labels || !refineRegion;
+  const unavailable = disabled || busy || running || !labels || !onRefine;
   return (
     <div className="svr-selection-native-detail">
       <div>
@@ -462,10 +566,10 @@ function SelectionNativeDetail({
           type="button"
           disabled={unavailable}
           onClick={() => {
-            if (!unavailable && labels) refineRegion?.(labels);
+            if (!unavailable) onRefine?.();
           }}
           title={
-            refineRegion
+            onRefine
               ? 'Load the selected region at the original stored sample spacing, without averaging or inverse reconstruction. Your selection transfers as a draft for review.'
               : 'Original-detail loading is unavailable in this view.'
           }
@@ -488,6 +592,7 @@ function SelectionDisplayControls({
   setCutaway,
   zoom,
   setZoom,
+  onRefine,
 }: {
   disabled: boolean;
   hasSelection: boolean;
@@ -499,8 +604,9 @@ function SelectionDisplayControls({
   setCutaway: (enabled: boolean) => void;
   zoom: number;
   setZoom: (zoom: number) => void;
+  onRefine?: () => void;
 }) {
-  const { volume, labels = null, refineRegion } = useSvrImaging();
+  const { volume } = useSvrImaging();
   if (!volume) return null;
   const windowWidth = windowRange[1] - windowRange[0];
   const windowLevel = (windowRange[0] + windowRange[1]) / 2;
@@ -576,15 +682,13 @@ function SelectionDisplayControls({
         >
           Interpolated cutaway
         </button>
-        {refineRegion && !volume.nativeVoxelSizeMm ? (
+        {onRefine && !volume.nativeVoxelSizeMm ? (
           <button
             type="button"
             disabled={
               disabled || !hasSelection || running || Math.max(...volume.voxelSizeMm) <= REGION_DETAIL_SPACING_MM * 1.05
             }
-            onClick={() => {
-              if (labels) refineRegion(labels);
-            }}
+            onClick={onRefine}
             title="Request a 0.50 mm grid within the browser memory limit. Reconstruct from acquired MRI and transfer your selection as a draft for review."
           >
             Refine region · {REGION_DETAIL_SPACING_MM.toFixed(2)} mm
@@ -725,7 +829,7 @@ export function SvrSegmentationEditor({
   onChange: (labels: SvrLabelVolume | null, patch?: SelectionPatch, previousData?: Uint8Array) => void;
   disabled?: boolean;
   disabledReason?: string;
-  storageError?: 'load' | 'save' | null;
+  storageError?: 'load' | 'save' | 'conflict' | null;
   retryStorage?: () => void;
   selectedVolumeMl: number;
   visualizationMode: 'anatomy' | 'overlay' | 'tumor';
@@ -740,7 +844,7 @@ export function SvrSegmentationEditor({
   selectionNotice?: ReactNode;
   children: ReactNode | ((selectionRunning: boolean) => ReactNode);
 }) {
-  const { volume, labels = null, proposeSelection, operations } = useSvrImaging();
+  const { volume, labels = null, proposeSelection, refineRegion, operations } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
   const [tool, setTool] = useState<Tool>('navigate');
   const [autoFillPreference, setAutoFill] = useState(true);
@@ -754,12 +858,27 @@ export function SvrSegmentationEditor({
   const editing = expanded !== 'volume';
   const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill, proposeSelection);
   const { getRetainedBytes, prepareHeavyOperation } = selection;
+  const refineSelection = refineRegion
+    ? () => {
+        const snapshot = selection.borrowLabels();
+        if (snapshot) refineRegion(snapshot);
+      }
+    : undefined;
   useLayoutEffect(
     () =>
-      operations.register('editor', (kind) => ({
-        retainedBytes: kind === 'selection' ? getRetainedBytes() : prepareHeavyOperation(),
-      })),
-    [operations, getRetainedBytes, prepareHeavyOperation],
+      operations.register('editor', (kind) => {
+        let retainedBytes = kind === 'selection' ? getRetainedBytes() : prepareHeavyOperation();
+        // Count only mounted panes, including the source ImageData, cached
+        // native rasters, one annotation rebuild and the visible canvas backing.
+        for (const canvas of workspaceRef.current?.querySelectorAll<HTMLCanvasElement>('canvas[data-plane]') ?? []) {
+          const axes = SLICE_AXES[canvas.dataset.plane as SvrRoiPlane];
+          const dimensions = { x: volume.dims[0], y: volume.dims[1], z: volume.dims[2] };
+          if (axes)
+            retainedBytes += dimensions[axes.column] * dimensions[axes.row] * 20 + canvas.width * canvas.height * 4;
+        }
+        return { retainedBytes };
+      }),
+    [operations, getRetainedBytes, prepareHeavyOperation, volume],
   );
   const show3D = () => {
     setTool('navigate');
@@ -933,15 +1052,24 @@ export function SvrSegmentationEditor({
                     : 'Brush-only editing. Only the tissue you paint changes. Review all three planes, then choose Done.'}
         </div>
         {editing ? (
-          <SelectionNativeDetail disabled={disabled} hasSelection={hasSelection} running={selection.status.running} />
+          <SelectionNativeDetail
+            disabled={disabled}
+            hasSelection={hasSelection}
+            running={selection.status.running}
+            onRefine={refineSelection}
+          />
         ) : null}
         {storageError ? (
           <div className="svr-selection-warning" role="alert">
             {storageError === 'load'
               ? 'Could not restore the saved selection. Editing is paused to protect it.'
-              : 'Could not save this selection. Keep this view open; your current edits remain in memory.'}{' '}
+              : storageError === 'conflict'
+                ? 'Saved data changed since this view was opened. Your unsaved edits remain visible here; reloading discards them and loads the saved version.'
+                : 'Could not save this selection. Keep this view open; your current edits remain in memory.'}{' '}
             <button type="button" onClick={retryStorage}>
-              Retry {storageError === 'load' ? 'loading' : 'saving'}
+              {storageError === 'conflict'
+                ? 'Discard edits and reload'
+                : `Retry ${storageError === 'load' ? 'loading' : 'saving'}`}
             </button>
           </div>
         ) : null}
@@ -958,6 +1086,7 @@ export function SvrSegmentationEditor({
             setCutaway={setCutaway}
             zoom={zoom}
             setZoom={setZoom}
+            onRefine={refineSelection}
           />
         ) : null}
         {selection.status.error ? (

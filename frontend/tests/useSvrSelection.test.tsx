@@ -674,6 +674,45 @@ describe('learned selection proposals share the existing editing authority', () 
 });
 
 describe('SVR selection publication and editing history', () => {
+  it('reuses one private working buffer across strokes and history, but preserves borrowed and hydrated revisions', () => {
+    const source = volume();
+    const saved: SvrLabelVolume = {
+      data: new Uint8Array(source.data.length),
+      dims: source.dims,
+      meta: SELECTION_LABEL_META,
+    };
+    saved.data[20] = 1;
+    const original = saved.data.slice();
+    const { result } = setup(source, saved);
+    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+    const working = result.current.labels!.data.buffer;
+    expect(working).not.toBe(saved.data.buffer);
+    let previous = result.current.labels!.data;
+    for (let index = 31; index < 41; index++) {
+      act(() => result.current.selection.stroke(Uint32Array.of(index), 'include'));
+      expect(result.current.labels!.data.buffer).toBe(working);
+      expect(result.current.labels!.data).not.toBe(previous);
+      expect(result.current.labels!.data[index]).toBe(1);
+      previous = result.current.labels!.data;
+    }
+    act(() => result.current.selection.travel('undo'));
+    expect(result.current.labels!.data.buffer).toBe(working);
+    expect(result.current.labels!.data[40]).toBe(0);
+    expect(result.current.selection.marks.has(40)).toBe(false);
+    act(() => result.current.selection.travel('redo'));
+    expect(result.current.labels!.data.buffer).toBe(working);
+    expect(result.current.labels!.data[40]).toBe(1);
+    expect(result.current.selection.marks.get(40)).toBe(1);
+    const borrowed = result.current.labels!.data;
+    const borrowedBytes = borrowed.slice();
+    act(() => result.current.selection.prepareHeavyOperation());
+    act(() => result.current.selection.stroke(Uint32Array.of(40), 'exclude'));
+    expect(result.current.labels!.data.buffer).not.toBe(working);
+    expect(result.current.labels!.data[40]).toBe(0);
+    expect(borrowed).toEqual(borrowedBytes);
+    expect(saved.data).toEqual(original);
+  });
+
   it('retains the actual stroke plane through automatic publication and reversible history', async () => {
     vi.useFakeTimers();
     testSelectionProposer.mockResolvedValue(proposedRegion([30, 31]));
@@ -863,25 +902,29 @@ describe('SVR selection publication and editing history', () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
-  it.each(['include', 'exclude'] as const)('reruns when any voxel in an %s stroke changes membership', async (kind) => {
-    vi.useFakeTimers();
-    const run = testSelectionProposer.mockResolvedValue(proposedRegion());
-    const { result } = setup(volume(), null, true);
-    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
-    await act(async () => vi.advanceTimersByTimeAsync(350));
-    const previousData = result.current.labels!.data;
-    const previousValues = previousData.slice();
-    const indices = kind === 'include' ? Uint32Array.of(31, 33) : Uint32Array.of(33, 31);
-    act(() => result.current.selection.stroke(indices, kind));
-    expect(result.current.labels!.data).not.toBe(previousData);
-    expect(previousData).toEqual(previousValues);
-    expect(result.current.selection.status.running).toBe(true);
-    await act(async () => vi.advanceTimersByTimeAsync(350));
-    expect(run).toHaveBeenCalledTimes(2);
-    expect([...indices].map((index) => result.current.labels!.data[index])).toEqual(
-      kind === 'include' ? [1, 1] : [0, 0],
-    );
-  });
+  it.each(['include', 'exclude'] as const)(
+    'reruns when any voxel in an %s stroke changes membership, preserving a borrowed snapshot',
+    async (kind) => {
+      vi.useFakeTimers();
+      const run = testSelectionProposer.mockResolvedValue(proposedRegion());
+      const { result } = setup(volume(), null, true);
+      act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      const previousData = result.current.labels!.data;
+      const previousValues = previousData.slice();
+      act(() => result.current.selection.prepareHeavyOperation());
+      const indices = kind === 'include' ? Uint32Array.of(31, 33) : Uint32Array.of(33, 31);
+      act(() => result.current.selection.stroke(indices, kind));
+      expect(result.current.labels!.data).not.toBe(previousData);
+      expect(previousData).toEqual(previousValues);
+      expect(result.current.selection.status.running).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(run).toHaveBeenCalledTimes(2);
+      expect([...indices].map((index) => result.current.labels!.data[index])).toEqual(
+        kind === 'include' ? [1, 1] : [0, 0],
+      );
+    },
+  );
 
   it.each(['queued', 'running'] as const)(
     'does not drop an unfinished %s first fill after an agreeing stroke',

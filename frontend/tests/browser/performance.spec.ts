@@ -2,6 +2,21 @@ import { expect, test } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import type {} from './probes';
 import { attachReceipt } from './evidence';
+import { measureSelectionEditing } from './selectionEditingWorkflow';
+
+test('sparse brush edits preserve durable history without rebuilding grayscale or copying whole masks', async ({
+  page,
+}, info) => {
+  const result = await measureSelectionEditing(page, info);
+  for (const { work } of result.measurements) {
+    expect(work.draftRasterAllocations).toBe(0);
+    expect(work.fullMaskSliceCalls).toBe(0);
+    expect(work.wholeMaskResets).toBe(0);
+    expect(work.failedSaves).toBe(0);
+    expect(work.completedSaves).toBe(1);
+    expect(work.persistedLabelBytes).toBeLessThan(result.initial.labelBytes / 4);
+  }
+});
 
 test('coarse pose-only workers preserve physical evidence without returning a discarded image', async ({
   page,

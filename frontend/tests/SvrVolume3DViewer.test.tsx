@@ -7,6 +7,9 @@ import type * as SegmentationEditor from '../src/components/SvrSegmentationEdito
 import { createSvrImagingOperations, SvrImagingContext, useSvrImaging } from '../src/components/svrImagingContext';
 import { useSvrNativePlane } from '../src/hooks/useSvrNativePlane';
 import type { SvrLabelVolume, SvrNativeSource, SvrVolume } from '../src/types/svr';
+import type { VolumeSegmentationRow } from '../src/db/schema';
+import { DatasetReplacedError } from '../src/db/db';
+import { SavedSelectionChangedError } from '../src/db/volumeSegmentations';
 import type { DecodedFrame } from '../src/utils/decodedFrame';
 import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../src/utils/localApi';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
@@ -101,11 +104,18 @@ vi.mock('../src/hooks/useOnnxTumorSession', () => ({
   },
 }));
 
-vi.mock('../src/utils/localApi', () => ({
-  deleteVolumeSegmentation: vi.fn(async () => undefined),
-  getVolumeSegmentation: vi.fn(async () => null),
-  saveVolumeSegmentation: vi.fn(async () => undefined),
-}));
+vi.mock('../src/utils/localApi', () => {
+  const getVolumeSegmentation = vi.fn<(_key: string) => Promise<VolumeSegmentationRow | null>>(async () => null);
+  return {
+    deleteVolumeSegmentation: vi.fn(async () => undefined),
+    getVolumeSegmentation,
+    getVolumeSegmentationSnapshot: async (key: string) => {
+      const record = await getVolumeSegmentation(key);
+      return { record, revision: record ? 'saved-revision' : null, datasetToken: 'test-dataset-token' };
+    },
+    saveVolumeSegmentation: vi.fn(async () => undefined),
+  };
+});
 
 const observedVolume: SvrVolume = {
   data: new Float32Array([0.5, 0, 0.7, 0]),
@@ -429,6 +439,7 @@ function open3DSettings(section?: string) {
   if (section) fireEvent.click(within(screen.getByRole('complementary', { name: '3D settings' })).getByText(section));
 }
 function recordSlices() {
+  let imageAllocations = 0;
   const contexts = new Map<
     HTMLCanvasElement,
     {
@@ -444,8 +455,10 @@ function recordSlices() {
         this,
         new Proxy(
           {
-            createImageData: (width: number, height: number) =>
-              ({ width, height, data: new Uint8ClampedArray(width * height * 4) }) as ImageData,
+            createImageData: (width: number, height: number) => {
+              imageAllocations++;
+              return { width, height, data: new Uint8ClampedArray(width * height * 4) } as ImageData;
+            },
             putImageData: vi.fn(),
             drawImage: vi.fn(),
           },
@@ -454,14 +467,24 @@ function recordSlices() {
       );
     return contexts.get(this);
   } as typeof HTMLCanvasElement.prototype.getContext);
-  return (plane: string) => {
-    const canvas = screen.getByRole('application', {
-      name: new RegExp(plane + ' reconstructed slice', 'i'),
-    }) as HTMLCanvasElement;
-    const draw = contexts.get(canvas)?.drawImage.mock.lastCall;
-    const image = contexts.get(draw?.[0])?.putImageData.mock.lastCall?.[0] as ImageData;
-    return { canvas, image, width: draw?.[3] as number, height: draw?.[4] as number };
-  };
+  return Object.assign(
+    (plane: string) => {
+      const canvas = screen.getByRole('application', {
+        name: new RegExp(plane + ' reconstructed slice', 'i'),
+      }) as HTMLCanvasElement;
+      const draw = contexts.get(canvas)?.drawImage.mock.lastCall;
+      const image = contexts.get(draw?.[0])?.putImageData.mock.lastCall?.[0] as ImageData;
+      return {
+        canvas,
+        image,
+        width: draw?.[3] as number,
+        height: draw?.[4] as number,
+        drawImage: contexts.get(canvas)!.drawImage,
+        sourceWrites: contexts.get(draw?.[0])!.putImageData,
+      };
+    },
+    { imageAllocations: () => imageAllocations },
+  );
 }
 beforeEach(() => {
   testSelectionProposer.mockReset();
@@ -2438,6 +2461,44 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(volume.data).toEqual(source);
   });
 
+  it('coalesces a long brush draft to one frame without rebuilding grayscale or copying its accumulated raster', async () => {
+    const read = recordSlices();
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
+    openSelectionEditor();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+    setAutoFill(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const { canvas, drawImage, sourceWrites } = read('axial');
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 320));
+    const allocations = read.imageAllocations();
+    const grayWrites = sourceWrites.mock.calls.length;
+    const draws = drawImage.mock.calls.length;
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 1, isPrimary: true, clientX: 120, clientY: 160 });
+    for (let x = 124; x <= 280; x += 4) fireEvent.pointerMove(canvas, { pointerId: 1, clientX: x, clientY: 160 });
+    expect(frames.size).toBe(1);
+    expect(drawImage).toHaveBeenCalledTimes(draws);
+    expect(read.imageAllocations()).toBe(allocations);
+    const frame = frames.values().next().value!;
+    frames.clear();
+    act(() => frame(performance.now()));
+    expect(drawImage.mock.calls.length).toBe(draws + 1); // one retained native-resolution composite
+    expect(sourceWrites).toHaveBeenCalledTimes(grayWrites);
+    expect(read.imageAllocations()).toBe(allocations);
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 280, clientY: 160 });
+    expect(sourceWrites).toHaveBeenCalledTimes(grayWrites);
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![1]!.patch!.indices.length).toBeGreaterThan(1);
+    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].seeds!.foreground.length).toBeGreaterThan(1);
+  });
+
   it('does not erase native slice texture by reducing a large plane to a fixed-size inspector', () => {
     const read = recordSlices();
     const volume = {
@@ -2544,7 +2605,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(saveVolumeSegmentation).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry loading' }));
     await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
-    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall?.[0].labels).toBe(labels);
+    expect(saveVolumeSegmentation).not.toHaveBeenCalled();
   });
 
   it('preserves edits through a failed save and retries the same selection', async () => {
@@ -2561,6 +2622,24 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument());
     expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(unsaved);
   });
+
+  it.each([SavedSelectionChangedError, DatasetReplacedError])(
+    'keeps unsaved edits visible and offers explicit discard/reload after %s',
+    async (Conflict) => {
+      vi.mocked(saveVolumeSegmentation).mockRejectedValueOnce(new Conflict());
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      render(<SvrVolume3DViewer volume={editingVolume()} volumeIdentity={identity} />);
+      openSelectionEditor();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Add' })).toBeEnabled());
+      setAutoFill(false);
+      paint(5, 6);
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Discard edits and reload' })).toBeInTheDocument());
+      expect(screen.getByText(/unsaved edits remain visible/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Retry saving' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Undo selection edit' })).toBeEnabled();
+      expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels[(6 * 12 + 6) * 12 + 5]).toBe(1);
+    },
+  );
 
   it('hydrates a new same-key volume before any write and ignores late hydration from another volume', async () => {
     const first = editingVolume(),
@@ -2590,7 +2669,8 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     await act(async () =>
       load.resolve({ volumeKey: 'old', dims: first.dims, labels: new Uint8Array(first.data.length), updatedAt: 0 }),
     );
-    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(labels);
+    expect(saveVolumeSegmentation).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
   });
 
   it('finishes a submitted save after navigation without silently dropping the last edit', async () => {
@@ -2629,6 +2709,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     const saved = data.slice();
     saved[31] = 0;
     saved[36] = 1;
+    vi.mocked(saveVolumeSegmentation).mockClear();
     vi.mocked(getVolumeSegmentation).mockResolvedValueOnce({
       volumeKey: 'saved',
       dims: volume.dims,
@@ -2639,7 +2720,7 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     });
     render(<SvrVolume3DViewer volume={volume} initialSelection={initialSelection} volumeIdentity={identity} />);
     await waitFor(() => expect(screen.getByText(/Reviewed selection ·/)).toBeInTheDocument());
-    expect(vi.mocked(saveVolumeSegmentation).mock.lastCall![0].labels).toBe(saved);
+    expect(saveVolumeSegmentation).not.toHaveBeenCalled();
   });
 
   it('keeps external labels read-only, sanitizes missing support, and withholds a stale reviewed volume', async () => {

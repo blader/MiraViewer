@@ -33,7 +33,9 @@ async function resetDb() {
   });
 }
 
-async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSegmentationRow } = {}) {
+async function seedSnapshot(
+  options: { model?: boolean; segmentation?: VolumeSegmentationRow; chunked?: boolean } = {},
+) {
   const db = await getDB();
   await db.put('studies', {
     studyInstanceUid: 'study-1',
@@ -60,7 +62,10 @@ async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSeg
     fileBlob: new Blob([new Uint8Array([1, 2, 3])]),
   });
   if (options.model) await putModelBlob('synthetic-model', new Blob([new Uint8Array([5, 6, 7])]));
-  if (options.segmentation) await db.put('volume_segmentations', options.segmentation);
+  if (options.segmentation) {
+    if (options.chunked) await saveVolumeSegmentation(options.segmentation);
+    else await db.put('volume_segmentations', options.segmentation);
+  }
 
   await initializeComparisonState(db);
   const blob = await exportStudiesToZip(['study-1']);
@@ -283,6 +288,20 @@ describe('exportBackup', () => {
       lastStroke: { plane: 'axial', slice: 3 },
     });
     expect(structuredClone(saved)).toStrictEqual(before);
+  });
+
+  it('round trips chunked selections through the compatible backup format and removes replaced chunks on restore', async () => {
+    const saved = { ...selectionRow(), patientKey: 'P1' };
+    const { archive, manifest } = await seedSnapshot({ segmentation: saved, chunked: true, model: true });
+    expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('storage');
+    expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('revision');
+    await restoreSnapshot(archive.zip, manifest);
+    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    await saveVolumeSegmentation({ ...saved, labels: new Uint8Array(saved.labels.length).fill(1) });
+    expect(await (await getDB()).count('volume_segmentation_chunks')).toBeGreaterThan(0);
+    await restoreSnapshot(archive.zip, manifest);
+    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    expect(await (await getDB()).count('volume_segmentation_chunks')).toBe(0);
   });
 
   it.each(['axial', 'coronal', 'sagittal', 'absent'] as const)(

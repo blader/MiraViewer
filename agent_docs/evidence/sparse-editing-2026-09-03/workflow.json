@@ -1,0 +1,115 @@
+{
+  "sourceBefore": {
+    "head": "e84e208264431164eeeb627c544fc38e62db1155",
+    "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+    "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "e84e208264431164eeeb627c544fc38e62db1155",
+    "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+    "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "buildSource": {
+    "head": "e84e208264431164eeeb627c544fc38e62db1155",
+    "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+    "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T05:41:45.251Z",
+    "fixture": "synthetic only"
+  },
+  "startedAt": "2026-09-04T05:45:17.451Z",
+  "finishedAt": "2026-09-04T05:46:03.478Z",
+  "exitCode": 0,
+  "cleanup": "CLOSED",
+  "remainingOwnedPidCount": 0,
+  "port43134": "free",
+  "harness": [
+    {
+      "path": "frontend/tmp/sparse-editing.config.ts",
+      "sha256": "64d8de2e4ab96dbc21421c815dc3a7e894de2cd80c539ce73dd60f6b965b347d"
+    },
+    {
+      "path": "frontend/tmp/run-sparse-editing.mjs",
+      "sha256": "0fc9929362b5f6406bb9e7cd182da60ed88da24f275fe906e27cdfc5c2ebf036"
+    }
+  ],
+  "scope": "Six normal production workflows, synthetic inputs only, isolated headed Chrome. Functional and durable-state checks; no anatomical or aesthetic sign-off.",
+  "tests": [
+    {
+      "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 12427,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 6244,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1865,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 2504,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 5011,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 3654,
+          "errors": []
+        }
+      ]
+    }
+  ]
+}

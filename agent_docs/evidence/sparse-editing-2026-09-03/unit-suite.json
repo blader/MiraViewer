@@ -1,0 +1,41 @@
+{
+  "startedAt": "2026-09-04T05:46:28.418Z",
+  "finishedAt": "2026-09-04T05:48:02.583Z",
+  "sourceBefore": {
+    "head": "e84e208264431164eeeb627c544fc38e62db1155",
+    "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+    "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "e84e208264431164eeeb627c544fc38e62db1155",
+    "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+    "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "command": [
+    "npm",
+    "run",
+    "test",
+    "--",
+    "--maxWorkers=2",
+    "--reporter=json",
+    "--outputFile=tmp/sparse-editing-unit-02.json"
+  ],
+  "node": "v22.22.0",
+  "privateOptIns": [],
+  "exitCode": 0,
+  "numTotalTests": 3237,
+  "numPassedTests": 3183,
+  "numFailedTests": 0,
+  "numPendingTests": 54,
+  "numTodoTests": 0,
+  "numTotalTestSuites": 415,
+  "numPassedTestSuites": 415,
+  "numFailedTestSuites": 0,
+  "files": 173,
+  "skippedFiles": 0,
+  "success": true,
+  "scope": "Complete default Vitest suite with two workers. No private fixture opt-ins. Fake IndexedDB/jsdom tests are not browser, model or anatomical admission."
+}

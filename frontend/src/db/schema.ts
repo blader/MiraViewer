@@ -8,6 +8,7 @@ import type {
   SvrSourceProvenance,
 } from '../types/svr';
 import type { PanelSettings } from '../types/api';
+import type { DBSchema } from 'idb';
 
 export interface DicomStudy {
   studyInstanceUid: string;
@@ -324,6 +325,18 @@ export interface VolumeSegmentationRow {
   updatedAt: number;
 }
 
+/** Old dense rows remain readable and migrate atomically on their next edit. */
+export type StoredVolumeSegmentationRow =
+  | VolumeSegmentationRow
+  | (Omit<VolumeSegmentationRow, 'labels'> & {
+      storage: 'chunks-v1';
+      revision: string;
+      labelBytes: number;
+      chunkCount: number;
+    });
+
+export type VolumeSegmentationChunk = { volumeKey: string; offset: number; data: Uint8Array };
+
 export interface DerivedAlignmentFramePresentation {
   displayTone?: AlignmentDisplayTone;
   pixels: Float32Array;
@@ -369,7 +382,7 @@ export interface DerivedAlignmentFrameRow extends DerivedAlignmentFramePresentat
   createdAt: number;
 }
 
-export interface MiraDB {
+export interface MiraDB extends DBSchema {
   studies: {
     key: string; // studyInstanceUid
     value: DicomStudy;
@@ -423,8 +436,13 @@ export interface MiraDB {
 
   volume_segmentations: {
     key: string;
-    value: VolumeSegmentationRow;
+    value: StoredVolumeSegmentationRow;
     indexes: { 'by-study': string };
+  };
+
+  volume_segmentation_chunks: {
+    key: [string, number];
+    value: VolumeSegmentationChunk;
   };
 
   derived_alignment_frames: {

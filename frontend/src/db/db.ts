@@ -4,7 +4,7 @@ import type { MiraDB } from './schema';
 import { initializeComparisonState } from './comparisonState';
 
 export const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 export const SELECTED_PATIENT_STATE_KEY = 'selected_patient_key';
 export const SELECTED_PATIENT_STUDY_STATE_KEY = 'selected_patient_study_uid';
 export const DATASET_REVISION_STATE_KEY = 'dataset_revision';
@@ -171,6 +171,9 @@ export function getDB() {
           if (!volumeStore.indexNames.contains('by-study')) {
             volumeStore.createIndex('by-study', 'studyUid');
           }
+        }
+        if (!db.objectStoreNames.contains('volume_segmentation_chunks')) {
+          db.createObjectStore('volume_segmentation_chunks', { keyPath: ['volumeKey', 'offset'] });
         }
 
         {

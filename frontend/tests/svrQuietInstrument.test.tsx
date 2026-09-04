@@ -23,7 +23,11 @@ vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.manifests,
   getSortedSopInstanceUidsForSeries: vi.fn(async () => []),
   deleteVolumeSegmentation: vi.fn(async () => undefined),
-  getVolumeSegmentation: vi.fn(async () => null),
+  getVolumeSegmentationSnapshot: vi.fn(async () => ({
+    record: null,
+    revision: null,
+    datasetToken: 'synthetic-dataset',
+  })),
   saveVolumeSegmentation: vi.fn(async () => undefined),
 }));
 
