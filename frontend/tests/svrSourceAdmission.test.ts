@@ -122,7 +122,11 @@ async function seedSeries(options: SourceFixture): Promise<SvrSelectedSeries> {
       physicalSlicePosition: options.unreliableGeometry ? undefined : slicePositionMm,
       rows,
       columns,
-      imagePositionPatient: coronal ? `0\\${-slicePositionMm}\\0` : `0\\0\\${slicePositionMm}`,
+      imagePositionPatient: options.unreliableGeometry
+        ? undefined
+        : coronal
+          ? `0\\${-slicePositionMm}\\0`
+          : `0\\0\\${slicePositionMm}`,
       imageOrientationPatient: coronal ? '1\\0\\0\\0\\0\\1' : '1\\0\\0\\0\\1\\0',
       pixelSpacing: (options.pixelSpacingMm ?? [1, 1]).join('\\'),
       sliceThickness: options.sliceThicknessMm ?? 1,

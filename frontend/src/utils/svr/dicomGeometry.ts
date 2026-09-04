@@ -8,10 +8,10 @@ function parseMultiNumberString(value: string): number[] {
   // Multi-valued DICOM tags are typically separated by backslashes.
   // Some exporters use commas/spaces; accept those as well.
   return value
-    .split(/[\\,\s]+/)
-    .filter(Boolean)
-    .map((s) => Number.parseFloat(s))
-    .filter((n) => Number.isFinite(n));
+    .trim()
+    .split(value.includes('\\') ? /\\/ : value.includes(',') ? /,/ : /\s+/)
+    .map((value) => value.trim())
+    .map((value) => (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?$/.test(value) ? Number(value) : NaN));
 }
 
 export type SliceAxes = {
@@ -23,7 +23,7 @@ export type SliceAxes = {
 export function parseImageOrientationPatient(iop: string | undefined): SliceAxes | null {
   if (!iop) return null;
   const nums = parseMultiNumberString(iop);
-  if (nums.length < 6) return null;
+  if (nums.length !== 6 || !nums.every(Number.isFinite)) return null;
 
   const rawRow = v3(nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0);
   const rawCol = v3(nums[3] ?? 0, nums[4] ?? 0, nums[5] ?? 0);
@@ -44,7 +44,7 @@ export function parseImageOrientationPatient(iop: string | undefined): SliceAxes
 export function parseImagePositionPatient(ipp: string | undefined): Vec3 | null {
   if (!ipp) return null;
   const nums = parseMultiNumberString(ipp);
-  if (nums.length < 3) return null;
+  if (nums.length !== 3 || !nums.every(Number.isFinite)) return null;
   return v3(nums[0] ?? 0, nums[1] ?? 0, nums[2] ?? 0);
 }
 
@@ -53,7 +53,7 @@ export function parsePixelSpacingMm(
 ): { rowSpacingMm: number; colSpacingMm: number } | null {
   if (!pixelSpacing) return null;
   const nums = parseMultiNumberString(pixelSpacing);
-  if (nums.length < 2) return null;
+  if (nums.length !== 2 || !nums.every(Number.isFinite)) return null;
 
   const rowSpacingMm = nums[0] ?? NaN;
   const colSpacingMm = nums[1] ?? NaN;
@@ -107,6 +107,8 @@ export function getSliceGeometryFromInstance(
   if (!axes || !ipp || !spacing) {
     throw new Error('Missing spatial metadata (ImagePositionPatient / ImageOrientationPatient / PixelSpacing)');
   }
+  if ([instance.rows, instance.columns].some((size) => !Number.isSafeInteger(size) || size < 1))
+    throw new Error('The source stack has invalid native pixel dimensions.');
 
   return {
     rows: instance.rows,

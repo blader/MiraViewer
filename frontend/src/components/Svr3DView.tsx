@@ -18,8 +18,7 @@ import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { useSvrReconstruction } from '../hooks/useSvrReconstruction';
-import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries } from '../utils/localApi';
-import type { SeriesFrameManifest } from '../utils/localApi';
+import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries, type SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
 import { estimateSvrSourceMemory } from '../utils/svr/sourceMemory';
@@ -36,7 +35,6 @@ import { createSvrImagingOperations, SvrImagingContext } from './svrImagingConte
 import { regionalRefinementParameters, selectionFocusRoi } from '../utils/svr/refineRegion';
 import {
   classifySvrAcquisitions,
-  hydrateSvrAcquisitionMetadata,
   nativeReferenceSources,
   type SvrAcquisitionClassification,
 } from '../utils/svr/acquisitionProvenance';
@@ -909,14 +907,22 @@ function useSvrReconstructionWorkspace({
     const controller = new AbortController();
     setSourceReadiness(null);
 
-    void Promise.all(selectedSeries.map((series) => getSeriesFrameManifest(series.seriesUid)))
-      .then((manifests) =>
-        hydrateSvrAcquisitionMetadata(manifests, {
-          signal: controller.signal,
-          datasetRevision: volumeIdentity?.datasetRevision,
-          selectedPatientKey: volumeIdentity?.patientKey,
-        }),
-      )
+    // Legacy preparation reads at most four bounded headers at once. Keep that
+    // operation-wide bound when several acquisitions contribute to this volume.
+    void (async () => {
+      const manifests: SeriesFrameManifest[] = [];
+      for (const series of selectedSeries) {
+        if (controller.signal.aborted) break;
+        manifests.push(
+          await getSeriesFrameManifest(series.seriesUid, {
+            signal: controller.signal,
+            datasetRevision: volumeIdentity?.datasetRevision,
+            selectedPatientKey: volumeIdentity?.patientKey,
+          }),
+        );
+      }
+      return manifests;
+    })()
       .then((manifests) => {
         if (!current) return;
 

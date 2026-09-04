@@ -22,6 +22,8 @@ import type {
 import type { ComparisonData, SequenceCombo, SeriesRef } from '../types/api';
 import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
 import { countSeriesImages } from '../db/comparisonState';
+import { hydrateDicomMetadata, type MetadataHydrationOptions } from '../db/instanceMetadata';
+import { DICOM_METADATA_VERSION } from '../services/dicomMetadata';
 import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
 import { dot } from './svr/vec3';
@@ -374,16 +376,37 @@ export type SeriesFrameManifest = {
   frames: Array<Omit<DicomInstance, 'fileBlob'> & { dicomByteLength?: number }>;
 };
 
-export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesFrameManifest> {
+export async function getSeriesFrameManifest(
+  seriesUid: string,
+  options: MetadataHydrationOptions = {},
+): Promise<SeriesFrameManifest> {
+  if (options.signal?.aborted) throw new DOMException('DICOM metadata loading canceled.', 'AbortError');
   const db = await getDB();
-  const transaction = db.transaction(['series', 'studies', 'instances'], 'readonly');
-  const [series, studies] = await Promise.all([
+  const transaction = db.transaction(['series', 'studies', 'instances', 'app_state'], 'readonly');
+  const [series, studies, revision, token, selected] = await Promise.all([
     transaction.objectStore('series').get(seriesUid),
     transaction.objectStore('studies').getAll(),
+    transaction.objectStore('app_state').get(DATASET_REVISION_STATE_KEY),
+    transaction.objectStore('app_state').get(DATASET_TOKEN_STATE_KEY),
+    transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
   ]);
   if (!series) throw new Error('Series not found');
   const study = studies.find((candidate) => candidate.studyInstanceUid === series.studyInstanceUid);
   if (!study) throw new Error('Series study not found');
+  const patientKey = getPatientIdentityKeys(studies).get(study.studyInstanceUid)!;
+  const datasetRevision = typeof revision?.value === 'number' ? revision.value : 0;
+  const datasetToken = typeof token?.value === 'string' ? token.value : undefined;
+  const selectedPatientKey = typeof selected?.value === 'string' ? selected.value : null;
+  if (
+    (options.datasetRevision !== undefined && options.datasetRevision !== datasetRevision) ||
+    (options.datasetToken !== undefined && options.datasetToken !== datasetToken) ||
+    (options.selectedPatientKey !== undefined &&
+      (options.selectedPatientKey !== selectedPatientKey ||
+        (selectedPatientKey !== null && selectedPatientKey !== patientKey)))
+  )
+    throw new Error(
+      'The currently selected patient or MRI dataset changed while loading metadata. Refresh the examination.',
+    );
 
   const range = IDBKeyRange.bound(
     [seriesUid, -Number.MAX_SAFE_INTEGER, ''],
@@ -404,14 +427,34 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
   let cursor = await orderedIndex.openCursor(range);
   while (cursor) {
     const { fileBlob, ...metadata } = cursor.value;
+    if (metadata.seriesInstanceUid !== seriesUid || metadata.studyInstanceUid !== study.studyInstanceUid)
+      throw new Error('A stored frame does not belong to its admitted series and examination.');
     // Size metadata only: no Blob decoding, extra read or persisted schema field.
     frames.push({ ...metadata, dicomByteLength: fileBlob?.size });
     orderedUids.push(metadata.sopInstanceUid);
     cursor = await cursor.continue();
   }
   await transaction.done;
+  if (options.signal?.aborted) throw new DOMException('DICOM metadata loading canceled.', 'AbortError');
   if (frames.length === 0) throw new Error('No instances for series');
+  if (frames.some((frame) => frame.metadataVersion !== DICOM_METADATA_VERSION)) {
+    const scope = { ...options, datasetRevision, datasetToken, selectedPatientKey };
+    await hydrateDicomMetadata(
+      {
+        seriesUid,
+        studyUid: study.studyInstanceUid,
+        patientKey,
+        frames,
+      },
+      scope,
+    );
+    // A completed batch is durable. Re-read the final manifest and ordering in
+    // one snapshot, rejecting replacement/import during header I/O.
+    return getSeriesFrameManifest(seriesUid, scope);
+  }
   cacheSeriesInstanceOrder(seriesUid, orderedUids);
+  const sourceFrameUid =
+    series.frameOfReferenceUid || frames.find((frame) => frame.frameOfReferenceUid)?.frameOfReferenceUid;
   let sortedPositions: number[] = [];
   let geometryReliable = frames.every(
     (frame) => typeof frame.physicalSlicePosition === 'number' && Number.isFinite(frame.physicalSlicePosition),
@@ -429,9 +472,7 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
           dot(geometry.rowDir, first.rowDir) < 0.999 ||
           dot(geometry.colDir, first.colDir) < 0.999 ||
           dot(geometry.normalDir, first.normalDir) < 0.999 ||
-          (series.frameOfReferenceUid &&
-            frame.frameOfReferenceUid &&
-            series.frameOfReferenceUid !== frame.frameOfReferenceUid)
+          (sourceFrameUid && frame.frameOfReferenceUid && sourceFrameUid !== frame.frameOfReferenceUid)
         ) {
           geometryReliable = false;
           break;
@@ -457,8 +498,10 @@ export async function getSeriesFrameManifest(seriesUid: string): Promise<SeriesF
   return {
     seriesUid,
     studyUid: study.studyInstanceUid,
-    patientKey: getPatientIdentityKeys(studies).get(study.studyInstanceUid)!,
-    frameOfReferenceUid: series.frameOfReferenceUid,
+    patientKey,
+    frameOfReferenceUid:
+      series.frameOfReferenceUid ||
+      (frames.every((frame) => frame.frameOfReferenceUid === sourceFrameUid) ? sourceFrameUid : undefined),
     ordering: geometryReliable ? 'physical' : 'instance-number',
     geometryReliable,
     sliceSpacingMm,

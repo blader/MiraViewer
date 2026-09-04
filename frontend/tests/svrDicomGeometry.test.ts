@@ -16,6 +16,17 @@ describe('svr/dicomGeometry', () => {
     expect(parseImagePositionPatient('1\\2\\3')).toEqual({ x: 1, y: 2, z: 3 });
   });
 
+  it('rejects malformed or extra geometry components instead of dropping them', () => {
+    expect(parseImagePositionPatient('1junk\\2\\3')).toBeNull();
+    expect(parseImagePositionPatient('0x1\\2\\3')).toBeNull();
+    expect(parseImagePositionPatient('1\\ \\2\\3')).toBeNull();
+    expect(parseImagePositionPatient('1\\\\2\\3')).toBeNull();
+    expect(parseImagePositionPatient('1\\NaN\\2\\3')).toBeNull();
+    expect(parseImagePositionPatient('1\\2\\3\\4')).toBeNull();
+    expect(parsePixelSpacingMm('0.5\\Infinity\\0.6')).toBeNull();
+    expect(parseImageOrientationPatient('1\\0\\bad\\0\\0\\1\\0')).toBeNull();
+  });
+
   it('parses ImageOrientationPatient and computes a normal', () => {
     const axes = parseImageOrientationPatient('1\\0\\0\\0\\1\\0');
     expect(axes).not.toBeNull();

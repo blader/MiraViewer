@@ -716,6 +716,87 @@ describe('localApi', () => {
     expect(exportStudyTransactions).toHaveLength(1);
   });
 
+  it('rejects conflicting frame ownership before enriching legacy metadata', async () => {
+    await seedAcquisition('legacy-study', 'legacy-series');
+    const db = await getDB();
+    const original = (await db.get('instances', 'legacy-series.0'))!;
+    const conflicting = { ...original, studyInstanceUid: 'another-study' };
+    await db.put('instances', conflicting);
+    await expect(getSeriesFrameManifest('legacy-series')).rejects.toThrow(/does not belong/);
+    expect((await db.get('instances', original.sopInstanceUid))?.metadataVersion).toBeUndefined();
+  });
+
+  it.each([true, false])(
+    'rejects mixed frame identities when the first identity is present: %s',
+    async (firstPresent) => {
+      await seedAcquisition('mixed-study', 'mixed-series', 3);
+      const db = await getDB();
+      for (let index = 0; index < 3; index++) {
+        const frame = (await db.get('instances', `mixed-series.${index}`))!;
+        await db.put('instances', {
+          ...frame,
+          metadataVersion: 1,
+          physicalSlicePosition: index,
+          imagePositionPatient: `0\\0\\${index}`,
+          imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+          pixelSpacing: '1\\1',
+          frameOfReferenceUid:
+            index === 0 && !firstPresent ? undefined : index === 2 ? 'foreign-frame' : 'source-frame',
+        });
+      }
+      const manifest = await getSeriesFrameManifest('mixed-series');
+      expect(manifest.geometryReliable).toBe(false);
+      expect(manifest.frameOfReferenceUid).toBeUndefined();
+    },
+  );
+
+  it('recovers legacy physical ordering without replacing source bytes or saved work', async () => {
+    await seedAcquisition('legacy-study', 'legacy-series', 3);
+    const db = await getDB();
+    const beforeState = await db.getAll('app_state');
+    const { owner } = await selectedSettings();
+    await savePanelSettings(owner, { ...DEFAULT_PANEL_SETTINGS, zoom: 2.5 });
+    const beforeSettings = await db.getAll('panel_settings');
+    for (let index = 0; index < 3; index++) {
+      const source = (await db.get('instances', `legacy-series.${index}`))!;
+      await db.put('instances', {
+        ...source,
+        instanceNumber: 3 - index,
+        frameOfReferenceUid: 'legacy-frame',
+        imageOrientationPatient: '1\\0\\0\\0\\1\\0',
+        imagePositionPatient: `0\\0\\${index * 2}`,
+        pixelSpacing: '0.5\\0.5',
+        acquisitionMetadata: {
+          version: 1,
+          imageType: ['ORIGINAL', 'PRIMARY'],
+          sourceSopInstanceUids: [],
+          derivationSopInstanceUids: [],
+        },
+        fileBlob: new NodeBlob([Uint8Array.of(index, 99)]),
+      });
+    }
+    const reads = vi.spyOn(NodeBlob.prototype, 'arrayBuffer');
+    const manifest = await getSeriesFrameManifest('legacy-series');
+    expect(manifest.geometryReliable).toBe(true);
+    expect(manifest.ordering).toBe('physical');
+    expect(manifest.frames.map((frame) => frame.sopInstanceUid)).toEqual([
+      'legacy-series.0',
+      'legacy-series.1',
+      'legacy-series.2',
+    ]);
+    expect(manifest.sliceSpacingMm).toBe(2);
+    expect(manifest.frameOfReferenceUid).toBe('legacy-frame');
+    expect(reads).not.toHaveBeenCalled();
+    expect(await getImageIdForInstance('legacy-series', 0)).toBe('miradb:legacy-series.0');
+    for (let index = 0; index < 3; index++) {
+      const stored = (await db.get('instances', `legacy-series.${index}`))!;
+      expect(stored.physicalSlicePosition).toBe(index * 2);
+      expect(new Uint8Array(await stored.fileBlob.arrayBuffer())).toEqual(Uint8Array.of(index, 99));
+    }
+    expect(await db.getAll('panel_settings')).toEqual(beforeSettings);
+    expect(await db.getAll('app_state')).toEqual(beforeState);
+  });
+
   it('reads a complete ordered frame manifest through one IndexedDB snapshot transaction', async () => {
     const db = await getDB();
     await db.put('studies', {
@@ -742,6 +823,7 @@ describe('localApi', () => {
         studyInstanceUid: 'manifest-study',
         instanceNumber: 24 - index,
         physicalSlicePosition: index,
+        metadataVersion: 1,
         frameOfReferenceUid: 'synthetic-frame',
         imageOrientationPatient: '1\\0\\0\\0\\1\\0',
         imagePositionPatient: `0\\0\\${index}`,

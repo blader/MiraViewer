@@ -308,6 +308,20 @@ describe('UploadModal', () => {
     expect(onUploadComplete).not.toHaveBeenCalled();
   });
 
+  it('refreshes repaired existing metadata without claiming new images were imported', async () => {
+    const onUploadComplete = vi.fn();
+    vi.mocked(processFiles).mockResolvedValue(
+      makeSummary({ total: 2, ingested: 0, duplicates: 2, metadataUpdated: 1 }),
+    );
+    render(<UploadModal onClose={vi.fn()} onUploadComplete={onUploadComplete} />);
+    selectFiles([imageFile('a.dcm'), imageFile('b.dcm')]);
+    fireEvent.click(screen.getByRole('button', { name: 'Import scans' }));
+    await waitFor(() => expect(screen.getByText('Existing scan metadata updated')).toBeInTheDocument());
+    expect(screen.getByText(/original images and saved work kept/)).toBeInTheDocument();
+    expect(screen.getByText('2 images were already stored.')).toBeInTheDocument();
+    await waitFor(() => expect(onUploadComplete).toHaveBeenCalledOnce());
+  });
+
   it('keeps partial-import errors and committed counts visible', async () => {
     vi.mocked(processFiles).mockResolvedValue(
       makeSummary({ total: 3, ingested: 2, errors: 1, errorSamples: ['One image could not be decoded.'] }),

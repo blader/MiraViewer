@@ -18,11 +18,7 @@ import type { SliceGeometry } from './dicomGeometry';
 import { downsampledSliceOriginMm, getSliceGeometryFromInstance } from './dicomGeometry';
 import { computeSvrDownsampleSize } from './downsample';
 import { filterSvrManifestFramesForRoi, getSvrSourceCropWindow } from './sliceRoiCrop';
-import {
-  classifySvrAcquisitions,
-  hydrateSvrAcquisitionMetadata,
-  nativeReferenceSources,
-} from './acquisitionProvenance';
+import { classifySvrAcquisitions, nativeReferenceSources } from './acquisitionProvenance';
 import { assembleNativeVolume, nativePlaneMemoryBytes, planNativeVolume } from './nativeVolume';
 import { IDENTITY_PATIENT_TRANSFORM, snapshotPatientTransform } from './volumeGeometry';
 import { dot } from './vec3';
@@ -51,6 +47,7 @@ type AdmittedSvrSeries = {
 async function admitSvrSeries(
   selectedSeries: SvrSelectedSeries[],
   selectedPatientKey: string | null,
+  datasetRevision: number,
   signal?: AbortSignal,
 ): Promise<AdmittedSvrSeries[]> {
   const admitted: AdmittedSvrSeries[] = [];
@@ -69,7 +66,7 @@ async function admitSvrSeries(
     }
     seenSeries.add(series.seriesUid);
 
-    const manifest = await getSeriesFrameManifest(series.seriesUid);
+    const manifest = await getSeriesFrameManifest(series.seriesUid, { signal, datasetRevision, selectedPatientKey });
     if (!manifest.patientKey || (referencePatient && manifest.patientKey !== referencePatient)) {
       throw new Error('SVR source series must belong to the same patient');
     }
@@ -572,14 +569,8 @@ export async function reconstructVolumeMultiPlane(params: {
   onProgress?.({ phase: 'loading', current: 0, total: 100, message: 'Validating source examinations…' });
 
   const [datasetRevision, selectedPatientKey] = await Promise.all([getDatasetRevision(), getSelectedPatientKey()]);
-  const canonicalSeries = await admitSvrSeries(selectedSeries, selectedPatientKey, signal);
-  const manifests = await hydrateSvrAcquisitionMetadata(
-    canonicalSeries.map((source) => source.manifest),
-    { signal, datasetRevision, selectedPatientKey },
-  );
-  canonicalSeries.forEach((source, index) => {
-    source.manifest = manifests[index]!;
-  });
+  const canonicalSeries = await admitSvrSeries(selectedSeries, selectedPatientKey, datasetRevision, signal);
+  const manifests = canonicalSeries.map((source) => source.manifest);
   await assertSvrIdentityUnchanged(datasetRevision, selectedPatientKey, 'while validating SVR sources');
   const classification = classifySvrAcquisitions(manifests);
   if (classification.mode === 'conflicting') throw new Error(classification.explanation);

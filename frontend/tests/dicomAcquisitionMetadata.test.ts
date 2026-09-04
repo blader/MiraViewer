@@ -3,9 +3,9 @@ import dicomParser from 'dicom-parser';
 import type { DicomInstance } from '../src/db/schema';
 import {
   extractDicomAcquisitionMetadata,
-  MAX_ACQUISITION_HEADER_BYTES,
-  readDicomAcquisitionMetadata,
-} from '../src/services/dicomAcquisitionMetadata';
+  MAX_DICOM_HEADER_BYTES,
+  readDicomInstanceMetadata,
+} from '../src/services/dicomMetadata';
 
 function dataset(tags: Record<string, string> = {}, matrix?: number[]): dicomParser.DataSet {
   return {
@@ -110,16 +110,16 @@ describe('canonical DICOM acquisition metadata extraction', () => {
   });
 
   it('bounds legacy reads without decoding pixels or surfacing parser exceptions', async () => {
-    const file = new Blob([new Uint8Array(MAX_ACQUISITION_HEADER_BYTES + 100)]);
+    const file = new Blob([new Uint8Array(MAX_DICOM_HEADER_BYTES + 100)]);
     const slices = vi.spyOn(Blob.prototype, 'slice');
     const parser = vi.spyOn(dicomParser, 'parseDicom').mockImplementation(() => {
       throw new Error('PRIVATE PARSER CONTENT');
     });
-    const result = await readDicomAcquisitionMetadata(instance(file));
-    expect(result).toMatchObject({ unavailable: true, imageType: [] });
+    const result = await readDicomInstanceMetadata(instance(file));
+    expect(result).toBeNull();
     expect(parser).toHaveBeenCalled();
-    expect(slices.mock.calls.every(([start, end]) => start === 0 && end! <= MAX_ACQUISITION_HEADER_BYTES)).toBe(true);
-    expect(slices.mock.calls.at(-1)?.[1]).toBe(MAX_ACQUISITION_HEADER_BYTES);
+    expect(slices.mock.calls.every(([start, end]) => start === 0 && end! <= MAX_DICOM_HEADER_BYTES)).toBe(true);
+    expect(slices.mock.calls.at(-1)?.[1]).toBe(MAX_DICOM_HEADER_BYTES);
   });
 
   it('honors cancellation before reading a legacy header', async () => {
@@ -127,7 +127,7 @@ describe('canonical DICOM acquisition metadata extraction', () => {
     controller.abort();
     const slices = vi.spyOn(Blob.prototype, 'slice');
     await expect(
-      readDicomAcquisitionMetadata(instance(new Blob([new Uint8Array(32)])), controller.signal),
+      readDicomInstanceMetadata(instance(new Blob([new Uint8Array(32)])), controller.signal),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(slices).not.toHaveBeenCalled();
   });

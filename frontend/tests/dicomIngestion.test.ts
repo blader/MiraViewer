@@ -11,6 +11,7 @@ vi.mock('dicom-parser', () => {
 });
 
 import dicomParser from 'dicom-parser';
+import { Blob as NativeBlob } from 'node:buffer';
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -67,6 +68,52 @@ describe('dicom ingestion', () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     vi.mocked(dicomParser.parseDicom).mockReset();
+  });
+
+  it('enriches a duplicate legacy image without replacing its bytes, labels, or dataset revision', async () => {
+    vi.mocked(dicomParser.parseDicom).mockReturnValue(
+      imageDataSet({
+        x00200032: '0\\0\\4',
+        x00200037: '1\\0\\0\\0\\1\\0',
+        x00280030: '0.5\\0.5',
+        x00200052: 'synthetic-frame',
+      }) as unknown as dicomParser.DataSet,
+    );
+    await processDicomFile(imageFile(0));
+    const db = await getDB();
+    const original = (await db.get('instances', 'synthetic-instance'))!;
+    const legacy = { ...original, fileBlob: new NativeBlob([Uint8Array.of(17, 19, 23)]) };
+    delete legacy.metadataVersion;
+    delete legacy.physicalSlicePosition;
+    delete legacy.pixelSpacing;
+    delete legacy.acquisitionMetadata;
+    await db.put('instances', legacy);
+    const labels = {
+      volumeKey: 'legacy-labels',
+      studyUid: 'synthetic-study',
+      dims: [2, 2, 1] as [number, number, number],
+      labels: Uint8Array.of(1, 0, 0, 0),
+      seeds: { foreground: Uint32Array.of(0), background: Uint32Array.of(1) },
+      updatedAt: 7,
+    };
+    await db.put('volume_segmentations', labels);
+    const savedLabels = await db.get('volume_segmentations', labels.volumeKey);
+    const state = await db.getAll('app_state');
+    const result = await processFiles([imageFile(9)]);
+    expect(result).toMatchObject({
+      ingested: 0,
+      duplicates: 1,
+      metadataUpdated: 1,
+      affectedSeriesUids: ['synthetic-series'],
+      errors: 0,
+    });
+    const restored = (await db.get('instances', 'synthetic-instance'))!;
+    expect(restored).toMatchObject({ metadataVersion: 1, physicalSlicePosition: 4, pixelSpacing: '0.5\\0.5' });
+    expect(new Uint8Array(await restored.fileBlob.arrayBuffer())).toEqual(Uint8Array.of(17, 19, 23));
+    expect(await db.count('instances')).toBe(1);
+    expect(await db.get('volume_segmentations', labels.volumeKey)).toEqual(savedLabels);
+    expect(await db.getAll('app_state')).toEqual(state);
+    expect((await processFiles([imageFile(9)])).metadataUpdated).toBeUndefined();
   });
 
   it('stores study, series, and instance metadata in IndexedDB', async () => {

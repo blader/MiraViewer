@@ -139,8 +139,6 @@ export function planNativeVolume(
   };
   const ordered = [...manifest.frames].sort((a, b) => position(a) - position(b));
   const first = getSliceGeometryFromInstance(ordered[0]!);
-  if ([first.rows, first.cols].some((size) => !Number.isSafeInteger(size) || size < 1))
-    throw new Error('The source stack has invalid native pixel dimensions.');
   const firstPosition = position(ordered[0]!);
   const deltas = ordered.slice(1).map((frame, index) => position(frame) - position(ordered[index]!));
   const declared = ordered[0]!.spacingBetweenSlices;

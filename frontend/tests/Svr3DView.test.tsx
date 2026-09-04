@@ -89,7 +89,6 @@ vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
   ...(await importOriginal<typeof AcquisitionProvenance>()),
   // This component suite owns preflight/UI transitions. Real Blob hydration and
   // revision guards are exercised in acquisitionProvenance.test.ts.
-  hydrateSvrAcquisitionMetadata: vi.fn(async (manifests) => manifests),
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
@@ -191,11 +190,7 @@ function data(patient = 'patient-a', orientationCount = 2, unclassified = false)
 function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = false, frame = 'frame-' + patient) {
   const isCoronal = seriesUid.startsWith('coronal') && !sameOrientation;
   const isSagittal = seriesUid.startsWith('sagittal') && !sameOrientation;
-  const orientation = isCoronal
-    ? '1\\\\0\\\\0\\\\0\\\\0\\\\1'
-    : isSagittal
-      ? '0\\\\1\\\\0\\\\0\\\\0\\\\1'
-      : '1\\\\0\\\\0\\\\0\\\\1\\\\0';
+  const orientation = isCoronal ? '1\\0\\0\\0\\0\\1' : isSagittal ? '0\\1\\0\\0\\0\\1' : '1\\0\\0\\0\\1\\0';
 
   return {
     seriesUid,
@@ -213,13 +208,9 @@ function manifest(seriesUid: string, patient = 'patient-a', sameOrientation = fa
       rows: 8,
       columns: 8,
       dicomByteLength: 8 * 8 * 2,
-      imagePositionPatient: isCoronal
-        ? '0\\\\' + index + '\\\\0'
-        : isSagittal
-          ? index + '\\\\0\\\\0'
-          : '0\\\\0\\\\' + index,
+      imagePositionPatient: isCoronal ? '0\\' + index + '\\0' : isSagittal ? index + '\\0\\0' : '0\\0\\' + index,
       imageOrientationPatient: orientation,
-      pixelSpacing: '1\\\\1',
+      pixelSpacing: '1\\1',
       frameOfReferenceUid: frame,
       physicalSlicePosition: index,
       acquisitionMetadata: {
@@ -1454,6 +1445,23 @@ describe('SVR reconstruction workspace', () => {
     },
   );
 
+  it('prepares one acquisition at a time and cancels metadata loading with the workspace', async () => {
+    let finish!: (value: ReturnType<typeof manifest>) => void;
+    mocks.manifests.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const view = render(<Svr3DView data={data('patient-a', 3)} />);
+    await waitFor(() => expect(mocks.manifests).toHaveBeenCalledTimes(1));
+    const signal = (mocks.manifests.mock.calls[0]?.[1] as { signal: AbortSignal }).signal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => finish(manifest('axial-patient-a')));
+    expect(mocks.manifests).toHaveBeenCalledTimes(1);
+  });
+
   it('never renders the previous patient volume after a patient switch', async () => {
     const first = data('patient-a');
     mocks.hook.status = 'ready';
@@ -1470,7 +1478,10 @@ describe('SVR reconstruction workspace', () => {
     expect(mocks.clear).toHaveBeenCalled();
 
     await waitFor(() => {
-      expect(mocks.manifests).toHaveBeenCalledWith('axial-patient-b');
+      expect(mocks.manifests).toHaveBeenCalledWith(
+        'axial-patient-b',
+        expect.objectContaining({ selectedPatientKey: 'patient-b', signal: expect.any(AbortSignal) }),
+      );
     });
   });
 

@@ -4,6 +4,8 @@ import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
 import type { DicomInstance } from '../../src/db/schema';
 import { createSyntheticCustomModel } from '../helpers/customTumorModel';
+import { createHash } from 'node:crypto';
+import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
 
 declare global {
   interface Window {
@@ -108,6 +110,294 @@ async function importComparisonExaminations(
   await goToSlice(page, 12);
   return files.length;
 }
+
+async function openLegacySyntheticStudy(page: Page) {
+  const studyUid = '1.2.826.0.1.3680043.10.543.20370904.1';
+  const seriesUid = studyUid + '.1';
+  const files = await Promise.all(
+    createSyntheticSvrDicomFiles({
+      imageSize: 36,
+      slicesPerOrientation: 24,
+      orientations: 1,
+      studyUid,
+      studyDate: '20370904',
+      pixelPaddingValue: null,
+    }).map(async (file) => ({ name: file.name, mimeType: file.type, buffer: Buffer.from(await file.arrayBuffer()) })),
+  );
+  // Bootstrap only a synthetic older database before loading any application
+  // code. All subsequent navigation uses the unmodified production document.
+  await page.route('**/legacy-fixture-bootstrap', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic legacy database setup</title>' }),
+  );
+  try {
+    await page.goto('/legacy-fixture-bootstrap');
+  } finally {
+    await page.unroute('**/legacy-fixture-bootstrap');
+  }
+  await page.evaluate(
+    async ({ studyUid, seriesUid, payloads, settings }) => {
+      const opened = indexedDB.open('MiraViewerDB', 6);
+      opened.onupgradeneeded = () => {
+        const db = opened.result;
+        db.createObjectStore('studies', { keyPath: 'studyInstanceUid' }).put({
+          studyInstanceUid: studyUid,
+          studyDate: '20370904',
+          studyTime: '120000',
+          studyDescription: 'SYNTHETIC SVR VALIDATION ONLY',
+          patientName: 'SYNTHETIC^SVR^NO^PATIENT^DATA',
+          patientId: 'SVR-SYNTHETIC-ONLY',
+          modality: 'MR',
+        });
+        db.createObjectStore('series', { keyPath: 'seriesInstanceUid' }).put({
+          seriesInstanceUid: seriesUid,
+          studyInstanceUid: studyUid,
+          seriesDescription: 'Axial T2 FLAIR',
+          seriesNumber: 1,
+          modality: 'MR',
+          plane: 'Axial',
+          weight: 'T2',
+          sequenceType: 'FLAIR',
+          frameOfReferenceUid: studyUid + '.999',
+        });
+        const instances = db.createObjectStore('instances', { keyPath: 'sopInstanceUid' });
+        payloads.forEach((bytes, index) =>
+          instances.put({
+            sopInstanceUid: seriesUid + '.' + (index + 1),
+            seriesInstanceUid: seriesUid,
+            studyInstanceUid: studyUid,
+            instanceNumber: payloads.length - index,
+            rows: 36,
+            columns: 36,
+            windowCenter: 500,
+            windowWidth: 1000,
+            fileBlob: new Blob([Uint8Array.from(bytes)], { type: 'application/dicom' }),
+          }),
+        );
+        db.createObjectStore('panel_settings', { keyPath: 'comboId' }).put({
+          comboId: 'source:' + encodeURIComponent(seriesUid),
+          source: { studyUid, seriesUid },
+          settings: { [studyUid]: settings },
+        });
+        db.createObjectStore('volume_segmentations', { keyPath: 'volumeKey' }).put({
+          volumeKey: 'synthetic-retained-legacy-grid',
+          studyUid,
+          seriesUids: [seriesUid],
+          frameOfReferenceUid: studyUid + '.999',
+          dims: [2, 2, 2],
+          voxelSizeMm: [1, 1, 1],
+          labels: Uint8Array.of(1, 0, 0, 0, 0, 0, 0, 0),
+          reviewState: 'reviewed',
+          seeds: {
+            foreground: Uint32Array.of(0),
+            background: Uint32Array.of(1),
+            lastStroke: { plane: 'axial', slice: 0 },
+          },
+          updatedAt: 42,
+        });
+        const state = db.createObjectStore('app_state', { keyPath: 'key' });
+        state.put({ key: 'dataset_revision', value: 7 });
+        state.put({ key: 'dataset_token', value: 'synthetic-legacy-metadata-token' });
+      };
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        opened.onsuccess = () => resolve(opened.result);
+        opened.onerror = () => reject(opened.error);
+      });
+      if (db.version !== 6) throw new Error('Expected the isolated synthetic schema-6 database.');
+      db.close();
+    },
+    {
+      studyUid,
+      seriesUid,
+      payloads: files.map((file) => Array.from(file.buffer)),
+      settings: { ...DEFAULT_PANEL_SETTINGS, zoom: 1.25, panX: 0.12 },
+    },
+  );
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Import additional scans' })).toBeVisible();
+  return {
+    files,
+    studyUid,
+    seriesUid,
+    hashes: files.map((file, index) => ({
+      uid: seriesUid + '.' + (index + 1),
+      sha256: createHash('sha256').update(file.buffer).digest('hex'),
+    })),
+  };
+}
+
+async function metadataSnapshot(page: Page) {
+  return page.evaluate(async () => {
+    const read = <T>(request: IDBRequest<T>) =>
+      new Promise<T>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const db = await read(indexedDB.open('MiraViewerDB'));
+    try {
+      const tx = db.transaction(['instances', 'app_state']);
+      const [rows, token, revision] = await Promise.all([
+        read(tx.objectStore('instances').getAll()) as Promise<DicomInstance[]>,
+        read(tx.objectStore('app_state').get('dataset_token')),
+        read(tx.objectStore('app_state').get('dataset_revision')),
+      ]);
+      const frames = await Promise.all(
+        rows.map(async (row) => ({
+          uid: row.sopInstanceUid,
+          metadataVersion: row.metadataVersion,
+          physicalPosition: row.physicalSlicePosition,
+          geometry: {
+            position: row.imagePositionPatient,
+            orientation: row.imageOrientationPatient,
+            spacing: row.pixelSpacing,
+            frame: row.frameOfReferenceUid,
+          },
+          sha256: Array.from(
+            new Uint8Array(await crypto.subtle.digest('SHA-256', await row.fileBlob.arrayBuffer())),
+            (byte) => byte.toString(16).padStart(2, '0'),
+          ).join(''),
+        })),
+      );
+      return { schema: db.version, token: token?.value, revision: revision?.value, frames };
+    } finally {
+      db.close();
+    }
+  });
+}
+
+async function openSelectionAndVerifyPixels(page: Page) {
+  await page.getByRole('button', { name: 'Select tissue', exact: true }).click();
+  const canvas = page.getByRole('application', { name: /^Axial reconstructed slice/ });
+  await expect(canvas).toBeVisible();
+  await expect
+    .poll(() =>
+      canvas.evaluate((element) => {
+        const canvas = element as HTMLCanvasElement;
+        const context = canvas.getContext('2d');
+        if (!context || !canvas.width || !canvas.height) return 0;
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const levels = new Set<number>();
+        for (let index = 0; index < pixels.length; index += 4)
+          if (pixels[index] === pixels[index + 1] && pixels[index] === pixels[index + 2]) levels.add(pixels[index]!);
+        return levels.size;
+      }),
+    )
+    .toBeGreaterThan(5);
+}
+
+test('shows a clear metadata-only repair summary for existing scans on desktop and mobile', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const input = await openLegacySyntheticStudy(page);
+  await page.getByRole('button', { name: 'Import additional scans' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Import scans' });
+  await dialog.getByLabel('Select DICOM image files').setInputFiles(input.files);
+  await dialog.getByRole('button', { name: 'Import scans', exact: true }).click();
+  await expect(dialog.getByText('Existing scan metadata updated', { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/24 metadata updated; original images and saved work kept/)).toBeVisible();
+  await capture(page, info, 'legacy-metadata-repair-desktop');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(dialog.getByRole('button', { name: 'Done', exact: true })).toBeInViewport();
+  await capture(page, info, 'legacy-metadata-repair-mobile');
+  expect(errors).toEqual([]);
+  await attachReceipt(info, 'metadata-ui-receipt', {
+    build: await (await page.request.get('/browser-build.json')).json(),
+    browser: page.context().browser()!.version(),
+    errors,
+    scope:
+      'Real metadata-only reimport from a schema-6 synthetic database. Static desktop/mobile summary and reachable Done control; no anatomical or motion verdict.',
+  });
+});
+
+test('upgrades a legacy database for physical viewing and preserves original bytes and saved work through backup restore', async ({
+  page,
+  browser,
+}, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const input = await openLegacySyntheticStudy(page);
+  const original = await metadataSnapshot(page);
+  const saved = await readSaved(page);
+  const selections = await savedVolumeSelection(page);
+  await page.getByRole('button', { name: '3D', exact: true }).click();
+  await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+  const upgraded = await metadataSnapshot(page);
+  await openSelectionAndVerifyPixels(page);
+  await capture(page, info, 'legacy-metadata-selection');
+  expect(
+    upgraded.frames.every(
+      (frame) =>
+        frame.metadataVersion === 1 &&
+        frame.geometry.position &&
+        frame.geometry.spacing &&
+        frame.geometry.orientation &&
+        frame.geometry.frame,
+    ),
+  ).toBe(true);
+  expect(
+    upgraded.frames
+      .map((frame) => ({ uid: frame.uid, sha256: frame.sha256 }))
+      .sort((a, b) => a.uid.localeCompare(b.uid)),
+  ).toEqual([...input.hashes].sort((a, b) => a.uid.localeCompare(b.uid)));
+  expect(upgraded.frames.map((frame) => frame.physicalPosition).sort((a, b) => a! - b!)).toEqual(
+    Array.from({ length: 24 }, (_, index) => index),
+  );
+  expect(upgraded.token).toBe(original.token);
+  expect(upgraded.revision).toBe(original.revision);
+  expect((await readSaved(page)).settings).toEqual(saved.settings);
+  expect(await savedVolumeSelection(page)).toEqual(selections);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Import additional scans' })).toBeVisible();
+  expect(await metadataSnapshot(page)).toEqual(upgraded);
+  expect(await savedVolumeSelection(page)).toEqual(selections);
+  await page.getByRole('button', { name: 'Application menu' }).click();
+  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
+  const pending = page.waitForEvent('download');
+  await page.getByRole('dialog').getByRole('button', { name: 'Export', exact: true }).click();
+  const download = await pending;
+  const archive = info.outputPath('synthetic-legacy-metadata-backup.zip');
+  await download.saveAs(archive);
+  expect(await download.failure()).toBeNull();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  let restoredSnapshot: Awaited<ReturnType<typeof metadataSnapshot>>;
+  try {
+    const restored = await context.newPage();
+    restored.on('pageerror', (error) => errors.push(error.message));
+    await restored.goto(new URL('/', page.url()).href);
+    await restored.getByRole('button', { name: 'Import scans', exact: true }).click();
+    const intake = restored.getByRole('dialog', { name: 'Import scans' });
+    await intake.getByLabel('Select a complete backup or image archive').setInputFiles(archive);
+    await intake.getByRole('checkbox').check();
+    await intake.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+    await expect(intake.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
+    await intake.getByRole('button', { name: 'Done', exact: true }).click();
+    restoredSnapshot = await metadataSnapshot(restored);
+    expect(restoredSnapshot.frames).toEqual(upgraded.frames);
+    expect((await readSaved(restored)).settings).toEqual(saved.settings);
+    expect(await savedVolumeSelection(restored)).toEqual(selections);
+    await restored.getByRole('button', { name: '3D', exact: true }).click();
+    await restored.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+    await expect(restored.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+    await openSelectionAndVerifyPixels(restored);
+    await capture(restored, info, 'legacy-metadata-restored-selection');
+  } finally {
+    await context.close();
+  }
+  expect(errors).toEqual([]);
+  await attachReceipt(info, 'legacy-metadata-receipt', {
+    build: await (await page.request.get('/browser-build.json')).json(),
+    browser: browser.version(),
+    input: { schema: 6, frames: input.hashes },
+    original,
+    upgraded,
+    restored: restoredSnapshot!,
+    settings: saved.settings,
+    selections,
+    errors,
+    scope:
+      'Synthetic legacy metadata and saved-work preservation. Real source-stack admission, reopen, ZIP export and fresh-context restore; retained legacy labels are storage evidence, not automatic remapping to the newly opened grid or anatomical evidence.',
+  });
+});
 
 test('backup controls show per-file limits and a reachable direct-save action', async ({ page }, info) => {
   const errors: string[] = [];

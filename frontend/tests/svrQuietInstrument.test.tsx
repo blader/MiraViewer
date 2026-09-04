@@ -35,7 +35,6 @@ vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
   ...(await importOriginal<typeof AcquisitionProvenance>()),
   // This presentation fixture has no stored DICOM Blobs. Keep real source
   // classification; metadata hydration/ownership has its own database tests.
-  hydrateSvrAcquisitionMetadata: vi.fn(async (manifests) => manifests),
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
