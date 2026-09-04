@@ -32,8 +32,7 @@ test('backup capacity rejects oversized input and restores sparse below-limit pa
     const tile = new Blob([new Uint8Array(1024 * 1024).fill(0x5a)]);
     const blob = new Blob(Array.from({ length: 256 }, () => tile));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('miraviewer:model-cache', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('models');
+      const request = indexedDB.open('MiraViewerDB');
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -99,7 +98,7 @@ test('backup capacity rejects oversized input and restores sparse below-limit pa
   await exportDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('miraviewer:model-cache');
+      const request = indexedDB.open('MiraViewerDB');
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -145,11 +144,10 @@ test('backup capacity rejects oversized input and restores sparse below-limit pa
           request.onerror = () => reject(request.error);
         });
       const data = await read(indexedDB.open('MiraViewerDB'));
-      const models = await read(indexedDB.open('miraviewer:model-cache'));
       try {
         const [instances, savedModels] = await Promise.all([
           read(data.transaction('instances').objectStore('instances').getAll()),
-          read(models.transaction('models').objectStore('models').getAll()),
+          read(data.transaction('models').objectStore('models').getAll()),
         ]);
         const pixels = await instances[0].fileBlob.arrayBuffer();
         const model = new Uint8Array(await savedModels[0].blob.arrayBuffer());
@@ -164,7 +162,6 @@ test('backup capacity rejects oversized input and restores sparse below-limit pa
         };
       } finally {
         data.close();
-        models.close();
       }
     });
     expect(restored).toEqual({

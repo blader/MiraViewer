@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
+import { openDB } from 'idb';
 import { Blob as NativeBlob } from 'node:buffer';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import { deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
+import { DATASET_TOKEN_STATE_KEY, deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
 import { initializeComparisonState } from '../src/db/comparisonState';
 import { acquisitionChoiceKey, sourceSettingsKey } from '../src/db/comparisonIdentity';
 import { usePanelSettings } from '../src/hooks/usePanelSettings';
@@ -26,6 +27,8 @@ import {
 } from '../src/services/exportBackup';
 import {
   deleteModelCache,
+  deleteModelBlob,
+  getAllModelRecords,
   getModelBlob,
   MODEL_CACHE_DB_NAME,
   putModelBlob,
@@ -244,12 +247,14 @@ describe('exportBackup', () => {
   });
 
   it('enforces the import identity policy when a restored Study UID has a conflicting patient name', async () => {
-    const { archive, manifest } = await seedSnapshot();
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    await putModelBlob('synthetic-model', new NativeBlob(['previous model']));
     const db = await getDB();
     await db.put('studies', { ...manifest.records.studies[0]!, patientName: 'Conflicting patient' });
     await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/conflicting patient names/i);
     expect((await db.get('studies', 'study-1'))?.patientName).toBe('Conflicting patient');
     expect(await db.count('instances')).toBe(0);
+    expect(await (await getModelBlob('synthetic-model'))!.text()).toBe('previous model');
   });
 
   afterEach(async () => {
@@ -632,8 +637,10 @@ describe('exportBackup', () => {
 
   it('detects model-cache version conflicts before committing medical images or annotations', async () => {
     const { archive, manifest } = await seedSnapshot({ model: true });
+    // A fresh shared database must first admit an unmigrated legacy cache.
+    await deleteAllStoredMriData();
     const newer = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 2);
+      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 3);
       request.onupgradeneeded = () => request.result.createObjectStore('models');
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -647,6 +654,86 @@ describe('exportBackup', () => {
     expect(committed).not.toHaveBeenCalled();
     expect(await (await getDB()).count('studies')).toBe(0);
     expect(await (await getDB()).count('instances')).toBe(0);
+  });
+
+  it('migrates legacy model bytes once, preserving metadata and avoiding resurrection after a model deletion', async () => {
+    await deleteModelCache();
+    await deleteAllStoredMriData();
+    const record = { key: 'legacy-private-model', blob: new NativeBlob(['synthetic legacy bytes']), savedAtMs: 123 };
+    const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('models').put(record, record.key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    let retired = false;
+    legacy.onversionchange = () => {
+      retired = true;
+      legacy.close();
+    };
+    const copied = await getAllModelRecords();
+    expect(retired).toBe(true);
+    expect(copied).toHaveLength(1);
+    expect(copied[0]).toMatchObject({ key: record.key, savedAtMs: 123 });
+    expect(await copied[0]!.blob.text()).toBe('synthetic legacy bytes');
+    expect(await (await getDB()).count('models')).toBe(1);
+    await deleteModelBlob(record.key);
+    await resetDbForTests();
+    expect(await getAllModelRecords()).toEqual([]);
+  });
+
+  it('rolls back medical rows, models and saved-work identity when the final model write fails', async () => {
+    const selection = selectionRow();
+    const { archive, manifest } = await seedSnapshot({ model: true, segmentation: selection });
+    await restoreSnapshot(archive.zip, manifest);
+    const db = await getDB();
+    await db.put('instances', { ...(await db.get('instances', 'inst-1'))!, fileBlob: new NativeBlob(['prior scan']) });
+    await putModelBlob('synthetic-model', new NativeBlob(['prior model']));
+    await saveVolumeSegmentation({
+      ...selection,
+      labels: Uint8Array.from(selection.labels, (_, index) => Number(index === 5)),
+      seeds: {
+        foreground: Uint32Array.of(5),
+        background: Uint32Array.of(19),
+        lastStroke: { plane: 'axial', slice: 0 },
+      },
+      reviewState: 'draft',
+    });
+    const token = await db.get('app_state', DATASET_TOKEN_STATE_KEY);
+    const labels = await getVolumeSegmentation(selection.volumeKey);
+    const original = IDBObjectStore.prototype.put;
+    const put = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, ...args) {
+      if (this.name === 'models') throw new DOMException('Synthetic model quota exhaustion', 'QuotaExceededError');
+      return Reflect.apply(original, this, args);
+    });
+    try {
+      await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/quota exhaustion/);
+    } finally {
+      put.mockRestore();
+    }
+    expect(await (await db.get('instances', 'inst-1'))!.fileBlob.text()).toBe('prior scan');
+    expect(await (await getModelBlob('synthetic-model'))!.text()).toBe('prior model');
+    expect(await db.get('app_state', DATASET_TOKEN_STATE_KEY)).toEqual(token);
+    expect(await getVolumeSegmentation(selection.volumeKey)).toEqual(labels);
+  });
+
+  it('does not let restored app state re-enable an obsolete model authority', async () => {
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    const legacy = await openDB(MODEL_CACHE_DB_NAME, 2, {
+      upgrade(db) {
+        db.createObjectStore('models');
+      },
+    });
+    await legacy.put(
+      'models',
+      { key: 'synthetic-model', blob: new NativeBlob(['obsolete bytes']), savedAtMs: 1 },
+      'synthetic-model',
+    );
+    legacy.close();
+    manifest.records.appState.push({ key: 'model_cache_migrated', value: false });
+    await restoreSnapshot(archive.zip, manifest);
+    await resetDbForTests();
+    expect(Array.from(new Uint8Array(await (await getModelBlob('synthetic-model'))!.arrayBuffer()))).toEqual([5, 6, 7]);
   });
 
   it('reports bounded SHA-verification degradation while retaining mandatory member CRC verification', async () => {

@@ -29,12 +29,7 @@ import {
   saveVolumeSegmentation,
   setSelectedPatientKey,
 } from '../src/utils/localApi';
-import {
-  closeModelCache,
-  deleteModelCache,
-  getModelBlob,
-  putModelBlob,
-} from '../src/utils/segmentation/onnx/modelCache';
+import { deleteModelCache, getModelBlob, putModelBlob } from '../src/utils/segmentation/onnx/modelCache';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { ClearDataModal } from '../src/components/ClearDataModal';
@@ -235,7 +230,6 @@ function makeDerivedFrame(overrides: Partial<DerivedAlignmentFrameRow> = {}): De
 describe('durable MRI storage and import contracts', () => {
   afterEach(async () => {
     await resetDbForTests();
-    await closeModelCache();
     for (const name of ['MiraViewerDB', 'miraviewer:model-cache']) {
       await new Promise<void>((resolve) => {
         const request = indexedDB.deleteDatabase(name);

@@ -26,7 +26,7 @@ import type {
 } from '../db/schema';
 import type { SvrSelectionPlane, SvrSelectionSeeds } from '../types/svr';
 import { isOwnedStorageKey } from '../utils/storageKeys';
-import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/modelCache';
+import { getAllModelRecords, prepareModelStore } from '../utils/segmentation/onnx/modelCache';
 import * as localApi from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
@@ -646,7 +646,7 @@ export async function restoreSnapshot(
 
   const db = await getDB();
   throwIfSnapshotAborted(signal);
-  if (models.length > 0) await putModelBlobs(models, { signal });
+  if (models.length > 0) await prepareModelStore(db);
   throwIfSnapshotAborted(signal);
   onCommitStart?.();
   const tx = db.transaction(
@@ -661,80 +661,89 @@ export async function restoreSnapshot(
       'volume_segmentation_chunks',
       'derived_alignment_frames',
       'app_state',
+      'models',
     ],
     'readwrite',
   );
-  const revisionStore = tx.objectStore('app_state');
-  const existingRevision = await revisionStore.get(DATASET_REVISION_STATE_KEY);
-  for (const row of manifest.records.studies) {
-    const existing = await tx.objectStore('studies').get(row.studyInstanceUid);
-    const conflict = studyIdentityConflict(existing, row);
-    if (conflict) {
-      await tx.done;
-      throw new Error(`A restored examination conflicts with an existing patient identity. ${conflict}`);
+  const completed = tx.done;
+  void completed.catch(() => {});
+  try {
+    const revisionStore = tx.objectStore('app_state');
+    const existingRevision = await revisionStore.get(DATASET_REVISION_STATE_KEY);
+    for (const row of manifest.records.studies) {
+      const existing = await tx.objectStore('studies').get(row.studyInstanceUid);
+      const conflict = studyIdentityConflict(existing, row);
+      if (conflict) {
+        await tx.done;
+        throw new Error(`A restored examination conflicts with an existing patient identity. ${conflict}`);
+      }
     }
-  }
-  for (const row of manifest.records.series) {
-    const existing = await tx.objectStore('series').get(row.seriesInstanceUid);
-    if (existing && existing.studyInstanceUid !== row.studyInstanceUid) {
-      await tx.done;
-      throw new Error('A restored series conflicts with an existing examination.');
+    for (const row of manifest.records.series) {
+      const existing = await tx.objectStore('series').get(row.seriesInstanceUid);
+      if (existing && existing.studyInstanceUid !== row.studyInstanceUid) {
+        await tx.done;
+        throw new Error('A restored series conflicts with an existing examination.');
+      }
     }
-  }
-  for (const row of instances) {
-    const existing = await tx.objectStore('instances').get(row.sopInstanceUid);
-    if (
-      existing &&
-      (existing.studyInstanceUid !== row.studyInstanceUid || existing.seriesInstanceUid !== row.seriesInstanceUid)
-    ) {
-      await tx.done;
-      throw new Error('A restored image conflicts with an existing examination.');
+    for (const row of instances) {
+      const existing = await tx.objectStore('instances').get(row.sopInstanceUid);
+      if (
+        existing &&
+        (existing.studyInstanceUid !== row.studyInstanceUid || existing.seriesInstanceUid !== row.seriesInstanceUid)
+      ) {
+        await tx.done;
+        throw new Error('A restored image conflicts with an existing examination.');
+      }
     }
-  }
-  for (const row of manifest.records.studies) await tx.objectStore('studies').put(row);
-  for (const row of manifest.records.series) await tx.objectStore('series').put(row);
-  for (const row of instances) await tx.objectStore('instances').put(row);
-  for (const row of manifest.records.panelSettings) await tx.objectStore('panel_settings').put(row);
-  for (const row of manifest.records.tumorSegmentations) await tx.objectStore('tumor_segmentations').put(row);
-  for (const row of manifest.records.tumorGroundTruth) await tx.objectStore('tumor_ground_truth').put(row);
-  for (const row of volumes) {
-    await tx.objectStore('volume_segmentation_chunks').delete(volumeChunkRange(row.volumeKey));
-    await tx.objectStore('volume_segmentations').put(row);
-  }
-  let archivedRevision = 0;
-  for (const row of manifest.records.appState) {
-    if (row.key.startsWith('acquisition:') && !ownsAcquisitionChoice(row, seriesByUid)) continue;
-    if (row.key === DATASET_REVISION_STATE_KEY) {
-      archivedRevision = typeof row.value === 'number' ? row.value : 0;
-      continue;
+    for (const row of manifest.records.studies) await tx.objectStore('studies').put(row);
+    for (const row of manifest.records.series) await tx.objectStore('series').put(row);
+    for (const row of instances) await tx.objectStore('instances').put(row);
+    for (const row of manifest.records.panelSettings) await tx.objectStore('panel_settings').put(row);
+    for (const row of manifest.records.tumorSegmentations) await tx.objectStore('tumor_segmentations').put(row);
+    for (const row of manifest.records.tumorGroundTruth) await tx.objectStore('tumor_ground_truth').put(row);
+    for (const row of volumes) {
+      await tx.objectStore('volume_segmentation_chunks').delete(volumeChunkRange(row.volumeKey));
+      await tx.objectStore('volume_segmentations').put(row);
     }
-    if (
-      row.key === SELECTED_PATIENT_STATE_KEY ||
-      row.key === SELECTED_PATIENT_STUDY_STATE_KEY ||
-      row.key === DATASET_TOKEN_STATE_KEY
-    )
-      continue;
-    await revisionStore.put(row);
+    let archivedRevision = 0;
+    for (const row of manifest.records.appState) {
+      if (row.key === DATASET_REVISION_STATE_KEY) {
+        archivedRevision = typeof row.value === 'number' ? row.value : 0;
+        continue;
+      }
+      // Backups carry user choices, not internal migration/publication controls.
+      // Patient anchors and saved-work identity are derived from verified rows.
+      if (row.key.startsWith('acquisition:') && ownsAcquisitionChoice(row, seriesByUid)) await revisionStore.put(row);
+    }
+    const restoredIdentities = getPatientIdentityKeys(await tx.objectStore('studies').getAll());
+    if (selectedPatientKey) {
+      const anchor = manifest.records.studies[0]!.studyInstanceUid;
+      await revisionStore.put({
+        key: SELECTED_PATIENT_STATE_KEY,
+        value: restoredIdentities.get(anchor)!,
+      });
+      await revisionStore.put({ key: SELECTED_PATIENT_STUDY_STATE_KEY, value: anchor });
+    }
+    const nextRevision =
+      Math.max(typeof existingRevision?.value === 'number' ? existingRevision.value : 0, archivedRevision) + 1;
+    for (const row of derivedFrames) {
+      await tx
+        .objectStore('derived_alignment_frames')
+        .put({ ...row, patientKey: restoredIdentities.get(row.targetStudyUid)!, datasetRevision: nextRevision });
+    }
+    await revisionStore.put({ key: DATASET_REVISION_STATE_KEY, value: nextRevision });
+    await revisionStore.put({ key: DATASET_TOKEN_STATE_KEY, value: newDatasetToken() });
+    for (const model of models) await tx.objectStore('models').put({ ...model, savedAtMs: Date.now() }, model.key);
+    await completed;
+  } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      /* The transaction may already be aborted. */
+    }
+    await completed.catch(() => {});
+    throw error;
   }
-  const restoredIdentities = getPatientIdentityKeys(await tx.objectStore('studies').getAll());
-  if (selectedPatientKey) {
-    const anchor = manifest.records.studies[0]!.studyInstanceUid;
-    await revisionStore.put({
-      key: SELECTED_PATIENT_STATE_KEY,
-      value: restoredIdentities.get(anchor)!,
-    });
-    await revisionStore.put({ key: SELECTED_PATIENT_STUDY_STATE_KEY, value: anchor });
-  }
-  const nextRevision =
-    Math.max(typeof existingRevision?.value === 'number' ? existingRevision.value : 0, archivedRevision) + 1;
-  for (const row of derivedFrames) {
-    await tx
-      .objectStore('derived_alignment_frames')
-      .put({ ...row, patientKey: restoredIdentities.get(row.targetStudyUid)!, datasetRevision: nextRevision });
-  }
-  await revisionStore.put({ key: DATASET_REVISION_STATE_KEY, value: nextRevision });
-  await revisionStore.put({ key: DATASET_TOKEN_STATE_KEY, value: newDatasetToken() });
-  await tx.done;
   await initializeComparisonState(db);
 
   if (typeof localStorage !== 'undefined') {

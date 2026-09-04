@@ -382,7 +382,10 @@ export interface DerivedAlignmentFrameRow extends DerivedAlignmentFramePresentat
   createdAt: number;
 }
 
+export type ModelRecord = { key: string; blob: Blob; savedAtMs: number };
+
 export interface MiraDB extends DBSchema {
+  models: { key: string; value: ModelRecord };
   studies: {
     key: string; // studyInstanceUid
     value: DicomStudy;
