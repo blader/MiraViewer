@@ -389,5 +389,236 @@
       "bothBrowserProcessesExited": true
     },
     "preservation": "Only the public Playwright package and authored diagnostic were mounted read-only; no private data, app source or models. No running host service was changed."
+  },
+  "linuxCustomWorkflowRepair": {
+    "precedingHostedRun": {
+      "url": "https://github.com/blader/MiraViewer/actions/runs/33876055400",
+      "source": {
+        "head": "52df08c416c87922c771a90ffc07abcafa9cbd4a",
+        "sourceSha256": "8dde9def6d012d7905813cd6a9d1846f3b53e878968353a2d8cd3c765da2ea53",
+        "applicationSourceSha256": "bbdd41fd2945a404f3c5cfeee3417d2f4bb266d7ee36287ffae90bf33411aeca",
+        "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+        "node": "v22.22.0",
+        "fixture": "synthetic only"
+      },
+      "prHead": "046bf74594ae9a622d9058881cd942ec94c388e6",
+      "unitPassed": 3254,
+      "existingOptionalSkips": 54,
+      "browserStats": {
+        "startTime": "2026-09-04T13:09:36.089Z",
+        "duration": 276529.99,
+        "expected": 9,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "graphics": {
+        "browser": "151.0.7922.34",
+        "platform": "linux",
+        "channel": "chromium",
+        "headless": false,
+        "graphics": {
+          "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+          "vendor": "Google Inc. (Mesa)",
+          "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 256 bits), OpenGL 4.5)"
+        },
+        "scope": "Runtime metadata from a disposable context in the workflow browser, not performance evidence."
+      },
+      "images": [
+        {
+          "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33876055400/download/synthetic-acceptance-52df08c416c87922c771a90ffc07abcafa9cbd4a/browser-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-cleared-reopened.png",
+          "sha256": "6b66786cfcf0c6a181ffd87b71956da97a501bd7cb4a718a6813a8751478dc90",
+          "visualVerdict": "Visible static viewport passed after individual original-detail inspection; no full-page, motion, anatomical or performance claim."
+        },
+        {
+          "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33876055400/download/synthetic-acceptance-52df08c416c87922c771a90ffc07abcafa9cbd4a/browser-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-recovered-desktop.png",
+          "sha256": "8e22397910f216dae582bf37c9c71d8bcc13570821d1b3a2bd9363f42ccb3c25",
+          "visualVerdict": "Visible static viewport passed after individual original-detail inspection; no full-page, motion, anatomical or performance claim."
+        },
+        {
+          "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33876055400/download/synthetic-acceptance-52df08c416c87922c771a90ffc07abcafa9cbd4a/browser-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-restored-desktop.png",
+          "sha256": "3251006f02e7b9ce33a268c9626fca5aa389d8a2ba50da0e647cbcb9e28a4dbd",
+          "visualVerdict": "Visible static viewport passed after individual original-detail inspection; no full-page, motion, anatomical or performance claim."
+        }
+      ],
+      "overall": "failed; sole failure was custom-model harness readiness"
+    },
+    "change": "Reuse the product 30-second initialization budget, timer-based inference-signal observation and the small real graph. Start through Enter; invoke real Cancel and reconstruction buttons at inference start. Production behavior/deadlines unchanged; separate slow-graph cancellation probe retained.",
+    "qualification": {
+      "scope": "Focused local Linux x64 emulation, retained production application and temporary protocol tracing; not final hosted acceptance or hardware performance.",
+      "cpus": 4,
+      "affinity": "0-3",
+      "memoryGiB": 4,
+      "build": {
+        "head": "736c24e6be7112b85a9fc4588c7dadb7e1f9e281",
+        "sourceSha256": "cd0befc6b6ed4526a8d72b32877c610f5d3db141afe8b8715870d88323dd2ef5",
+        "applicationSourceSha256": "d790405230d02a380034e97907349aed07a7280f4377145c2108654e8fa50777",
+        "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+        "mode": "production",
+        "builtAt": "2026-09-04T12:43:52.950Z",
+        "fixture": "synthetic only"
+      },
+      "stats": {
+        "startTime": "2026-09-04T13:28:25.396Z",
+        "duration": 191360.749,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "draft": [
+        {
+          "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+          "dims": [36, 36, 24],
+          "modelKey": "brats-tumor-v1",
+          "reviewState": "draft",
+          "labelBytes": 31104,
+          "selectedCount": 31104,
+          "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+        }
+      ],
+      "reopenedExactlyMatches": true,
+      "workers": [
+        {
+          "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        }
+      ],
+      "errors": [],
+      "actionInput": "Cancel and reconstruction buttons are invoked at real inference start; not trusted-pointer latency evidence.",
+      "cancelToReadyObservedMs": 21873.270000000484,
+      "timingScope": "Includes software rendering, emulation and harness readback; not trusted-pointer or worker-cancellation latency.",
+      "events": [
+        {
+          "time": 11501.093,
+          "text": "[TRACE:custom] worker-created 3073.0750000001863 blob:http://127.0.0.1:43134/043db2b7-dbfb-4fb5-af1d-ea1e25837765"
+        },
+        {
+          "time": 31030.88,
+          "text": "[TRACE:custom] worker-created 22611.360000000335 http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js"
+        },
+        {
+          "time": 40675.593,
+          "text": "[TRACE:custom] message 32264.28000000026 running undefined"
+        },
+        {
+          "time": 40733.386,
+          "text": "[TRACE:custom] message 32321.205000000075 inference undefined"
+        },
+        {
+          "time": 40949.333,
+          "text": "[TRACE:custom] message 32535.46499999985 done undefined"
+        },
+        {
+          "time": 40957.784,
+          "text": "[TRACE:custom] terminate 32546.28500000015"
+        },
+        {
+          "time": 43141.051,
+          "text": "[TRACE:custom] worker-created 34728.91500000004 http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js"
+        },
+        {
+          "time": 69063.065,
+          "text": "[TRACE:custom] message 60643.389999999665 running undefined"
+        },
+        {
+          "time": 69103.514,
+          "text": "[TRACE:custom] message 60675.919999999925 inference undefined"
+        },
+        {
+          "time": 69103.615,
+          "text": "[TRACE:custom] action 60687.81500000041 Cancel model suggestion"
+        },
+        {
+          "time": 69103.667,
+          "text": "[TRACE:custom] terminate 60689.485000000335"
+        },
+        {
+          "time": 115399.746,
+          "text": "[TRACE:custom] worker-created 106981.41999999993 http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js"
+        },
+        {
+          "time": 141630.743,
+          "text": "[TRACE:custom] message 133217.4249999998 running undefined"
+        },
+        {
+          "time": 141639.465,
+          "text": "[TRACE:custom] message 133228.3700000001 inference undefined"
+        },
+        {
+          "time": 141639.571,
+          "text": "[TRACE:custom] action 133229.26499999966 Open 3D volume"
+        },
+        {
+          "time": 141644.367,
+          "text": "[TRACE:custom] terminate 133230.27500000037"
+        },
+        {
+          "time": 170688.21,
+          "text": "[TRACE:custom] worker-created 7060.3100000005215 blob:http://127.0.0.1:43134/33e8c7ff-72ee-47d6-acb8-71057759a754"
+        }
+      ]
+    },
+    "raw": [
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/output/results.json",
+        "sha256": "43d996a62f312922797a5c2abb07affd4131c3c166ae2db172e65c62310495e2"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/output/results/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+        "sha256": "42da845de597ceded5b086b3721cb69499772892fdc956010a07044d1bd866bc"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/output/results/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/trace.zip",
+        "sha256": "3b955f1eab4b93ba062e94f8b30526a184204ed007c3cabce4161fbc1c0c8199"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/workflow.spec.ts",
+        "sha256": "f6172894b9697e4b7c8f41633c4d6f40924f245a998d4a88756c4d7a99f4b70a"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/run.py",
+        "sha256": "07947413fcbc67d4c48c98d8723a12b6e769ecbedc2a3198558c72e2d64f1ff2"
+      }
+    ],
+    "closedOwnedContainers": [
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-graphics-diagnostic/closed.json",
+        "sha256": "267c9853ec0199719c48b4ee65e047a69de6010fff6a1127ddc3a3ca7598ad75"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-rendering-diagnostic/closed.json",
+        "sha256": "12d805c28d4d504a4f69e03f63b62f39675234e465815fe13ac445d17aa48859"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic/closed.json",
+        "sha256": "acb9fd94593665a3eefe9fea73f07d8336055262d4eb2d6f9f9b7cc9826ee10d"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-02/closed.json",
+        "sha256": "0a3893f1d3edf5c02fac0b4feb66ae11844612f49bba8e182b1538df185abbe7"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-03/closed.json",
+        "sha256": "572bec8cad89de5d170d22fda833874b84146a48fdb623be8929e8ce3e76ae61"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-04/closed.json",
+        "sha256": "257d89a17e5b218fcf1d3d13521d077228053315f34c28dd383c0d46d942e6a9"
+      },
+      {
+        "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-custom-diagnostic-05/closed.json",
+        "sha256": "6712c0ed9ff2559eaaf64922c8d9b4369315597deacff37ffbaf148ba11ead85"
+      }
+    ],
+    "failedDiagnostics": "Original setup/module/MIME and emulated pointer-stability failures remain at linux-custom-diagnostic through -04; they are not counted as application passes."
   }
 }

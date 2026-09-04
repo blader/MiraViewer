@@ -6,12 +6,14 @@ import type { DicomInstance, StoredVolumeSegmentationRow, VolumeSegmentationChun
 import { createSyntheticCustomModel } from '../helpers/customTumorModel';
 import { createHash } from 'node:crypto';
 import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
+import { CUSTOM_MODEL_INIT_TIMEOUT_MS } from '../../src/utils/segmentation/onnx/customModelWorker';
 
 declare global {
   interface Window {
     replayWorkerStarts: number;
     customInferenceStarted: boolean;
     customInferenceAction?: () => void;
+    customInferenceActionAt: number;
     finishPanelWriteAudit: () => { writeStores: string[][]; sourceCatalogReads: number };
     alignmentRequests: {
       type: string;
@@ -747,34 +749,42 @@ test('normal custom-model controls save a real draft, cancel and replace active 
   await page.getByRole('button', { name: 'Show 3D settings', exact: true }).click();
   const custom = page.locator('details').filter({ has: page.locator('summary', { hasText: /^Custom model$/ }) });
   await custom.locator('summary').first().click();
-  const upload = async (kind: 'small' | 'slow') => {
-    const files = await createSyntheticCustomModel(kind);
-    await custom.locator('input[type=file]').setInputFiles(
-      await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          mimeType: file.type,
-          buffer: Buffer.from(await file.arrayBuffer()),
-        })),
-      ),
-    );
-    await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
-  };
-  const start = async (onInference?: Locator) => {
-    await page.evaluate(() => {
+  const files = await createSyntheticCustomModel('small');
+  await custom.locator('input[type=file]').setInputFiles(
+    await Promise.all(
+      files.map(async (file) => ({
+        name: file.name,
+        mimeType: file.type,
+        buffer: Buffer.from(await file.arrayBuffer()),
+      })),
+    ),
+  );
+  await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
+  const start = async (onInference?: string) => {
+    await page.evaluate((action) => {
       window.customInferenceStarted = false;
-      window.customInferenceAction = undefined;
+      window.customInferenceAction = action
+        ? () => {
+            const buttons = [...document.querySelectorAll('button')].filter(
+              (button) => button.textContent?.trim() === action,
+            );
+            if (buttons.length !== 1 || buttons[0]!.disabled)
+              throw new Error(`Inference action unavailable: ${action}`);
+            window.customInferenceActionAt = performance.now();
+            buttons[0]!.click();
+          }
+        : undefined;
+    }, onInference);
+    // Exercise keyboard activation without waiting for two GPU animation frames
+    // between the completed draft and the next operation.
+    await custom.getByRole('button', { name: 'Suggest with model' }).press('Enter');
+    // Initialization has its own product deadline. Observe the worker signal
+    // independently of software-rendered animation frames.
+    await page.waitForFunction(() => window.customInferenceStarted, undefined, {
+      timeout: CUSTOM_MODEL_INIT_TIMEOUT_MS,
+      polling: 100,
     });
-    if (onInference) {
-      await expect(onInference).toBeEnabled();
-      await onInference.evaluate((button) => {
-        window.customInferenceAction = () => (button as HTMLButtonElement).click();
-      });
-    }
-    await custom.getByRole('button', { name: 'Suggest with model' }).click();
-    await page.waitForFunction(() => window.customInferenceStarted);
   };
-  await upload('small');
   await start();
   await expect(page.getByRole('status').filter({ hasText: /Segmentation complete.*runtime released/ })).toBeVisible();
   await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
@@ -783,13 +793,12 @@ test('normal custom-model controls save a real draft, cancel and replace active 
   expect(draft[0]!.reviewState).toBe('draft');
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
 
-  await upload('slow');
-  await start();
-  const cancelStarted = performance.now();
-  await page.getByRole('button', { name: 'Cancel model suggestion' }).click();
+  // Use the real inference-start event, not an artificially slow model, to
+  // exercise both ordinary actions before a valid result can finish.
+  await start('Cancel model suggestion');
   await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
-  const cancelToReadyMs = performance.now() - cancelStarted;
+  const cancelToReadyMs = await page.evaluate(() => performance.now() - window.customInferenceActionAt);
   await expect(
     page.getByRole('status').filter({ hasText: /Model suggestion canceled.*worker was stopped/ }),
   ).toBeInViewport();
@@ -801,7 +810,7 @@ test('normal custom-model controls save a real draft, cancel and replace active 
   // Trigger its real button at inference start: a fast model can otherwise
   // finish legitimately between the two Playwright clicks before replacement.
   await page.getByRole('button', { name: 'Show reconstruction sources and controls' }).click();
-  await start(page.getByRole('button', { name: 'Open 3D volume', exact: true }));
+  await start('Open 3D volume');
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
   await expect(page.getByRole('button', { name: 'Show reconstruction sources and controls' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
@@ -817,6 +826,8 @@ test('normal custom-model controls save a real draft, cancel and replace active 
     draft,
     reopened: await savedVolumeSelection(page),
     cancelToReadyMs,
+    actionInput:
+      'Cancel and reconstruction buttons are invoked at real inference start; not trusted-pointer latency evidence.',
     workers,
     errors,
     scope:
