@@ -1,0 +1,475 @@
+{
+  "recordedAt": "2026-09-04T15:55:59.224813+00:00",
+  "scope": "Supplemental synthetic actual-app evidence; no private MRI or clinical claim. This is a local pre-push checkpoint; current-head CI, merge and public-host execution are separate gates.",
+  "ciFailures": [
+    {
+      "run": 33887132867,
+      "head": "f36e71ac27f401b7dc144cd019f165ef389124df",
+      "failure": "Custom workflow exhausted 180-second test at reopen."
+    },
+    {
+      "run": 33889164663,
+      "head": "8fde8e73bbe82efa3ac85c2764630a1d15a6924b",
+      "unitPassed": 3259,
+      "unitSkipped": 54,
+      "workflowPassed": 10,
+      "failure": "Custom workflow screenshot exhausted 15 seconds; prior trivial evaluation took 12796 ms."
+    }
+  ],
+  "change": "Remove enhancement wrapper/ref invalidation. Read committed enhancement state using useEffectEvent and request a frame only when result, source, enabled or strength changes. Shader, quality, fixtures, viewport and deadlines unchanged.",
+  "regression": {
+    "before": {
+      "path": "artifacts/turbovac/startup-delivery-2026-09-04/idle-render-before.json",
+      "sha256": "abea801227d86f7e622608aa225e180041b798ebfdef856e8cb23614273ccb2e"
+    },
+    "observed": "One model-status update added a full draw without any changed display input.",
+    "focusedAfter": {
+      "path": "artifacts/turbovac/startup-delivery-2026-09-04/idle-render-focused.json",
+      "sha256": "3d0696a93580ea10883af2b713ea163e347ec0d864713498dbf0fa522b27d468"
+    },
+    "passed": 149,
+    "failed": 0,
+    "validation": [
+      {
+        "command": [
+          "node_modules/.bin/prettier",
+          "--write",
+          "src/components/SvrVolume3DViewer.tsx",
+          "tests/SvrVolume3DViewer.test.tsx"
+        ],
+        "status": 0
+      },
+      {
+        "command": [
+          "npm",
+          "run",
+          "test",
+          "--",
+          "tests/SvrVolume3DViewer.test.tsx",
+          "tests/useSvrEnhancement.test.tsx",
+          "--maxWorkers=2",
+          "--reporter=json",
+          "--outputFile=<worktree>/artifacts/turbovac/startup-delivery-2026-09-04/idle-render-focused.json"
+        ],
+        "status": 0
+      },
+      {
+        "command": ["node_modules/.bin/tsc", "-b"],
+        "status": 0
+      },
+      {
+        "command": ["npm", "run", "lint", "--", "--max-warnings=0"],
+        "status": 0
+      }
+    ]
+  },
+  "pairedObservation": {
+    "runs": [
+      {
+        "name": "render-baseline-01",
+        "run": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-baseline-01/run-receipt.json",
+          "sha256": "57765083073f5d4423abdf479c5982675fe44f4f8bf6610f11dbc1dcc925912e"
+        },
+        "observer": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-baseline-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/render-observer.json",
+          "sha256": "a85485532198d230e7b20320c971d8070bb8bdf8ad18f85d9aed56a6e38b7c52"
+        },
+        "workflowReceipt": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-baseline-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+          "sha256": "5c21b9bdb2064c6898f43b42ad071dce9916619eab51c0b5622697acc3000bb7"
+        },
+        "build": {
+          "head": "7da6db818a339a27ac2f9ffec853944d58aff370",
+          "sourceSha256": "1779140f61c8136274b1555cf1c68e89f3edceca084eebd8edd38428c2be248c",
+          "applicationSourceSha256": "48504a54af41c7c47215e38d34968536c19894c120f68a426bb326177dd64e9b",
+          "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+          "directory": "<retained-build>/miraviewer-startup-candidate-04-Rk1gTh",
+          "mode": "production",
+          "builtAt": "2026-09-04T14:45:37.702Z",
+          "fixture": "synthetic only",
+          "node": "v22.22.0",
+          "initialChunks": [
+            {
+              "key": "index.html",
+              "file": "assets/index-CQI0d0uY.js",
+              "bytes": 2047293,
+              "gzipBytes": 658515,
+              "sha256": "aa0e08fa4939331828b9f61170534d3efbf9dc42dee18f370388a1d53f9f81fa"
+            }
+          ],
+          "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+        },
+        "browser": "151.0.7922.34",
+        "drawArraysCalls": 32,
+        "longTasks": 5,
+        "longTaskDurationMs": 366,
+        "drawStatuses": {
+          "Loading saved selection\u2026|Loading 13\u2026": 3,
+          "Browse the MRI in 3D, or select tissue to inspect a region.": 1,
+          "Browse the MRI in 3D, or select tissue to inspect a region.|36 \u00d7 36 \u00b7 source pixels": 2,
+          "Browse the MRI in 3D, or select tissue to inspect a region.|Verifying model: synthetic-small.onnx|36 \u00d7 36 \u00b7 source pixels": 1,
+          "Browse the MRI in 3D, or select tissue to inspect a region.|Verified model and manifest cached|36 \u00d7 36 \u00b7 source pixels": 1,
+          "Model computation is running. Cancel it before editing.|Preparing custom-model suggestion\u2026Cancel model suggestion|36 \u00d7 36 \u00b7 source pixels": 7,
+          "Model computation is running. Cancel it before editing.|Running custom-model suggestion\u2026 (WebGPU preferred)Cancel model suggestion|36 \u00d7 36 \u00b7 source pixels": 3,
+          "Draft selection. Review all three planes before confirming.|Segmentation complete (336ms). Model runtime released. Source-aligned suggestion; review against original slices.|36 \u00d7 36 \u00b7 source pixels": 2,
+          "Draft selection. Review all three planes before confirming.|Model suggestion canceled. The worker was stopped; your selection is unchanged.|36 \u00d7 36 \u00b7 source pixels": 5,
+          "Reconstructing detail. Your current selection is preserved; editing resumes when it finishes.|Model suggestion canceled. The worker was stopped; your selection is unchanged.|36 \u00d7 36 \u00b7 source pixels": 2,
+          "Loading saved selection\u2026|Loading 13\u2026|Model suggestion canceled. The worker was stopped; your selection is unchanged.|Loading original\u2026": 2,
+          "Draft selection. Review all three planes before confirming.|Loading 13\u2026|Model suggestion canceled. The worker was stopped; your selection is unchanged.|Loading original\u2026": 1,
+          "Draft selection. Review all three planes before confirming.|Loading 13\u2026": 1,
+          "Draft selection. Review all three planes before confirming.": 1
+        },
+        "draft": [
+          {
+            "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+            "dims": [36, 36, 24],
+            "modelKey": "brats-tumor-v1",
+            "reviewState": "draft",
+            "labelBytes": 31104,
+            "selectedCount": 31104,
+            "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+          }
+        ],
+        "reopened": [
+          {
+            "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+            "dims": [36, 36, 24],
+            "modelKey": "brats-tumor-v1",
+            "reviewState": "draft",
+            "labelBytes": 31104,
+            "selectedCount": 31104,
+            "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+          }
+        ],
+        "workers": [
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          },
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          },
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          }
+        ],
+        "errors": [],
+        "screenshot": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-baseline-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-canceled-desktop.png",
+          "sha256": "b33b2499c36fcaedfd42972a1cd4b81bc5a0087432fec5c479f19b247cb5fca1"
+        }
+      },
+      {
+        "name": "render-candidate-01",
+        "run": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-candidate-01/run-receipt.json",
+          "sha256": "1d0566fe4bd77fec3e6cf7ef62d7d6bfe22e1b00e415aba7f6d15e7732f0789b"
+        },
+        "observer": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-candidate-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/render-observer.json",
+          "sha256": "5c2311cfe3f6d88c6ef4a66eef616dfbefde8fc755acb4b57029febcc6c90dff"
+        },
+        "workflowReceipt": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-candidate-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+          "sha256": "bbd218bcd37dc1b582d441f598eeacbd8620d5663cbf652ac2da74013ec2fb8c"
+        },
+        "build": {
+          "head": "8fde8e73bbe82efa3ac85c2764630a1d15a6924b",
+          "sourceSha256": "68730602da614e48361f2ab2ab6f130316d3a2347c5c668c2200a1faecd36242",
+          "applicationSourceSha256": "2c21538f1a3b340ba0d94f68784bf41af1754498cc46860fc24e64f18d7024db",
+          "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+          "directory": "<retained-build>/miraviewer-startup-candidate-06-4iEAGF",
+          "mode": "production",
+          "builtAt": "2026-09-04T15:45:28.647Z",
+          "fixture": "synthetic only",
+          "node": "v22.22.0",
+          "initialChunks": [
+            {
+              "key": "index.html",
+              "file": "assets/index-p_kCYYTW.js",
+              "bytes": 2047293,
+              "gzipBytes": 658513,
+              "sha256": "2a495d8fc75ed36ab33dec6c1d7c5c1e88e8393fefb7af63552f661768d20dbe"
+            }
+          ],
+          "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+        },
+        "browser": "151.0.7922.34",
+        "drawArraysCalls": 18,
+        "longTasks": 2,
+        "longTaskDurationMs": 108,
+        "drawStatuses": {
+          "Loading saved selection\u2026|Loading 13\u2026": 4,
+          "Browse the MRI in 3D, or select tissue to inspect a region.": 1,
+          "Browse the MRI in 3D, or select tissue to inspect a region.|36 \u00d7 36 \u00b7 source pixels": 1,
+          "Model computation is running. Cancel it before editing.|Preparing custom-model suggestion\u2026Cancel model suggestion|36 \u00d7 36 \u00b7 source pixels": 5,
+          "Draft selection. Review all three planes before confirming.|Segmentation complete (307ms). Model runtime released. Source-aligned suggestion; review against original slices.|36 \u00d7 36 \u00b7 source pixels": 2,
+          "Draft selection. Review all three planes before confirming.|Model suggestion canceled. The worker was stopped; your selection is unchanged.|36 \u00d7 36 \u00b7 source pixels": 2,
+          "Loading saved selection\u2026|Loading 13\u2026|Model suggestion canceled. The worker was stopped; your selection is unchanged.|Loading original\u2026": 1,
+          "Draft selection. Review all three planes before confirming.|Loading 13\u2026|Model suggestion canceled. The worker was stopped; your selection is unchanged.|Loading original\u2026": 1,
+          "Draft selection. Review all three planes before confirming.": 1
+        },
+        "draft": [
+          {
+            "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+            "dims": [36, 36, 24],
+            "modelKey": "brats-tumor-v1",
+            "reviewState": "draft",
+            "labelBytes": 31104,
+            "selectedCount": 31104,
+            "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+          }
+        ],
+        "reopened": [
+          {
+            "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+            "dims": [36, 36, 24],
+            "modelKey": "brats-tumor-v1",
+            "reviewState": "draft",
+            "labelBytes": 31104,
+            "selectedCount": 31104,
+            "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+          }
+        ],
+        "workers": [
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          },
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          },
+          {
+            "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+            "closed": true
+          }
+        ],
+        "errors": [],
+        "screenshot": {
+          "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-candidate-01/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-canceled-desktop.png",
+          "sha256": "b33b2499c36fcaedfd42972a1cd4b81bc5a0087432fec5c479f19b247cb5fca1"
+        }
+      }
+    ],
+    "drawCallsRemoved": 14,
+    "identicalScreenshotBytes": true,
+    "identicalSavedAndReopenedDrafts": true,
+    "limitations": "One local sample per bundle. GL call counts and main-thread tasks are not completed GPU-frame timing, trusted-pointer cancellation latency or a hardware-wide speed guarantee."
+  },
+  "normalWorkflow": {
+    "run": {
+      "path": "artifacts/performance/audit-startup-delivery-2026-09-04/candidate-workflow-06/run-receipt.json",
+      "sha256": "9faaa94b9336cd9bb085e0d4f63063e14cb0065829ff088250b38a685e273f9a"
+    },
+    "results": {
+      "path": "artifacts/performance/audit-startup-delivery-2026-09-04/candidate-workflow-06/results.json",
+      "sha256": "cbf4a384748c7ea9d56f8c35e75ad1a24b198d30540636de258bbcdde489e1b6"
+    },
+    "stats": {
+      "startTime": "2026-09-04T15:53:09.885Z",
+      "duration": 41582.632999999994,
+      "expected": 11,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "unchanged": true,
+    "build": {
+      "head": "8fde8e73bbe82efa3ac85c2764630a1d15a6924b",
+      "sourceSha256": "68730602da614e48361f2ab2ab6f130316d3a2347c5c668c2200a1faecd36242",
+      "applicationSourceSha256": "2c21538f1a3b340ba0d94f68784bf41af1754498cc46860fc24e64f18d7024db",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "directory": "<retained-build>/miraviewer-startup-candidate-06-4iEAGF",
+      "mode": "production",
+      "builtAt": "2026-09-04T15:45:28.647Z",
+      "fixture": "synthetic only",
+      "node": "v22.22.0",
+      "initialChunks": [
+        {
+          "key": "index.html",
+          "file": "assets/index-p_kCYYTW.js",
+          "bytes": 2047293,
+          "gzipBytes": 658513,
+          "sha256": "2a495d8fc75ed36ab33dec6c1d7c5c1e88e8393fefb7af63552f661768d20dbe"
+        }
+      ],
+      "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+    }
+  },
+  "independent2d": {
+    "sourceHead": "8fde8e73bbe82efa3ac85c2764630a1d15a6924b",
+    "build": {
+      "head": "7da6db818a339a27ac2f9ffec853944d58aff370",
+      "sourceSha256": "1779140f61c8136274b1555cf1c68e89f3edceca084eebd8edd38428c2be248c",
+      "applicationSourceSha256": "48504a54af41c7c47215e38d34968536c19894c120f68a426bb326177dd64e9b",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "directory": "<retained-build>/miraviewer-startup-candidate-04-Rk1gTh",
+      "mode": "production",
+      "builtAt": "2026-09-04T14:45:37.702Z",
+      "fixture": "synthetic only",
+      "node": "v22.22.0",
+      "initialChunks": [
+        {
+          "key": "index.html",
+          "file": "assets/index-CQI0d0uY.js",
+          "bytes": 2047293,
+          "gzipBytes": 658515,
+          "sha256": "aa0e08fa4939331828b9f61170534d3efbf9dc42dee18f370388a1d53f9f81fa"
+        }
+      ],
+      "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+    },
+    "original": {
+      "path": "artifacts/performance/audit-startup-delivery-2026-09-04/independent-brush-01/independent-brush-acceptan-8fdae-g-and-exact-reviewed-reopen-independent-brush/independent-brush.json",
+      "sha256": "8dad812762ab89c67b103245903ee564248eee6add097876d4c75e77fb370683"
+    },
+    "inputCount": 72,
+    "sourceMode": "independent-2d",
+    "saved": [
+      {
+        "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20350701.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20350701.1.1\",\"1.2.826.0.1.3680043.10.543.20350701.1.2\",\"1.2.826.0.1.3680043.10.543.20350701.1.3\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20350701.1.999\",\"dims\":[25,25,25],\"spacing\":[1,1,1],\"origin\":[-0.5,-0.5,-0.5],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"feec7a1729a6edab\"}",
+        "dims": [25, 25, 25],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "reviewed",
+        "labelBytes": 15625,
+        "selectedCount": 13,
+        "labelsSha256": "3381b61f105fc6228ffa1225927b50f6b7fb1bc69ce306eac77302ba13a29051",
+        "seeds": {
+          "foreground": [
+            7762, 7786, 7787, 7788, 7810, 7811, 7812, 7813, 7814, 7836, 7837,
+            7838, 7862
+          ],
+          "background": [
+            7771, 7795, 7796, 7797, 7819, 7820, 7821, 7822, 7823, 7845, 7846,
+            7847, 7871
+          ],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 12
+          }
+        }
+      }
+    ],
+    "reopened": [
+      {
+        "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20350701.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20350701.1.1\",\"1.2.826.0.1.3680043.10.543.20350701.1.2\",\"1.2.826.0.1.3680043.10.543.20350701.1.3\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20350701.1.999\",\"dims\":[25,25,25],\"spacing\":[1,1,1],\"origin\":[-0.5,-0.5,-0.5],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"feec7a1729a6edab\"}",
+        "dims": [25, 25, 25],
+        "modelKey": "manual-seeded-v1",
+        "reviewState": "reviewed",
+        "labelBytes": 15625,
+        "selectedCount": 13,
+        "labelsSha256": "3381b61f105fc6228ffa1225927b50f6b7fb1bc69ce306eac77302ba13a29051",
+        "seeds": {
+          "foreground": [
+            7762, 7786, 7787, 7788, 7810, 7811, 7812, 7813, 7814, 7836, 7837,
+            7838, 7862
+          ],
+          "background": [
+            7771, 7795, 7796, 7797, 7819, 7820, 7821, 7822, 7823, 7845, 7846,
+            7847, 7871
+          ],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 12
+          }
+        }
+      }
+    ],
+    "inferenceWorkers": [],
+    "errors": [],
+    "visual": [
+      {
+        "path": "artifacts/performance/audit-startup-delivery-2026-09-04/independent-brush-01/independent-brush-acceptan-8fdae-g-and-exact-reviewed-reopen-independent-brush/independent-brush-desktop.png",
+        "sha256": "467e2671c5294fcf5aa8609dca07fca8ce662da5f5f5be5eb7ae975677160c8b",
+        "verdict": "PASS",
+        "scope": "Individually inspected at original resolution. Visible desktop workspace only; lower panes extend beyond the capture. No anatomical, full-page, motion or hardware-performance verdict."
+      },
+      {
+        "path": "artifacts/performance/audit-startup-delivery-2026-09-04/independent-brush-01/independent-brush-acceptan-8fdae-g-and-exact-reviewed-reopen-independent-brush/independent-brush-reopened.png",
+        "sha256": "fd44d6ed7841466b57aeba216d65da65f444418e9acedad96f1ce24e7e71397d",
+        "verdict": "PASS",
+        "scope": "Individually inspected at original resolution. Visible desktop workspace only; lower panes extend beyond the capture. No anatomical, full-page, motion or hardware-performance verdict."
+      }
+    ],
+    "scope": "Actual normal production app, genuine synthetic independent 2D DICOM acquisition tags, real reconstruction and native pointer marks. Exact saved labels, literal marks and reviewed state survive reload/reconstruction. No learned proposer is invoked. Not anatomical or hardware-performance evidence."
+  },
+  "visualRecovery": {
+    "checkedAt": "2026-09-04T15:55:59.224813+00:00",
+    "incident": "Two tool previews omitted grayscale and marks that are present in canonical PNG pixels. No product mutation followed those previews.",
+    "quarantine": "Earlier visual claims through this path were reopened; exact current/referenced states below received fresh single-source original-resolution inspections. No motion or family-wide architecture verdict is inherited.",
+    "recovery": "An exact-byte copy under a distinct path displayed each affected source correctly. Originals and failed inspection history remain preserved.",
+    "independentEvidence": {
+      "cancellationPngSha256": "b33b2499c36fcaedfd42972a1cd4b81bc5a0087432fec5c479f19b247cb5fca1",
+      "baselineCandidatePngBytesEqual": true,
+      "cancellationCanvasNonblackNeutralPixels": 39147,
+      "cancellationSample575x650": [143, 143, 143],
+      "independent2dAxialWhitePixelsBeforeAndAfter": 2551,
+      "independent2dAxialTurquoisePixelsBeforeAndAfter": 2061
+    },
+    "inspected": [
+      {
+        "path": "agent_docs/evidence/startup-delivery-2026-09-04/dialog-delivery-loading.png",
+        "sha256": "40419347d2ed93178090e51e778ffd28dc7d101e3152e3f8de0f67cc01fc4e87",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      },
+      {
+        "path": "agent_docs/evidence/startup-delivery-2026-09-04/dialog-delivery-unavailable.png",
+        "sha256": "bbecebc6d14574812267da86861b02c75a40f0193e40b4373692c29f1f99d5d5",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      },
+      {
+        "path": "agent_docs/evidence/startup-delivery-2026-09-04/compressed-first-image.png",
+        "sha256": "3afa1616bd5ddf2b87e8a5fee1665d8e2d484aa9d6ac07d22f883e736049f8d2",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      },
+      {
+        "path": "artifacts/performance/audit-startup-delivery-2026-09-04/render-candidate-01/canonical-candidate-06-cancel.png",
+        "sha256": "b33b2499c36fcaedfd42972a1cd4b81bc5a0087432fec5c479f19b247cb5fca1",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      },
+      {
+        "path": "artifacts/performance/audit-startup-delivery-2026-09-04/independent-brush-01/independent-brush-acceptan-8fdae-g-and-exact-reviewed-reopen-independent-brush/independent-brush-desktop.png",
+        "sha256": "467e2671c5294fcf5aa8609dca07fca8ce662da5f5f5be5eb7ae975677160c8b",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      },
+      {
+        "path": "artifacts/performance/audit-startup-delivery-2026-09-04/independent-brush-01/canonical-reviewed-independent-2d.png",
+        "sha256": "fd44d6ed7841466b57aeba216d65da65f444418e9acedad96f1ce24e7e71397d",
+        "verdict": "PASS",
+        "scope": "Fresh original-resolution inspection of this exact desktop raster only. F9 and independent-2d sources retain their earlier build identity. Lower independent-2d panes extend beyond the capture; no motion, full-page, anatomy or hardware-performance claim."
+      }
+    ],
+    "decisionRevalidation": {
+      "F7": "Reconsidered from elapsed-demand ownership, measured uncached completions and exact pixel/support hashes; not chosen from a screenshot impression.",
+      "F9": "Reconsidered from unused imports, conditional dialog ownership, actual network failure/reload behavior, entry transfer bytes and emitted runtime execution; not chosen from a screenshot impression.",
+      "F10": "Brush-only capability is intentional for independent-2d; actual native-pointer save/reopen and literal-mark equality independently prove preserved editing.",
+      "renderInvalidation": "Chosen before this inspection incident from source ownership and a failing real-component draw-count regression; actual display controls still redraw and complete workflow screenshots/labels match exactly."
+    },
+    "cleanup": {
+      "checkedAt": "2026-09-04T15:54:28.637492+00:00",
+      "currentBatch": "clear",
+      "staleOwned": "clear",
+      "preservation": "clear",
+      "ownedMarker": "--miraviewer-browser-acceptance=",
+      "ownedBrowserProcesses": [],
+      "acceptancePort43134Listeners": [],
+      "runners": [
+        "render-baseline-01",
+        "render-candidate-01",
+        "candidate-workflow-06"
+      ],
+      "exitCodes": [0, 0, 0],
+      "scope": "Existing Playwright runner closed its page/context/browser handles on exit; scoped process and server audits clear. No user or other-worktree browser was signaled."
+    }
+  },
+  "releaseGate": "Do not infer current-head CI/merge/hosted acceptance from local success. The final rollout is recorded separately in artifacts/turbovac/startup-delivery-2026-09-04/merge-closeout.md."
+}
