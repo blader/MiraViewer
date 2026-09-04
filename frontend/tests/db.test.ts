@@ -53,6 +53,39 @@ describe('db', () => {
     db2.close();
   });
 
+  it('indexes existing derived frames when upgrading an older database without rewriting pixels', async () => {
+    const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('MiraViewerDB', 6);
+      request.onupgradeneeded = () => {
+        const frames = request.result.createObjectStore('derived_alignment_frames', { keyPath: 'id' });
+        frames.createIndex('by-patient', 'patientKey');
+        frames.createIndex('by-created-at', 'createdAt');
+        frames.put({
+          id: 'retained-plane',
+          patientKey: 'patient',
+          datasetRevision: 4,
+          sequenceId: 'axial-t2',
+          targetSeriesUid: 'series',
+          createdAt: 1,
+          pixels: Float32Array.of(3, 4),
+        });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    legacy.close();
+
+    const db = await getDB();
+    const frames = await db.getAllFromIndex('derived_alignment_frames', 'by-patient-revision-source', [
+      'patient',
+      4,
+      'axial-t2',
+      'series',
+    ]);
+    expect(frames.map((frame) => frame.id)).toEqual(['retained-plane']);
+    expect(Array.from(frames[0]!.pixels)).toEqual([3, 4]);
+  });
+
   it('requests persistent storage when available', async () => {
     const persist = vi.fn().mockResolvedValue(true);
     const estimate = vi.fn().mockResolvedValue({ usage: 1024, quota: 2048 });

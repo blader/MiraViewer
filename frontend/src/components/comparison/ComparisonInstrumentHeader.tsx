@@ -19,6 +19,7 @@ type InstrumentNavigation = {
   setViewMode: (mode: 'grid' | 'overlay' | 'svr3d') => void;
   overlayColumns: ReadonlyArray<{ date: string; ref?: SeriesRef }>;
   overlayDateIndex: number;
+  selectionFallback?: boolean;
   setOverlayDateIndex: (index: number) => void;
   isPlaying: boolean;
   setIsPlaying: (playing: boolean) => void;
@@ -38,6 +39,8 @@ type InstrumentActions = {
 type InstrumentNotices = {
   persistenceError: string | null;
   clearPersistenceError: () => void;
+  settingsReady?: boolean;
+  retrySettings?: () => void;
   alignmentError: string | null;
   alignmentResults: AlignmentResult[];
   clearAlignmentState: () => void;
@@ -246,11 +249,22 @@ function InstrumentNoticeRail({
   return (
     <div className="instrument-notice-rail">
       {notices.persistenceError ? (
-        <div role="alert" className="instrument-notice" data-severity="error">
-          <span>Changes could not be saved: {notices.persistenceError}</span>
-          <button type="button" className="instrument-notice-button" onClick={notices.clearPersistenceError}>
-            Dismiss
-          </button>
+        <div role="alert" className="instrument-notice" data-severity="error" data-persistence="true">
+          <span>
+            {notices.settingsReady === false
+              ? 'Settings unavailable; browsing works, but changes are unsaved. '
+              : 'Changes could not be saved: '}
+            {notices.persistenceError}
+          </span>
+          {notices.settingsReady === false ? (
+            <button type="button" className="instrument-notice-button" onClick={notices.retrySettings}>
+              Retry settings
+            </button>
+          ) : (
+            <button type="button" className="instrument-notice-button" onClick={notices.clearPersistenceError}>
+              Dismiss
+            </button>
+          )}
         </div>
       ) : null}
       {notices.alignmentError ? (
@@ -338,8 +352,12 @@ function InstrumentContextRail({
         ) : null}
       </div>
 
-      {alignmentControls}
-      {displayControls}
+      {alignmentControls || displayControls ? (
+        <div className="instrument-context-options">
+          {alignmentControls}
+          {displayControls}
+        </div>
+      ) : null}
 
       {navigation.viewMode === 'overlay' && navigation.overlayColumns.length > 0 ? (
         <div className="instrument-context-playback">
@@ -375,6 +393,12 @@ function InstrumentContextRail({
 
       {showStudyFilmstrip && navigation.overlayColumns.length > 0 ? (
         <nav className="instrument-study-filmstrip" aria-label="Available examinations">
+          {navigation.selectionFallback && (
+            <span role="status" className="text-xs text-[var(--text-secondary)]">
+              Previous examination unavailable; showing{' '}
+              {formatDate(navigation.overlayColumns[navigation.overlayDateIndex]!.date)}.
+            </span>
+          )}
           {navigation.overlayColumns.map((column, index) => (
             <button
               key={column.date}
@@ -386,6 +410,7 @@ function InstrumentContextRail({
               }}
               aria-current={index === navigation.overlayDateIndex ? 'true' : undefined}
               className="instrument-study-button"
+              data-overlay-navigation="date"
             >
               {formatDate(column.date)}
             </button>

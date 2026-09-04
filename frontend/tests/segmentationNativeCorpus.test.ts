@@ -1,10 +1,11 @@
+/** These solver comparisons target the retired diagnostic, not shipped learned-model acceptance. */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { buildOutputPlaneGrid, outputGridPixelToWorld } from '../src/utils/outputPlaneGrid';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
-import { segmentSeededVolume, type SeededVolumeInput } from '../src/utils/segmentation/seededVolume';
+import { segmentSeededVolume, type SeededVolumeInput } from './helpers/legacySeededVolume';
 import { physicalBrushIndices } from '../src/utils/segmentation/selectionEditing';
 import {
   inspectAlignmentCorpus,
@@ -146,7 +147,7 @@ describe.skipIf(!requireByteEquivalence)('private baseline-preserving segmentati
     expect(pixelFingerprint(readFileSync(baselinePath))).toBe(
       '8cc742ba8be8fb5d298f94e6281894f292ea192ce4f22ea6fb6d58e740a2dd2a',
     );
-    const solverPath = resolve('src/utils/segmentation/seededVolume.ts');
+    const solverPath = resolve('tests/helpers/legacySeededVolume.ts');
     const solverHash = pixelFingerprint(readFileSync(solverPath));
     expect(solverHash).toBe(process.env.MIRAVIEWER_SEGMENTATION_CANDIDATE_SHA);
     const original: typeof segmentSeededVolume = (await import(/* @vite-ignore */ pathToFileURL(baselinePath).href))
@@ -685,7 +686,7 @@ describe.skipIf(!corpusRoot)('private native MRI segmentation validation (no cli
       const baselinePath = join(outputDirectory, 'baseline-seededVolume.ts');
       expect(pixelFingerprint(readFileSync(baselinePath))).toBe(marks.baselineCoreHash);
       const solverPath = runCandidate
-        ? resolve(experimentalSolverPath ?? 'src/utils/segmentation/seededVolume.ts')
+        ? resolve(experimentalSolverPath ?? 'tests/helpers/legacySeededVolume.ts')
         : baselinePath;
       if (experimentalSolverPath) {
         expect(runCandidate).toBe(true);

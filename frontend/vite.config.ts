@@ -10,7 +10,7 @@ import { availableParallelism } from 'node:os';
 const privateArtifactsDirectory = fileURLToPath(new URL('./tmp/', import.meta.url)).replace(/\/$/, '');
 
 // https://vite.dev/config/
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
   const isVitest = process.env.VITEST === 'true';
   const usePolling = /^(1|true)$/i.test(process.env.CHOKIDAR_USEPOLLING ?? '');
   const plugins: PluginOption[] = [react(), tailwindcss()];
@@ -54,6 +54,19 @@ export default defineConfig(() => {
 
   return {
     plugins,
+    // Acceptance-only entrypoints are excluded from normal and offline builds.
+    ...(mode === 'browser-test'
+      ? {
+          build: {
+            rollupOptions: {
+              input: {
+                app: fileURLToPath(new URL('./index.html', import.meta.url)),
+                probes: fileURLToPath(new URL('./tests/browser/probes.html', import.meta.url)),
+              },
+            },
+          },
+        }
+      : {}),
     // Avoid pre-bundling ITK-Wasm packages. These rely on lazy-loaded web workers
     // and Emscripten modules that can break when optimized.
     optimizeDeps: {

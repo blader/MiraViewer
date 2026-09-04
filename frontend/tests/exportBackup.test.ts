@@ -1,6 +1,18 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
-import { getDB, resetDbForTests } from '../src/db/db';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
+import { initializeComparisonState } from '../src/db/comparisonState';
+import { acquisitionChoiceKey, sourceSettingsKey } from '../src/db/comparisonIdentity';
+import { usePanelSettings } from '../src/hooks/usePanelSettings';
+import {
+  getComparisonData,
+  getPanelSettingsSnapshot,
+  getVolumeSegmentation,
+  savePanelSettings,
+  saveVolumeSegmentation,
+} from '../src/utils/localApi';
+import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { VolumeSegmentationRow } from '../src/db/schema';
 import { loadSafeArchive } from '../src/services/archiveSafety';
 import {
@@ -50,6 +62,7 @@ async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSeg
   if (options.model) await putModelBlob('synthetic-model', new Blob([new Uint8Array([5, 6, 7])]));
   if (options.segmentation) await db.put('volume_segmentations', options.segmentation);
 
+  await initializeComparisonState(db);
   const blob = await exportStudiesToZip(['study-1']);
   await resetDbForTests();
   await resetDb();
@@ -59,6 +72,64 @@ async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSeg
   if (!manifest) throw new Error('Synthetic complete backup has no manifest');
   return { archive, manifest, blob };
 }
+
+it('restores settings into a mounted viewer without allowing old timers or unload writes to overwrite them', async () => {
+  const { archive, manifest } = await seedSnapshot();
+  manifest.records.panelSettings = [
+    {
+      comboId: sourceSettingsKey('series-1'),
+      source: { studyUid: 'study-1', seriesUid: 'series-1' },
+      settings: { 'study-1': { ...DEFAULT_PANEL_SETTINGS, zoom: 5 } },
+    },
+  ];
+  await restoreSnapshot(archive.zip, manifest);
+  const data = await getComparisonData();
+  const combo = data.sequences[0]!.id;
+  const date = data.dates[0]!;
+  const sources = data.series_map[combo];
+  const readSettings = () => getPanelSettingsSnapshot(combo, data.selected_patient_key, sources);
+  const original = await readSettings();
+  await savePanelSettings(original.verifiedSources[date]!, { ...DEFAULT_PANEL_SETTINGS, zoom: 2 });
+  const hook = renderHook(
+    ({ token }) => usePanelSettings(combo, date, data.selected_patient_key, false, sources, token),
+    {
+      initialProps: { token: original.datasetToken },
+    },
+  );
+  try {
+    await waitFor(() => expect(hook.result.current.settingsReady).toBe(true));
+    expect(hook.result.current.panelSettings.get(date)?.zoom).toBe(2);
+    act(() => hook.result.current.setProgress(0.5));
+    await act(async () => {
+      await restoreSnapshot(archive.zip, manifest);
+    });
+    expect(hook.result.current.settingsReady).toBe(false);
+    await expect(savePanelSettings(original.verifiedSources[date]!, DEFAULT_PANEL_SETTINGS)).rejects.toThrow(
+      /replaced/,
+    );
+    const restored = await readSettings();
+    expect(restored.datasetToken).not.toBe(original.datasetToken);
+    await act(async () => hook.rerender({ token: restored.datasetToken }));
+    await waitFor(() => expect(hook.result.current.settingsReady).toBe(true));
+    expect(hook.result.current.panelSettings.get(date)?.zoom).toBe(5);
+    act(() => hook.result.current.setProgress(0.75));
+    await waitFor(async () => expect((await readSettings()).settings[date]).toMatchObject({ zoom: 5, progress: 0.75 }));
+
+    act(() => hook.result.current.setProgress(0.9));
+    await act(async () => {
+      await deleteAllStoredMriData();
+      window.dispatchEvent(new Event('beforeunload'));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    expect(await (await getDB()).count('panel_settings')).toBe(0);
+  } finally {
+    cleanup();
+    await resetDbForTests();
+    await resetDb();
+  }
+});
 
 async function rewriteSnapshotManifest(
   blob: Blob,
@@ -104,6 +175,59 @@ function selectionRow(): VolumeSegmentationRow {
 }
 
 describe('exportBackup', () => {
+  it('round trips one conservatively isolated patient without stranding source settings or labels', async () => {
+    const { archive, manifest } = await seedSnapshot();
+    await restoreSnapshot(archive.zip, manifest);
+    const db = await getDB();
+    await db.put('studies', {
+      ...manifest.records.studies[0]!,
+      studyInstanceUid: 'conflicting-study',
+      patientName: 'Another name',
+    });
+    await initializeComparisonState(db);
+    const foreignChoice = { key: acquisitionChoiceKey('conflicting-study', 'unknown'), value: 'foreign-series' };
+    await db.put('app_state', foreignChoice);
+    const data = await getComparisonData();
+    expect(data.selected_patient_key).toBe('P1#study-1');
+    const combo = data.sequences[0]!.id;
+    const date = data.dates[0]!;
+    const owner = (await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]))
+      .verifiedSources[date]!;
+    await savePanelSettings(owner, { ...DEFAULT_PANEL_SETTINGS, zoom: 2, panX: 0.2 });
+    await saveVolumeSegmentation({
+      volumeKey: 'source-labels',
+      patientKey: data.selected_patient_key!,
+      studyUid: 'study-1',
+      seriesUids: ['series-1'],
+      dims: [2, 1, 1],
+      labels: Uint8Array.of(1, 0),
+      updatedAt: 1,
+    });
+    const backup = await exportStudiesToZip(['study-1']);
+    await deleteAllStoredMriData();
+    const isolated = await loadSafeArchive(backup, { deferStorageCheck: true });
+    const isolatedManifest = await readSnapshotManifest(isolated.zip);
+    expect(isolatedManifest!.records.appState.some((row) => row.key === foreignChoice.key)).toBe(false);
+    // Old backups may have included foreign choices; they must not be republished.
+    isolatedManifest!.records.appState.push(foreignChoice);
+    await restoreSnapshot(isolated.zip, isolatedManifest!);
+    expect(await (await getDB()).get('app_state', foreignChoice.key)).toBeUndefined();
+    const restored = await getComparisonData();
+    expect(restored.selected_patient_key).toBe('P1');
+    const settings = await getPanelSettingsSnapshot(combo, restored.selected_patient_key, restored.series_map[combo]);
+    expect(settings.settings[date]).toMatchObject({ zoom: 2, panX: 0.2 });
+    expect(Array.from((await getVolumeSegmentation('source-labels'))!.labels)).toEqual([1, 0]);
+  });
+
+  it('enforces the import identity policy when a restored Study UID has a conflicting patient name', async () => {
+    const { archive, manifest } = await seedSnapshot();
+    const db = await getDB();
+    await db.put('studies', { ...manifest.records.studies[0]!, patientName: 'Conflicting patient' });
+    await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/conflicting patient names/i);
+    expect((await db.get('studies', 'study-1'))?.patientName).toBe('Conflicting patient');
+    expect(await db.count('instances')).toBe(0);
+  });
+
   afterEach(async () => {
     await resetDbForTests();
     await resetDb();

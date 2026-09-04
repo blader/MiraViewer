@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { Profiler } from 'react';
+import { Profiler, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DicomViewer } from '../src/components/DicomViewer';
 import { DEBUG_ALIGNMENT_STORAGE_KEY, subscribeToDebugAlignmentKey } from '../src/utils/debugAlignment';
@@ -26,6 +26,7 @@ vi.mock('cornerstone-core', () => ({
     displayImage: vi.fn(),
     getDefaultViewportForImage: vi.fn().mockReturnValue({}),
     resize: vi.fn(),
+    imageCache: { getImageLoadObject: vi.fn(), removeImageLoadObject: vi.fn() },
   },
 }));
 
@@ -97,6 +98,9 @@ function renderViewer() {
 // Mock getBoundingClientRect to return non-zero dimensions
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getImageIdForInstance).mockReset().mockResolvedValue('miradb:inst-1');
+  vi.mocked(cornerstone.loadImage).mockReset().mockResolvedValue({});
+  vi.mocked(cornerstone.imageCache.getImageLoadObject).mockReset();
   act(() => clearDerivedAlignmentFrames());
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
   resetAlignmentSliceScoreStore();
@@ -115,6 +119,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   act(() => clearDerivedAlignmentFrames());
   fireEvent.keyUp(window, { key: 'z' });
   localStorage.removeItem(DEBUG_ALIGNMENT_STORAGE_KEY);
@@ -122,6 +127,147 @@ afterEach(() => {
 });
 
 describe('DicomViewer', () => {
+  function nativeViewer(index = 0, brightness = 100) {
+    return (
+      <DicomViewer
+        studyId="study"
+        seriesUid="series"
+        instanceIndex={index}
+        instanceCount={2}
+        onInstanceChange={() => {}}
+        brightness={brightness}
+      >
+        <button type="button">Synthetic image annotation</button>
+      </DicomViewer>
+    );
+  }
+
+  it.each(['reject', 'timeout'] as const)(
+    'recovers from an image-ID lookup %s without reimporting data',
+    async (cause) => {
+      vi.useFakeTimers();
+      vi.mocked(getImageIdForInstance)
+        .mockImplementationOnce(() =>
+          cause === 'reject' ? Promise.reject(new Error('Lookup unavailable')) : new Promise(() => {}),
+        )
+        .mockResolvedValueOnce('miradb:recovered');
+      render(nativeViewer());
+      await act(async () => vi.advanceTimersByTimeAsync(cause === 'timeout' ? 10_000 : 0));
+      expect(screen.getByRole('alert')).toHaveTextContent(cause === 'timeout' ? 'timed out' : 'Lookup unavailable');
+      expect(cornerstone.loadImage).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry image' }));
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByRole('img', { name: 'Slice 1' })).toHaveAttribute('data-image-id', 'miradb:recovered');
+      expect(getImageIdForInstance).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    },
+  );
+
+  it('keeps the previous native image and its metadata after a lookup failure, then retries the requested slice', async () => {
+    vi.mocked(getImageIdForInstance)
+      .mockResolvedValueOnce('miradb:old')
+      .mockRejectedValueOnce(new Error('Lookup unavailable'))
+      .mockResolvedValueOnce('miradb:new');
+    const { rerender } = render(nativeViewer());
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+    const image = screen.getByRole('img', { name: 'Slice 1' });
+    rerender(nativeViewer(1, 150));
+    await screen.findByRole('alert');
+    expect(image).toHaveAttribute('data-image-id', 'miradb:old');
+    expect(image).toHaveAttribute('aria-label', 'Slice 1');
+    expect(image.parentElement!.style.filter).toBe('brightness(1) contrast(1)');
+    expect(screen.getByRole('alert')).toHaveTextContent('Showing slice 1');
+    expect(screen.getByRole('button', { name: 'Synthetic image annotation' }).parentElement).toHaveAttribute('inert');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry image' }));
+    await waitFor(() => expect(image).toHaveAttribute('data-image-id', 'miradb:new'));
+    expect(image).toHaveAttribute('aria-label', 'Slice 2');
+    expect(image.parentElement!.style.filter).toBe('brightness(1.5) contrast(1)');
+    expect(screen.getByRole('button', { name: 'Synthetic image annotation' })).toBeInTheDocument();
+  });
+
+  it('keeps annotation draft and viewport focus identity while a new slice is pending', async () => {
+    const next = createDeferred<object>();
+    vi.mocked(getImageIdForInstance).mockResolvedValueOnce('miradb:old').mockResolvedValueOnce('miradb:new');
+    vi.mocked(cornerstone.loadImage).mockResolvedValueOnce({ imageId: 'miradb:old' }).mockReturnValueOnce(next.promise);
+    function Draft() {
+      const [vertices, setVertices] = useState(0);
+      return <button onClick={() => setVertices((count) => count + 1)}>Draft vertices: {vertices}</button>;
+    }
+    const pan = vi.fn();
+    const viewer = (index: number) => (
+      <DicomViewer
+        studyId="study"
+        seriesUid="series"
+        instanceIndex={index}
+        instanceCount={2}
+        onInstanceChange={() => {}}
+        onPanChange={pan}
+      >
+        <Draft />
+      </DicomViewer>
+    );
+    const { rerender } = render(viewer(0));
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'Draft vertices: 0' }));
+    const draft = screen.getByRole('button', { name: 'Draft vertices: 1' });
+    const viewport = screen.getByRole('group', { name: 'Pan MRI slice 1' });
+    viewport.focus();
+    rerender(viewer(1));
+    await act(async () => {});
+    expect(screen.getByRole('button', { name: 'Draft vertices: 1' })).toBe(draft);
+    expect(draft.parentElement).toHaveAttribute('inert');
+    expect(viewport).toHaveAttribute('tabindex', '0');
+    expect(document.activeElement).toBe(viewport);
+    fireEvent.keyDown(viewport, { key: 'Enter' });
+    expect(pan).not.toHaveBeenCalled();
+    await act(async () => next.resolve({ imageId: 'miradb:new' }));
+    expect(draft.parentElement).not.toHaveAttribute('inert');
+    expect(screen.getByRole('button', { name: 'Draft vertices: 1' })).toBe(draft);
+  });
+
+  it.each(['reject', 'timeout'] as const)(
+    'retries a decoder %s without showing late pixels under the wrong slice label',
+    async (cause) => {
+      const late = createDeferred<object>();
+      vi.mocked(getImageIdForInstance).mockResolvedValueOnce('miradb:old').mockResolvedValueOnce('miradb:new');
+      vi.mocked(cornerstone.loadImage).mockResolvedValueOnce({ imageId: 'miradb:old' });
+      const { rerender } = render(nativeViewer());
+      await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+      const image = screen.getByRole('img', { name: 'Slice 1' });
+      vi.useFakeTimers();
+      vi.mocked(cornerstone.loadImage).mockImplementationOnce(() =>
+        cause === 'reject' ? Promise.reject(new Error('Decoder unavailable')) : late.promise,
+      );
+      rerender(nativeViewer(1, 150));
+      // The lookup settles before React commits the decoder effect and starts its deadline.
+      await act(async () => {});
+      expect(cornerstone.loadImage).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(cause === 'timeout' ? 30_000 : 0));
+      expect(screen.getByRole('alert')).toHaveTextContent(cause === 'timeout' ? 'timed out' : 'Decoder unavailable');
+      expect(image).toHaveAttribute('aria-label', 'Slice 1');
+      expect(image).toHaveAttribute('data-image-id', 'miradb:old');
+      expect(image.parentElement!.style.filter).toBe('brightness(1) contrast(1)');
+      vi.mocked(cornerstone.imageCache.getImageLoadObject).mockReturnValue({});
+      if (cause === 'reject') vi.mocked(cornerstone.loadImage).mockResolvedValueOnce({ imageId: 'miradb:new' });
+      fireEvent.click(screen.getByRole('button', { name: 'Retry image' }));
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      if (cause === 'timeout') {
+        expect(cornerstone.imageCache.removeImageLoadObject).not.toHaveBeenCalled();
+        expect(cornerstone.loadImage).toHaveBeenCalledTimes(2);
+        await act(async () => late.resolve({ imageId: 'miradb:new' }));
+      } else expect(cornerstone.imageCache.removeImageLoadObject).toHaveBeenCalledExactlyOnceWith('miradb:new');
+      expect(getImageIdForInstance).toHaveBeenCalledTimes(2);
+      expect(image).toHaveAttribute('aria-label', 'Slice 2');
+      expect(image.parentElement!.style.filter).toBe('brightness(1.5) contrast(1)');
+      await act(async () => {
+        late.resolve({ imageId: 'miradb:obsolete-completion' });
+      });
+      expect(cornerstone.displayImage).toHaveBeenCalledTimes(2);
+      expect(image).toHaveAttribute('data-image-id', 'miradb:new');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    },
+  );
+
   it('publishes a debug-key change once when diagnostic subscribers change during notification', () => {
     const removed = vi.fn();
     const stable = vi.fn();

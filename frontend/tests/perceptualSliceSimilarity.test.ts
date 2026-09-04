@@ -4,8 +4,10 @@ import {
   choosePerceptualWinner,
   normalizePerceptualSource,
   preparePerceptualReference,
+  preparePerceptualCoverage,
   rankFixedCandidateSet,
   scoreAlignedCandidate,
+  scoreAlignedCoverage,
   type PerceptualScaleComponents,
 } from '../src/utils/perceptualSliceSimilarity';
 import {
@@ -90,6 +92,26 @@ function makeTenCandidateRankSet(structuralPositions: readonly number[], appeara
 }
 
 describe('perceptual slice scoring', () => {
+  test.each([31, 64])('coverage-only evaluation exactly matches full scoring at size %s', (size) => {
+    const reference = normalizePerceptualSource(makePattern(size), size);
+    const candidate = translate(reference, size, 2);
+    const support = Float32Array.from(reference, (_, index) => (index % 17 === 0 ? NaN : (index % 7) / 6));
+    for (const validity of [undefined, new Float32Array(reference.length), support]) {
+      for (const exclusionRect of [
+        undefined,
+        { x: 0.35, y: 0.4, width: 0.1, height: 0.12 },
+        { x: 0.1, y: 0.2, width: 0.6, height: 0.5 },
+      ]) {
+        const options = { scales: [size, Math.floor(size / 2), 9], validity, exclusionRect };
+        const full = preparePerceptualReference(reference, size, options);
+        const coverage = preparePerceptualCoverage(reference, size, options);
+        expect(scoreAlignedCoverage(coverage, support, size)).toBe(
+          scoreAlignedCandidate(full, candidate, support, size).coverage,
+        );
+      }
+    }
+  });
+
   test('retains anatomical contrast after a signed modality intercept shifts every pixel below zero', () => {
     const size = 32;
     const labels = makeTissueLabelPhantom(size);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { ComparisonData, PanelSettings, SeriesRef } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import { getEffectiveInstanceIndex, getSliceIndex } from '../utils/math';
+import { comparisonReference } from '../utils/comparisonReference';
 import { useGlobalSliceWheelNavigation } from './useGlobalSliceWheelNavigation';
 import { useGridLayout } from './useGridLayout';
 import { useOverlayNavigation } from './useOverlayNavigation';
@@ -134,29 +135,25 @@ export function useComparisonWorkspaceNavigation({
     progressRef.current = progress;
   }, [progress]);
 
+  const navigationReference = useMemo(() => {
+    const selected = viewMode === 'overlay' ? overlayColumns[overlayDateIndex] : undefined;
+    const column = selected && selected.ref.instance_count > 1 ? selected : comparisonReference(columns);
+    if (!column || viewMode === 'svr3d') return null;
+    const settings = panelSettings.get(column.date) ?? DEFAULT_PANEL_SETTINGS;
+    return {
+      date: column.date,
+      ref: column.ref,
+      instanceCount: column.ref.instance_count,
+      offset: settings.offset,
+      reverseSliceOrder: settings.reverseSliceOrder,
+    };
+  }, [viewMode, overlayColumns, overlayDateIndex, columns, panelSettings]);
+
   const wheelNavContextRef = useRef<{ instanceCount: number; offset: number } | null>(null);
   useEffect(() => {
-    if (viewMode === 'svr3d') {
-      wheelNavContextRef.current = null;
-      return;
-    }
-
-    let instanceCount = 1;
-    let offset = DEFAULT_PANEL_SETTINGS.offset;
-
-    if (viewMode === 'overlay' && overlaySelectedRef && overlaySelectedDate) {
-      instanceCount = overlaySelectedRef.instance_count;
-      offset = overlaySelectedSettings.offset;
-    } else {
-      const primaryGrid = columns[0];
-      if (primaryGrid) {
-        instanceCount = primaryGrid.ref.instance_count;
-        offset = (panelSettings.get(primaryGrid.date) || DEFAULT_PANEL_SETTINGS).offset;
-      }
-    }
-
-    wheelNavContextRef.current = instanceCount > 1 ? { instanceCount, offset } : null;
-  }, [viewMode, overlaySelectedRef, overlaySelectedDate, overlaySelectedSettings.offset, columns, panelSettings]);
+    wheelNavContextRef.current =
+      navigationReference && navigationReference.instanceCount > 1 ? navigationReference : null;
+  }, [navigationReference]);
 
   const setProgressRef = useRef(setProgress);
   useEffect(() => {
@@ -171,18 +168,7 @@ export function useComparisonWorkspaceNavigation({
     setProgressRef,
   });
 
-  const playbackInstanceCount = useMemo(() => {
-    const fromOverlay = overlayColumns[overlayDateIndex]?.ref?.instance_count;
-    if (typeof fromOverlay === 'number' && fromOverlay > 1) return fromOverlay;
-
-    const anyOverlay = overlayColumns.find((column) => column.ref)?.ref?.instance_count;
-    if (typeof anyOverlay === 'number' && anyOverlay > 1) return anyOverlay;
-
-    const anyGrid = columns.find((column) => column.ref)?.ref?.instance_count;
-    if (typeof anyGrid === 'number' && anyGrid > 1) return anyGrid;
-
-    return 1;
-  }, [overlayColumns, overlayDateIndex, columns]);
+  const playbackInstanceCount = navigationReference?.instanceCount ?? 1;
 
   return {
     columns,
@@ -192,6 +178,7 @@ export function useComparisonWorkspaceNavigation({
     setCenterPaneRef,
     viewMode,
     setViewMode,
+    selectionFallback: navigation.selectionFallback,
     overlayDateIndex,
     setOverlayDateIndex,
     isPlaying,
@@ -216,6 +203,7 @@ export function useComparisonWorkspaceNavigation({
     overlayViewerSize: getOverlayViewerSize(gridSize),
     svr3dSeed,
     progressRef,
+    navigationReference,
     playbackInstanceCount,
   };
 }

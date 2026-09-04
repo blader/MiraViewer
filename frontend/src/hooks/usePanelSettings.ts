@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useEffectEvent, useLayoutEffect, useCallback, useMemo } from 'react';
 import type { PanelSettings, PanelSettingsPartial, SeriesRef } from '../types/api';
-import { getPanelSettings, savePanelSettings } from '../utils/localApi';
+import { getPanelSettingsSnapshot, savePanelSettings } from '../utils/localApi';
+import type { LegacyPanelSettings, VerifiedPanelSettingsSource } from '../db/panelSettings';
+import { DatasetReplacedError, subscribeDatasetMutations } from '../db/db';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import {
   adjustAlignment,
@@ -52,6 +54,15 @@ type PanelSettingsHistoryEntry = {
 };
 
 const MAX_HISTORY = 200;
+type SettingsOwner = {
+  patientKey: string | null;
+  sequenceId: string;
+  datasetToken: string;
+  sourcesKey: string;
+  loadAttempt: number;
+  // null is an ephemeral browsing owner after a failed read, never a writer.
+  verifiedSources: Record<string, VerifiedPanelSettingsSource> | null;
+};
 
 export function usePanelSettings(
   selectedSeqId: string | null,
@@ -59,27 +70,119 @@ export function usePanelSettings(
   patientKey: string | null = null,
   interactionBlocked = false,
   seriesByDate?: Record<string, SeriesRef>,
+  datasetToken?: string,
 ) {
   // Per-panel settings: Map<date, PanelSettings>
   const [panelSettings, setPanelSettings] = useState<Map<string, PanelSettings>>(new Map());
   const [activePanel, setActivePanel] = useState<string | null>(null); // date of panel being adjusted
   const [progress, setProgress] = useState(0); // 0..1 normalized
-  const [persistenceError, setPersistenceError] = useState<string | null>(null);
-  const [settingsOwner, setSettingsOwner] = useState({ patientKey, sequenceId: null as string | null });
-  const settingsBelongToPatient = settingsOwner.patientKey === patientKey && settingsOwner.sequenceId === selectedSeqId;
+  const [persistenceFailure, setPersistenceFailure] = useState<{
+    patientKey: string | null;
+    sequenceId: string | null;
+    message: string;
+  } | null>(null);
+  const persistenceError =
+    persistenceFailure?.patientKey === patientKey && persistenceFailure.sequenceId === selectedSeqId
+      ? persistenceFailure.message
+      : null;
+  const [legacySettings, setLegacySettings] = useState<LegacyPanelSettings[]>([]);
+  const [settingsOwner, setSettingsOwner] = useState<SettingsOwner | null>(null);
+  const currentOwnerRef = useRef<SettingsOwner | null>(null);
+  const replacementVersionRef = useRef(0);
+  const [replacement, setReplacement] = useState<{ token?: string; version: number } | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const sourcesKey = useMemo(
+    () =>
+      JSON.stringify(
+        Object.entries(seriesByDate ?? {})
+          .map(([date, source]) => [date, source.study_id, source.series_uid])
+          .sort(([a], [b]) => a!.localeCompare(b!)),
+      ),
+    [seriesByDate],
+  );
+  const settingsBelongToPatient =
+    settingsOwner !== null &&
+    settingsOwner.patientKey === patientKey &&
+    settingsOwner.sequenceId === selectedSeqId &&
+    settingsOwner.sourcesKey === sourcesKey &&
+    (datasetToken === undefined || settingsOwner.datasetToken === datasetToken);
+  const browsingReady =
+    settingsBelongToPatient &&
+    enabledDatesKey
+      .split(',')
+      .filter(Boolean)
+      .every((date) => panelSettings.has(date));
+  const settingsReady = browsingReady && settingsOwner?.verifiedSources !== null;
+  const canEdit = useCallback(
+    () => browsingReady && currentOwnerRef.current === settingsOwner,
+    [browsingReady, settingsOwner],
+  );
+  const canWrite = useCallback(
+    () => settingsReady && currentOwnerRef.current === settingsOwner,
+    [settingsReady, settingsOwner],
+  );
+  useLayoutEffect(() => {
+    if (!settingsBelongToPatient) currentOwnerRef.current = null;
+  }, [settingsBelongToPatient]);
 
-  const reportPersistenceFailure = useCallback((error: unknown) => {
-    setPersistenceError(error instanceof Error ? error.message : 'Viewer settings could not be saved locally');
+  const retireWriter = useCallback(() => {
+    const token = datasetToken ?? currentOwnerRef.current?.datasetToken;
+    currentOwnerRef.current = null;
+    setSettingsOwner(null);
+    setReplacement({ token, version: ++replacementVersionRef.current });
+    setPersistenceFailure({
+      patientKey,
+      sequenceId: selectedSeqId,
+      message: 'Saved scans changed. Reload their viewer settings.',
+    });
+  }, [datasetToken, patientKey, selectedSeqId]);
+
+  useEffect(
+    () =>
+      subscribeDatasetMutations((seriesUid) => {
+        if (seriesUid !== undefined) return; // Additive imports do not replace saved settings.
+        retireWriter();
+      }),
+    [retireWriter],
+  );
+
+  const retryLoad = useCallback(() => {
+    setReplacement(null);
+    setLoadAttempt((attempt) => attempt + 1);
   }, []);
+
+  const reportPersistenceFailure = useCallback(
+    (error: unknown) => {
+      if (error instanceof DatasetReplacedError) {
+        retireWriter();
+        return;
+      }
+      setPersistenceFailure({
+        patientKey,
+        sequenceId: selectedSeqId,
+        message: error instanceof Error ? error.message : 'Viewer settings could not be saved locally',
+      });
+    },
+    [patientKey, selectedSeqId, retireWriter],
+  );
+
+  const persist = useCallback(
+    (date: string, settings: PanelSettings) => {
+      const source = canWrite() ? settingsOwner?.verifiedSources?.[date] : undefined;
+      // A date with no selected acquisition is display-only, never a legacy row.
+      if (source) void savePanelSettings(source, settings).catch(reportPersistenceFailure);
+    },
+    [canWrite, settingsOwner, reportPersistenceFailure],
+  );
 
   // Keep activePanel usable even if enabled dates change.
   // enabledDatesKey is already sorted ascending (ISO), so newest is the last entry.
   const effectiveActivePanel = useMemo(() => {
-    const dates = enabledDatesKey.split(',').filter(Boolean);
+    const dates = enabledDatesKey.split(',').filter((date) => date && seriesByDate?.[date]);
     if (dates.length === 0) return null;
     if (activePanel && dates.includes(activePanel)) return activePanel;
     return dates[dates.length - 1] || null;
-  }, [enabledDatesKey, activePanel]);
+  }, [enabledDatesKey, activePanel, seriesByDate]);
 
   // Refs for persistence
   const panelSettingsRef = useRef(panelSettings);
@@ -88,6 +191,7 @@ export function usePanelSettings(
   // The latest uncorrected presentation is disposable computation. Manual intent
   // lives with persisted panel settings and is never replaced by an async result.
   const baselineSettingsRef = useRef(new Map<string, PanelSettings>());
+  const pendingBaselineDatesRef = useRef(new Set<string>());
 
   // Undo/redo stacks for panel settings changes (pan/zoom/rotation/etc).
   // Stored in refs to avoid re-rendering on every adjustment.
@@ -104,12 +208,12 @@ export function usePanelSettings(
   useEffect(() => {
     undoStackRef.current.length = 0;
     redoStackRef.current.length = 0;
-  }, [patientKey, selectedSeqId]);
+  }, [patientKey, selectedSeqId, datasetToken, sourcesKey, replacement]);
 
   const applyPanelSettings = useCallback(
     (date: string, saved: PanelSettings, opposite: PanelSettings) => {
       const seqId = selectedSeqIdRef.current;
-      if (!seqId || !settingsBelongToPatient) return;
+      if (!seqId || !canEdit()) return;
 
       const current = panelSettingsRef.current.get(date) ?? DEFAULT_PANEL_SETTINGS;
       const changes = changedSettings(opposite, saved);
@@ -160,9 +264,10 @@ export function usePanelSettings(
       setPanelSettings(next);
 
       // Persist to local storage (fire-and-forget)
-      savePanelSettings(seqId, date, settings, patientKey).catch(reportPersistenceFailure);
+      pendingBaselineDatesRef.current.delete(date);
+      persist(date, settings);
     },
-    [patientKey, progress, reportPersistenceFailure, seriesByDate, settingsBelongToPatient],
+    [progress, seriesByDate, canEdit, persist],
   );
 
   const undoLastPanelSetting = useCallback(() => {
@@ -267,19 +372,24 @@ export function usePanelSettings(
   }, [interactionBlocked, redoLastPanelSetting, undoLastPanelSetting]);
 
   // Load panel settings from local storage when the patient, sequence, or dates change.
+  const readStoredSettings = useEffectEvent((sequenceId: string, ownerPatient: string | null) =>
+    seriesByDate === undefined
+      ? getPanelSettingsSnapshot(sequenceId, ownerPatient)
+      : getPanelSettingsSnapshot(sequenceId, ownerPatient, seriesByDate),
+  );
   useEffect(() => {
     if (!selectedSeqId) return;
+    // Wait for the parent to load the replacement catalog. In particular, do not
+    // hydrate defaults from a just-deleted database using the old visible dates.
+    if (replacement && (datasetToken === undefined || datasetToken === replacement.token)) return;
     const currentDates = new Set(enabledDatesKey.split(',').filter(Boolean));
     if (currentDates.size === 0) return;
 
     // Determine if the settings owner changed or which dates are new.
     const scopeChanged = !settingsBelongToPatient;
-    const newDates = scopeChanged
-      ? currentDates
-      : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
-
-    // Update refs
-    prevDatesRef.current = currentDates;
+    const retrying = settingsOwner?.loadAttempt !== loadAttempt;
+    const newDates =
+      scopeChanged || retrying ? currentDates : new Set([...currentDates].filter((d) => !prevDatesRef.current.has(d)));
 
     // If no new dates to fetch, nothing to do (keep all settings in memory)
     if (newDates.size === 0) {
@@ -287,13 +397,47 @@ export function usePanelSettings(
     }
 
     let cancelled = false;
+    const replacementVersion = replacementVersionRef.current;
     (async () => {
       try {
-        const stored = await getPanelSettings(selectedSeqId, patientKey);
-        if (cancelled) return;
+        const snapshot = await readStoredSettings(selectedSeqId, patientKey);
+        if (cancelled || replacementVersion !== replacementVersionRef.current) return;
+        if (datasetToken !== undefined && snapshot.datasetToken !== datasetToken) {
+          throw new DatasetReplacedError();
+        }
+        const stored = snapshot.settings;
 
-        const next = new Map<string, PanelSettings>(scopeChanged ? [] : panelSettingsRef.current);
-        if (scopeChanged) baselineSettingsRef.current.clear();
+        const replaceSettings = scopeChanged || retrying;
+        const next = new Map<string, PanelSettings>(replaceSettings ? [] : panelSettingsRef.current);
+        const previousBaselines = baselineSettingsRef.current;
+        if (replaceSettings) {
+          baselineSettingsRef.current = new Map();
+          pendingBaselineDatesRef.current.clear();
+        }
+        // A catalog addition or date collision does not replace an unchanged
+        // acquisition's current presentation. Carry it by the verified source,
+        // never by a display date that may now name a different examination.
+        if (
+          !retrying &&
+          settingsOwner?.patientKey === patientKey &&
+          settingsOwner.sequenceId === selectedSeqId &&
+          settingsOwner.datasetToken === snapshot.datasetToken
+        ) {
+          const previousDates = new Map(
+            Object.entries(settingsOwner.verifiedSources ?? {}).map(([date, source]) => [
+              source.seriesUid,
+              { date, studyUid: source.studyUid },
+            ]),
+          );
+          for (const [date, source] of Object.entries(snapshot.verifiedSources)) {
+            const previous = previousDates.get(source.seriesUid);
+            if (!previous || previous.studyUid !== source.studyUid) continue;
+            const settings = panelSettingsRef.current.get(previous.date);
+            if (settings) next.set(date, settings);
+            const baseline = previousBaselines.get(previous.date);
+            if (baseline) baselineSettingsRef.current.set(date, baseline);
+          }
+        }
         // Hydrate hidden dates too; their corrections survive hide/show without a second authority.
         for (const [date, saved] of Object.entries(stored)) {
           if (!next.has(date)) next.set(date, normalizePanelSettingsPartial(saved));
@@ -308,11 +452,32 @@ export function usePanelSettings(
         }
         panelSettingsRef.current = next;
         setPanelSettings(next);
-        setPersistenceError(null);
+        setPersistenceFailure(null);
+        setLegacySettings(snapshot.legacySettings ?? []);
+        prevDatesRef.current = currentDates;
+        const owner = {
+          patientKey,
+          sequenceId: selectedSeqId,
+          datasetToken: snapshot.datasetToken,
+          sourcesKey,
+          loadAttempt,
+          verifiedSources: snapshot.verifiedSources,
+        };
+        currentOwnerRef.current = owner;
+        setSettingsOwner(owner);
 
-        // Restore slice position only from settings belonging to the current owner.
-        if (scopeChanged) {
-          const sortedDates = [...currentDates].sort((a, b) => b.localeCompare(a));
+        // A new acquisition/catalog changes source-bound settings, not the shared
+        // browsing position. Only a patient/sequence or saved-work replacement
+        // hydrates progress; this also preserves position through date collisions.
+        const restoreProgress =
+          !settingsOwner?.verifiedSources ||
+          settingsOwner.patientKey !== patientKey ||
+          settingsOwner.sequenceId !== selectedSeqId ||
+          settingsOwner.datasetToken !== snapshot.datasetToken;
+        if (restoreProgress) {
+          const sortedDates = [...currentDates]
+            .filter((date) => snapshot.verifiedSources[date])
+            .sort((a, b) => b.localeCompare(a));
           const initial = sortedDates[0];
           if (initial) {
             setActivePanel(initial);
@@ -323,29 +488,54 @@ export function usePanelSettings(
           }
         }
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || replacementVersion !== replacementVersionRef.current) return;
         reportPersistenceFailure(error);
-        // A failed patient-scoped read must never inherit another patient's settings.
+        if (error instanceof DatasetReplacedError) return;
+        // Absence is a successful read of no row. A failed read grants no write
+        // authority, but browsing and temporary adjustments remain available.
         const next = new Map<string, PanelSettings>(scopeChanged ? [] : panelSettingsRef.current);
-        if (scopeChanged) baselineSettingsRef.current.clear();
-        for (const date of newDates) {
-          if (!next.has(date)) next.set(date, { ...DEFAULT_PANEL_SETTINGS });
+        for (const date of currentDates) if (!next.has(date)) next.set(date, { ...DEFAULT_PANEL_SETTINGS });
+        if (scopeChanged) {
+          baselineSettingsRef.current.clear();
+          pendingBaselineDatesRef.current.clear();
+          setProgress(0);
         }
         panelSettingsRef.current = next;
         setPanelSettings(next);
-        if (scopeChanged) setProgress(0);
+        setLegacySettings([]);
+        prevDatesRef.current = currentDates;
+        const owner = {
+          patientKey,
+          sequenceId: selectedSeqId,
+          datasetToken: datasetToken ?? '',
+          sourcesKey,
+          loadAttempt,
+          verifiedSources: null,
+        };
+        currentOwnerRef.current = owner;
+        setSettingsOwner(owner);
       }
-      setSettingsOwner({ patientKey, sequenceId: selectedSeqId });
     })();
     return () => {
       cancelled = true;
     };
-  }, [patientKey, selectedSeqId, enabledDatesKey, reportPersistenceFailure, settingsBelongToPatient]);
+  }, [
+    patientKey,
+    selectedSeqId,
+    enabledDatesKey,
+    reportPersistenceFailure,
+    settingsBelongToPatient,
+    datasetToken,
+    replacement,
+    loadAttempt,
+    sourcesKey,
+    settingsOwner,
+  ]);
 
   // Update a panel's settings
   const updatePanelSetting = useCallback(
     (date: string, update: Partial<PanelSettings>) => {
-      if (!selectedSeqId || !settingsBelongToPatient) return;
+      if (!selectedSeqId || !canEdit() || !panelSettingsRef.current.has(date)) return;
 
       const updateKeys = Object.keys(update);
       const shouldRecordHistory = updateKeys.some((k) => k !== 'progress');
@@ -412,16 +602,17 @@ export function usePanelSettings(
       setPanelSettings(next);
 
       // Persist to local storage (fire-and-forget)
-      savePanelSettings(selectedSeqId, date, updated, patientKey).catch(reportPersistenceFailure);
+      pendingBaselineDatesRef.current.delete(date);
+      persist(date, updated);
     },
-    [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
+    [selectedSeqId, canEdit, persist],
   );
 
   // Batch update multiple panels at once (for alignment results).
   // The undo stack groups all entries with the same batchId so Cmd/Ctrl+Z reverts the whole batch.
   const batchUpdateSettings = useCallback(
     (updates: Map<string, PanelSettings>, operationId?: string, automatic = false) => {
-      if (!selectedSeqId || !settingsBelongToPatient || updates.size === 0) return;
+      if (!selectedSeqId || !canEdit() || updates.size === 0) return;
 
       const batchId = operationId ?? `batch:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
 
@@ -459,44 +650,86 @@ export function usePanelSettings(
 
       if (!automatic) {
         for (const { date, after } of historyEntries) {
-          savePanelSettings(selectedSeqId, date, after, patientKey).catch(reportPersistenceFailure);
+          pendingBaselineDatesRef.current.delete(date);
+          persist(date, after);
         }
+      } else {
+        for (const { date } of historyEntries) pendingBaselineDatesRef.current.add(date);
       }
     },
-    [patientKey, selectedSeqId, reportPersistenceFailure, settingsBelongToPatient],
+    [selectedSeqId, canEdit, persist],
   );
 
   // Debounced persistence of progress for the active panel
   useEffect(() => {
-    if (!settingsBelongToPatient || !selectedSeqId || !effectiveActivePanel) return;
+    if (
+      !settingsReady ||
+      !selectedSeqId ||
+      !effectiveActivePanel ||
+      panelSettingsRef.current.get(effectiveActivePanel)?.progress === progress
+    )
+      return;
     const handle = setTimeout(() => {
       updatePanelSetting(effectiveActivePanel, { progress });
     }, 200);
     return () => clearTimeout(handle);
-  }, [progress, effectiveActivePanel, selectedSeqId, settingsBelongToPatient, updatePanelSetting]);
+  }, [progress, effectiveActivePanel, selectedSeqId, settingsReady, updatePanelSetting]);
 
-  // Flush all in-memory settings on page unload (debounced progress writes may not have fired).
+  // Edits save immediately. Flush only changed automatic baselines and pending
+  // progress so a reload retains the unclipped baseline underlying manual intent.
   useEffect(() => {
     const handleUnload = () => {
-      const seqId = selectedSeqIdRef.current;
-      const settings = panelSettingsRef.current;
-      if (!settingsBelongToPatient || !seqId || settings.size === 0) return;
-      for (const [date, s] of settings) {
-        savePanelSettings(seqId, date, s, patientKey).catch(reportPersistenceFailure);
+      if (!selectedSeqId || !canWrite()) return;
+      const pending = new Set(pendingBaselineDatesRef.current);
+      if (effectiveActivePanel && panelSettingsRef.current.get(effectiveActivePanel)?.progress !== progress) {
+        pending.add(effectiveActivePanel);
+      }
+      for (const date of pending) {
+        const settings = panelSettingsRef.current.get(date);
+        if (!settings) continue;
+        persist(date, date === effectiveActivePanel ? { ...settings, progress } : settings);
       }
     };
     window.addEventListener('beforeunload', handleUnload);
     return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [patientKey, reportPersistenceFailure, settingsBelongToPatient]);
+  }, [effectiveActivePanel, progress, selectedSeqId, canWrite, persist]);
 
   const scopedPanelSettings = useMemo(
     () => (settingsBelongToPatient ? panelSettings : new Map<string, PanelSettings>()),
     [panelSettings, settingsBelongToPatient],
   );
 
+  const assignLegacySettings = useCallback(
+    async (id: string, date: string) => {
+      const legacy = legacySettings.find((entry) => entry.id === id && entry.eligibleDates.includes(date));
+      const source = settingsOwner?.verifiedSources?.[date];
+      if (!legacy || !source || !selectedSeqId || !canWrite()) return;
+      const settings = normalizePanelSettingsPartial(legacy.settings);
+      const before = panelSettingsRef.current.get(date) ?? DEFAULT_PANEL_SETTINGS;
+      undoStackRef.current.push({ date, before, after: settings });
+      if (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift();
+      redoStackRef.current.length = 0;
+      baselineSettingsRef.current.set(date, removeAlignmentAdjustment(settings));
+      const next = new Map(panelSettingsRef.current).set(date, settings);
+      panelSettingsRef.current = next;
+      setPanelSettings(next);
+      // Retain the explicit assignment in this owner so subsequent saves carry
+      // its migration provenance without rereading the row on every gesture.
+      const assignedSource = Object.freeze({ ...source, legacyOrigin: Object.freeze({ ...legacy.origin }) });
+      settingsOwner!.verifiedSources![date] = assignedSource;
+      try {
+        await savePanelSettings(assignedSource, settings);
+        if (canWrite()) setLegacySettings((entries) => entries.filter((entry) => entry.id !== id));
+      } catch (error) {
+        reportPersistenceFailure(error);
+      }
+    },
+    [legacySettings, selectedSeqId, canWrite, settingsOwner, reportPersistenceFailure],
+  );
+
   return {
     panelSettings: scopedPanelSettings,
-    settingsReady: settingsBelongToPatient,
+    settingsReady,
     manuallyAdjustedDates: new Set(
       [...scopedPanelSettings].flatMap(([date, settings]) => (settings.alignmentAdjustment ? [date] : [])),
     ),
@@ -506,8 +739,11 @@ export function usePanelSettings(
     setProgress,
     updatePanelSetting,
     batchUpdateSettings,
-    persistenceError: settingsBelongToPatient ? persistenceError : null,
+    persistenceError,
+    retryLoad,
+    legacySettings: settingsBelongToPatient ? legacySettings : [],
+    assignLegacySettings,
     reportPersistenceError: reportPersistenceFailure,
-    clearPersistenceError: () => setPersistenceError(null),
+    clearPersistenceError: () => setPersistenceFailure(null),
   };
 }

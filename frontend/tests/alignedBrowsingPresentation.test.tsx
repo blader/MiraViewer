@@ -1,8 +1,8 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
-import { createRef, type ContextType, type PropsWithChildren, type Ref } from 'react';
+import { type ContextType, type PropsWithChildren } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import cornerstone from 'cornerstone-core';
-import { DicomViewer, type DicomViewerHandle } from '../src/components/DicomViewer';
+import { DicomViewer } from '../src/components/DicomViewer';
 import { AlignedBrowsingContext, useAlignedFrame } from '../src/hooks/useAlignedFrame';
 import type { AlignmentResult } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
@@ -469,11 +469,10 @@ describe('DicomViewer aligned browsing', () => {
     vi.restoreAllMocks();
   });
 
-  function viewer(browsingContext: BrowsingContext, instanceIndex: number, ref?: Ref<DicomViewerHandle>) {
+  function viewer(browsingContext: BrowsingContext, instanceIndex: number) {
     return (
       <AlignedBrowsingContext.Provider value={browsingContext}>
         <DicomViewer
-          ref={ref}
           studyId="target-study"
           seriesUid="target-series"
           instanceIndex={instanceIndex}
@@ -503,13 +502,34 @@ describe('DicomViewer aligned browsing', () => {
     expect(getImageIdForInstance).not.toHaveBeenCalled();
   });
 
+  it('adopts replayed settings without reloading or repainting the same accepted pixels', async () => {
+    const accepted = alignedResult();
+    setDerivedAlignmentFrame(accepted);
+    render(viewer(context(), 4));
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
+    const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
+    const replay = {
+      ...accepted,
+      runId: 'new-display-request',
+      computedSettings: { ...accepted.computedSettings, brightness: 125, panX: 0.15 },
+    };
+
+    await act(async () => setDerivedAlignmentFrame(replay));
+
+    expect(getDerivedAlignmentFrame('target-series', 4)?.acceptedResult).toBe(replay);
+    expect(imageElement.parentElement!.style.filter).toBe('brightness(1.25) contrast(0.89)');
+    expect(imageElement.parentElement!.style.transform).toContain('translate(76.8px, 10.24px)');
+    expect(cornerstone.loadImage).toHaveBeenCalledOnce();
+    expect(cornerstone.displayImage).toHaveBeenCalledOnce();
+    expect(getImageIdForInstance).not.toHaveBeenCalled();
+  });
+
   it('never loads an unregistered native image between accepted aligned slices or separates pixels from their transform', async () => {
     const accepted = alignedResult();
     setDerivedAlignmentFrame(accepted);
     const acceptedFrame = getDerivedAlignmentFrame('target-series', 4)!;
-    const handle = createRef<DicomViewerHandle>();
-    const { rerender } = render(viewer(context(), 4, handle));
-    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4'));
+    const { rerender } = render(viewer(context(), 4));
+    await waitFor(() => expect(screen.getByLabelText('Slice 5')).toBeInTheDocument());
 
     const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
     const presentation = imageElement.parentElement!;
@@ -522,7 +542,7 @@ describe('DicomViewer aligned browsing', () => {
     const acceptedTransform = presentation.style.transform;
 
     await act(async () => {
-      rerender(viewer(context({ sliceIndex: 41 }), 5, handle));
+      rerender(viewer(context({ sliceIndex: 41 }), 5));
     });
 
     expect(getImageIdForInstance).not.toHaveBeenCalled();
@@ -530,13 +550,12 @@ describe('DicomViewer aligned browsing', () => {
     expect(presentation.style.filter).toBe('brightness(1.11) contrast(0.89)');
     expect(presentation.style.transform).toBe(acceptedTransform);
     expect(imageElement).toHaveAttribute('aria-label', 'Slice 5');
-    expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4');
     expect(imageElement.closest('[aria-busy]')).toHaveAttribute('aria-busy', 'true');
 
     const completed = alignedResult(41, 6);
     completed.computedSettings = { ...completed.computedSettings, brightness: 92, contrast: 118, zoom: 1.03 };
     act(() => setDerivedAlignmentFrame(completed));
-    await waitFor(() => expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:6'));
+    await waitFor(() => expect(screen.getByLabelText('Slice 7')).toBeInTheDocument());
 
     expect(getImageIdForInstance).not.toHaveBeenCalled();
     expect(vi.mocked(cornerstone.loadImage).mock.calls.map(([imageId]) => imageId)).toEqual([
@@ -585,14 +604,13 @@ describe('DicomViewer aligned browsing', () => {
     'keeps the accepted image without claiming ongoing work when alignment is %s',
     async (status) => {
       setDerivedAlignmentFrame(alignedResult());
-      const handle = createRef<DicomViewerHandle>();
-      const { rerender } = render(viewer(context(), 4, handle));
+      const { rerender } = render(viewer(context(), 4));
       await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
       const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
       const presentation = imageElement.parentElement!;
       const acceptedTransform = presentation.style.transform;
       const pendingContext = context({ sliceIndex: 41 });
-      await act(async () => rerender(viewer(pendingContext, 5, handle)));
+      await act(async () => rerender(viewer(pendingContext, 5)));
       expect(imageElement.closest('[aria-busy]')).toHaveAttribute('aria-busy', 'true');
 
       await act(async () =>
@@ -604,7 +622,6 @@ describe('DicomViewer aligned browsing', () => {
               unavailableSeriesUids: status === 'unavailable' ? new Set(['target-series']) : undefined,
             },
             5,
-            handle,
           ),
         ),
       );
@@ -614,7 +631,6 @@ describe('DicomViewer aligned browsing', () => {
       expect(presentation.style.filter).toBe('brightness(1.11) contrast(0.89)');
       expect(presentation.style.transform).toBe(acceptedTransform);
       expect(imageElement).toHaveAttribute('aria-label', 'Slice 5');
-      expect(handle.current?.getDisplayedContentKey()).toBe('target-study:target-series:4');
       expect(imageElement.closest('[aria-busy="true"]')).toBeNull();
       expect(screen.queryByText(/Updating aligned slice/)).not.toBeInTheDocument();
       if (status === 'unavailable') expect(screen.getByText(/Aligned slice unavailable/)).toBeInTheDocument();
@@ -638,7 +654,7 @@ describe('DicomViewer aligned browsing', () => {
       </AlignedBrowsingContext.Provider>,
     );
     await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
-    const viewport = screen.getByRole('button', { name: 'Pan MRI slice 6' });
+    const viewport = screen.getByRole('group', { name: 'Pan MRI slice 6' });
     const modifiedWheel = new WheelEvent('wheel', { deltaY: -100, metaKey: true, cancelable: true, bubbles: true });
 
     fireEvent(viewport, modifiedWheel);

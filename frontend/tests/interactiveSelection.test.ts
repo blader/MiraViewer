@@ -1,24 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrRoiPlane, SvrSelectionSeeds, SvrVolume } from '../src/types/svr';
 import { proposeInteractiveSelection } from '../src/utils/segmentation/interactiveSelection';
-import type { InteractiveTrackingWorkerOptions } from '../src/utils/segmentation/interactiveTrackingWorker';
+import type {
+  InteractiveTrackingProgress,
+  InteractiveTrackingWorkerOptions,
+} from '../src/utils/segmentation/interactiveTrackingWorker';
 import { SLICE_AXES } from '../src/utils/segmentation/selectionEditing';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 import { deferred } from './helpers/deferred';
 import { retainMarkedComponents } from '../src/utils/segmentation/seedConnectedSelection';
 import { prepareEmptyEditingPlanePruning } from '../src/utils/segmentation/emptyEditingPlane';
 import * as scheduling from '../src/utils/svr/svrUtils';
+import { planInteractiveSelectionContext } from '../src/utils/svr/interactiveSelectionContext';
 
-const worker = vi.hoisted(() => ({ run: vi.fn(), dispose: vi.fn(), created: vi.fn() }));
-vi.mock('../src/utils/segmentation/interactiveTrackingWorker', () => ({
-  InteractiveTrackingWorker: class {
-    constructor() {
-      worker.created();
-    }
-    run = worker.run;
-    dispose = worker.dispose;
-  },
-}));
+const worker = { run: vi.fn(), dispose: vi.fn() };
 
 function volume(dims: SvrVolume['dims'] = [4, 5, 3], geometry: Partial<SvrVolume> = {}): SvrVolume {
   const count = dims.reduce((product, size) => product * size, 1);
@@ -56,6 +51,8 @@ function propose(
     onProgress?: (value: number) => void;
     provider?: InteractiveTrackingWorkerOptions['provider'];
     retainMarkedComponents?: true;
+    worker?: { run: typeof worker.run; releaseIdle: typeof worker.dispose };
+    retainRuntimeAfterRun?: boolean;
   } = {},
 ) {
   return proposeInteractiveSelection(
@@ -63,7 +60,10 @@ function propose(
       nativeContext,
       sourceRange: [-25, 100],
       provider: options.provider ?? 'wasm',
+      admittedRuntimeBytes: 1234567890,
       retainMarkedComponents: options.retainMarkedComponents,
+      worker: options.worker ?? { run: worker.run, releaseIdle: worker.dispose },
+      retainRuntimeAfterRun: options.retainRuntimeAfterRun,
     },
     {
       volume: editingVolume,
@@ -78,6 +78,7 @@ function propose(
 async function emitAll(
   options: InteractiveTrackingWorkerOptions,
   logits?: (frame: number, direction: 1 | -1) => Float32Array,
+  delivered?: Array<[number, 1 | -1]>,
 ) {
   let completedFrames = 0;
   const directionEndpoints = { forward: options.anchorIndex, reverse: options.anchorIndex };
@@ -90,6 +91,7 @@ async function emitAll(
         initial: frame === options.anchorIndex,
         nativeLogits: logits?.(frame, direction) ?? new Float32Array(pixels),
       });
+      delivered?.push([frame, direction]);
       completedFrames++;
       directionEndpoints[direction === 1 ? 'forward' : 'reverse'] = frame;
       if (decision === 'stop-direction') {
@@ -104,11 +106,63 @@ beforeEach(() => {
   worker.run.mockReset();
   worker.run.mockImplementation(emitAll);
   worker.dispose.mockReset();
-  worker.created.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('native interactive proposals on the existing editing grid', () => {
+  it('borrows a source-owned runtime for successive corrections without disposing it before publication', async () => {
+    const source = volume();
+    const borrowed = { run: vi.fn(emitAll), releaseIdle: vi.fn() };
+    const first = await propose(source, source, seeds(source), { worker: borrowed, retainRuntimeAfterRun: true });
+    const second = await propose(source, source, seeds(source), { worker: borrowed, retainRuntimeAfterRun: true });
+    expect(first.data).toEqual(second.data);
+    expect(borrowed.run).toHaveBeenCalledTimes(2);
+    expect(borrowed.releaseIdle).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
+  });
+
+  it('decodes the same compressed overview prompts counted by preflight, preserving every mark', async () => {
+    const native = volume([16, 16, 5], { voxelSizeMm: [1, 1, 1] });
+    const editing = volume([8, 8, 5], { voxelSizeMm: [2, 2, 1] });
+    const marks = {
+      foreground: Uint32Array.from([1, 2, 3].flatMap((y) => [1, 2, 3].map((x) => index(editing, x, y, 2)))),
+      background: Uint32Array.of(index(editing, 6, 6, 2), index(editing, 6, 6, 3)),
+      lastStroke: { plane: 'axial' as const, slice: 2 },
+    };
+    const original = { foreground: marks.foreground.slice(), background: marks.background.slice() };
+    const plan = planInteractiveSelectionContext(editing, native, marks);
+    await propose(native, editing, marks);
+    const options = worker.run.mock.calls[0]![0] as InteractiveTrackingWorkerOptions;
+    const frames = [{ points: options.points }, ...options.markedFrames!];
+    expect(plan.literalMarkCount).toBe(11);
+    expect(plan.conditioningFrames).toBe(frames.length);
+    expect(plan.maximumFramePrompts).toBe(Math.max(...frames.map((frame) => frame.points.length)));
+    expect(options).toMatchObject({
+      anchorIndex: 2,
+      points: [
+        [4, 4],
+        [12, 12],
+      ],
+      labels: [1, 0],
+    });
+    expect(options.markedFrames).toEqual([{ index: 3, points: [[12, 12]], labels: [0] }]);
+    expect(marks.foreground).toEqual(original.foreground);
+    expect(marks.background).toEqual(original.background);
+  });
+
+  it('rejects an unsupported nonrepresentative native mark before creating the model', async () => {
+    const native = volume([8, 8, 3], { voxelSizeMm: [1, 1, 1] });
+    const editing = volume([4, 4, 3], { voxelSizeMm: [2, 2, 1] });
+    const marks = {
+      foreground: Uint32Array.of(index(editing, 1, 1, 1), index(editing, 2, 1, 1)),
+      background: new Uint32Array(),
+      lastStroke: { plane: 'axial' as const, slice: 1 },
+    };
+    native.observedSupport![index(native, 4, 2, 1)] = 0;
+    await expect(propose(native, editing, marks)).rejects.toThrow(/native-context sample/);
+    expect(worker.run).not.toHaveBeenCalled();
+  });
+
   it.each(['hybrid', 'gpu-memory'] as const)(
     'passes the explicit %s placement to its owned worker without choosing another runtime',
     async (provider) => {
@@ -141,7 +195,7 @@ describe('native interactive proposals on the existing editing grid', () => {
       ]);
       expect(options.sourceRange).toEqual([-25, 100]);
       expect(result.contextLimited).toBe(false);
-      expect(worker.created).toHaveBeenCalledTimes(1);
+      expect(worker.run).toHaveBeenCalledTimes(1);
       expect(worker.dispose).toHaveBeenCalledTimes(1);
     },
   );
@@ -317,7 +371,7 @@ describe('native interactive proposals on the existing editing grid', () => {
       if (kind === 'missing foreground') marks.foreground = new Uint32Array();
       if (kind === 'outside mark') marks.foreground = Uint32Array.of(0xffffffff);
       await expect(propose(native, editing, marks)).rejects.toThrow(/plane|native-cell|inside|sample/);
-      expect(worker.created).not.toHaveBeenCalled();
+      expect(worker.run).not.toHaveBeenCalled();
     },
   );
 
@@ -359,7 +413,7 @@ describe('native interactive proposals on the existing editing grid', () => {
     await expect(propose(source, source, seeds(source), { signal: abort.signal })).rejects.toMatchObject({
       name: 'AbortError',
     });
-    expect(worker.created).not.toHaveBeenCalled();
+    expect(worker.run).not.toHaveBeenCalled();
   });
 
   it('rejects a cancellation after provisional frames even if a runner returns success', async () => {
@@ -410,6 +464,142 @@ describe('native interactive proposals on the existing editing grid', () => {
   });
 });
 
+describe('phase-aware multi-plane proposal progress', () => {
+  const preparation = [
+    [4, 1],
+    [5, 1],
+    [6, 1],
+    [3, -1],
+    [2, -1],
+  ] as const;
+  function fixture() {
+    const source = volume([5, 5, 9]);
+    const marks: SvrSelectionSeeds = {
+      foreground: Uint32Array.of(index(source, 2, 2, 4), index(source, 2, 2, 2)),
+      background: Uint32Array.of(index(source, 1, 1, 4), index(source, 1, 1, 6)),
+      lastStroke: { plane: 'axial', slice: 4 },
+    };
+    return { source, marks };
+  }
+  function preparing(index: number, direction: 1 | -1, stage = 'frame-complete'): InteractiveTrackingProgress {
+    return {
+      phase: 'preparing',
+      stage,
+      index,
+      direction,
+      completedFrames: 0,
+      totalFrames: 10,
+      conditioningFrames: 3,
+      spatialMemories: 3,
+      pointers: 3,
+      retainedStateBytes: 395312,
+      liveTensorBackingBytes: 0,
+    };
+  }
+
+  it.each([false, true])(
+    'advances only on complete preparation planes and remains monotonic through final coverage and release (pruning: %s)',
+    async (pruning) => {
+      const { source, marks } = fixture();
+      const original = {
+        source: source.data.slice(),
+        foreground: marks.foreground.slice(),
+        background: marks.background.slice(),
+      };
+      const progress = vi.fn<(value: number) => void>();
+      const prepared = deferred<void>(),
+        startFinal = deferred<void>(),
+        emitted = deferred<void>(),
+        release = deferred<void>();
+      const delivered: Array<[number, 1 | -1]> = [];
+      let resolved = false;
+      worker.run.mockImplementation(async (options: InteractiveTrackingWorkerOptions) => {
+        const readFrame = vi.spyOn(options, 'readFrame');
+        const onFrame = vi.spyOn(options, 'onFrame');
+        options.onProgress?.({ phase: 'loading', asset: 'encoder' });
+        for (const [index, direction] of preparation) {
+          const before = progress.mock.lastCall?.[0] ?? 0;
+          await options.readFrame(index, options.signal);
+          options.onProgress?.(preparing(index, direction, 'after-encoder'));
+          expect(progress.mock.lastCall?.[0] ?? 0).toBe(before);
+          options.onProgress?.(preparing(index, direction));
+          expect(progress.mock.lastCall?.[0] ?? 0).toBeGreaterThan(before);
+          expect(progress.mock.lastCall![0]).toBeLessThan(1);
+          expect(onFrame).not.toHaveBeenCalled();
+        }
+        expect(readFrame.mock.calls.map(([index]) => index)).toEqual([4, 5, 6, 3, 2]);
+        const afterPreparation = progress.mock.lastCall![0];
+        prepared.resolve();
+        await startFinal.promise;
+        const result = await emitAll(options, () => new Float32Array(25).fill(-1), delivered);
+        expect(progress.mock.calls[preparation.length]?.[0]).toBeGreaterThanOrEqual(afterPreparation);
+        expect(readFrame.mock.calls.map(([index]) => index)).toEqual([
+          4,
+          5,
+          6,
+          3,
+          2,
+          ...delivered.map(([index]) => index),
+        ]);
+        expect(onFrame.mock.calls.map(([frame]) => [frame.index, frame.direction])).toEqual(delivered);
+        emitted.resolve();
+        await release.promise;
+        return result;
+      });
+      const result = propose(source, source, marks, {
+        onProgress: progress,
+        ...(pruning ? { retainMarkedComponents: true } : {}),
+      }).then((value) => {
+        resolved = true;
+        return value;
+      });
+      await Promise.race([prepared.promise, result]);
+      expect(resolved).toBe(false);
+      expect(delivered).toEqual([]);
+      expect(progress).not.toHaveBeenCalledWith(1);
+      startFinal.resolve();
+      await Promise.race([emitted.promise, result]);
+      expect(resolved).toBe(false);
+      expect(worker.dispose).not.toHaveBeenCalled();
+      expect(progress).not.toHaveBeenCalledWith(1);
+      expect(delivered).toEqual([
+        ...Array.from({ length: pruning ? 4 : 5 }, (_, i) => [4 + i, 1]),
+        ...Array.from({ length: pruning ? 4 : 5 }, (_, i) => [4 - i, -1]),
+      ]);
+      release.resolve();
+      expect((await result).data.every((value) => value === 0)).toBe(true);
+      expect(progress).toHaveBeenLastCalledWith(1);
+      const values = progress.mock.calls.map(([value]) => value);
+      expect(
+        values.every(
+          (value, i) => Number.isFinite(value) && value >= 0 && value <= 1 && (!i || value >= values[i - 1]!),
+        ),
+      ).toBe(true);
+      expect(source.data).toEqual(original.source);
+      expect(marks.foreground).toEqual(original.foreground);
+      expect(marks.background).toEqual(original.background);
+      expect(worker.dispose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('never treats preparation or a progress-only completion report as acknowledged final coverage', async () => {
+    const { source, marks } = fixture();
+    const progress = vi.fn<(value: number) => void>();
+    worker.run.mockImplementation(async (options: InteractiveTrackingWorkerOptions) => {
+      for (const [index, direction] of preparation) options.onProgress?.(preparing(index, direction));
+      options.onProgress?.({ ...preparing(0, -1), phase: 'frames', stage: 'snapshot-released', completedFrames: 10 });
+      return { completedFrames: 10, directionEndpoints: { forward: 8, reverse: 0 } };
+    });
+    await expect(
+      propose(source, source, marks, { onProgress: progress, retainMarkedComponents: true }),
+    ).rejects.toThrow(/before every native source plane/);
+    expect(progress.mock.calls.some(([value]) => value > 0)).toBe(true);
+    expect(progress).not.toHaveBeenCalledWith(1);
+    expect(progress.mock.calls.every(([value]) => value < 1)).toBe(true);
+    expect(worker.dispose).toHaveBeenCalledOnce();
+  });
+});
+
 describe('certified empty editing-plane pruning', () => {
   const axisIndex = { x: 0, y: 1, z: 2 } as const;
   function centralMarks(source: SvrVolume, plane: SvrRoiPlane = 'axial'): SvrSelectionSeeds {
@@ -429,11 +619,302 @@ describe('certified empty editing-plane pruning', () => {
     await retainMarkedComponents(copy, source.dims, marks.foreground);
     return copy;
   }
-  function emptySeparators(options: InteractiveTrackingWorkerOptions) {
+  function emptySeparators(options: InteractiveTrackingWorkerOptions, barriers = [1, 5]) {
     return emitAll(options, (frame) =>
-      new Float32Array(options.width * options.height).fill(frame === 1 || frame === 5 ? -1 : 1),
+      new Float32Array(options.width * options.height).fill(barriers.includes(frame) ? -1 : 1),
     );
   }
+  function sampledTrackingGrid(plane: SvrRoiPlane, stride: number, permuted = false, phase = 0) {
+    const nativeAxis = axisIndex[SLICE_AXES[plane].slice];
+    const direction: NonNullable<SvrVolume['direction']> = permuted
+      ? [0, 0, 1, 1, 0, 0, 0, 1, 0]
+      : [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const editingAxis = [0, 1, 2].find((axis) => direction[nativeAxis * 3 + axis] !== 0)!;
+    const step = Math.abs(stride);
+    const dims: SvrVolume['dims'] = [7, 7, 7];
+    dims[nativeAxis] = 6 * step + 2 * phase + 1;
+    const native = volume(dims, { voxelSizeMm: [1, 1, 1] });
+    const voxelSizeMm: SvrVolume['voxelSizeMm'] = [1, 1, 1];
+    voxelSizeMm[editingAxis] = step;
+    const origin: [number, number, number] = [0, 0, 0];
+    origin[nativeAxis] = phase + (stride < 0 ? 6 * step : 0);
+    direction[nativeAxis * 3 + editingAxis] = Math.sign(stride);
+    const editing = volume([7, 7, 7], {
+      voxelSizeMm,
+      direction,
+      originMm: volumeVoxelToPatient(native, origin),
+    });
+    const editingPlane = (['axial', 'coronal', 'sagittal'] as const).find(
+      (candidate) => axisIndex[SLICE_AXES[candidate].slice] === editingAxis,
+    )!;
+    return {
+      native,
+      editing,
+      marks: centralMarks(editing, editingPlane),
+      anchor: phase + 3 * step,
+      barriers: [phase + step, phase + 5 * step],
+    };
+  }
+
+  it.each(
+    (['axial', 'coronal', 'sagittal'] as const).flatMap((plane) =>
+      [-2, 1, 2].flatMap((stride) => [false, true].map((outerMarks) => ({ plane, stride, outerMarks }))),
+    ),
+  )(
+    'completes the whole editing footprint with an identical raw mask in $plane, stride $stride, outer marks $outerMarks',
+    async ({ plane, stride, outerMarks }) => {
+      const phase = 3,
+        step = Math.abs(stride);
+      const { native, editing, marks, anchor } = sampledTrackingGrid(plane, stride, true, phase);
+      if (outerMarks) {
+        const axis = axisIndex[SLICE_AXES[marks.lastStroke!.plane].slice];
+        for (const [kind, section] of [
+          ['foreground', 0],
+          ['background', 6],
+        ] as const) {
+          const point: [number, number, number] = [3, 3, 3];
+          point[axis] = section;
+          marks[kind] = Uint32Array.from([...marks[kind], index(editing, ...point)]);
+        }
+      }
+      const upper = phase + 6 * step;
+      const traversals: Array<Array<[number, 1 | -1]>> = [];
+      worker.run.mockImplementation((options: InteractiveTrackingWorkerOptions) => {
+        const delivered: Array<[number, 1 | -1]> = [];
+        traversals.push(delivered);
+        return emitAll(
+          options,
+          (frame) =>
+            new Float32Array(options.width * options.height).fill(
+              frame < phase || frame > upper || (frame - phase) % step === 0 ? 1 : -1,
+            ),
+          delivered,
+        );
+      });
+      const full = await propose(native, editing, marks);
+      const pruned = await propose(native, editing, marks, { retainMarkedComponents: true });
+      expect(pruned.data).toEqual(full.data);
+      expect(pruned.data.every((value) => value === 1)).toBe(true);
+      const first = worker.run.mock.calls[0]![0] as InteractiveTrackingWorkerOptions;
+      const { anchorIndex, points, labels, markedFrames, frameCount } = first;
+      expect(first.allowDirectionStop).toBeUndefined();
+      expect(worker.run.mock.lastCall![0]).toMatchObject({ anchorIndex, points, labels, markedFrames, frameCount });
+      expect(traversals[0]).toEqual([
+        ...Array.from({ length: frameCount - anchor }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor + 1 }, (_, i) => [anchor - i, -1]),
+      ]);
+      expect(traversals[1]).toEqual([
+        ...Array.from({ length: upper + 2 - anchor }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor - phase + 2 }, (_, i) => [anchor - i, -1]),
+      ]);
+      expect(full.contextLimited).toBe(false);
+      expect(full.boundaryCount).toBeGreaterThan(0);
+      expect(full.clippedNativeVoxels).toBeGreaterThan(0);
+      expect(pruned.contextLimited).toBe(true);
+      expect(pruned).not.toHaveProperty('boundaryCount');
+      expect(pruned).not.toHaveProperty('clippedNativeVoxels');
+      expect(worker.dispose).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not mistake a support-trimmed footprint or an interior sampling hole for completed editing coverage', async () => {
+    const { native, editing, marks, anchor } = sampledTrackingGrid('axial', 2, false, 3);
+    editing.observedSupport!.fill(0, 0, 49);
+    editing.observedSupport!.fill(0, 6 * 49);
+    const certify = await prepareEmptyEditingPlanePruning(
+      native,
+      editing,
+      marks,
+      'axial',
+      anchor,
+      new AbortController().signal,
+    );
+    expect(certify).not.toBeNull();
+    const positive = new Uint8Array(native.data.length).fill(1);
+    expect(await certify!(4, -1, positive)).toBe(false);
+    expect(await certify!(14, 1, positive)).toBe(false);
+    expect(await certify!(2, -1, positive)).toBe(true);
+    expect(await certify!(16, 1, positive)).toBe(true);
+  });
+
+  it.each([-2, 2])(
+    'uses natural in-range endpoints when a stride %s editing footprint extends beyond the context',
+    async (stride) => {
+      const native = volume([7, 7, 9], { voxelSizeMm: [1, 1, 1] });
+      const editing = volume([7, 7, 7], {
+        voxelSizeMm: [1, 1, 2],
+        originMm: volumeVoxelToPatient(native, [0, 0, stride > 0 ? -2 : 10]),
+        direction: [1, 0, 0, 0, 1, 0, 0, 0, Math.sign(stride)],
+      });
+      const marks = centralMarks(editing);
+      const delivered: Array<[number, 1 | -1]> = [];
+      worker.run.mockImplementation((options) => emitAll(options, () => new Float32Array(49).fill(1), delivered));
+      const full = await propose(native, editing, marks);
+      delivered.length = 0;
+      const opted = await propose(native, editing, marks, { retainMarkedComponents: true });
+      expect(opted).toEqual(full);
+      expect(opted.data.reduce((sum, value) => sum + value, 0)).toBe(5 * 49);
+      expect(delivered).toEqual([
+        ...Array.from({ length: 5 }, (_, i) => [4 + i, 1]),
+        ...Array.from({ length: 5 }, (_, i) => [4 - i, -1]),
+      ]);
+      expect(opted).toHaveProperty('boundaryCount');
+      expect(opted).toHaveProperty('clippedNativeVoxels');
+    },
+  );
+
+  it.each(['unobserved footprint endpoints', 'outside-context endpoints'] as const)(
+    'rejects %s without publishing a fabricated footprint completion',
+    async (invalid) => {
+      const { native, editing, marks } = sampledTrackingGrid('axial', 2, false, 3);
+      worker.run.mockImplementation(async (options: InteractiveTrackingWorkerOptions) => {
+        if (invalid === 'unobserved footprint endpoints')
+          return { completedFrames: 16, directionEndpoints: { forward: 16, reverse: 2 } };
+        const result = await emitAll(options, () => new Float32Array(49).fill(1));
+        return { ...result, directionEndpoints: { forward: options.frameCount, reverse: -1 } };
+      });
+      await expect(propose(native, editing, marks, { retainMarkedComponents: true })).rejects.toThrow(
+        /before every native source plane/,
+      );
+      expect(worker.dispose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(
+    (['axial', 'coronal', 'sagittal'] as const).flatMap((plane) =>
+      [-3, -2, 2, 3].flatMap((stride) => [
+        { plane, stride, permuted: false, phase: 0 },
+        { plane, stride, permuted: true, phase: 1 },
+      ]),
+    ),
+  )(
+    'preserves the hard-mark connected mask in native $plane at stride $stride, permutation $permuted, phase $phase',
+    async ({ plane, stride, permuted, phase }) => {
+      const { native, editing, marks, anchor, barriers } = sampledTrackingGrid(plane, stride, permuted, phase);
+      const traversals: Array<Array<[number, 1 | -1]>> = [];
+      const original = {
+        native: native.data.slice(),
+        editing: editing.data.slice(),
+        marks: {
+          foreground: marks.foreground.slice(),
+          background: marks.background.slice(),
+          lastStroke: marks.lastStroke && { ...marks.lastStroke },
+        },
+      };
+      worker.run.mockImplementation((options) => {
+        const delivered: Array<[number, 1 | -1]> = [];
+        traversals.push(delivered);
+        return emitAll(
+          options,
+          (frame) => {
+            const logits = new Float32Array(options.width * options.height).fill(barriers.includes(frame) ? -1 : 1);
+            if (frame === anchor) logits[3 * options.width + 3] = -1;
+            return logits;
+          },
+          delivered,
+        );
+      });
+      const full = await propose(native, editing, marks);
+      const pruned = await propose(native, editing, marks, { retainMarkedComponents: true });
+      expect(worker.run.mock.lastCall![0]).toMatchObject({ anchorIndex: anchor, allowDirectionStop: true });
+      const end = native.dims[axisIndex[SLICE_AXES[plane].slice]] - 1;
+      expect(traversals[0]).toEqual([
+        ...Array.from({ length: end - anchor + 1 }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor + 1 }, (_, i) => [anchor - i, -1]),
+      ]);
+      expect(traversals[1]).toEqual([
+        ...Array.from({ length: barriers[1]! - anchor + 1 }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor - barriers[0]! + 1 }, (_, i) => [anchor - i, -1]),
+      ]);
+      const kept = await connected(pruned.data, editing, marks);
+      expect(kept).toEqual(await connected(full.data, editing, marks));
+      expect(kept.reduce((sum, value) => sum + value, 0)).toBe(3 * 49 - 1);
+      expect(pruned.data[marks.foreground[0]!]).toBe(0);
+      expect(kept[marks.foreground[0]!]).toBe(1);
+      expect(kept[marks.background[0]!]).toBe(0);
+      expect(pruned.contextLimited).toBe(true);
+      expect(pruned).not.toHaveProperty('boundaryCount');
+      expect(pruned).not.toHaveProperty('clippedNativeVoxels');
+      expect(native.data).toEqual(original.native);
+      expect(editing.data).toEqual(original.editing);
+      expect(marks).toEqual(original.marks);
+    },
+  );
+
+  it('retains diagonal 26-connected editing cells across sampled native frames at stride 2', async () => {
+    const native = volume([5, 5, 13], { voxelSizeMm: [1, 1, 1] });
+    const editing = volume([5, 5, 7], { voxelSizeMm: [1, 1, 2] });
+    const marks = centralMarks(editing);
+    worker.run.mockImplementation((options) =>
+      emitAll(options, (frame) => {
+        const logits = new Float32Array(25).fill(-1);
+        if (frame !== 2 && frame !== 10) {
+          const coordinate = Math.max(0, Math.min(4, Math.floor(frame / 2) - 1));
+          logits[coordinate * 5 + coordinate] = 1;
+        }
+        return logits;
+      }),
+    );
+    const full = await propose(native, editing, marks);
+    const pruned = await propose(native, editing, marks, { retainMarkedComponents: true });
+    expect(worker.run.mock.lastCall![0].allowDirectionStop).toBe(true);
+    const kept = await connected(pruned.data, editing, marks);
+    expect(kept).toEqual(await connected(full.data, editing, marks));
+    expect([...kept.keys()].filter((i) => kept[i])).toEqual([
+      index(editing, 1, 1, 2),
+      index(editing, 2, 2, 3),
+      index(editing, 3, 3, 4),
+    ]);
+  });
+
+  it.each([false, true])(
+    'tests sampled editing cells rather than in-plane native positives at stride 2 (sampled positive: %s)',
+    async (sampledPositive) => {
+      const native = volume([9, 9, 13], { voxelSizeMm: [1, 1, 1] });
+      const editing = volume([5, 5, 7], { voxelSizeMm: [2, 2, 2] });
+      const marks = centralMarks(editing);
+      const traversals: Array<Array<[number, 1 | -1]>> = [];
+      worker.run.mockImplementation((options) => {
+        const delivered: Array<[number, 1 | -1]> = [];
+        traversals.push(delivered);
+        return emitAll(
+          options,
+          (frame) =>
+            Float32Array.from({ length: 81 }, (_, i) =>
+              frame === 2 || frame === 10 ? (i === (sampledPositive ? 20 : 10) ? 1 : -1) : 1,
+            ),
+          delivered,
+        );
+      });
+      const full = await propose(native, editing, marks);
+      const pruned = await propose(native, editing, marks, { retainMarkedComponents: true });
+      expect(worker.run.mock.lastCall![0].allowDirectionStop).toBe(true);
+      expect(await connected(pruned.data, editing, marks)).toEqual(await connected(full.data, editing, marks));
+      if (sampledPositive) {
+        expect(traversals[1]).toEqual(traversals[0]);
+        expect(pruned).toEqual(full);
+        expect(pruned.data[index(editing, 1, 1, 1)]).toBe(1);
+        expect(pruned.data[index(editing, 1, 1, 5)]).toBe(1);
+      } else {
+        expect(traversals[1]).toEqual([
+          [6, 1],
+          [7, 1],
+          [8, 1],
+          [9, 1],
+          [10, 1],
+          [6, -1],
+          [5, -1],
+          [4, -1],
+          [3, -1],
+          [2, -1],
+        ]);
+        expect(pruned.data.reduce((sum, value) => sum + value, 0)).toBe(75);
+        expect(pruned.contextLimited).toBe(true);
+        expect(pruned).not.toHaveProperty('boundaryCount');
+        expect(pruned).not.toHaveProperty('clippedNativeVoxels');
+      }
+    },
+  );
 
   it('requires literal true opt-in and accounts for certified work without reporting skipped observations', async () => {
     const source = volume([7, 7, 7]);
@@ -511,26 +992,149 @@ describe('certified empty editing-plane pruning', () => {
   it('never treats a skipped native zero as an editing separator for [1,0,1] coarse tracking', async () => {
     const native = volume([5, 5, 7], { voxelSizeMm: [1, 1, 1] });
     const editing = volume([5, 5, 4], { voxelSizeMm: [1, 1, 2] });
-    worker.run.mockImplementation((options) =>
-      emitAll(options, (frame) => new Float32Array(25).fill(frame % 2 ? -1 : 1)),
-    );
-    const result = await propose(native, editing, centralMarks(editing), { retainMarkedComponents: true });
-    expect(worker.run.mock.lastCall![0].allowDirectionStop).toBeUndefined();
+    const marks = centralMarks(editing);
+    const traversals: Array<Array<[number, 1 | -1]>> = [];
+    worker.run.mockImplementation((options) => {
+      const delivered: Array<[number, 1 | -1]> = [];
+      traversals.push(delivered);
+      return emitAll(options, (frame) => new Float32Array(25).fill(frame % 2 ? -1 : 1), delivered);
+    });
+    const full = await propose(native, editing, marks);
+    const result = await propose(native, editing, marks, { retainMarkedComponents: true });
+    expect(worker.run.mock.lastCall![0].allowDirectionStop).toBe(true);
+    expect(traversals[1]).toEqual([
+      [4, 1],
+      [5, 1],
+      [6, 1],
+      [4, -1],
+      [3, -1],
+      [2, -1],
+      [1, -1],
+      [0, -1],
+    ]);
+    expect(traversals[1]).toEqual(traversals[0]);
+    expect(result).toEqual(full);
+    expect(await connected(result.data, editing, marks)).toEqual(await connected(full.data, editing, marks));
     expect(result.data.every((value) => value === 1)).toBe(true);
     expect(result).toHaveProperty('boundaryCount');
     expect(result.contextLimited).toBe(false);
   });
 
-  it.each(['foreground', 'background'] as const)(
-    'disables pruning for any off-anchor literal %s mark',
-    async (kind) => {
-      const source = volume([7, 7, 7]);
-      const marks = centralMarks(source);
-      marks[kind] = Uint32Array.from([...marks[kind], index(source, 1, 1, 6)]);
-      worker.run.mockImplementation(emptySeparators);
-      const result = await propose(source, source, marks, { retainMarkedComponents: true });
-      expect(worker.run.mock.lastCall![0].allowDirectionStop).toBeUndefined();
-      expect(result).toHaveProperty('boundaryCount');
+  it.each([1, 2].flatMap((stride) => (['foreground', 'background'] as const).map((kind) => ({ stride, kind }))))(
+    'retains every frame through an off-anchor literal $kind mark while pruning only the opposite tail at stride $stride',
+    async ({ stride, kind }) => {
+      const { native, editing, marks, barriers } = sampledTrackingGrid('axial', stride);
+      const offAnchor = index(editing, 1, 1, 6);
+      marks[kind] = Uint32Array.from([...marks[kind], offAnchor]);
+      const delivered: Array<[number, 1 | -1]> = [];
+      worker.run.mockImplementation((options) =>
+        emitAll(options, (frame) => new Float32Array(49).fill(barriers.includes(frame) ? -1 : 1), delivered),
+      );
+      const full = await propose(native, editing, marks);
+      delivered.length = 0;
+      const result = await propose(native, editing, marks, { retainMarkedComponents: true });
+      const kept = await connected(result.data, editing, marks);
+      expect(kept).toEqual(await connected(full.data, editing, marks));
+      expect(kept[offAnchor]).toBe(kind === 'foreground' ? 1 : 0);
+      expect(delivered).toEqual([
+        ...Array.from({ length: 3 * stride + 1 }, (_, i) => [3 * stride + i, 1]),
+        ...Array.from({ length: 2 * stride + 1 }, (_, i) => [3 * stride - i, -1]),
+      ]);
+      expect(result.contextLimited).toBe(true);
+      expect(result).not.toHaveProperty('boundaryCount');
+      expect(result).not.toHaveProperty('clippedNativeVoxels');
+    },
+  );
+
+  it.each(
+    [
+      { stride: 1, reverse: false },
+      { stride: 1, reverse: true },
+      { stride: 2, reverse: false },
+      { stride: -2, reverse: false },
+    ].flatMap((grid) => (['foreground', 'background'] as const).map((kind) => ({ ...grid, kind }))),
+  )(
+    'crosses early empty sections and the literal $kind fence before pruning: stride $stride, reverse $reverse',
+    async ({ stride, reverse, kind }) => {
+      const step = Math.abs(stride),
+        phase = step === 1 ? 0 : 1;
+      const native = volume([5, 5, 12 * step + 2 * phase + 1], { voxelSizeMm: [1, 1, 1] });
+      const origin = phase + (stride < 0 ? 12 * step : 0);
+      const editing = volume([5, 5, 13], {
+        voxelSizeMm: [1, 1, step],
+        direction: [1, 0, 0, 0, 1, 0, 0, 0, Math.sign(stride)],
+        originMm: volumeVoxelToPatient(native, [0, 0, origin]),
+      });
+      const editingZ = (logical: number) => (reverse ? 12 - logical : logical);
+      const nativeZ = (logical: number) => origin + editingZ(logical) * stride;
+      const marks: SvrSelectionSeeds = {
+        foreground: Uint32Array.of(index(editing, 2, 2, editingZ(2))),
+        background: Uint32Array.of(index(editing, 1, 1, editingZ(2))),
+        lastStroke: { plane: 'axial', slice: editingZ(2) },
+      };
+      const distant = index(editing, 2, 2, editingZ(8));
+      marks[kind] = Uint32Array.from([...marks[kind], distant]);
+      const original = {
+        native: native.data.slice(),
+        editing: editing.data.slice(),
+        foreground: marks.foreground.slice(),
+        background: marks.background.slice(),
+        lastStroke: { ...marks.lastStroke },
+      };
+      const traversals: Array<Array<[number, 1 | -1]>> = [];
+      worker.run.mockImplementation((options) => {
+        const delivered: Array<[number, 1 | -1]> = [];
+        traversals.push(delivered);
+        return emitAll(
+          options,
+          (frame) => {
+            const z = (frame - origin) / stride;
+            const logical = reverse ? 12 - z : z;
+            const body =
+              (logical >= 1 && logical <= 2) || (logical >= 7 && logical <= 9 && logical !== 8) || logical === 12;
+            return new Float32Array(25).fill(body ? 1 : -1);
+          },
+          delivered,
+        );
+      });
+      const full = await propose(native, editing, marks);
+      const keptFull = await connected(full.data, editing, marks);
+      expect(full.data[distant]).toBe(0);
+      expect(keptFull.reduce((sum, value) => sum + value, 0)).toBe(kind === 'foreground' ? 100 : 49);
+      if (kind === 'foreground') {
+        const prematurelyStopped = full.data.slice();
+        for (let logical = 4; logical <= 12; logical++) {
+          const z = editingZ(logical);
+          prematurelyStopped.fill(0, z * 25, (z + 1) * 25);
+        }
+        const repaired = await connected(prematurelyStopped, editing, marks);
+        expect(repaired[distant]).toBe(1);
+        expect(repaired.reduce((sum, value) => sum + value, 0)).toBe(50);
+        expect(repaired).not.toEqual(keptFull);
+        expect(keptFull[index(editing, 2, 2, editingZ(7))]).toBe(1);
+        expect(keptFull[index(editing, 2, 2, editingZ(9))]).toBe(1);
+      }
+      const pruned = await propose(native, editing, marks, { retainMarkedComponents: true });
+      expect(await connected(pruned.data, editing, marks)).toEqual(keptFull);
+      const lower = Math.min(nativeZ(0), nativeZ(10)),
+        upper = Math.max(nativeZ(0), nativeZ(10));
+      const anchor = nativeZ(2);
+      expect(traversals[0]).toEqual([
+        ...Array.from({ length: native.dims[2] - anchor }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor + 1 }, (_, i) => [anchor - i, -1]),
+      ]);
+      expect(traversals[1]).toEqual([
+        ...Array.from({ length: upper - anchor + 1 }, (_, i) => [anchor + i, 1]),
+        ...Array.from({ length: anchor - lower + 1 }, (_, i) => [anchor - i, -1]),
+      ]);
+      expect(pruned.contextLimited).toBe(true);
+      expect(pruned).not.toHaveProperty('boundaryCount');
+      expect(pruned).not.toHaveProperty('clippedNativeVoxels');
+      expect(native.data).toEqual(original.native);
+      expect(editing.data).toEqual(original.editing);
+      expect(marks.foreground).toEqual(original.foreground);
+      expect(marks.background).toEqual(original.background);
+      expect(marks.lastStroke).toEqual(original.lastStroke);
     },
   );
 
@@ -578,76 +1182,88 @@ describe('certified empty editing-plane pruning', () => {
     expect(await propose(source, source, centralMarks(source), { retainMarkedComponents: true })).toEqual(full);
   });
 
-  it.each(['unsupported', 'nonfinite'] as const)(
-    'rejects a future %s native sample before creating an opted model',
-    async (kind) => {
-      const source = volume([7, 7, 7]);
-      if (kind === 'unsupported') source.observedSupport![0] = 0;
-      else source.data[0] = NaN;
-      worker.run.mockImplementation(emptySeparators);
-      await expect(propose(source, source, centralMarks(source), { retainMarkedComponents: true })).rejects.toThrow(
+  it.each([1, 2].flatMap((stride) => (['unsupported', 'nonfinite'] as const).map((kind) => ({ stride, kind }))))(
+    'rejects a future $kind native sample before creating an opted model at stride $stride',
+    async ({ stride, kind }) => {
+      const { native, editing, marks, barriers } = sampledTrackingGrid('axial', stride);
+      if (kind === 'unsupported') native.observedSupport![0] = 0;
+      else native.data[0] = NaN;
+      worker.run.mockImplementation((options) => emptySeparators(options, barriers));
+      await expect(propose(native, editing, marks, { retainMarkedComponents: true })).rejects.toThrow(
         /unavailable|nonfinite/,
       );
-      expect(worker.created).not.toHaveBeenCalled();
+      expect(worker.run).not.toHaveBeenCalled();
     },
   );
 
-  it.each(['missing endpoints', 'spoofed endpoints', 'early completion', 'ignored barrier'] as const)(
-    'rejects %s rather than publishing unknown coverage',
-    async (kind) => {
-      const source = volume([7, 7, 7]);
+  it.each(
+    [1, 2].flatMap((stride) =>
+      ['missing endpoints', 'spoofed endpoints', 'early completion', 'ignored barrier'].map((kind) => ({
+        stride,
+        kind,
+      })),
+    ),
+  )('rejects $kind rather than publishing unknown coverage at stride $stride', async ({ stride, kind }) => {
+    const { native, editing, marks, barriers } = sampledTrackingGrid('axial', stride);
+    worker.run.mockImplementation(async (options) => {
+      if (kind === 'early completion')
+        return {
+          completedFrames: barriers[1]! - barriers[0]! + 2,
+          directionEndpoints: { forward: barriers[1], reverse: barriers[0] },
+        };
+      if (kind === 'ignored barrier') {
+        for (let i = options.anchorIndex; i < options.frameCount; i++)
+          await options.onFrame({
+            index: i,
+            direction: 1,
+            initial: i === options.anchorIndex,
+            nativeLogits: new Float32Array(options.width * options.height).fill(-1),
+          });
+      }
+      const result = await emptySeparators(options, barriers);
+      return kind === 'missing endpoints'
+        ? { completedFrames: result.completedFrames }
+        : { ...result, directionEndpoints: { forward: options.frameCount - 1, reverse: 0 } };
+    });
+    await expect(propose(native, editing, marks, { retainMarkedComponents: true })).rejects.toThrow(/native.*plane/);
+    expect(worker.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([1, 2])(
+    'cancels the cooperative complete-source validation before a worker exists at stride %s',
+    async (stride) => {
+      const { native, editing, marks } = sampledTrackingGrid('axial', stride);
+      const abort = new AbortController();
+      vi.spyOn(scheduling, 'yieldToMain').mockImplementationOnce(async () => abort.abort());
+      await expect(
+        propose(native, editing, marks, { retainMarkedComponents: true, signal: abort.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(worker.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([1, 2])(
+    'rejects cancellation after a certified traversal without reporting completion at stride %s',
+    async (stride) => {
+      const { native, editing, marks, barriers } = sampledTrackingGrid('axial', stride);
+      const abort = new AbortController(),
+        progress = vi.fn();
       worker.run.mockImplementation(async (options) => {
-        if (kind === 'early completion') return { completedFrames: 6, directionEndpoints: { forward: 5, reverse: 1 } };
-        if (kind === 'ignored barrier') {
-          for (let i = options.anchorIndex; i < options.frameCount; i++)
-            await options.onFrame({
-              index: i,
-              direction: 1,
-              initial: i === options.anchorIndex,
-              nativeLogits: new Float32Array(49).fill(-1),
-            });
-        }
-        const result = await emptySeparators(options);
-        return kind === 'missing endpoints'
-          ? { completedFrames: result.completedFrames }
-          : { ...result, directionEndpoints: { forward: 6, reverse: 0 } };
+        const result = await emptySeparators(options, barriers);
+        abort.abort();
+        return result;
       });
-      await expect(propose(source, source, centralMarks(source), { retainMarkedComponents: true })).rejects.toThrow(
-        /native.*plane/,
-      );
+      await expect(
+        propose(native, editing, marks, {
+          retainMarkedComponents: true,
+          signal: abort.signal,
+          onProgress: progress,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(progress).not.toHaveBeenCalledWith(1);
       expect(worker.dispose).toHaveBeenCalledOnce();
     },
   );
-
-  it('cancels the cooperative complete-source validation before a worker exists', async () => {
-    const source = volume([7, 7, 7]);
-    const abort = new AbortController();
-    vi.spyOn(scheduling, 'yieldToMain').mockImplementationOnce(async () => abort.abort());
-    await expect(
-      propose(source, source, centralMarks(source), { retainMarkedComponents: true, signal: abort.signal }),
-    ).rejects.toMatchObject({ name: 'AbortError' });
-    expect(worker.created).not.toHaveBeenCalled();
-  });
-
-  it('rejects cancellation after a certified traversal without reporting completion', async () => {
-    const source = volume([7, 7, 7]);
-    const abort = new AbortController(),
-      progress = vi.fn();
-    worker.run.mockImplementation(async (options) => {
-      const result = await emptySeparators(options);
-      abort.abort();
-      return result;
-    });
-    await expect(
-      propose(source, source, centralMarks(source), {
-        retainMarkedComponents: true,
-        signal: abort.signal,
-        onProgress: progress,
-      }),
-    ).rejects.toMatchObject({ name: 'AbortError' });
-    expect(progress).not.toHaveBeenCalledWith(1);
-    expect(worker.dispose).toHaveBeenCalledOnce();
-  });
 
   it('rejects small coefficient errors that accumulate beyond an exact editing-grid lattice', async () => {
     const native = volume([201, 3, 3], { originMm: [10_000_000, 20, 30], voxelSizeMm: [1, 1, 1] });

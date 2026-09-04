@@ -1,13 +1,10 @@
+/** These solver comparisons target the retired diagnostic, not shipped learned-model acceptance. */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  segmentSeededVolume,
-  type SeededVolumeInput,
-  type SeededVolumeResult,
-} from '../src/utils/segmentation/seededVolume';
+import { segmentSeededVolume, type SeededVolumeInput, type SeededVolumeResult } from './helpers/legacySeededVolume';
 import { pixelFingerprint } from './helpers/interSliceCorpus';
 import { rasterizeGoldenSection, type GoldenVolumeSection } from './helpers/segmentationGolden';
 import {
@@ -18,7 +15,7 @@ import {
   type GoldenCorpusManifest,
 } from './helpers/segmentationGoldenCorpus';
 
-const productionPath = resolve('src/utils/segmentation/seededVolume.ts');
+const productionPath = resolve('tests/helpers/legacySeededVolume.ts');
 const productionHash = pixelFingerprint(readFileSync(productionPath));
 const ownedTemporaryDirectories: string[] = [];
 afterEach(() => {

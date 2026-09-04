@@ -39,12 +39,12 @@ import {
   mapFixedExclusionToMovingBounds,
   type GridSeedTransform,
 } from '../utils/alignmentTransform';
+import type { FinalAffineProposalKind, OptimizerFinalAffineProposal } from '../utils/structuralAffineSelection';
 import {
-  selectFinalAffineProposal,
-  type FinalAffineProposalKind,
-  type OptimizerFinalAffineProposal,
-} from '../utils/structuralAffineSelection';
-import { createAlignmentScoringRunner, type AlignmentScoringRunner } from '../utils/alignmentScoringRunner';
+  createAlignmentScoringRunner,
+  scoreFinalAffineInWorker,
+  type AlignmentScoringRunner,
+} from '../utils/alignmentScoringRunner';
 import { assessSliceAlignmentEvidence } from '../utils/alignmentConfidence';
 import { rasterizeImageExclusion, selectPhysicalTargetSlice } from '../utils/alignmentGeometry';
 import { applyAlignmentSliceOffset } from '../utils/alignmentSliceCorrection';
@@ -70,7 +70,7 @@ import {
   type LongitudinalReferenceAnatomy,
   type PreparedLongitudinalReferenceInput,
 } from '../utils/svr/longitudinalFrames';
-import { runLongitudinalRegistration } from '../utils/svr/runLongitudinalRegistration';
+import { runLongitudinalEstimate } from '../utils/svr/runLongitudinalRegistration';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import {
   resample2dAreaAverage,
@@ -231,6 +231,7 @@ export function useAutoAlign() {
         requestKey?: string;
         reuseRegistration?: boolean;
         targetSliceOffsets?: ReadonlyMap<string, number>;
+        getPresentedDates?: () => readonly string[];
       } = {},
     ): Promise<AlignmentResult[]> => {
       abortControllerRef.current?.abort();
@@ -271,6 +272,14 @@ export function useAutoAlign() {
       });
 
       let scoringRunner: AlignmentScoringRunner | null = null;
+      let sharedWebWorker: Worker | undefined;
+      const releaseSharedWorker = async () => {
+        if (!sharedWebWorker) return;
+        const worker = sharedWebWorker;
+        sharedWebWorker = undefined;
+        const { disposeElastixWorker } = await import('../utils/elastixRegistration');
+        disposeElastixWorker(worker);
+      };
       try {
         // Direct source-pixel capture keeps exhaustive search independent of offscreen display rendering.
         const ensureNotAborted = () => {
@@ -278,6 +287,8 @@ export function useAutoAlign() {
             throw new AlignmentCancelledError();
           }
         };
+        const presentedDates = () => new Set(options.getPresentedDates?.() ?? targetDates);
+        const presented = presentedDates();
         const reusable =
           options.reuseRegistration && !reference.exclusionMask && !displayedDerivedReference
             ? targetDates.flatMap((date) => {
@@ -302,13 +313,23 @@ export function useAutoAlign() {
                   outputMode: options.outputMode ?? 'native',
                   manualSliceOffset: options.targetSliceOffsets?.get(date) ?? 0,
                 });
-                return [{ key, date, target, model, exact: exact?.registrationId === model.registrationId }];
+                const exactMatch = exact?.registrationId === model.registrationId;
+                // An offscreen warm slab must not run ahead of a visible cold
+                // target. Zero-work exact replay remains cheap and immediate.
+                return presented.has(date) || exactMatch ? [{ key, date, target, model, exact: exactMatch }] : [];
               })
             : [];
         // Publish resident planes first, even when a different date needs source
         // I/O or a new registration. Dense source slabs remain bounded/serial.
-        reusable.sort((first, second) => Number(second.exact) - Number(first.exact));
-        for (const { key, date, target, model } of reusable) {
+        const pendingReusable = [...reusable];
+        while (pendingReusable.length) {
+          const visible = presentedDates();
+          pendingReusable.sort(
+            (first, second) =>
+              Number(second.exact) - Number(first.exact) ||
+              Number(visible.has(second.date)) - Number(visible.has(first.date)),
+          );
+          const { key, date, target, model } = pendingReusable.shift()!;
           ensureNotAborted();
           setStateForCurrentRun((state) => ({
             ...state,
@@ -373,7 +394,8 @@ export function useAutoAlign() {
               alignmentAbortController.signal.removeEventListener('abort', done);
               resolve();
             };
-            const timer = window.setTimeout(done, 650);
+            const visible = presentedDates();
+            const timer = window.setTimeout(done, remainingTargetDates.some((date) => visible.has(date)) ? 0 : 650);
             alignmentAbortController.signal.addEventListener('abort', done, { once: true });
             if (alignmentAbortController.signal.aborted) done();
           });
@@ -851,7 +873,7 @@ export function useAutoAlign() {
               : null;
           const coarseRegistration =
             cached?.estimate ??
-            (await runLongitudinalRegistration(
+            (await runLongitudinalEstimate(
               {
                 referenceSlices,
                 targetSlices: prepared!.targetSlices,
@@ -1093,21 +1115,25 @@ export function useAutoAlign() {
               );
               ensureNotAborted();
               sharedWebWorker = residual.webWorker;
-              const selection = selectFinalAffineProposal({
-                normalizedReference: calibrationNormalizedReference,
-                referenceValidity: calibrationReference?.validity ?? referenceRender.validity,
-                movingPixels: calibrationMoving.pixels,
-                movingValidity: calibrationMoving.validity,
-                size: ALIGNMENT_IMAGE_SIZE,
-                scales: FINE_PERCEPTUAL_SCALES,
-                winningWarp: {
-                  A: { m00: 1, m01: 0, m10: 0, m11: 1 },
-                  translateX: 0,
-                  translateY: 0,
+              const selection = await scoreFinalAffineInWorker(
+                {
+                  normalizedReference: calibrationNormalizedReference,
+                  referenceValidity: calibrationReference?.validity ?? referenceRender.validity,
+                  movingPixels: calibrationMoving.pixels,
+                  movingValidity: calibrationMoving.validity,
+                  size: ALIGNMENT_IMAGE_SIZE,
+                  scales: FINE_PERCEPTUAL_SCALES,
+                  winningWarp: {
+                    A: { m00: 1, m01: 0, m10: 0, m11: 1 },
+                    translateX: 0,
+                    translateY: 0,
+                  },
+                  fixedExclusionRect: reference.exclusionMask,
+                  optimizerProposals: [{ kind: 'structure-elastix', residualMovingToFixed: residual.movingToFixed }],
                 },
-                fixedExclusionRect: reference.exclusionMask,
-                optimizerProposals: [{ kind: 'structure-elastix', residualMovingToFixed: residual.movingToFixed }],
-              });
+                alignmentAbortController.signal,
+              );
+              ensureNotAborted();
               if (selection.selected.kind !== 'seed-only') {
                 displayAffine = selection.selected.totalMovingToFixed;
                 displayGeometry = composeReferencePanelGeometry(
@@ -1129,7 +1155,7 @@ export function useAutoAlign() {
               );
             } catch (error) {
               ensureNotAborted();
-              sharedWebWorker = undefined;
+              await releaseSharedWorker();
               debugAlignmentLog(
                 'physical.final-affine-unavailable',
                 { date, message: error instanceof Error ? error.message : String(error) },
@@ -1334,12 +1360,14 @@ export function useAutoAlign() {
           progress: s.progress ? { ...s.progress, phase: 'matching' } : null,
         }));
 
-        // Keep a web worker + initial transform around as we iterate.
-        let sharedWebWorker: Worker | undefined;
-
         for (let dateIdx = 0; dateIdx < remainingTargetDates.length; dateIdx++) {
           ensureNotAborted();
-
+          // Reprioritize only at a target boundary. A filmstrip change must not
+          // cancel a cold registration that is already doing useful work.
+          const visible = presentedDates();
+          const nextVisible = remainingTargetDates.findIndex((date, index) => index >= dateIdx && visible.has(date));
+          if (nextVisible > dateIdx)
+            remainingTargetDates.splice(dateIdx, 0, remainingTargetDates.splice(nextVisible, 1)[0]!);
           const date = remainingTargetDates[dateIdx];
           const seriesRef = seriesMap[date];
 
@@ -2099,7 +2127,7 @@ export function useAutoAlign() {
                 });
               } catch (error) {
                 ensureNotAborted();
-                sharedWebWorker = undefined;
+                await releaseSharedWorker();
                 failedOptimizerAttempts.push({
                   kind,
                   message: error instanceof Error ? error.message : String(error),
@@ -2321,7 +2349,7 @@ export function useAutoAlign() {
             await yieldToMain();
           } catch (error) {
             ensureNotAborted();
-            sharedWebWorker = undefined;
+            await releaseSharedWorker();
             publishResult(
               terminalResult(
                 date,
@@ -2356,6 +2384,7 @@ export function useAutoAlign() {
       } finally {
         releaseDisplayedReference?.();
         scoringRunner?.close();
+        await releaseSharedWorker();
         if (abortControllerRef.current === alignmentAbortController) abortControllerRef.current = null;
       }
     },

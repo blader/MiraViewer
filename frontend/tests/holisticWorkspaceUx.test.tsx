@@ -4,6 +4,8 @@ import { StudyTools, StudyToolsWorkspace } from '../src/components/comparison/St
 import { ImageControls } from '../src/components/ImageControls';
 import { SliceLoopNavigator } from '../src/components/comparison/SliceLoopNavigator';
 import { useGridLayout } from '../src/hooks/useGridLayout';
+import { useComparisonWorkspaceNavigation } from '../src/hooks/useComparisonWorkspaceNavigation';
+import type { ComparisonData } from '../src/types/api';
 import { formatPatientName } from '../src/utils/clinicalData';
 import { DEFAULT_PANEL_SETTINGS, GRID_CELL_METADATA_HEIGHT } from '../src/utils/constants';
 
@@ -128,6 +130,62 @@ function SliceFixture({
 }
 
 describe('direct slice navigation', () => {
+  it('uses the active view acquisition for wheel and footer counts, including unequal stacks and view changes', () => {
+    localStorage.removeItem('miraviewer:overlay-nav:v1');
+    const data: ComparisonData = {
+      planes: ['Axial'],
+      dates: ['2035-01-01', '2035-02-01'],
+      sequences: [],
+      series_map: {
+        sequence: {
+          '2035-01-01': { study_id: 'old', series_uid: 'old-series', instance_count: 20 },
+          '2035-02-01': { study_id: 'new', series_uid: 'new-series', instance_count: 100 },
+        },
+      },
+    };
+    const { result } = renderHook(() =>
+      useComparisonWorkspaceNavigation({
+        data,
+        selectedSeqId: 'sequence',
+        enabledDates: new Set(data.dates),
+        panelSettings: new Map([['2035-02-01', { ...DEFAULT_PANEL_SETTINGS, offset: 3, reverseSliceOrder: true }]]),
+        progress: 0,
+        setProgress: vi.fn(),
+        interactionBlocked: false,
+      }),
+    );
+    expect(result.current.navigationReference).toMatchObject({
+      instanceCount: 100,
+      offset: 3,
+      reverseSliceOrder: true,
+    });
+    expect(result.current.playbackInstanceCount).toBe(100);
+    act(() => result.current.setViewMode('overlay'));
+    expect(result.current.playbackInstanceCount).toBe(20);
+    act(() => result.current.setViewMode('grid'));
+    expect(result.current.playbackInstanceCount).toBe(100);
+  });
+
+  it('shows acquired slice ordinals and inverts both offset and reverse order when jumping', () => {
+    const onSelect = vi.fn();
+    render(
+      <SliceLoopNavigator
+        selectedSeqId="offset-reverse"
+        playbackInstanceCount={10}
+        progress={2 / 9}
+        progressRef={{ current: 2 / 9 }}
+        setProgress={onSelect}
+        reference={{ label: 'Synthetic examination', offset: 2, reverseSliceOrder: true }}
+      />,
+    );
+    const input = screen.getByRole('spinbutton', { name: 'Go to slice' });
+    expect(input).toHaveValue(6);
+    expect(input).toHaveAttribute('max', '8');
+    fireEvent.change(input, { target: { value: '3' } });
+    fireEvent.blur(input);
+    expect(onSelect).toHaveBeenCalledWith(5 / 9);
+  });
+
   it('commits an exact slice only when the edit is submitted', () => {
     const onSelect = vi.fn();
     render(<SliceFixture onSelect={onSelect} />);

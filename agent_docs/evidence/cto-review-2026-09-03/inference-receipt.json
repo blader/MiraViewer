@@ -1,0 +1,1043 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-results/inference-real-pinned-infe-ed282-ffline-cancels-and-recovers-inference/inference-receipt.json",
+    "sha256": "20e3a6ad8a450d163deb171bd98dc19da2b6310ccdab8c96e4b218ccb60b71cd"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:30:36.062Z",
+    "fixture": "synthetic only",
+    "browserVersion": "152.0.7977.82",
+    "provider": "wasm",
+    "wasmThreads": 1,
+    "evidence": "Actual pinned model and worker; complete synthetic prompt snapshots, retained-session parity, verified offline bytes, cancellation and fresh-worker recovery. Not anatomical accuracy, measured peak memory, a normal-editor workflow or in-kernel cancellation proof.",
+    "runs": [
+      {
+        "result": {
+          "completedFrames": 4
+        },
+        "error": null,
+        "frames": [
+          {
+            "index": 1,
+            "direction": 1,
+            "initial": true,
+            "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+            "positivePixels": 0
+          },
+          {
+            "index": 2,
+            "direction": 1,
+            "initial": false,
+            "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+            "positivePixels": 0
+          },
+          {
+            "index": 1,
+            "direction": -1,
+            "initial": true,
+            "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+            "positivePixels": 0
+          },
+          {
+            "index": 0,
+            "direction": -1,
+            "initial": false,
+            "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+            "positivePixels": 0
+          }
+        ],
+        "timings": [
+          {
+            "stage": "runtime-load",
+            "elapsedMs": 45.62000012397766
+          },
+          {
+            "stage": "asset-load",
+            "asset": "encoder",
+            "elapsedMs": 816.670000076294
+          },
+          {
+            "stage": "session-init",
+            "asset": "encoder",
+            "elapsedMs": 408.13499999046326
+          },
+          {
+            "stage": "asset-load",
+            "asset": "decoder",
+            "elapsedMs": 583.1950001716614
+          },
+          {
+            "stage": "session-init",
+            "asset": "decoder",
+            "elapsedMs": 126.96500015258789
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryAttention",
+            "elapsedMs": 776.8000001907349
+          },
+          {
+            "stage": "session-init",
+            "asset": "memoryAttention",
+            "elapsedMs": 215.4800000190735
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryEncoder",
+            "elapsedMs": 183.47000002861023
+          },
+          {
+            "stage": "session-init",
+            "asset": "memoryEncoder",
+            "elapsedMs": 10.90499997138977
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryPosition",
+            "elapsedMs": 11.78499984741211
+          },
+          {
+            "stage": "asset-load",
+            "asset": "temporalPositions",
+            "elapsedMs": 1.9749999046325684
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 482.24000000953674
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 37.25499987602234
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 77.85500001907349
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 466.960000038147
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryAttention",
+            "elapsedMs": 446.6099998950958
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 28.419999837875366
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 26.389999866485596
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 77.73499989509583
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 450.94000005722046
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryAttention",
+            "elapsedMs": 545.6000001430511
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 29.37000012397766
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 83.15499997138977
+          }
+        ],
+        "animationCallbacks": 718,
+        "elapsedMs": 5972.810000181198,
+        "startedAtUnixMs": 1788492732581.055,
+        "finishedAtUnixMs": 1788492738553.865,
+        "cancelToReleaseMs": null,
+        "ownedInputBytes": 12288,
+        "sourceUnchanged": true,
+        "fixture": {
+          "kind": "synthetic Gaussian/texture",
+          "width": 32,
+          "height": 32,
+          "frameCount": 3,
+          "conditioningFrames": 2
+        },
+        "memoryEstimate": {
+          "retainedBytes": 12288,
+          "retainedRuntimeBytes": 0,
+          "sourceLoadPeakBytes": 12288,
+          "contextBytes": 15360,
+          "contextMaskBytes": 3072,
+          "runtimeAllowanceBytes": 1073741824,
+          "temporalAttentionBytes": 25264128,
+          "promptAttentionBytes": 2959488,
+          "frameScratchBytes": 16862208,
+          "retainedStateBytes": 535568,
+          "packedMemoryBytes": 1579008,
+          "runtimeBytes": 1120942224,
+          "publicationScratchBytes": 55296,
+          "sourcePeakBytes": 27648,
+          "trackingPeakBytes": 1120972944,
+          "publicationPeakBytes": 86016,
+          "publicationRuntimeBytes": 0,
+          "totalBytes": 1120972944
+        },
+        "retainedRuntimeAllowanceBytes": 0
+      },
+      {
+        "result": {
+          "completedFrames": 4
+        },
+        "error": null,
+        "frames": [
+          {
+            "index": 1,
+            "direction": 1,
+            "initial": true,
+            "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+            "positivePixels": 0
+          },
+          {
+            "index": 2,
+            "direction": 1,
+            "initial": false,
+            "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+            "positivePixels": 0
+          },
+          {
+            "index": 1,
+            "direction": -1,
+            "initial": true,
+            "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+            "positivePixels": 0
+          },
+          {
+            "index": 0,
+            "direction": -1,
+            "initial": false,
+            "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+            "positivePixels": 0
+          }
+        ],
+        "timings": [
+          {
+            "stage": "runtime-load",
+            "elapsedMs": 43.34500002861023
+          },
+          {
+            "stage": "asset-load",
+            "asset": "encoder",
+            "elapsedMs": 14.27999997138977
+          },
+          {
+            "stage": "session-init",
+            "asset": "encoder",
+            "elapsedMs": 391.835000038147
+          },
+          {
+            "stage": "asset-load",
+            "asset": "decoder",
+            "elapsedMs": 11.240000009536743
+          },
+          {
+            "stage": "session-init",
+            "asset": "decoder",
+            "elapsedMs": 117.05999994277954
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryAttention",
+            "elapsedMs": 15.274999856948853
+          },
+          {
+            "stage": "session-init",
+            "asset": "memoryAttention",
+            "elapsedMs": 238.22000002861023
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryEncoder",
+            "elapsedMs": 5.015000104904175
+          },
+          {
+            "stage": "session-init",
+            "asset": "memoryEncoder",
+            "elapsedMs": 10.879999876022339
+          },
+          {
+            "stage": "asset-load",
+            "asset": "memoryPosition",
+            "elapsedMs": 0.6349999904632568
+          },
+          {
+            "stage": "asset-load",
+            "asset": "temporalPositions",
+            "elapsedMs": 0.2850000858306885
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 477.50499987602234
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 35.47000002861023
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 85.52999997138977
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 453.414999961853
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryAttention",
+            "elapsedMs": 438.27999997138977
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 28.264999866485596
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 28.884999990463257
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 84.03500008583069
+          },
+          {
+            "stage": "graph-run",
+            "asset": "encoder",
+            "elapsedMs": 460.25
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryAttention",
+            "elapsedMs": 554.7549998760223
+          },
+          {
+            "stage": "graph-run",
+            "asset": "decoder",
+            "elapsedMs": 26.294999837875366
+          },
+          {
+            "stage": "graph-run",
+            "asset": "memoryEncoder",
+            "elapsedMs": 78.66999983787537
+          }
+        ],
+        "animationCallbacks": 437,
+        "elapsedMs": 3639.6600000858307,
+        "startedAtUnixMs": 1788492740061.8599,
+        "finishedAtUnixMs": 1788492743701.52,
+        "cancelToReleaseMs": null,
+        "ownedInputBytes": 12288,
+        "sourceUnchanged": true,
+        "fixture": {
+          "kind": "synthetic Gaussian/texture",
+          "width": 32,
+          "height": 32,
+          "frameCount": 3,
+          "conditioningFrames": 2
+        },
+        "memoryEstimate": {
+          "retainedBytes": 12288,
+          "retainedRuntimeBytes": 0,
+          "sourceLoadPeakBytes": 12288,
+          "contextBytes": 15360,
+          "contextMaskBytes": 3072,
+          "runtimeAllowanceBytes": 1073741824,
+          "temporalAttentionBytes": 25264128,
+          "promptAttentionBytes": 2959488,
+          "frameScratchBytes": 16862208,
+          "retainedStateBytes": 535568,
+          "packedMemoryBytes": 1579008,
+          "runtimeBytes": 1120942224,
+          "publicationScratchBytes": 55296,
+          "sourcePeakBytes": 27648,
+          "trackingPeakBytes": 1120972944,
+          "publicationPeakBytes": 86016,
+          "publicationRuntimeBytes": 0,
+          "totalBytes": 1120972944
+        },
+        "retainedRuntimeAllowanceBytes": 0
+      }
+    ],
+    "canceled": {
+      "result": null,
+      "error": {
+        "name": "AbortError",
+        "message": "Interactive selection cancelled."
+      },
+      "frames": [],
+      "timings": [
+        {
+          "stage": "runtime-load",
+          "elapsedMs": 47.204999923706055
+        },
+        {
+          "stage": "asset-load",
+          "asset": "encoder",
+          "elapsedMs": 14.889999866485596
+        },
+        {
+          "stage": "session-init",
+          "asset": "encoder",
+          "elapsedMs": 412.36500000953674
+        },
+        {
+          "stage": "asset-load",
+          "asset": "decoder",
+          "elapsedMs": 12.68500018119812
+        },
+        {
+          "stage": "session-init",
+          "asset": "decoder",
+          "elapsedMs": 117.58500003814697
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryAttention",
+          "elapsedMs": 17.880000114440918
+        },
+        {
+          "stage": "session-init",
+          "asset": "memoryAttention",
+          "elapsedMs": 232.15000009536743
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryEncoder",
+          "elapsedMs": 6.235000133514404
+        },
+        {
+          "stage": "session-init",
+          "asset": "memoryEncoder",
+          "elapsedMs": 12.134999990463257
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryPosition",
+          "elapsedMs": 0.695000171661377
+        },
+        {
+          "stage": "asset-load",
+          "asset": "temporalPositions",
+          "elapsedMs": 0.3450000286102295
+        },
+        {
+          "stage": "graph-run",
+          "asset": "encoder",
+          "elapsedMs": 495.75
+        }
+      ],
+      "animationCallbacks": 167,
+      "elapsedMs": 1393.8499999046326,
+      "startedAtUnixMs": 1788492738562.435,
+      "finishedAtUnixMs": 1788492739956.285,
+      "cancelToReleaseMs": 0.125,
+      "ownedInputBytes": 12288,
+      "sourceUnchanged": true,
+      "fixture": {
+        "kind": "synthetic Gaussian/texture",
+        "width": 32,
+        "height": 32,
+        "frameCount": 3,
+        "conditioningFrames": 2
+      },
+      "memoryEstimate": {
+        "retainedBytes": 12288,
+        "retainedRuntimeBytes": 0,
+        "sourceLoadPeakBytes": 12288,
+        "contextBytes": 15360,
+        "contextMaskBytes": 3072,
+        "runtimeAllowanceBytes": 1073741824,
+        "temporalAttentionBytes": 25264128,
+        "promptAttentionBytes": 2959488,
+        "frameScratchBytes": 16862208,
+        "retainedStateBytes": 535568,
+        "packedMemoryBytes": 1579008,
+        "runtimeBytes": 1120942224,
+        "publicationScratchBytes": 55296,
+        "sourcePeakBytes": 27648,
+        "trackingPeakBytes": 1120972944,
+        "publicationPeakBytes": 86016,
+        "publicationRuntimeBytes": 0,
+        "totalBytes": 1120972944
+      },
+      "retainedRuntimeAllowanceBytes": 0
+    },
+    "retained": {
+      "runs": [
+        {
+          "result": {
+            "completedFrames": 4
+          },
+          "error": null,
+          "frames": [
+            {
+              "index": 1,
+              "direction": 1,
+              "initial": true,
+              "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+              "positivePixels": 0
+            },
+            {
+              "index": 2,
+              "direction": 1,
+              "initial": false,
+              "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+              "positivePixels": 0
+            },
+            {
+              "index": 1,
+              "direction": -1,
+              "initial": true,
+              "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+              "positivePixels": 0
+            },
+            {
+              "index": 0,
+              "direction": -1,
+              "initial": false,
+              "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+              "positivePixels": 0
+            }
+          ],
+          "timings": [
+            {
+              "stage": "runtime-load",
+              "elapsedMs": 44.125
+            },
+            {
+              "stage": "asset-load",
+              "asset": "encoder",
+              "elapsedMs": 14.52999997138977
+            },
+            {
+              "stage": "session-init",
+              "asset": "encoder",
+              "elapsedMs": 410.8199999332428
+            },
+            {
+              "stage": "asset-load",
+              "asset": "decoder",
+              "elapsedMs": 12.610000133514404
+            },
+            {
+              "stage": "session-init",
+              "asset": "decoder",
+              "elapsedMs": 120.16499996185303
+            },
+            {
+              "stage": "asset-load",
+              "asset": "memoryAttention",
+              "elapsedMs": 15.674999952316284
+            },
+            {
+              "stage": "session-init",
+              "asset": "memoryAttention",
+              "elapsedMs": 222.38499999046326
+            },
+            {
+              "stage": "asset-load",
+              "asset": "memoryEncoder",
+              "elapsedMs": 5.824999809265137
+            },
+            {
+              "stage": "session-init",
+              "asset": "memoryEncoder",
+              "elapsedMs": 12.369999885559082
+            },
+            {
+              "stage": "asset-load",
+              "asset": "memoryPosition",
+              "elapsedMs": 0.695000171661377
+            },
+            {
+              "stage": "asset-load",
+              "asset": "temporalPositions",
+              "elapsedMs": 0.3399999141693115
+            },
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 490.0199999809265
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 35.12000012397766
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 80.28500008583069
+            },
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 459.7449998855591
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryAttention",
+              "elapsedMs": 452.54499983787537
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 27.02999997138977
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 26.72499990463257
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 82.0550000667572
+            },
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 468.61500000953674
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryAttention",
+              "elapsedMs": 553.2549998760223
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 28.375
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 80.80999994277954
+            }
+          ],
+          "animationCallbacks": 442,
+          "elapsedMs": 3680.4900000095367,
+          "startedAtUnixMs": 1788492743709.3499,
+          "finishedAtUnixMs": 1788492747389.8398,
+          "cancelToReleaseMs": null,
+          "ownedInputBytes": 12288,
+          "sourceUnchanged": true,
+          "fixture": {
+            "kind": "synthetic Gaussian/texture",
+            "width": 32,
+            "height": 32,
+            "frameCount": 3,
+            "conditioningFrames": 2
+          },
+          "memoryEstimate": {
+            "retainedBytes": 12288,
+            "retainedRuntimeBytes": 0,
+            "sourceLoadPeakBytes": 12288,
+            "contextBytes": 15360,
+            "contextMaskBytes": 3072,
+            "runtimeAllowanceBytes": 1073741824,
+            "temporalAttentionBytes": 25264128,
+            "promptAttentionBytes": 2959488,
+            "frameScratchBytes": 16862208,
+            "retainedStateBytes": 535568,
+            "packedMemoryBytes": 1579008,
+            "runtimeBytes": 1120942224,
+            "publicationScratchBytes": 55296,
+            "sourcePeakBytes": 27648,
+            "trackingPeakBytes": 1120972944,
+            "publicationPeakBytes": 1121028240,
+            "publicationRuntimeBytes": 1120942224,
+            "totalBytes": 1121028240
+          },
+          "retainedRuntimeAllowanceBytes": 1120942224
+        },
+        {
+          "result": {
+            "completedFrames": 4
+          },
+          "error": null,
+          "frames": [
+            {
+              "index": 1,
+              "direction": 1,
+              "initial": true,
+              "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+              "positivePixels": 0
+            },
+            {
+              "index": 2,
+              "direction": 1,
+              "initial": false,
+              "sha256": "2bb00d9b3c43c79dd6d833676b87890ed178d625c442526d0dcb29f6008106bf",
+              "positivePixels": 3
+            },
+            {
+              "index": 1,
+              "direction": -1,
+              "initial": true,
+              "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+              "positivePixels": 0
+            },
+            {
+              "index": 0,
+              "direction": -1,
+              "initial": false,
+              "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+              "positivePixels": 0
+            }
+          ],
+          "timings": [
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 460.7350001335144
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 27.34999990463257
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 78.69000005722046
+            },
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 459.5899999141693
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryAttention",
+              "elapsedMs": 452.2699999809265
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 28.545000076293945
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 27.96499991416931
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 81.13499999046326
+            },
+            {
+              "stage": "graph-run",
+              "asset": "encoder",
+              "elapsedMs": 461.05999994277954
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryAttention",
+              "elapsedMs": 552.829999923706
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 26.174999952316284
+            },
+            {
+              "stage": "graph-run",
+              "asset": "decoder",
+              "elapsedMs": 26.37999987602234
+            },
+            {
+              "stage": "graph-run",
+              "asset": "memoryEncoder",
+              "elapsedMs": 81.49499988555908
+            }
+          ],
+          "animationCallbacks": 333,
+          "elapsedMs": 2779.215000152588,
+          "startedAtUnixMs": 1788492747390.005,
+          "finishedAtUnixMs": 1788492750169.22,
+          "cancelToReleaseMs": null,
+          "ownedInputBytes": 12288,
+          "sourceUnchanged": true,
+          "fixture": {
+            "kind": "synthetic Gaussian/texture",
+            "width": 32,
+            "height": 32,
+            "frameCount": 3,
+            "conditioningFrames": 3
+          },
+          "memoryEstimate": {
+            "retainedBytes": 12288,
+            "retainedRuntimeBytes": 1120942224,
+            "sourceLoadPeakBytes": 12288,
+            "contextBytes": 15360,
+            "contextMaskBytes": 3072,
+            "runtimeAllowanceBytes": 1073741824,
+            "temporalAttentionBytes": 25264128,
+            "promptAttentionBytes": 2959488,
+            "frameScratchBytes": 16863232,
+            "retainedStateBytes": 605208,
+            "packedMemoryBytes": 1579008,
+            "runtimeBytes": 1121012888,
+            "publicationScratchBytes": 55296,
+            "sourcePeakBytes": 1120969872,
+            "trackingPeakBytes": 1121043608,
+            "publicationPeakBytes": 1121098904,
+            "publicationRuntimeBytes": 1121012888,
+            "totalBytes": 1121098904
+          },
+          "retainedRuntimeAllowanceBytes": 1121012888
+        }
+      ],
+      "releasedRuntimeAllowanceBytes": 0
+    },
+    "corrected": {
+      "result": {
+        "completedFrames": 4
+      },
+      "error": null,
+      "frames": [
+        {
+          "index": 1,
+          "direction": 1,
+          "initial": true,
+          "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+          "positivePixels": 0
+        },
+        {
+          "index": 2,
+          "direction": 1,
+          "initial": false,
+          "sha256": "2bb00d9b3c43c79dd6d833676b87890ed178d625c442526d0dcb29f6008106bf",
+          "positivePixels": 3
+        },
+        {
+          "index": 1,
+          "direction": -1,
+          "initial": true,
+          "sha256": "d6dfe7afc58e9f4fdb67b971bbc179f9e1059f71d5eb7854ad833a1f8185c4be",
+          "positivePixels": 0
+        },
+        {
+          "index": 0,
+          "direction": -1,
+          "initial": false,
+          "sha256": "6ce090a09cd431e359f7fdb5a37d488ddb601c14cf1c601a57ea7b42e44a82ac",
+          "positivePixels": 0
+        }
+      ],
+      "timings": [
+        {
+          "stage": "runtime-load",
+          "elapsedMs": 44.90499997138977
+        },
+        {
+          "stage": "asset-load",
+          "asset": "encoder",
+          "elapsedMs": 15.875
+        },
+        {
+          "stage": "session-init",
+          "asset": "encoder",
+          "elapsedMs": 396.3949999809265
+        },
+        {
+          "stage": "asset-load",
+          "asset": "decoder",
+          "elapsedMs": 12.805000066757202
+        },
+        {
+          "stage": "session-init",
+          "asset": "decoder",
+          "elapsedMs": 122.90499997138977
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryAttention",
+          "elapsedMs": 17.009999990463257
+        },
+        {
+          "stage": "session-init",
+          "asset": "memoryAttention",
+          "elapsedMs": 237.31499981880188
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryEncoder",
+          "elapsedMs": 5.2200000286102295
+        },
+        {
+          "stage": "session-init",
+          "asset": "memoryEncoder",
+          "elapsedMs": 11.450000047683716
+        },
+        {
+          "stage": "asset-load",
+          "asset": "memoryPosition",
+          "elapsedMs": 0.744999885559082
+        },
+        {
+          "stage": "asset-load",
+          "asset": "temporalPositions",
+          "elapsedMs": 0.26999998092651367
+        },
+        {
+          "stage": "graph-run",
+          "asset": "encoder",
+          "elapsedMs": 484.88499999046326
+        },
+        {
+          "stage": "graph-run",
+          "asset": "decoder",
+          "elapsedMs": 34.609999895095825
+        },
+        {
+          "stage": "graph-run",
+          "asset": "memoryEncoder",
+          "elapsedMs": 78.88499999046326
+        },
+        {
+          "stage": "graph-run",
+          "asset": "encoder",
+          "elapsedMs": 460.0050001144409
+        },
+        {
+          "stage": "graph-run",
+          "asset": "memoryAttention",
+          "elapsedMs": 451.414999961853
+        },
+        {
+          "stage": "graph-run",
+          "asset": "decoder",
+          "elapsedMs": 27.274999856948853
+        },
+        {
+          "stage": "graph-run",
+          "asset": "decoder",
+          "elapsedMs": 26.365000009536743
+        },
+        {
+          "stage": "graph-run",
+          "asset": "memoryEncoder",
+          "elapsedMs": 78.1399998664856
+        },
+        {
+          "stage": "graph-run",
+          "asset": "encoder",
+          "elapsedMs": 465.3199999332428
+        },
+        {
+          "stage": "graph-run",
+          "asset": "memoryAttention",
+          "elapsedMs": 559.8800001144409
+        },
+        {
+          "stage": "graph-run",
+          "asset": "decoder",
+          "elapsedMs": 26.055000066757202
+        },
+        {
+          "stage": "graph-run",
+          "asset": "decoder",
+          "elapsedMs": 27.40999984741211
+        },
+        {
+          "stage": "graph-run",
+          "asset": "memoryEncoder",
+          "elapsedMs": 77.24499988555908
+        }
+      ],
+      "animationCallbacks": 444,
+      "elapsedMs": 3701.7050001621246,
+      "startedAtUnixMs": 1788492750174.545,
+      "finishedAtUnixMs": 1788492753876.25,
+      "cancelToReleaseMs": null,
+      "ownedInputBytes": 12288,
+      "sourceUnchanged": true,
+      "fixture": {
+        "kind": "synthetic Gaussian/texture",
+        "width": 32,
+        "height": 32,
+        "frameCount": 3,
+        "conditioningFrames": 3
+      },
+      "memoryEstimate": {
+        "retainedBytes": 12288,
+        "retainedRuntimeBytes": 0,
+        "sourceLoadPeakBytes": 12288,
+        "contextBytes": 15360,
+        "contextMaskBytes": 3072,
+        "runtimeAllowanceBytes": 1073741824,
+        "temporalAttentionBytes": 25264128,
+        "promptAttentionBytes": 2959488,
+        "frameScratchBytes": 16863232,
+        "retainedStateBytes": 605208,
+        "packedMemoryBytes": 1579008,
+        "runtimeBytes": 1121012888,
+        "publicationScratchBytes": 55296,
+        "sourcePeakBytes": 27648,
+        "trackingPeakBytes": 1121043608,
+        "publicationPeakBytes": 86016,
+        "publicationRuntimeBytes": 0,
+        "totalBytes": 1121043608
+      },
+      "retainedRuntimeAllowanceBytes": 0
+    },
+    "blockedAssetRequests": 0,
+    "workers": [
+      {
+        "url": "http://127.0.0.1:43134/assets/interactiveTracking.worker-BDNziqu1.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/interactiveTracking.worker-BDNziqu1.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/interactiveTracking.worker-BDNziqu1.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/interactiveTracking.worker-BDNziqu1.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/interactiveTracking.worker-BDNziqu1.js",
+        "closed": true
+      }
+    ]
+  }
+}

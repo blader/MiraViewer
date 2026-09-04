@@ -585,20 +585,19 @@ describe('SVR canonical source admission and acquired support', () => {
       boundsMm: { min: [60, 60, 0] as [number, number, number], max: [140, 140, 220] as [number, number, number] },
     };
     const ordinary = createNativeSourceContext(options);
-    const plan = ordinary.plan(roi);
+    const plan = ordinary.plan(roi, options);
     expect(plan.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
     expect(plan.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
     cornerstone.loadImage.mockClear();
-    await expect(ordinary.load(roi)).rejects.toThrow(/memory budget/);
+    await expect(ordinary.load(roi, options)).rejects.toThrow(/memory budget/);
     expect(cornerstone.loadImage).not.toHaveBeenCalled();
 
-    const rejected = createNativeSourceContext({ ...options, budgetBytes: plan.totalBytes - 1 });
-    await expect(rejected.load(roi)).rejects.toThrow(/memory budget/);
+    await expect(ordinary.load(roi, { ...options, budgetBytes: plan.totalBytes - 1 })).rejects.toThrow(/memory budget/);
     expect(cornerstone.loadImage).not.toHaveBeenCalled();
 
-    const admitted = createNativeSourceContext({ ...options, budgetBytes: plan.totalBytes });
-    expect(admitted.plan(roi).budgetBytes).toBe(plan.totalBytes);
-    const loaded = await admitted.load(roi);
+    const admitted = { ...options, budgetBytes: plan.totalBytes };
+    expect(ordinary.plan(roi, admitted).budgetBytes).toBe(plan.totalBytes);
+    const loaded = await ordinary.load(roi, admitted);
     expect(loaded.dims).toEqual(plan.dims);
     expect(loaded.voxelSizeMm).toEqual(plan.nativeVoxelSizeMm);
     expect(loaded.originMm).toEqual(plan.originMm);
@@ -616,7 +615,7 @@ describe('SVR canonical source admission and acquired support', () => {
     // A caller-supplied operation budget does not weaken the source identity boundary.
     cornerstone.loadImage.mockClear();
     await setSelectedPatientKey('another-active-patient');
-    await expect(admitted.load(roi)).rejects.toThrow(/currently selected patient/);
+    await expect(ordinary.load(roi, admitted)).rejects.toThrow(/currently selected patient/);
     expect(cornerstone.loadImage).not.toHaveBeenCalled();
   });
 

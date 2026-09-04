@@ -474,7 +474,9 @@ describe('dicom ingestion', () => {
       const summary = await processFiles([imageFile(1), imageFile(2), imageFile(3)]);
 
       expect(summary).toMatchObject({ ingested: 3, errors: 0 });
-      expect(transactions.mock.calls.filter((call) => call[1] === 'readwrite')).toHaveLength(1);
+      // One atomic payload batch, then one explicit catalog-initialization step.
+      // Catalog reads no longer perform that second mutation on the UI's behalf.
+      expect(transactions.mock.calls.filter((call) => call[1] === 'readwrite')).toHaveLength(2);
       expect((await db.get('app_state', DATASET_REVISION_STATE_KEY))?.value).toBe(3);
       expect(notifications.sort()).toEqual(['synthetic-second-series', 'synthetic-series']);
     } finally {
@@ -800,7 +802,8 @@ describe('dicom ingestion', () => {
     });
 
     expect(summary).toMatchObject({ ingested: 3, errors: 0 });
-    expect(transactions.mock.calls.filter((call) => call[1] === 'readwrite')).toHaveLength(3);
+    // Three bounded payload batches, followed by one initialization, not one per image.
+    expect(transactions.mock.calls.filter((call) => call[1] === 'readwrite')).toHaveLength(4);
     expect((await db.get('app_state', DATASET_REVISION_STATE_KEY))?.value).toBe(3);
   });
 });

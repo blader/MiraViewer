@@ -1,24 +1,30 @@
 import {
   registerAndResliceLongitudinal,
+  estimateLongitudinalRegistration,
   resliceDenseLongitudinalPlane,
   longitudinalRegistrationFailure,
   type DenseLongitudinalResliceOptions,
   type DenseLongitudinalResliceResult,
   type LongitudinalRegistrationFailure,
   type LongitudinalRegistrationResult,
+  type LongitudinalRegistrationEstimate,
   type RegisterLongitudinalOptions,
 } from './longitudinalRegistration';
 
 export type LongitudinalWorkerOptions = Omit<RegisterLongitudinalOptions, 'signal'>;
 
 export type LongitudinalWorkerRequest =
-  | { type: 'run'; options: LongitudinalWorkerOptions }
+  | { type: 'run' | 'estimate'; options: LongitudinalWorkerOptions }
   | { type: 'reslice'; options: Omit<DenseLongitudinalResliceOptions, 'signal'> }
   | { type: 'abort' };
 
 export type LongitudinalWorkerResponse = {
   type: 'done';
-  result: LongitudinalRegistrationResult | DenseLongitudinalResliceResult | LongitudinalRegistrationFailure;
+  result:
+    | LongitudinalRegistrationResult
+    | LongitudinalRegistrationEstimate
+    | DenseLongitudinalResliceResult
+    | LongitudinalRegistrationFailure;
 };
 
 let activeController: AbortController | null = null;
@@ -34,13 +40,17 @@ self.onmessage = async (event: MessageEvent<LongitudinalWorkerRequest>) => {
   activeController = controller;
 
   try {
+    if (event.data.type === 'run' && import.meta.env.MODE !== 'test' && import.meta.env.MODE !== 'browser-test')
+      throw new Error('The historical image-producing registration oracle is test-only.');
     const result =
       event.data.type === 'reslice'
         ? resliceDenseLongitudinalPlane({ ...event.data.options, signal: controller.signal })
-        : await registerAndResliceLongitudinal({ ...event.data.options, signal: controller.signal });
+        : event.data.type === 'estimate'
+          ? await estimateLongitudinalRegistration({ ...event.data.options, signal: controller.signal })
+          : await registerAndResliceLongitudinal({ ...event.data.options, signal: controller.signal });
     if (activeController !== controller) return;
     const message: LongitudinalWorkerResponse = { type: 'done', result };
-    if (result.ok) {
+    if (result.ok && 'pixels' in result) {
       self.postMessage(message, { transfer: [result.pixels.buffer, result.valid.buffer] });
     } else {
       self.postMessage(message);

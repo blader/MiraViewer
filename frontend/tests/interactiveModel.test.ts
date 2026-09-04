@@ -61,6 +61,19 @@ function fourThreadPlatform() {
 }
 
 describe('interactive model setup ownership', () => {
+  it('releases a newly initialized session if its timing observer interrupts setup', async () => {
+    await expect(
+      createInteractiveTrackingModel({
+        provider: 'wasm',
+        onTiming: (timing) => {
+          if (timing.stage === 'session-init') throw new Error('Timing observer stopped setup');
+        },
+      }),
+    ).rejects.toThrow('Timing observer stopped setup');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.release).toHaveBeenCalledOnce();
+    expect(createTrackingController).not.toHaveBeenCalled();
+  });
   it.each([
     ['wasm', ['wasm', 'wasm', 'wasm', 'wasm']],
     ['hybrid', ['webgpu', 'wasm', 'wasm', 'wasm']],
@@ -70,7 +83,15 @@ describe('interactive model setup ownership', () => {
     'loads only verified assets and hands owned sessions to the %s controller',
     async (provider, graphProviders) => {
       const onProgress = vi.fn();
-      expect(await createInteractiveTrackingModel({ provider, onProgress })).toBe(controller);
+      const onTiming = vi.fn();
+      expect(await createInteractiveTrackingModel({ provider, onProgress, onTiming })).toBe(controller);
+      expect(
+        onTiming.mock.calls.filter(([timing]) => timing.stage === 'session-init').map(([timing]) => timing.asset),
+      ).toEqual(['encoder', 'decoder', 'memoryAttention', 'memoryEncoder']);
+      expect(onTiming.mock.calls.filter(([timing]) => timing.stage === 'asset-load')).toHaveLength(6);
+      expect(onTiming.mock.calls.every(([timing]) => Number.isFinite(timing.elapsedMs) && timing.elapsedMs >= 0)).toBe(
+        true,
+      );
       expect(vi.mocked(loadTrackingAsset).mock.calls.map(([name]) => name)).toEqual([
         'encoder',
         'decoder',
@@ -102,6 +123,7 @@ describe('interactive model setup ownership', () => {
         },
         position: Float32Array.of(1.25),
         temporalPosition: Float32Array.of(-2.5),
+        onTiming,
       });
       expect(sessions.every((session) => session.release.mock.calls.length === 0)).toBe(true);
     },

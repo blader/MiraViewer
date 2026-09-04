@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "numPassedTests": 3169,
+  "numFailedTests": 0,
+  "numPendingTests": 54,
+  "numTotalTests": 3223,
+  "numPassedTestSuites": 415,
+  "numFailedTestSuites": 0,
+  "numPendingTestSuites": 0,
+  "startTime": 1788492491372,
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/validation/cto-full-tests-final.json",
+    "sha256": "521e6f6283da501ca2175a303412b1a952d37487dc41e0253bccf5e852bc6fc9"
+  },
+  "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+  "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+  "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3"
+}

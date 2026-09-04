@@ -37,6 +37,7 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
 }));
 
 vi.mock('../src/utils/elastixRegistration', () => ({
+  disposeElastixWorker: (worker: Worker) => worker.terminate(),
   registerRigid2DWithElastix: mocks.registerRigid2DWithElastix,
   registerAffine2DWithElastix: mocks.registerAffine2DWithElastix,
 }));

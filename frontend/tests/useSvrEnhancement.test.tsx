@@ -1,10 +1,10 @@
+import { proposedRegion, testSelectionProposer } from './helpers/selectionInteraction';
 import { useState } from 'react';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { useSvrEnhancement } from '../src/hooks/useSvrEnhancement';
 import { useSvrSelection } from '../src/hooks/useSvrSelection';
-import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import type { SvrEnhancedVolume } from '../src/utils/svr/superResolutionTypes';
@@ -86,6 +86,7 @@ const measurement = (source: SvrVolume, labels: SvrLabelVolume) =>
   source.voxelSizeMm.reduce((product, pitch) => product * pitch, 1);
 
 beforeEach(() => {
+  testSelectionProposer.mockReset();
   worker.mockReset();
 });
 afterEach(() => {
@@ -103,26 +104,29 @@ describe('display-only learned MRI enhancement lifecycle', () => {
     const source = volume();
     const output = enhanced(source);
     const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(source);
-    const grow = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(5, 6),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 3, z: 3 } },
+    const grow = testSelectionProposer.mockResolvedValue({
+      ...proposedRegion(Uint32Array.of(5, 6), source.data.length),
       boundaryCount: 0,
-      domainVoxels: source.data.length,
+      contextLimited: false,
     });
     worker.mockResolvedValue(output);
     const { result } = renderHook(() => {
       const [labels, setLabels] = useState<SvrLabelVolume | null>(null);
-      const selection = useSvrSelection(source, labels, setLabels, true);
-      const enhancement = useSvrEnhancement({ volume: source, labels, loadSource, blocked: selection.status.running });
+      const selection = useSvrSelection(source, labels, setLabels, true, testSelectionProposer);
+      const enhancement = useSvrEnhancement({
+        volume: source,
+        labels,
+        loadSource,
+        blocked: selection.status.running,
+        prepare: selection.prepareHeavyOperation,
+      });
       return { labels, selection, enhancement };
     });
     act(() => result.current.selection.stroke(Uint32Array.of(5), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(350));
     expect(result.current.selection.status.running).toBe(false);
     expect(result.current.labels!.data[6]).toBe(1);
-    await act(async () =>
-      expect(await result.current.enhancement.run(result.current.selection.prepareEnhancement)).toBe(true),
-    );
+    await act(async () => expect(await result.current.enhancement.run()).toBe(true));
     act(() => result.current.enhancement.setStrength(0.35));
     const displayedMask = result.current.labels!.data;
     const retainedBytes = result.current.enhancement.retainedBytes;
@@ -177,20 +181,20 @@ describe('display-only learned MRI enhancement lifecycle', () => {
       return native;
     });
     worker.mockResolvedValue(enhanced(native));
-    const { result } = setup({ loadSource });
-    await act(async () => expect(await result.current.run(prepareMemory)).toBe(true));
+    const { result } = setup({ loadSource, prepare: prepareMemory });
+    await act(async () => expect(await result.current.run()).toBe(true));
     expect(loadSource).toHaveBeenCalledOnce();
     expect(worker).toHaveBeenCalledOnce();
   });
 
   it('surfaces an active selection operation instead of loading or clearing its work', async () => {
     const loadSource = vi.fn<EnhancementSourceLoader>();
-    const { result, props } = setup({ loadSource });
-    const labels = props.labels;
     const prepareMemory = vi.fn(() => {
       throw new Error('Wait for boundary suggestions to finish.');
     });
-    await act(async () => expect(await result.current.run(prepareMemory)).toBe(false));
+    const { result, props } = setup({ loadSource, prepare: prepareMemory });
+    const labels = props.labels;
+    await act(async () => expect(await result.current.run()).toBe(false));
     expect(result.current).toMatchObject({ running: false, error: 'Wait for boundary suggestions to finish.' });
     expect(props.labels).toBe(labels);
     expect(loadSource).not.toHaveBeenCalled();
@@ -202,13 +206,15 @@ describe('display-only learned MRI enhancement lifecycle', () => {
       output = enhanced(native);
     const loadSource = vi.fn<EnhancementSourceLoader>().mockResolvedValue(native);
     worker.mockResolvedValue(output);
-    const { result } = setup({ loadSource });
+    let retained = 12345;
+    const { result } = setup({ loadSource, prepare: () => retained });
     await act(async () => {
-      await result.current.run(12345);
+      await result.current.run();
     });
     expect(loadSource.mock.calls[0]![1].retainedBytes).toBe(12345);
+    retained = 6789 + result.current.retainedBytes;
     await act(async () => {
-      await result.current.run(6789);
+      await result.current.run();
     });
     expect(loadSource.mock.calls[1]![1].retainedBytes).toBe(
       6789 +
@@ -281,9 +287,9 @@ describe('display-only learned MRI enhancement lifecycle', () => {
     'rejects an invalid additional retained budget %s before loading',
     async (bytes) => {
       const loadSource = vi.fn<EnhancementSourceLoader>();
-      const { result } = setup({ loadSource });
+      const { result } = setup({ loadSource, prepare: () => bytes });
       await act(async () => {
-        expect(await result.current.run(bytes)).toBe(false);
+        expect(await result.current.run()).toBe(false);
       });
       expect(result.current.error).toMatch(/retained-memory/);
       expect(loadSource).not.toHaveBeenCalled();

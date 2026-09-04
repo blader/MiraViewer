@@ -6,7 +6,7 @@ import {
   voxelIndex,
   voxelPoint,
   type SeededVolumeInput,
-} from '../src/utils/segmentation/seededVolume';
+} from './helpers/legacySeededVolume';
 import { segmentationQuality } from './helpers/segmentationQuality';
 
 function anatomy(polarity = 1, spacing: [number, number, number] = [1, 1, 1], heldOut = false) {

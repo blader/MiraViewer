@@ -1,0 +1,143 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-02/inference-results/inference-128-cube-custom--c8e69--renderer-memory-high-water-inference/custom-model-calibration-receipt.json",
+    "sha256": "82dddf491858b57e3cbbf39b525a4acb6e80c97957bbc14e0a5eebca724731ad"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "7bd51a8b8f44e1f12ccd67281712bf97f3f3ce59694f28dc0f5bc48c132d9856",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:18:11.998Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "result": {
+      "cancel": false,
+      "calibration": true,
+      "size": 128,
+      "modelBytes": 20972050,
+      "estimatedPeakBytes": 293603400,
+      "working": {
+        "nvox": 2097152,
+        "modelRuntimeBytes": 218105928,
+        "inputBytes": 8388608,
+        "preprocessingBytes": 18874368,
+        "logitsBytes": 33554432,
+        "labelBytes": 4194304,
+        "totalBytes": 283117640
+      },
+      "elapsedMs": 451.82499980926514,
+      "inferenceStartedAt": 765.664999961853,
+      "cancelAt": null,
+      "cancelToReturnMs": null,
+      "animationCallbacks": 53,
+      "outputCount": 2097152,
+      "mismatches": 0,
+      "error": null,
+      "sourceUnchanged": true,
+      "provider": "wasm",
+      "wasmThreads": 8
+    },
+    "workers": [
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      },
+      {
+        "closed": true
+      }
+    ],
+    "workerPids": [
+      70062
+    ],
+    "memory": [
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779720574139,
+        "bytes": {
+          "private_footprint_bytes": 35850240
+        }
+      },
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779720701944,
+        "bytes": {
+          "private_footprint_bytes": 84379648
+        }
+      },
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779720792678,
+        "bytes": {
+          "private_footprint_bytes": 113641472
+        }
+      },
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779721166374,
+        "bytes": {
+          "private_footprint_bytes": 458002432
+        }
+      },
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779736195366,
+        "bytes": {
+          "private_footprint_bytes": 0
+        }
+      },
+      {
+        "pid": 70062,
+        "timestampMicroseconds": 1779751215802,
+        "bytes": {
+          "private_footprint_bytes": 104008704
+        }
+      }
+    ],
+    "samples": [
+      {
+        "dumpGuid": "0x2",
+        "success": true
+      },
+      {
+        "dumpGuid": "0x3",
+        "success": true
+      },
+      {
+        "dumpGuid": "0x4",
+        "success": true
+      },
+      {
+        "dumpGuid": "0x5",
+        "success": true
+      },
+      {
+        "dumpGuid": "0x6",
+        "success": false
+      },
+      {
+        "dumpGuid": "0x8",
+        "success": true
+      }
+    ],
+    "samplingErrors": [],
+    "scope": "Synthetic pointwise label oracle with a data-dependent 20 MiB Gather initializer, actual ORT/WASM worker. 100-ms requested Chromium memory dumps measure the whole worker-host renderer, including its page; they are sampled process high-water, not isolated worker allocation, guaranteed instantaneous peak or arbitrary-model admission proof. Tracing overhead is included."
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/workflow-receipt.json",
+    "sha256": "c53463057fc9456d877735755a3ce3333e0fb532d6b98ab615024fc0b41c798d"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T03:30:27.978Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "fixtureFiles": 72,
+    "panelWriteAudit": {
+      "writeStores": [
+        [
+          "app_state",
+          "panel_settings"
+        ]
+      ],
+      "sourceCatalogReads": 0
+    },
+    "completed": [
+      "binary import",
+      "acquired pixels",
+      "slice wheel",
+      "pan persistence",
+      "real decoder failure with retained prior image and successful local retry",
+      "compare and overlay",
+      "outline save/reopen",
+      "download and fresh-context restore",
+      "failed settings read keeps slice browsing available and durable work unchanged; Retry restores persistence",
+      "mounted restore retires the old writer before the next progress save",
+      "unclipped mobile plane and sequence context"
+    ],
+    "instances": 72,
+    "outlines": 1,
+    "skipped": [
+      "private anatomical evaluation",
+      "hardware performance",
+      "real model inference (separate command)"
+    ]
+  }
+}

@@ -5,6 +5,20 @@ export function volumeDisplayRange(volume: SvrVolume): [number, number] {
   return volume.intensityRange ?? [0, 1];
 }
 
+/** Direct native stacks retain source modality units; independent reconstructions do not. */
+export function hasNativeIntensityDomain(volume: SvrVolume): boolean {
+  const mode = volume.sourceProvenance?.mode;
+  return mode === 'native-3d' || mode === 'source-stack';
+}
+
+/** Honor the source VOI, including width-one thresholds, before measured fallback. */
+export function defaultVolumeWindow(volume: SvrVolume): [number, number] {
+  const voi = volume.displayWindow;
+  if (voi?.every(Number.isFinite) && voi[1] >= voi[0]) return voi;
+  const range = volume.intensityRange;
+  return range?.every(Number.isFinite) && range[1] > range[0] ? range : [0, 1];
+}
+
 export function normalizedVolumeWindow(volume: SvrVolume, window: readonly [number, number]): [number, number] {
   const [low, high] = volumeDisplayRange(volume);
   const range = Math.max(Number.EPSILON, high - low);

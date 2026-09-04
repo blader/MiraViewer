@@ -19,6 +19,7 @@ import type {
   TrackingSessions,
   TrackingSnapshotOptions,
   TrackingSnapshotProgress,
+  TrackingPhaseTiming,
 } from '../src/utils/segmentation/interactiveTracking';
 
 const MEMORY_VALUES = 64 * 32 * 32;
@@ -33,7 +34,10 @@ function entry(index: number): TrackingMemoryEntry {
   };
 }
 
-function fakeRuntime(onRun?: (name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) => void | Promise<void>) {
+function fakeRuntime(
+  onRun?: (name: TrackingGraph, feeds: Ort.InferenceSession.FeedsType) => void | Promise<void>,
+  onTiming?: (timing: TrackingPhaseTiming) => void,
+) {
   const alive = new Set<Ort.Tensor>();
   // Actual CPU Tensor objects exercise the injectable ORT interface; no session/model/runtime initialization.
   const ObservedTensor = new Proxy(Tensor, {
@@ -97,6 +101,7 @@ function fakeRuntime(onRun?: (name: TrackingGraph, feeds: Ort.InferenceSession.F
     sessions,
     position: new Float32Array(MEMORY_VALUES),
     temporalPosition: new Float32Array(7 * 64),
+    onTiming,
   });
   return { controller, sessions, alive, calls, Tensor: ObservedTensor };
 }
@@ -144,7 +149,7 @@ describe('consumer-certified directional prefixes', () => {
       const runtime = fakeRuntime();
       const frames: number[] = [],
         progress: TrackingProgress[] = [];
-      const readFrame = vi.fn(async () => Float32Array.of(0, 1, 2, 3));
+      const readFrame = vi.fn<TrackingOptions['readFrame']>(async () => Float32Array.of(0, 1, 2, 3));
       const result = await runtime.controller.run(
         options({
           frameCount: 5,
@@ -262,18 +267,40 @@ describe('consumer-certified directional prefixes', () => {
   });
 
   it.each([0, 1] as const)(
-    'rejects opted snapshots with off-anchor label%s before running any graph',
+    'prepares an off-anchor label%s unchanged before stopping only beyond its final-frame fence',
     async (label) => {
       const runtime = fakeRuntime();
+      const frames: number[][] = [];
+      const progress: TrackingSnapshotProgress[] = [];
+      const readFrame = vi.fn(async () => Float32Array.of(0, 1, 2, 3));
       await expect(
         runtime.controller.runSnapshot(
           snapshotOptions({
             allowDirectionStop: true,
             markedFrames: [{ index: 4, points: [[0, 0]], labels: [label] }],
+            readFrame,
+            onProgress: (value) => progress.push(value),
+            onFrame(frame) {
+              expect(progress.at(-1)?.stage).toBe('final');
+              expect(progress.at(-1)?.conditioningFrames).toBe(2);
+              frames.push([frame.index, frame.direction]);
+              if (frame.index === (frame.direction === 1 ? 5 : 2)) return 'stop-direction';
+            },
           }),
         ),
-      ).rejects.toThrow(/single marked source plane/);
-      expect(runtime.calls).toHaveLength(0);
+      ).resolves.toEqual({ completedFrames: 5, directionEndpoints: { forward: 5, reverse: 2 } });
+      expect(frames).toEqual([
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [3, -1],
+        [2, -1],
+      ]);
+      expect(readFrame.mock.calls.map(([index]) => index)).toEqual([3, 4, 5, 2]);
+      expect(
+        runtime.calls.filter((call) => call.name === 'decoder' && call.flags[2] === 1).map((call) => call.labels),
+      ).toEqual([[BigInt(label)]]);
+      expect(runtime.alive.size).toBe(0);
       await runtime.controller.dispose();
     },
   );
@@ -498,92 +525,252 @@ describe('complete literal-prompt snapshot tracking', () => {
     await snapshot.controller.dispose();
   });
 
-  it('prepares forward then reverse once, corrects raw priors, and reuses the same conditions in both final sweeps', async () => {
-    const sourceReads: number[] = [];
-    const outputs: number[][] = [];
-    const progress: TrackingSnapshotProgress[] = [];
-    const priors: number[] = [];
-    const pointerInputs: number[][] = [];
-    let decoderCount = 0;
-    const runtime = fakeRuntime((name, feeds) => {
-      if (name === 'decoder' && Number(feeds.has_previous.data[0])) priors.push(Number(feeds.previous_logits.data[0]));
-      if (name === 'memoryAttention') {
-        const count = Number(feeds.pointer_tokens.data[0]) / 4;
-        const values = feeds.memory.data as Float32Array;
-        pointerInputs.push(
-          Array.from({ length: count }, (_, index) => values[values.length - count * 256 + index * 256]),
+  it.each([false, true])(
+    'prepares forward then reverse once, corrects raw priors, and reuses the same conditions in both final sweeps (stopping opt-in: %s)',
+    async (allowStop) => {
+      const sourceReads: number[] = [];
+      const outputs: number[][] = [];
+      const progress: TrackingSnapshotProgress[] = [];
+      const priors: number[] = [];
+      const pointerInputs: number[][] = [];
+      let decoderCount = 0;
+      const runtime = fakeRuntime((name, feeds) => {
+        if (name === 'decoder' && Number(feeds.has_previous.data[0]))
+          priors.push(Number(feeds.previous_logits.data[0]));
+        if (name === 'memoryAttention') {
+          const count = Number(feeds.pointer_tokens.data[0]) / 4;
+          const values = feeds.memory.data as Float32Array;
+          pointerInputs.push(
+            Array.from({ length: count }, (_, index) => values[values.length - count * 256 + index * 256]),
+          );
+        }
+      });
+      const decode = runtime.sessions.decoder.run.bind(runtime.sessions.decoder);
+      runtime.sessions.decoder.run = async (feeds) => {
+        const result = await decode(feeds);
+        decoderCount++;
+        for (const tensor of Object.values(result)) (tensor.data as Float32Array).fill(decoderCount);
+        // The pinned decoder graph, not the controller, owns the official [-32,32] clamp.
+        (result.low_logits.data as Float32Array).fill(decoderCount * 40);
+        return result;
+      };
+      await expect(
+        runtime.controller.runSnapshot(
+          snapshotOptions({
+            ...(allowStop ? { allowDirectionStop: true } : {}),
+            readFrame: async (index) => {
+              sourceReads.push(index);
+              return Float32Array.of(0, 1, 2, 3);
+            },
+            onFrame: (frame) => {
+              expect(progress.at(-1)?.stage).toBe('final');
+              outputs.push([frame.index, frame.direction, frame.nativeLogits[0]]);
+            },
+            onProgress: (value) => progress.push(value),
+          }),
+        ),
+      ).resolves.toEqual({
+        completedFrames: 8,
+        ...(allowStop ? { directionEndpoints: { forward: 6, reverse: 0 } } : {}),
+      });
+      expect(sourceReads).toEqual([3, 4, 5, 2, 1, 4, 6, 2, 0]);
+      expect(outputs).toEqual([
+        [3, 1, 1],
+        [4, 1, 8],
+        [5, 1, 4],
+        [6, 1, 9],
+        [3, -1, 1],
+        [2, -1, 10],
+        [1, -1, 7],
+        [0, -1, 11],
+      ]);
+      expect(priors).toEqual([120, 240]);
+      expect(pointerInputs).toEqual([[1], [1, 2], [1, 4], [1, 4, 5], [1, 7], [1, 4, 7, 8], [1, 4], [1, 4, 7, 10]]);
+      const decoders = runtime.calls.filter((call) => call.name === 'decoder');
+      expect(
+        decoders
+          .filter((call) => call.flags[2] === 1)
+          .map((call) => [call.flags, call.labels, call.coords, call.feature]),
+      ).toEqual([
+        [[0, 0, 1], [0n, 0n], [128, 192, 384, 320], 2],
+        [[0, 1, 1], [1n], [64, 384], 2],
+      ]);
+      expect(runtime.calls.filter((call) => call.name === 'encoder')).toHaveLength(9);
+      expect(
+        runtime.calls.filter((call) => call.name === 'memoryEncoder').map((call) => [call.flags, call.feature]),
+      ).toEqual([
+        [[1], 1],
+        [[0], 1],
+        [[1], 1],
+        [[0], 1],
+        [[1], 1],
+        [[0], 1],
+        [[0], 1],
+        [[0], 1],
+        [[0], 1],
+      ]);
+      const estimate = estimateTrackingSnapshotMemory(2, 2, 7, 3);
+      expect(Math.max(...progress.map((value) => value.retainedStateBytes))).toBeLessThanOrEqual(
+        estimate.retainedStateBytes,
+      );
+      expect(
+        progress
+          .filter((value) => value.stage === 'final' && value.phase === 'conditioned-frame')
+          .every((value) => value.conditioningFrames === 3),
+      ).toBe(true);
+      expect(progress.at(-1)).toMatchObject({
+        phase: 'snapshot-released',
+        retainedStateBytes: 0,
+        liveTensorBackingBytes: 0,
+        conditioningFrames: 0,
+      });
+      expect(runtime.alive.size).toBe(0);
+      await runtime.controller.dispose();
+    },
+  );
+
+  it('keeps complete conditioning inputs and preparation order identical before shortening either final sweep', async () => {
+    async function runSnapshot(allowStop: boolean) {
+      const runtime = fakeRuntime();
+      const progress: TrackingSnapshotProgress[] = [];
+      const reads: Array<{ index: number; stage: string; pixels: number[] }> = [];
+      const outputs: number[][] = [];
+      let preparationCalls: typeof runtime.calls | undefined;
+      try {
+        const result = await runtime.controller.runSnapshot(
+          snapshotOptions({
+            frameCount: 11,
+            anchorIndex: 5,
+            markedFrames: [
+              {
+                index: 8,
+                points: [
+                  [0.5, 0.75],
+                  [1.5, 1.25],
+                ],
+                labels: [0, 0],
+              },
+              { index: 2, points: [[0.25, 1.5]], labels: [1] },
+            ],
+            ...(allowStop ? { allowDirectionStop: true } : {}),
+            readFrame: async (index) => {
+              const pixels = Float32Array.of(0, 1, 2, 3);
+              reads.push({ index, stage: progress.at(-1)!.stage, pixels: [...pixels] });
+              return pixels;
+            },
+            onProgress: (value) => progress.push(value),
+            onFrame(frame) {
+              expect(progress.at(-1)?.stage).toBe('final');
+              expect(progress.at(-1)?.conditioningFrames).toBe(3);
+              preparationCalls ??= runtime.calls.slice();
+              outputs.push([frame.index, frame.direction, ...frame.nativeLogits]);
+              if (allowStop && frame.index === (frame.direction === 1 ? 9 : 1)) return 'stop-direction';
+            },
+          }),
         );
+        expect(progress.at(-1)).toMatchObject({
+          phase: 'snapshot-released',
+          retainedStateBytes: 0,
+          liveTensorBackingBytes: 0,
+          conditioningFrames: 0,
+        });
+        expect(runtime.alive.size).toBe(0);
+        return { result, reads, outputs, preparationCalls, progress };
+      } finally {
+        await runtime.controller.dispose();
+        expect(
+          Object.values(runtime.sessions).every((session) => vi.mocked(session.release).mock.calls.length === 1),
+        ).toBe(true);
       }
-    });
-    const decode = runtime.sessions.decoder.run.bind(runtime.sessions.decoder);
-    runtime.sessions.decoder.run = async (feeds) => {
-      const result = await decode(feeds);
-      decoderCount++;
-      for (const tensor of Object.values(result)) (tensor.data as Float32Array).fill(decoderCount);
-      // The pinned decoder graph, not the controller, owns the official [-32,32] clamp.
-      (result.low_logits.data as Float32Array).fill(decoderCount * 40);
-      return result;
-    };
-    await expect(
-      runtime.controller.runSnapshot(
-        snapshotOptions({
-          readFrame: async (index) => {
-            sourceReads.push(index);
-            return Float32Array.of(0, 1, 2, 3);
-          },
-          onFrame: (frame) => {
-            expect(progress.at(-1)?.stage).toBe('final');
-            outputs.push([frame.index, frame.direction, frame.nativeLogits[0]]);
-          },
-          onProgress: (value) => progress.push(value),
-        }),
-      ),
-    ).resolves.toEqual({ completedFrames: 8 });
-    expect(sourceReads).toEqual([3, 4, 5, 2, 1, 4, 6, 2, 0]);
-    expect(outputs).toEqual([
-      [3, 1, 1],
-      [4, 1, 8],
-      [5, 1, 4],
-      [6, 1, 9],
-      [3, -1, 1],
-      [2, -1, 10],
-      [1, -1, 7],
-      [0, -1, 11],
+    }
+    const full = await runSnapshot(false);
+    const pruned = await runSnapshot(true);
+    expect(full.result).toEqual({ completedFrames: 12 });
+    expect(pruned.result).toEqual({ completedFrames: 10, directionEndpoints: { forward: 9, reverse: 1 } });
+    const preparation = (run: typeof full) => run.reads.filter((read) => read.stage === 'prepare');
+    expect(preparation(full).map((read) => read.index)).toEqual([5, 6, 7, 8, 4, 3, 2]);
+    expect(preparation(pruned)).toEqual(preparation(full));
+    expect(pruned.preparationCalls).toEqual(full.preparationCalls);
+    expect(pruned.outputs).toEqual(full.outputs.filter(([index]) => index >= 1 && index <= 9));
+    expect(pruned.outputs.map(([index, direction]) => [index, direction])).toEqual([
+      [5, 1],
+      [6, 1],
+      [7, 1],
+      [8, 1],
+      [9, 1],
+      [5, -1],
+      [4, -1],
+      [3, -1],
+      [2, -1],
+      [1, -1],
     ]);
-    expect(priors).toEqual([120, 240]);
-    expect(pointerInputs).toEqual([[1], [1, 2], [1, 4], [1, 4, 5], [1, 7], [1, 4, 7, 8], [1, 4], [1, 4, 7, 10]]);
-    const decoders = runtime.calls.filter((call) => call.name === 'decoder');
+    expect(pruned.reads.filter((read) => read.stage === 'final').map((read) => read.index)).toEqual([6, 7, 9, 4, 3, 1]);
     expect(
-      decoders
-        .filter((call) => call.flags[2] === 1)
-        .map((call) => [call.flags, call.labels, call.coords, call.feature]),
-    ).toEqual([
-      [[0, 0, 1], [0n, 0n], [128, 192, 384, 320], 2],
-      [[0, 1, 1], [1n], [64, 384], 2],
-    ]);
-    expect(runtime.calls.filter((call) => call.name === 'encoder')).toHaveLength(9);
-    expect(
-      runtime.calls.filter((call) => call.name === 'memoryEncoder').map((call) => [call.flags, call.feature]),
-    ).toEqual([
-      [[1], 1],
-      [[0], 1],
-      [[1], 1],
-      [[0], 1],
-      [[1], 1],
-      [[0], 1],
-      [[0], 1],
-      [[0], 1],
-      [[0], 1],
-    ]);
-    const estimate = estimateTrackingSnapshotMemory(2, 2, 7, 3);
-    expect(Math.max(...progress.map((value) => value.retainedStateBytes))).toBeLessThanOrEqual(
-      estimate.retainedStateBytes,
+      pruned.progress
+        .filter((value) => value.stage === 'final' && value.phase === 'frame-complete')
+        .map((value) => [value.index, value.direction]),
+    ).toEqual(pruned.outputs.map(([index, direction]) => [index, direction]));
+  });
+
+  it.each([
+    { direction: 1, stop: 4 },
+    { direction: 1, stop: 5 },
+    { direction: -1, stop: 2 },
+    { direction: -1, stop: 1 },
+  ])(
+    'rejects a final stop at $stop in direction $direction before or on a literal conditioning fence',
+    async ({ direction, stop }) => {
+      const runtime = fakeRuntime();
+      const frames: number[][] = [];
+      await expect(
+        runtime.controller.runSnapshot(
+          snapshotOptions({
+            allowDirectionStop: true,
+            onFrame(frame) {
+              frames.push([frame.index, frame.direction]);
+              if (frame.direction === direction && frame.index === stop) return 'stop-direction';
+            },
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(frames.at(-1)).toEqual([stop, direction]);
+      expect(frames[0]).toEqual([3, 1]);
+      expect(runtime.alive.size).toBe(0);
+      await runtime.controller.run(options({ frameCount: 1 }));
+      await runtime.controller.dispose();
+    },
+  );
+
+  it('cancels an awaited multi-plane final barrier without releasing a result or leaking tensors', async () => {
+    const runtime = fakeRuntime();
+    const abort = new AbortController();
+    const reached = deferred<void>(),
+      gate = deferred<TrackingFrameDecision>();
+    const progress: TrackingSnapshotProgress[] = [];
+    const run = runtime.controller.runSnapshot(
+      snapshotOptions({
+        frameCount: 9,
+        anchorIndex: 4,
+        allowDirectionStop: true,
+        signal: abort.signal,
+        markedFrames: [
+          { index: 2, points: [[0, 0]], labels: [1] },
+          { index: 6, points: [[1, 1]], labels: [0] },
+        ],
+        onProgress: (value) => progress.push(value),
+        onFrame(frame) {
+          if (frame.direction === 1 && frame.index === 7) {
+            reached.resolve();
+            return gate.promise;
+          }
+        },
+      }),
     );
-    expect(
-      progress
-        .filter((value) => value.stage === 'final' && value.phase === 'conditioned-frame')
-        .every((value) => value.conditioningFrames === 3),
-    ).toBe(true);
+    await Promise.race([reached.promise, run]);
+    const rejected = expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    abort.abort();
+    gate.resolve('stop-direction');
+    await rejected;
     expect(progress.at(-1)).toMatchObject({
       phase: 'snapshot-released',
       retainedStateBytes: 0,
@@ -591,6 +778,7 @@ describe('complete literal-prompt snapshot tracking', () => {
       conditioningFrames: 0,
     });
     expect(runtime.alive.size).toBe(0);
+    await runtime.controller.run(options({ frameCount: 1 }));
     await runtime.controller.dispose();
   });
 
@@ -640,24 +828,32 @@ describe('complete literal-prompt snapshot tracking', () => {
     },
   );
 
-  it('cancels preparation without publishing and cleans late tensors before a fresh job', async () => {
-    const abort = new AbortController();
-    const runtime = fakeRuntime((name, feeds) => {
-      if (name === 'decoder' && Number(feeds.has_previous.data[0])) abort.abort();
-    });
-    const onFrame = vi.fn();
-    const progress: TrackingSnapshotProgress[] = [];
-    await expect(
-      runtime.controller.runSnapshot(
-        snapshotOptions({ signal: abort.signal, onFrame, onProgress: (value) => progress.push(value) }),
-      ),
-    ).rejects.toMatchObject({ name: 'AbortError' });
-    expect(onFrame).not.toHaveBeenCalled();
-    expect(progress.at(-1)).toMatchObject({ retainedStateBytes: 0, liveTensorBackingBytes: 0 });
-    expect(runtime.alive.size).toBe(0);
-    await runtime.controller.run(options({ frameCount: 1 }));
-    await runtime.controller.dispose();
-  });
+  it.each([false, true])(
+    'cancels preparation without publishing and cleans late tensors before a fresh job (stopping opt-in: %s)',
+    async (allowStop) => {
+      const abort = new AbortController();
+      const runtime = fakeRuntime((name, feeds) => {
+        if (name === 'decoder' && Number(feeds.has_previous.data[0])) abort.abort();
+      });
+      const onFrame = vi.fn();
+      const progress: TrackingSnapshotProgress[] = [];
+      await expect(
+        runtime.controller.runSnapshot(
+          snapshotOptions({
+            ...(allowStop ? { allowDirectionStop: true } : {}),
+            signal: abort.signal,
+            onFrame,
+            onProgress: (value) => progress.push(value),
+          }),
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onFrame).not.toHaveBeenCalled();
+      expect(progress.at(-1)).toMatchObject({ retainedStateBytes: 0, liveTensorBackingBytes: 0 });
+      expect(runtime.alive.size).toBe(0);
+      await runtime.controller.run(options({ frameCount: 1 }));
+      await runtime.controller.dispose();
+    },
+  );
 
   it.each(['before-source-frame', 'conditioned-frame', 'after-decoder'] as const)(
     'honors cancellation from %s progress before the next source/output callback',
@@ -745,7 +941,8 @@ describe('complete literal-prompt snapshot tracking', () => {
 
 describe('single-conditioning-plane tracking lifecycle', () => {
   it('streams native raw outputs, uses raw encoder features for memory, and disposes all tensors', async () => {
-    const runtime = fakeRuntime();
+    const onTiming = vi.fn<(timing: TrackingPhaseTiming) => void>();
+    const runtime = fakeRuntime(undefined, onTiming);
     const progress: TrackingProgress[] = [];
     const source = Float32Array.of(0, 1, 2, 3);
     const visited: number[] = [];
@@ -764,6 +961,12 @@ describe('single-conditioning-plane tracking lifecycle', () => {
       ),
     ).toEqual({ completedFrames: 2, direction: 1, freshAnchor: true });
     expect(visited).toEqual([0, 1]);
+    expect(onTiming.mock.calls.map(([timing]) => timing.asset)).toEqual(runtime.calls.map((call) => call.name));
+    expect(
+      onTiming.mock.calls.every(
+        ([timing]) => timing.stage === 'graph-run' && Number.isFinite(timing.elapsedMs) && timing.elapsedMs >= 0,
+      ),
+    ).toBe(true);
     expect(source).toEqual(Float32Array.of(0, 1, 2, 3));
     expect(runtime.calls.map((call) => call.name)).toEqual([
       'encoder',

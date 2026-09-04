@@ -1,17 +1,22 @@
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useComparisonFilters } from '../src/hooks/useComparisonFilters';
 import { useOverlayNavigation } from '../src/hooks/useOverlayNavigation';
-import { useWheelNavigation } from '../src/hooks/useWheelNavigation';
 import { useGridLayout } from '../src/hooks/useGridLayout';
-import { usePanelSettings } from '../src/hooks/usePanelSettings';
+import { useTestPanelSettings as usePanelSettings, verifiedSourcesForTest } from './helpers/panelSettings';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { ComparisonData, SeriesRef } from '../src/types/api';
 import { getPanelSettings, savePanelSettings } from '../src/utils/localApi';
 import { deferred } from './helpers/deferred';
+import { notifyDatasetMutation } from '../src/db/db';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn().mockResolvedValue({}),
+  getPanelSettingsSnapshot: async (combo: string, patient: string | null, sources: Record<string, SeriesRef>) => ({
+    datasetToken: 'test-dataset',
+    settings: await getPanelSettings(combo, patient),
+    verifiedSources: verifiedSourcesForTest(sources),
+  }),
   savePanelSettings: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -57,6 +62,112 @@ describe('useComparisonFilters', () => {
 });
 
 describe('useOverlayNavigation', () => {
+  it('keeps the selected and previous examinations attached to Study UID when columns are filtered or renamed', () => {
+    const columns = ['2035-01-01', '2035-02-01', '2035-03-01'].map((date, index) => ({
+      date,
+      ref: { study_id: `study-${index}`, series_uid: `series-${index}`, instance_count: 10 },
+    }));
+    const { result, rerender } = renderHook(({ visible }) => useOverlayNavigation(visible), {
+      initialProps: { visible: columns },
+    });
+    act(() => result.current.setOverlayDateIndex(1));
+    rerender({ visible: columns.slice(1) });
+    expect(result.current.overlayDateIndex).toBe(0);
+    expect(result.current.compareTargetIndex).toBe(1);
+    const renamed = columns.map((column) => ({ ...column, date: `${column.date}#${column.ref.study_id}` }));
+    rerender({ visible: renamed });
+    expect(result.current.overlayDateIndex).toBe(1);
+    expect(result.current.compareTargetIndex).toBe(0);
+    expect(JSON.parse(localStorage.getItem('miraviewer:overlay-nav:v1')!)).toMatchObject({
+      overlayStudyUid: 'study-1',
+    });
+  });
+
+  const keyboardColumns = ['2035-01-01', '2035-02-01'].map((date, i) => ({
+    date,
+    ref: { study_id: `study-${i}`, series_uid: `series-${i}`, instance_count: 1 },
+  }));
+
+  it.each(['button', 'a', 'summary', 'input', 'select', 'textarea', 'editable', 'role-button'])(
+    'leaves Space and arrows with the focused %s control without blurring it',
+    (kind) => {
+      const { result } = renderHook(() => useOverlayNavigation(keyboardColumns));
+      act(() => {
+        result.current.setViewMode('overlay');
+        result.current.setOverlayDateIndex(1);
+      });
+      const control = document.createElement(kind === 'editable' || kind === 'role-button' ? 'div' : kind);
+      control.tabIndex = 0;
+      if (kind === 'editable') control.setAttribute('contenteditable', 'true');
+      if (kind === 'role-button') control.setAttribute('role', 'button');
+      if (kind === 'a') control.setAttribute('href', '#synthetic');
+      document.body.append(control);
+      control.focus();
+      try {
+        for (const key of [' ', 'ArrowLeft', '1']) {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+          fireEvent(control, event);
+          expect(event.defaultPrevented).toBe(false);
+          expect(result.current.displayedOverlayIndex).toBe(1);
+          expect(document.activeElement).toBe(control);
+        }
+      } finally {
+        control.remove();
+      }
+    },
+  );
+
+  it('keeps viewport focus during hold-to-compare, resets on blur, and respects consumed keys', () => {
+    const { result } = renderHook(() => useOverlayNavigation(keyboardColumns));
+    act(() => {
+      result.current.setViewMode('overlay');
+      result.current.setOverlayDateIndex(1);
+    });
+    const viewport = document.createElement('div');
+    viewport.tabIndex = 0;
+    viewport.setAttribute('role', 'group');
+    document.body.append(viewport);
+    viewport.focus();
+    try {
+      fireEvent.keyDown(viewport, { key: ' ' });
+      expect(result.current.displayedOverlayIndex).toBe(0);
+      expect(document.activeElement).toBe(viewport);
+      fireEvent.blur(window);
+      expect(result.current.displayedOverlayIndex).toBe(1);
+      const consumed = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      consumed.preventDefault();
+      fireEvent(viewport, consumed);
+      expect(result.current.displayedOverlayIndex).toBe(1);
+    } finally {
+      viewport.remove();
+    }
+  });
+
+  it('lets focused examination buttons own hold-to-compare, arrow and number navigation', () => {
+    const { result } = renderHook(() => useOverlayNavigation(keyboardColumns));
+    act(() => {
+      result.current.setViewMode('overlay');
+      result.current.setOverlayDateIndex(1);
+    });
+    const control = document.createElement('button');
+    control.dataset.overlayNavigation = 'date';
+    document.body.append(control);
+    control.focus();
+    try {
+      fireEvent.keyDown(control, { key: ' ' });
+      expect(result.current.displayedOverlayIndex).toBe(0);
+      fireEvent.keyUp(control, { key: ' ' });
+      expect(result.current.displayedOverlayIndex).toBe(1);
+      fireEvent.keyDown(control, { key: 'ArrowLeft' });
+      expect(result.current.overlayDateIndex).toBe(0);
+      fireEvent.keyDown(control, { key: '2' });
+      expect(result.current.overlayDateIndex).toBe(1);
+      expect(document.activeElement).toBe(control);
+    } finally {
+      control.remove();
+    }
+  });
+
   it('hydrates view mode, selected date, and play speed from storage', async () => {
     localStorage.setItem(
       'miraviewer:overlay-nav:v1',
@@ -213,17 +324,6 @@ describe('useOverlayNavigation', () => {
   });
 });
 
-describe('useWheelNavigation', () => {
-  it('updates index on wheel events', () => {
-    const setIdx = vi.fn();
-    const ref = { current: document.createElement('div') } as React.RefObject<HTMLDivElement>;
-    renderHook(() => useWheelNavigation(ref, 0, 10, setIdx, true));
-
-    ref.current!.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, cancelable: true }));
-    expect(setIdx).toHaveBeenCalledWith(1);
-  });
-});
-
 describe('useGridLayout', () => {
   it('computes layout for non-zero container size', async () => {
     const { result } = renderHook(() => useGridLayout(4));
@@ -239,9 +339,129 @@ describe('useGridLayout', () => {
 describe('usePanelSettings', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.mocked(getPanelSettings).mockReset().mockResolvedValue({});
+    vi.mocked(savePanelSettings).mockReset().mockResolvedValue(undefined);
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('preserves shared browsing progress when acquisition choices or display-date keys change', async () => {
+    const date = '2035-01-01';
+    const source = { study_id: 'study', series_uid: 'first', instance_count: 16 };
+    const { result, rerender, unmount } = renderHook(
+      ({ dates, sources }) => usePanelSettings('sequence', dates, 'patient', false, sources),
+      {
+        initialProps: { dates: date, sources: { [date]: source } as Record<string, SeriesRef> },
+      },
+    );
+    await act(async () => {});
+    act(() => result.current.setProgress(7 / 15));
+    await act(async () =>
+      rerender({ dates: date, sources: { [date]: { ...source, series_uid: 'alternative', instance_count: 20 } } }),
+    );
+    expect(result.current.progress).toBe(7 / 15);
+    await act(async () =>
+      rerender({
+        dates: `${date}#study,${date}#other`,
+        sources: {
+          [`${date}#study`]: source,
+          [`${date}#other`]: { ...source, study_id: 'other', series_uid: 'other' },
+        },
+      }),
+    );
+    expect(result.current.progress).toBe(7 / 15);
+    unmount();
+  });
+
+  it('does not turn a failed read into writable defaults, and retries without losing saved work', async () => {
+    const date = '2035-01-01';
+    vi.mocked(getPanelSettings)
+      .mockRejectedValueOnce(new Error('Recoverable read failure'))
+      .mockResolvedValueOnce({ [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 2, panX: 0.2 } });
+    const { result, unmount } = renderHook(() => usePanelSettings('sequence', date, 'patient'));
+    await act(async () => {});
+    expect(result.current.settingsReady).toBe(false);
+    expect(result.current.persistenceError).toContain('Recoverable read failure');
+    act(() => {
+      result.current.updatePanelSetting(date, { zoom: 1.5, panX: 0.1 });
+      result.current.setProgress(0.5);
+      window.dispatchEvent(new Event('beforeunload'));
+      vi.advanceTimersByTime(250);
+    });
+    expect(savePanelSettings).not.toHaveBeenCalled();
+    expect(result.current.progress).toBe(0.5);
+    expect(result.current.panelSettings.get(date)).toMatchObject({ zoom: 1.5, panX: 0.1 });
+    await act(async () => result.current.retryLoad());
+    expect(result.current.settingsReady).toBe(true);
+    expect(result.current.panelSettings.get(date)).toMatchObject({ zoom: 2, panX: 0.2 });
+    expect(result.current.persistenceError).toBeNull();
+    act(() => vi.advanceTimersByTime(250));
+    expect(savePanelSettings).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('never writes a date without an acquisition and chooses an available date for progress', async () => {
+    const { result, unmount } = renderHook(() =>
+      usePanelSettings('sequence', '2035-01-01,2035-02-01', 'patient', false, {
+        '2035-01-01': { study_id: 'study', series_uid: 'series', instance_count: 10 },
+      }),
+    );
+    await act(async () => {});
+    expect(result.current.activePanel).toBe('2035-01-01');
+    act(() => result.current.updatePanelSetting('2035-02-01', { zoom: 2 }));
+    expect(savePanelSettings).not.toHaveBeenCalled();
+    act(() => result.current.setProgress(0.5));
+    act(() => vi.advanceTimersByTime(250));
+    expect(savePanelSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ studyUid: 'study', seriesUid: 'series' }),
+      expect.objectContaining({ progress: 0.5 }),
+    );
+    unmount();
+  });
+
+  it('does not retry failed hydration merely because an unchanged source map was recreated on render', async () => {
+    const next = deferred<Record<string, typeof DEFAULT_PANEL_SETTINGS>>();
+    vi.mocked(getPanelSettings)
+      .mockRejectedValueOnce(new Error('Recoverable read failure'))
+      .mockReturnValue(next.promise);
+    const hook = renderHook(() =>
+      usePanelSettings('sequence', 'date', 'patient', false, {
+        date: { study_id: 'study', series_uid: 'series', instance_count: 10 },
+      }),
+    );
+    try {
+      await act(async () => {});
+      expect(hook.result.current.settingsReady).toBe(false);
+      expect(getPanelSettings).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.unmount();
+    }
+  });
+
+  it('retires mounted callbacks synchronously on replacement but keeps additive imports editable', async () => {
+    const date = '2035-01-01';
+    const { result, unmount } = renderHook(() => usePanelSettings('sequence', date, 'patient'));
+    await act(async () => {});
+    act(() => {
+      notifyDatasetMutation('new-series');
+      result.current.updatePanelSetting(date, { zoom: 2 });
+    });
+    expect(result.current.panelSettings.get(date)?.zoom).toBe(2);
+    vi.mocked(savePanelSettings).mockClear();
+    const staleUpdate = result.current.updatePanelSetting;
+    act(() => {
+      result.current.setProgress(0.5);
+      notifyDatasetMutation();
+      staleUpdate(date, { zoom: 3 });
+      window.dispatchEvent(new Event('beforeunload'));
+      vi.advanceTimersByTime(250);
+    });
+    expect(result.current.settingsReady).toBe(false);
+    expect(savePanelSettings).not.toHaveBeenCalled();
+    await act(async () => {});
+    expect(getPanelSettings).toHaveBeenCalledTimes(1);
+    unmount();
   });
 
   it('does not let automatic presentation updates fill undo history or write per-slice settings', async () => {
@@ -489,10 +709,8 @@ describe('usePanelSettings', () => {
       result.current.setProgress(0.8);
     });
     expect(savePanelSettings).toHaveBeenLastCalledWith(
-      'shared-synthetic-sequence',
-      date,
+      expect.objectContaining({ studyUid: `synthetic-patient-a:${date}`, datasetToken: 'test-dataset' }),
       expect.objectContaining({ brightness: 190 }),
-      'synthetic-patient-a',
     );
     const writesBeforePatientSwitch = vi.mocked(savePanelSettings).mock.calls.length;
 
@@ -526,10 +744,8 @@ describe('usePanelSettings', () => {
       vi.advanceTimersByTime(250);
     });
     expect(savePanelSettings).toHaveBeenLastCalledWith(
-      'shared-synthetic-sequence',
-      date,
+      expect.objectContaining({ studyUid: `synthetic-patient-b:${date}`, datasetToken: 'test-dataset' }),
       expect.objectContaining({ brightness: 100, progress: 0.35 }),
-      'synthetic-patient-b',
     );
 
     const writesBeforeUndo = vi.mocked(savePanelSettings).mock.calls.length;

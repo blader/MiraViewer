@@ -38,11 +38,13 @@ export function useSvrEnhancement({
   volume,
   labels,
   loadSource,
+  prepare,
   blocked = false,
 }: {
   volume: SvrVolume | null;
   labels: SvrLabelVolume | null;
   loadSource?: EnhancementSourceLoader;
+  prepare?: () => number;
   blocked?: boolean;
 }) {
   const scope = useMemo(() => ({ volume, data: labels?.data }), [volume, labels?.data]);
@@ -101,70 +103,66 @@ export function useSvrEnhancement({
     operation.current = null;
     setStored(EMPTY);
   }, []);
-  const run = useCallback(
-    async (prepareMemory: number | (() => number) = 0) => {
-      if (!volume || !labels || blocked) return false;
-      operation.current?.abort();
-      const controller = new AbortController();
-      operation.current = controller;
-      const current = () =>
-        operation.current === controller && liveScope.current === scope && !controller.signal.aborted;
-      setStored({ ...EMPTY, scope, running: true, message: 'Loading original detail around your selection…' });
-      let lastUpdate = 0;
-      const progress = (fraction: number, message: string) => {
-        if (!current()) return false;
-        const now = performance.now();
-        if (now - lastUpdate < 80 && fraction < 1) return;
-        lastUpdate = now;
-        setStored((previous) => ({
-          ...previous,
-          progress: Math.max(previous.progress, clamp(fraction, 0, 1)),
-          message,
-        }));
+  const run = useCallback(async () => {
+    if (!volume || !labels || blocked) return false;
+    operation.current?.abort();
+    const controller = new AbortController();
+    operation.current = controller;
+    const current = () => operation.current === controller && liveScope.current === scope && !controller.signal.aborted;
+    setStored({ ...EMPTY, scope, running: true, message: 'Loading original detail around your selection…' });
+    let lastUpdate = 0;
+    const progress = (fraction: number, message: string) => {
+      if (!current()) return false;
+      const now = performance.now();
+      if (now - lastUpdate < 80 && fraction < 1) return;
+      lastUpdate = now;
+      setStored((previous) => ({
+        ...previous,
+        progress: Math.max(previous.progress, clamp(fraction, 0, 1)),
+        message,
+      }));
+    };
+    try {
+      // The selection owner can release its idle worker's reproducible MRI copy
+      // before reporting the marks/history that genuinely remain resident.
+      const additionalRetainedBytes = prepare ? prepare() : retainedBytes;
+      if (!Number.isSafeInteger(additionalRetainedBytes) || additionalRetainedBytes < 0)
+        throw new Error('Enhancement requires a valid retained-memory estimate. Original data is unchanged.');
+      const options = {
+        signal: controller.signal,
+        // A previous completed display can survive until React commits this run's loading state.
+        retainedBytes: additionalRetainedBytes,
+        onProgress: (p: { current: number; total: number; message: string }) =>
+          progress((p.current / Math.max(1, p.total)) * 0.2, p.message),
       };
-      try {
-        // The selection owner can release its idle worker's reproducible MRI copy
-        // before reporting the marks/history that genuinely remain resident.
-        const additionalRetainedBytes = typeof prepareMemory === 'function' ? prepareMemory() : prepareMemory;
-        if (!Number.isSafeInteger(additionalRetainedBytes) || additionalRetainedBytes < 0)
-          throw new Error('Enhancement requires a valid retained-memory estimate. Original data is unchanged.');
-        const options = {
-          signal: controller.signal,
-          // A previous completed display can survive until React commits this run's loading state.
-          retainedBytes: retainedBytes + additionalRetainedBytes,
-          onProgress: (p: { current: number; total: number; message: string }) =>
-            progress((p.current / Math.max(1, p.total)) * 0.2, p.message),
-        };
-        const source = loadSource
-          ? await loadSource(labels, options)
-          : await cropEnhancementSource(volume, labels, options);
-        if (!current()) return;
-        const result = await runSuperResolution(source, {
-          signal: controller.signal,
-          onProgress: (p) => {
-            const ranges = {
-              preparing: [0, 0.15],
-              training: [0.15, 0.35],
-              validating: [0.35, 0.4],
-              enhancing: [0.4, 1],
-            } as const;
-            const [start, end] = ranges[p.phase];
-            progress(0.2 + 0.8 * (start + ((end - start) * p.current) / Math.max(1, p.total)), p.message);
-          },
-        });
-        if (!current()) return false;
-        setStored({ ...EMPTY, scope, result, source, enabled: true, progress: 1, message: 'Enhanced region ready' });
-        return true;
-      } catch (error) {
-        if (!current()) return false;
-        setStored({ ...EMPTY, scope, error: error instanceof Error ? error.message : String(error) });
-        return false;
-      } finally {
-        if (operation.current === controller) operation.current = null;
-      }
-    },
-    [blocked, labels, loadSource, scope, retainedBytes, volume],
-  );
+      const source = loadSource
+        ? await loadSource(labels, options)
+        : await cropEnhancementSource(volume, labels, options);
+      if (!current()) return;
+      const result = await runSuperResolution(source, {
+        signal: controller.signal,
+        onProgress: (p) => {
+          const ranges = {
+            preparing: [0, 0.15],
+            training: [0.15, 0.35],
+            validating: [0.35, 0.4],
+            enhancing: [0.4, 1],
+          } as const;
+          const [start, end] = ranges[p.phase];
+          progress(0.2 + 0.8 * (start + ((end - start) * p.current) / Math.max(1, p.total)), p.message);
+        },
+      });
+      if (!current()) return false;
+      setStored({ ...EMPTY, scope, result, source, enabled: true, progress: 1, message: 'Enhanced region ready' });
+      return true;
+    } catch (error) {
+      if (!current()) return false;
+      setStored({ ...EMPTY, scope, error: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally {
+      if (operation.current === controller) operation.current = null;
+    }
+  }, [blocked, labels, loadSource, scope, retainedBytes, volume, prepare]);
 
   const setEnabled = useCallback(
     (enabled: boolean) => {

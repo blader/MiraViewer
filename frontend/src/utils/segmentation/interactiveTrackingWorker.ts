@@ -5,10 +5,12 @@ import type {
   TrackingProgress,
   TrackingFrameDecision,
   TrackingSnapshotResult,
+  TrackingPhaseTiming,
 } from './interactiveTracking';
 import type { InteractiveTrackingProvider } from './efficientTam/model';
 
 export const TRACKING_INACTIVITY_MS = 120_000;
+export const TRACKING_IDLE_MS = 30_000;
 
 export type InteractiveTrackingFrame = Pick<TrackingFrameOutput, 'index' | 'direction' | 'initial'> & {
   /** Owned, tight source-grid logits; the consumer may retain or transfer this array. */
@@ -17,6 +19,7 @@ export type InteractiveTrackingFrame = Pick<TrackingFrameOutput, 'index' | 'dire
 
 export type InteractiveTrackingProgress =
   | { phase: 'loading'; asset?: TrackingGraph }
+  | ({ phase: 'timing' } & TrackingPhaseTiming)
   | (Omit<TrackingProgress, 'phase'> & {
       phase: 'preparing' | 'frames';
       stage: string;
@@ -30,7 +33,9 @@ export type InteractiveTrackingWorkerOptions = Omit<
   'direction' | 'stopIndex' | 'onFrame' | 'onProgress'
 > & {
   provider: InteractiveTrackingProvider;
-  /** Streamed predictions are provisional; only a successful run() signals complete, released work. */
+  /** The source owner's admitted high-water estimate, including every literal mark. */
+  admittedRuntimeBytes: number;
+  /** Streamed predictions are provisional. Successful run() releases job state, not the reusable model runtime. */
   onFrame(frame: InteractiveTrackingFrame): TrackingFrameDecision | Promise<TrackingFrameDecision>;
   onProgress?(progress: InteractiveTrackingProgress): void;
 };
@@ -138,8 +143,6 @@ function snapshotJob(options: InteractiveTrackingWorkerOptions): InteractiveTrac
       labels: [...frame.labels],
     };
   });
-  if (options.allowDirectionStop && markedFrames?.some((frame) => frame.index !== anchorIndex))
-    throw new Error('Directional stopping requires a single marked source plane.');
   return {
     width,
     height,
@@ -154,24 +157,71 @@ function snapshotJob(options: InteractiveTrackingWorkerOptions): InteractiveTrac
   };
 }
 
-/** One job owns one worker/model. Each direction is fresh and deliberately emits the anchor again. */
+/** One source owner retains at most one runtime; each job owns an isolated channel and fresh tracking history. */
 export class InteractiveTrackingWorker {
   private active: { worker: Worker; fail(error: Error): void } | null = null;
+  private resident: { worker: Worker; provider: InteractiveTrackingProvider; retainedBytes: number } | null = null;
+  private idleCleanup: (() => void) | undefined;
+
+  /** The source owner must reserve this worker's admitted high-water memory until it is gone. */
+  get hasWorker(): boolean {
+    return this.resident !== null;
+  }
+
+  /** Admitted high-water allowance, not measured heap; zero only after termination. */
+  get retainedBytes(): number {
+    return this.resident?.retainedBytes ?? 0;
+  }
+
+  private clearIdle(): void {
+    this.idleCleanup?.();
+    this.idleCleanup = undefined;
+  }
+
+  private releaseWorker(): void {
+    this.clearIdle();
+    const resident = this.resident;
+    if (!resident) return;
+    resident.worker.onmessage = null;
+    resident.worker.onerror = null;
+    resident.worker.onmessageerror = null;
+    resident.worker.terminate();
+    this.resident = null;
+  }
 
   run(options: InteractiveTrackingWorkerOptions): Promise<InteractiveTrackingWorkerResult> {
     if (options.signal?.aborted)
       return Promise.reject(new DOMException('Interactive selection cancelled.', 'AbortError'));
     if (this.active) return Promise.reject(new Error('Only one interactive selection job can run at a time.'));
-    if (typeof Worker === 'undefined')
-      return Promise.reject(new Error('Interactive selection requires browser worker support.'));
+    if (typeof Worker === 'undefined' || typeof MessageChannel === 'undefined')
+      return Promise.reject(
+        new Error('Interactive selection requires browser worker support and job message channels.'),
+      );
     let job: InteractiveTrackingJob;
     let worker: Worker;
+    let channel: MessageChannel | undefined;
     try {
       job = snapshotJob(options);
-      worker = new Worker(new URL('./interactiveTracking.worker.ts', import.meta.url), { type: 'module' });
+      const runtimeBytes = options.admittedRuntimeBytes;
+      if (!Number.isSafeInteger(runtimeBytes) || runtimeBytes <= 0)
+        throw new Error('Interactive selection requires its source-owner runtime admission.');
+      if (this.resident && this.resident.provider !== job.provider) this.releaseWorker();
+      channel = new MessageChannel();
+      worker =
+        this.resident?.worker ??
+        new Worker(new URL('./interactiveTracking.worker.ts', import.meta.url), { type: 'module' });
+      this.resident = {
+        worker,
+        provider: job.provider,
+        retainedBytes: Math.max(runtimeBytes, this.resident?.retainedBytes ?? 0),
+      };
+      this.clearIdle();
     } catch (error) {
+      channel?.port1.close();
+      channel?.port2.close();
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
+    const { port1: port, port2 } = channel;
     const { signal, readFrame, onFrame, onProgress } = options;
     const sourceAbort = new AbortController();
     return new Promise((resolve, reject) => {
@@ -199,17 +249,36 @@ export class InteractiveTrackingWorker {
         this.active = null;
         clearTimeout(timer);
         signal?.removeEventListener('abort', cancel);
-        worker.onmessage = null;
+        port.onmessage = null;
+        port.onmessageerror = null;
+        port.close();
+        port2.close();
         worker.onerror = null;
         worker.onmessageerror = null;
         sourceAbort.abort();
-        worker.terminate();
-        if (error) reject(error);
-        else
+        if (error) {
+          this.releaseWorker();
+          reject(error);
+        } else {
+          const releaseIdle = () => {
+            // A callback captured by a previous job cannot terminate a reused runtime.
+            if (this.idleCleanup === cleanup) this.dispose();
+          };
+          const idleTimer = setTimeout(releaseIdle, TRACKING_IDLE_MS);
+          const cleanup = () => {
+            clearTimeout(idleTimer);
+            signal?.removeEventListener('abort', releaseIdle);
+          };
+          this.idleCleanup = cleanup;
+          signal?.addEventListener('abort', releaseIdle, { once: true });
+          worker.onerror = releaseIdle;
+          worker.onmessageerror = releaseIdle;
+          if (signal?.aborted) releaseIdle();
           resolve({
             completedFrames,
             ...(job.allowDirectionStop ? { directionEndpoints: { ...directionEndpoints } } : {}),
           });
+        }
       };
       const active = { worker, fail: (error: Error) => finish(error) };
       const cancel = () => finish(new DOMException('Interactive selection cancelled.', 'AbortError'));
@@ -273,7 +342,7 @@ export class InteractiveTrackingWorker {
           else awaiting = 'frame';
           handshaking = false;
           touch();
-          worker.postMessage({ type: 'source', requestId, pixels: copy } satisfies InteractiveTrackingWorkerRequest, [
+          port.postMessage({ type: 'source', requestId, pixels: copy } satisfies InteractiveTrackingWorkerRequest, [
             copy.buffer,
           ]);
         } else {
@@ -292,15 +361,17 @@ export class InteractiveTrackingWorker {
           if (decision !== undefined && decision !== 'stop-direction')
             throw new Error('Interactive selection received an invalid frame decision.');
           if (decision === 'stop-direction') {
-            if (!job.allowDirectionStop || hasCorrections || initial)
-              throw new Error('Directional stopping requires explicit permission on a non-anchor frame.');
+            if (!job.allowDirectionStop || (direction === 1 ? index <= preparationMax : index >= preparationMin))
+              throw new Error(
+                'Directional stopping requires explicit permission on a non-anchor frame beyond every marked source plane.',
+              );
             directionEndpoints[direction === 1 ? 'forward' : 'reverse'] = index;
           }
           completedFrames++;
           awaiting = 'read';
           handshaking = false;
           touch();
-          worker.postMessage({
+          port.postMessage({
             type: 'consumed',
             requestId,
             ...(decision === 'stop-direction' ? { stopDirection: true as const } : {}),
@@ -308,7 +379,7 @@ export class InteractiveTrackingWorker {
         }
       };
       this.active = active;
-      worker.onmessage = ({ data }: MessageEvent<InteractiveTrackingWorkerResponse>) => {
+      port.onmessage = ({ data }: MessageEvent<InteractiveTrackingWorkerResponse>) => {
         if (!current()) return;
         touch();
         try {
@@ -339,21 +410,31 @@ export class InteractiveTrackingWorker {
       };
       worker.onerror = () =>
         active.fail(new Error('The interactive selection worker failed. Your marks are unchanged; please retry.'));
-      worker.onmessageerror = () =>
+      const unreadable = () =>
         active.fail(new Error('The interactive selection worker returned unreadable data. Please retry.'));
+      worker.onmessageerror = unreadable;
+      port.onmessageerror = unreadable;
       signal?.addEventListener('abort', cancel, { once: true });
       touch();
       try {
         if (signal?.aborted) cancel();
-        else worker.postMessage({ type: 'start', job } satisfies InteractiveTrackingWorkerRequest);
+        else worker.postMessage({ type: 'start', job } satisfies InteractiveTrackingWorkerRequest, [port2]);
       } catch (error) {
         active.fail(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }
 
-  /** Interrupts only this job, including an uncancelable graph/session call in its dedicated worker. */
+  /** Reclaims active or idle runtime memory, including an uncancelable graph/session call. */
   dispose(): void {
     this.active?.fail(new DOMException('Interactive selection cancelled.', 'AbortError'));
+    this.releaseWorker();
+  }
+
+  /** A completed proposal may reclaim sessions before publication, never another active job. */
+  releaseIdle(): boolean {
+    if (this.active) return false;
+    this.releaseWorker();
+    return true;
   }
 }

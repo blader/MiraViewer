@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
+import type { AlignmentResult } from '../src/types/api';
+import type * as DerivedImages from '../src/utils/derivedImagePresentation';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { deferred } from './helpers/deferred';
 
@@ -12,7 +14,10 @@ const mocks = vi.hoisted(() => ({
   lookup: vi.fn(),
 }));
 vi.mock('../src/utils/sharpSliceDisplay', () => ({ requestSharpSliceDisplay: mocks.request }));
-vi.mock('../src/utils/derivedImagePresentation', () => ({ createDerivedImagePresentation: mocks.present }));
+vi.mock('../src/utils/derivedImagePresentation', async (importOriginal) => ({
+  ...(await importOriginal<typeof DerivedImages>()),
+  createDerivedImagePresentation: mocks.present,
+}));
 vi.mock('../src/utils/localApi', () => ({ getImageIdForInstance: mocks.lookup }));
 vi.mock('../src/hooks/useAlignedFrame', () => ({
   useAlignedFrame: () => ({ frame: mocks.frame, pending: false, status: 'ready', settings: undefined }),
@@ -52,6 +57,21 @@ function frame(id = 'first', instanceIndex = 0): DerivedAlignmentFrame {
     rows: 2,
     columns: 2,
   };
+}
+
+function acceptedFrame(content: DerivedAlignmentFrame, runId = content.runId): DerivedAlignmentFrame {
+  const acceptedResult: AlignmentResult = {
+    date: 'synthetic-date',
+    seriesUid: content.seriesUid,
+    bestSliceIndex: content.instanceIndex,
+    nmiScore: 1,
+    computedSettings: DEFAULT_PANEL_SETTINGS,
+    slicesChecked: 1,
+    outcome: 'aligned',
+    runId,
+    derivedFrame: content,
+  };
+  return { ...content, runId, acceptedResult };
 }
 
 function image(imageId: string, source = mocks.frame) {
@@ -119,6 +139,42 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('DicomViewer sharp slice display', () => {
+  it.each(['pending', 'ready'])(
+    'keeps %s sharp work when a new request replays unchanged plane content',
+    async (stage) => {
+      const content = frame();
+      mocks.frame = acceptedFrame(content);
+      const job = deferred<typeof replacement>();
+      mocks.request.mockReturnValue(job.promise);
+      const { rerender } = render(viewer(true));
+      const canvas = await screen.findByLabelText('Slice 1');
+      await waitFor(() => expect(canvas).toHaveAttribute('data-image-id', content.imageId));
+      await waitFor(() => expect(mocks.request).toHaveBeenCalledOnce());
+      const signal = mocks.request.mock.calls[0]![1].signal as AbortSignal;
+      if (stage === 'ready') {
+        await act(async () => job.resolve(replacement));
+        await waitFor(() => expect(canvas.getAttribute('data-image-id')).toMatch(/:sharp:/));
+      }
+      const displayedId = canvas.getAttribute('data-image-id');
+
+      mocks.frame = acceptedFrame(content, 'replayed-display-request');
+      rerender(viewer(true, false, { brightness: 150, panX: 0.2 }));
+      await act(async () => {});
+
+      expect(mocks.request).toHaveBeenCalledOnce();
+      expect(cornerstone.loadImage).toHaveBeenCalledOnce();
+      expect(mocks.present).toHaveBeenCalledTimes(stage === 'ready' ? 1 : 0);
+      expect(canvas).toHaveAttribute('data-image-id', displayedId);
+      expect(canvas.parentElement!.style.filter).toBe('brightness(1.5) contrast(1.15)');
+      if (stage === 'pending') {
+        expect(signal.aborted).toBe(false);
+        await act(async () => job.resolve(replacement));
+        await waitFor(() => expect(canvas.getAttribute('data-image-id')).toMatch(/:sharp:/));
+        expect(mocks.present).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it('keeps original pixels visible until ready, then switches variants in place without changing geometry or controls', async () => {
     const job = deferred<typeof replacement>();
     mocks.request.mockReturnValue(job.promise);
@@ -166,7 +222,7 @@ describe('DicomViewer sharp slice display', () => {
     const { rerender } = render(viewer(true, false, { onPanChange }));
     const content = await screen.findByLabelText('Slice 1');
     await waitFor(() => expect(content.getAttribute('data-image-id')).toMatch(/^miraderived:first:sharp:/));
-    const viewport = screen.getByRole('button', { name: 'Pan MRI slice 1' });
+    const viewport = screen.getByRole('group', { name: 'Pan MRI slice 1' });
     const pointer = { pointerId: 7, isPrimary: true, button: 0 };
     fireEvent.pointerDown(viewport, { ...pointer, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(viewport, { ...pointer, clientX: 180, clientY: 70 });
@@ -199,7 +255,7 @@ describe('DicomViewer sharp slice display', () => {
     await waitFor(() => expect(content).toHaveAttribute('data-image-id', 'miraderived:first'));
     await waitFor(() => expect(mocks.request).toHaveBeenCalledOnce());
     const signal = mocks.request.mock.calls[0]![1].signal;
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'Pan MRI slice 1' }), {
+    fireEvent.pointerDown(screen.getByRole('group', { name: 'Pan MRI slice 1' }), {
       pointerId: 7,
       isPrimary: true,
       button: 0,
@@ -269,10 +325,17 @@ describe('DicomViewer sharp slice display', () => {
     expect(screen.queryByText('Failed to load image')).not.toBeInTheDocument();
   });
 
-  it.each([false, true])(
-    'refreshes same-ID pixels and tone, then restores the current baseline: sharp=%s',
-    async (enabled) => {
-      const first = mocks.frame!;
+  it.each([
+    { enabled: false, reusePixels: false },
+    { enabled: true, reusePixels: false },
+    { enabled: false, reusePixels: true },
+    { enabled: true, reusePixels: true },
+  ])(
+    'refreshes same-ID content and tone, then restores the current baseline: sharp=$enabled, reuse pixels=$reusePixels',
+    async ({ enabled, reusePixels }) => {
+      const firstContent = frame();
+      const first = acceptedFrame(firstContent);
+      mocks.frame = first;
       const cachedPredecessor = image(first.imageId, first);
       vi.mocked(cornerstone.loadImage).mockResolvedValue(cachedPredecessor);
       mocks.request.mockResolvedValue(replacement);
@@ -282,11 +345,12 @@ describe('DicomViewer sharp slice display', () => {
       if (enabled) await waitFor(() => expect(content.getAttribute('data-image-id')).toMatch(/:sharp:/));
       const previousDisplayedId = content.getAttribute('data-image-id');
       const previousStyle = content.parentElement!.getAttribute('style');
-      const current = {
-        ...first,
-        pixels: Float32Array.from([7, 8, 9, 10]),
+      const currentPixels = reusePixels ? firstContent.pixels : Float32Array.from([7, 8, 9, 10]);
+      const current = acceptedFrame({
+        ...firstContent,
+        pixels: currentPixels,
         displayTone: { windowCenter: 82, windowWidth: 164, source: [0.25, 0.75], reference: [0.25, 0.75] },
-      };
+      });
       mocks.frame = current;
       rerender(viewer(enabled));
 
@@ -300,7 +364,7 @@ describe('DicomViewer sharp slice display', () => {
       );
       const currentOriginal = await mocks.present.mock.results[originalCall]!.value;
       expect(currentOriginal.imageId).not.toBe(cachedPredecessor.imageId);
-      expect(currentOriginal.getPixelData()).toEqual(Uint16Array.from([7, 8, 9, 10]));
+      expect(currentOriginal.getPixelData()).toEqual(Uint16Array.from(currentPixels));
       expect(currentOriginal.windowCenter).toBe(82);
       expect(currentOriginal.windowWidth).toBe(164);
 
@@ -314,7 +378,7 @@ describe('DicomViewer sharp slice display', () => {
       await waitFor(() => expect(vi.mocked(cornerstone.displayImage).mock.calls.at(-1)![1]).toBe(currentOriginal));
       expect(content.parentElement!.getAttribute('style')).toBe(previousStyle);
       expect(first.pixels).toEqual(Float32Array.from([1, 2, 3, 4]));
-      expect(current.pixels).toEqual(Float32Array.from([7, 8, 9, 10]));
+      expect(current.pixels).toBe(currentPixels);
       expect(cornerstone.enable).toHaveBeenCalledOnce();
       expect(cornerstone.disable).not.toHaveBeenCalled();
       expect(mocks.request).toHaveBeenCalledTimes(enabled ? 2 : 0);

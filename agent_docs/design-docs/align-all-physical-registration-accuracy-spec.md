@@ -4,7 +4,7 @@
 - Reviewed revision: df59ceccaa90151c20fd9ba32a524c952f00c667.
 - Date: 2026-08-24.
 - Scope: longitudinal MRI correspondence, physical geometry, source-pixel validity, registration, resampling, derived-image presentation, confidence, provenance, accuracy evaluation, and their necessary user controls.
-- Existing foundation: agent_docs/exec-plans/active/miraviewer-architecture-and-auto-alignment-improvement-plan.md.
+- Existing foundation: agent_docs/exec-plans/historical/miraviewer-architecture-and-auto-alignment-improvement-plan.md.
 - Relationship to prior alignment documents: supersedes scoring-only proposals wherever they assume that 2D perceptual ranking, square analysis images, or a single native target slice are sufficient.
 
 ## Executive decision

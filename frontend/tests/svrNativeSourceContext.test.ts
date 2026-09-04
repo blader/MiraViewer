@@ -162,7 +162,7 @@ describe('accepted native source context', () => {
       expect(context.grid.voxelSizeMm).toEqual(f.full.nativeVoxelSizeMm);
       expect(context.grid.direction).toEqual(f.full.direction);
       context.grid.originMm.forEach((value, axis) => expect(value).toBeCloseTo(f.full.originMm[axis]!, 10));
-      const plan = context.plan(f.roi);
+      const plan = context.plan(f.roi, f.options);
       expect(plan).toEqual(planNativeVolume(f.nativeSource, { roi: f.roi }, { ...f.options, transform: f.transform }));
       expect(plan.sourceStrides).toEqual([1, 1, 1]);
       expect(plan.overview).toBe(false);
@@ -176,11 +176,11 @@ describe('accepted native source context', () => {
     const f = fixture(false, false, 129);
     const context = createNativeSourceContext(f.options);
     const roi = { ...f.roi, boundsMm: f.full.boundsMm };
-    const plan = context.plan(roi);
+    const plan = context.plan(roi, f.options);
     expect(plan.dims).toEqual([129, 129, 129]);
     expect(plan.dims.reduce((count, size) => count * size, 1) * 8).toBeGreaterThan(MAX_SR_OUTPUT_VOXELS);
     expect(plan.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
-    expect(context.plan(f.roi).dims.every((size) => size < 32)).toBe(true);
+    expect(context.plan(f.roi, f.options).dims.every((size) => size < 32)).toBe(true);
     expect(reconstruct).not.toHaveBeenCalled();
   });
 
@@ -210,7 +210,7 @@ describe('accepted native source context', () => {
     const roi = { ...f.roi, boundsMm: f.full.boundsMm };
     const signal = new AbortController().signal;
     const onProgress = vi.fn();
-    const loaded = await context.load(roi, { signal, onProgress });
+    const loaded = await context.load(roi, { ...f.options, signal, onProgress });
     expect(reconstruct).toHaveBeenCalledOnce();
     expect(reconstruct.mock.calls[0]![0]).toMatchObject({
       selectedSeries: f.options.selectedSeries,
@@ -219,7 +219,8 @@ describe('accepted native source context', () => {
       signal,
       onProgress,
     });
-    expect(reconstruct.mock.calls[0]![0].acceptedProvenance).toBe(f.volume.sourceProvenance);
+    expect(reconstruct.mock.calls[0]![0].acceptedProvenance).toEqual(f.volume.sourceProvenance);
+    expect(reconstruct.mock.calls[0]![0].acceptedProvenance).not.toBe(f.volume.sourceProvenance);
     expect(readFrame).toHaveBeenCalledTimes(f.nativeSource.frames.length);
     expect(loaded.dims).toEqual(f.full.dims);
     const local = patientToVolumeVoxel(loaded, volumeVoxelToPatient(f.full, [5, 6, 4])).map(Math.round);
@@ -238,7 +239,7 @@ describe('accepted native source context', () => {
   it('leaves live source-phase admission to the assembler even when cache residency changes after planning', async () => {
     const f = fixture();
     const context = createNativeSourceContext(f.options);
-    expect(context.plan(f.roi).totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(context.plan(f.roi, f.options).totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
     const readFrame = vi.fn(async () => ({ pixels: new Int16Array() }));
     reconstruct.mockImplementation(async (request) => ({
       volume: await assembleNativeVolume(
@@ -250,7 +251,7 @@ describe('accepted native source context', () => {
         readFrame,
       ),
     }));
-    await expect(context.load(f.roi)).rejects.toThrow(/memory budget/);
+    await expect(context.load(f.roi, f.options)).rejects.toThrow(/memory budget/);
     expect(readFrame).not.toHaveBeenCalled();
     expect(reconstruct.mock.calls[0]![0].retainedBytes).toBe(f.options.retainedBytes);
   });
@@ -279,13 +280,13 @@ describe('accepted native source context', () => {
   it.each(['metadata', 'pose', 'owner'])('rejects %s changes between planning and loading', async (kind) => {
     const f = fixture();
     const context = createNativeSourceContext(f.options);
-    context.plan(f.roi);
+    context.plan(f.roi, f.options);
     if (kind === 'metadata') f.nativeSource.frames[0]!.sliceThickness = 3;
     if (kind === 'pose')
       f.volume.sourceProvenance!.sources[0]!.transform = { ...f.transform, translationMm: [41, -10, 7] };
     if (kind === 'owner') f.volume.sourceProvenance = { ...f.volume.sourceProvenance! };
-    expect(() => context.plan(f.roi)).toThrow(/source changed/);
-    await expect(context.load(f.roi)).rejects.toThrow(/source changed/);
+    expect(() => context.plan(f.roi, f.options)).toThrow(/source changed/);
+    await expect(context.load(f.roi, f.options)).rejects.toThrow(/source changed/);
     expect(reconstruct).not.toHaveBeenCalled();
   });
 
@@ -297,7 +298,7 @@ describe('accepted native source context', () => {
       const controller = new AbortController();
       const completion = deferred<Awaited<ReturnType<typeof reconstructVolumeMultiPlane>>>();
       reconstruct.mockReturnValue(completion.promise);
-      const pending = context.load(f.roi, { signal: controller.signal });
+      const pending = context.load(f.roi, { ...f.options, signal: controller.signal });
       const rejected = expect(pending).rejects.toThrow(kind === 'cancel' ? /SVR cancelled/ : /source changed/);
       if (kind === 'cancel') controller.abort();
       else f.nativeSource.frames[0]!.pixelPaddingValue = -1;
@@ -312,7 +313,7 @@ describe('accepted native source context', () => {
     f.options.parameters.iterations = 17;
     f.options.selectedSeries[0]!.seriesUid = 'other';
     reconstruct.mockRejectedValue(new Error('Source examination changed during loading'));
-    const pending = context.load(f.roi);
+    const pending = context.load(f.roi, f.options);
     const requestedRoi = reconstruct.mock.calls[0]![0].svrParams.roi!;
     const before = structuredClone(requestedRoi);
     f.roi.boundsMm.min[0] = -999;
@@ -325,11 +326,13 @@ describe('accepted native source context', () => {
   it('requires an explicit exact region and does not start already-canceled work', async () => {
     const f = fixture();
     const context = createNativeSourceContext(f.options);
-    expect(() => context.plan(undefined as unknown as SvrRoi)).toThrow(/explicit patient-space region/);
-    await expect(context.load(undefined as unknown as SvrRoi)).rejects.toThrow(/explicit patient-space region/);
+    expect(() => context.plan(undefined as unknown as SvrRoi, f.options)).toThrow(/explicit patient-space region/);
+    await expect(context.load(undefined as unknown as SvrRoi, f.options)).rejects.toThrow(
+      /explicit patient-space region/,
+    );
     const controller = new AbortController();
     controller.abort();
-    await expect(context.load(f.roi, { signal: controller.signal })).rejects.toThrow(/SVR cancelled/);
+    await expect(context.load(f.roi, { ...f.options, signal: controller.signal })).rejects.toThrow(/SVR cancelled/);
     expect(reconstruct).not.toHaveBeenCalled();
   });
 
@@ -349,7 +352,7 @@ describe('accepted native source context', () => {
       f.volume.intensityRange = [500, 600];
       f.volume.displayWindow = [700, 800];
       const context = createNativeSourceContext(f.options);
-      expect(context.plan(f.roi).cropMin.some((offset) => offset > 0)).toBe(true);
+      expect(context.plan(f.roi, f.options).cropMin.some((offset) => offset > 0)).toBe(true);
       const onProgress = vi.fn();
       await expect(context.intensityRange({ onProgress })).resolves.toEqual([-17, 79]);
       expect(sourceReads.load.mock.calls).toEqual(
@@ -393,6 +396,47 @@ describe('accepted native source context', () => {
     await expect(context.intensityRange()).resolves.toEqual([0, 15]);
     expect(sourceReads.load).toHaveBeenCalledTimes(16);
     expect(sourceReads.revision).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([16, 64])('visits caller metadata linearly, not once per frame, for %s source planes', async (size) => {
+    const f = fixture(false, false, size);
+    sourceImages(f);
+    let visits = 0;
+    for (const frame of f.nativeSource.frames) {
+      Object.defineProperty(frame, 'sliceThickness', {
+        enumerable: true,
+        get() {
+          visits++;
+          return 2.5;
+        },
+      });
+    }
+    const context = createNativeSourceContext(f.options);
+    visits = 0;
+    await expect(context.intensityRange()).resolves.toEqual([0, size - 1]);
+    expect(sourceReads.load).toHaveBeenCalledTimes(size);
+    expect(visits).toBeLessThanOrEqual(size * 4);
+  });
+
+  it('keeps immutable geometry but admits each operation with current residency', async () => {
+    const f = fixture();
+    sourceImages(f);
+    const context = createNativeSourceContext(f.options);
+    await context.intensityRange();
+    const first = context.plan(f.roi, f.options);
+    expect(() => {
+      first.frames[0]!.frame.rows++;
+    }).toThrow(TypeError);
+    expect(() => {
+      context.grid.dims[0]++;
+    }).toThrow(TypeError);
+    const memory = { ...f.options, retainedBytes: f.options.retainedBytes + 123_456 };
+    expect(context.plan(f.roi, memory).totalBytes - first.totalBytes).toBe(123_456);
+    reconstruct.mockResolvedValue({ volume: f.volume });
+    await context.load(f.roi, memory);
+    expect(reconstruct.mock.lastCall![0].retainedBytes).toBe(memory.retainedBytes);
+    await expect(context.intensityRange()).resolves.toEqual([0, 15]);
+    expect(sourceReads.load).toHaveBeenCalledTimes(16);
   });
 
   it.each(['constant', 'padding', 'nonfinite'] as const)(

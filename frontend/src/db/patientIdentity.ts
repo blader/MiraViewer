@@ -7,6 +7,33 @@ function basePatientIdentity(study: DicomStudy): string {
   return issuer ? `${issuer}::${patientId}` : patientId;
 }
 
+/** Historical grouping keys may change as ambiguity is discovered or a subset is restored. */
+export function getPatientIdentityAliases(study: DicomStudy): string[] {
+  const base = basePatientIdentity(study);
+  return [base, `${base}#${study.studyInstanceUid}`];
+}
+
+/** Import and restore must enforce the same immutable Study UID ownership. */
+export function studyIdentityConflict(existing: DicomStudy | undefined, incoming: DicomStudy): string | null {
+  if (!existing) return null;
+  if (existing.patientId.trim() && incoming.patientId.trim() && existing.patientId.trim() !== incoming.patientId.trim())
+    return 'A study UID cannot contain more than one patient identity';
+  if (
+    existing.patientIdIssuer?.trim() &&
+    incoming.patientIdIssuer?.trim() &&
+    existing.patientIdIssuer.trim() !== incoming.patientIdIssuer.trim()
+  )
+    return 'A study UID cannot contain more than one patient-identifier issuer';
+  const name = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  if (
+    name(existing.patientName) &&
+    name(incoming.patientName) &&
+    name(existing.patientName) !== name(incoming.patientName)
+  )
+    return 'A study UID cannot contain conflicting patient names';
+  return null;
+}
+
 /**
  * Missing identifiers are never shared. Reused IDs with conflicting nonempty
  * patient names are conservatively isolated by examination rather than merged.

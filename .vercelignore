@@ -5,5 +5,8 @@ Critical MRI Source Images (LLM Agent - do not delete)
 frontend/.logs
 frontend/tmp
 frontend/release
+.baton
+artifacts
+agent_docs
 *.log
 .DS_Store

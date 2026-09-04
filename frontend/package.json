@@ -5,13 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "node scripts/verify-efficient-tam-assets.mjs && tsc -b && vite build && node scripts/verify-efficient-tam-assets.mjs dist/models/efficienttam-tiny512-v1",
+    "build": "node scripts/verify-efficient-tam-assets.mjs && tsc -b && vite build && node scripts/verify-efficient-tam-assets.mjs dist/models/efficienttam-tiny512-v2",
     "lint": "eslint .",
     "doctor": "react-doctor . --no-telemetry --no-supply-chain --blocking warning",
     "doctor:score": "npm run doctor --silent && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url GIT_CONFIG_VALUE_0= REACT_DOCTOR_NO_TELEMETRY=1 react-doctor . --no-supply-chain --score",
     "prettier": "prettier -w .",
     "prettier:check": "prettier -c .",
     "test": "vitest run",
+    "build:browser": "node scripts/verify-efficient-tam-assets.mjs && tsc -b && node scripts/build-browser.mjs && node scripts/verify-efficient-tam-assets.mjs tmp/browser-dist/models/efficienttam-tiny512-v2",
+    "test:browser": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=workflow --reporter=line",
+    "test:gpu": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=gpu --reporter=line",
+    "test:performance": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=performance --reporter=line",
+    "test:inference": "PLAYWRIGHT_HTML_OPEN=never playwright test --project=inference --reporter=line",
     "check": "npm run lint && npm run test",
     "preview": "vite preview",
     "package:zip": "node scripts/make-downloadable-zip.mjs"
@@ -36,6 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "1.62.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@testing-library/user-event": "^14.6.1",

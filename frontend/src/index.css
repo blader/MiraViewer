@@ -193,6 +193,32 @@
   line-height: 1.5;
   color: var(--warning);
 }
+.svr-selection-memory {
+  max-width: 560px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+.svr-selection-memory summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.svr-selection-memory p {
+  margin: 8px 0;
+}
+.svr-selection-memory dl {
+  margin: 0;
+}
+.svr-selection-memory dl > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 2px 0;
+}
+.svr-selection-memory dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
 .svr-selection-display-controls {
   margin-top: 6px;
 }
@@ -437,6 +463,24 @@
 .svr-native-controls {
   flex: 1 1 auto;
   flex-wrap: wrap;
+}
+.svr-native-orientation {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.svr-native-orientation > button {
+  padding: 4px 6px;
+  border-color: transparent;
+  font-size: 11px;
+}
+.svr-native-orientation > button[aria-pressed='true'] {
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
+}
+.svr-native-source-note {
+  color: var(--text-tertiary);
+  font: 10px var(--font-mono);
 }
 .svr-native-browse {
   flex: 1 1 200px;
@@ -1000,6 +1044,13 @@ textarea {
   margin-left: auto;
 }
 
+.instrument-context-options {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 16px;
+}
+
 .instrument-count {
   color: var(--signal-metal);
   font-family: var(--font-mono);
@@ -1100,7 +1151,7 @@ textarea {
 .instrument-notice-rail {
   display: flex;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   align-items: center;
   gap: 8px;
   overflow-x: auto;
@@ -1130,6 +1181,18 @@ textarea {
   padding: 0;
   color: var(--text-secondary);
   list-style: none;
+}
+
+/* Recovery stays visible even when the storage error is longer than the rail. */
+.instrument-notice[data-persistence='true'] {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.instrument-notice[data-persistence='true'] > span {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .instrument-notice[data-severity='error'] {
@@ -1595,15 +1658,36 @@ textarea {
 
   .instrument-context-rail {
     min-height: 44px;
-    gap: 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
+    flex-wrap: wrap;
+    gap: 0 6px;
     padding: 0 6px;
   }
 
   .instrument-context-summary {
-    flex-shrink: 1;
-    gap: 5px;
+    flex: 1;
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 0 5px;
+    padding: 8px 0;
+    white-space: normal;
+  }
+
+  .instrument-context-summary > span {
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+
+  .instrument-context-options {
+    order: 2;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    gap: 0 8px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .instrument-notice-rail {
+    order: 3;
+    flex-basis: 100%;
   }
 
   .instrument-context-button {
@@ -1617,10 +1701,6 @@ textarea {
   }
 
   .instrument-context-summary [data-secondary='true'] {
-    display: none;
-  }
-
-  .instrument-context-rail[data-notices-visible='true'] .instrument-context-summary > :not(:first-child) {
     display: none;
   }
 
@@ -1799,30 +1879,6 @@ input[type='range']::-moz-range-thumb {
 input[type='range']:focus::-webkit-slider-thumb {
   outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
-}
-
-/* Tumor 2D: thinner vertical threshold slider (used by TumorSegmentationOverlaySeedGrow). */
-input[type='range'].tumor-vert-slider {
-  height: 10px;
-}
-
-input[type='range'].tumor-vert-slider::-webkit-slider-runnable-track {
-  height: 2px;
-}
-
-input[type='range'].tumor-vert-slider::-webkit-slider-thumb {
-  width: 12px;
-  height: 12px;
-  margin-top: -5px;
-}
-
-input[type='range'].tumor-vert-slider::-moz-range-track {
-  height: 2px;
-}
-
-input[type='range'].tumor-vert-slider::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
 }
 
 .intake-console {

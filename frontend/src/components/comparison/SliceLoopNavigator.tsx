@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
 import { CONTROL_LIMITS } from '../../utils/constants';
-import { clamp01 } from '../../utils/math';
+import { clamp01, getEffectiveInstanceIndex, getProgressFromSlice, getSliceIndex } from '../../utils/math';
 import {
   readPersistedSliceLoopPlaybackSettingsForSeq,
   writePersistedSliceLoopPlaybackSettingsForSeq,
@@ -21,6 +21,7 @@ export type SliceLoopNavigatorProps = {
   selectedSeqId: string | null;
   /** Number of slices in the current context (used to compute per-step progress). */
   playbackInstanceCount: number;
+  reference?: { label: string; offset: number; reverseSliceOrder: boolean };
   /** Normalized progress (0..1). */
   progress: number;
   /** Shared progress ref used by global wheel navigation + playback loops. */
@@ -98,12 +99,16 @@ function LoopRangeHandles({
 function SliceNumberField({
   value,
   count,
+  minimum = 1,
+  maximum = count,
   disabled,
   onSelect,
   onStartEditing,
 }: {
   value: number;
   count: number;
+  minimum?: number;
+  maximum?: number;
   disabled: boolean;
   onSelect: (slice: number) => void;
   onStartEditing: () => void;
@@ -114,13 +119,13 @@ function SliceNumberField({
       <span>Slice</span>
       <input
         type="number"
-        min={1}
-        max={count}
+        min={minimum}
+        max={maximum}
         step={1}
         inputMode="numeric"
         className="slice-number-input"
         aria-label="Go to slice"
-        title={`Enter a slice from 1 to ${count}, then press Enter`}
+        title={`Enter an acquired slice from ${minimum} to ${maximum}, then press Enter. The current alignment offset limits the available range.`}
         disabled={disabled}
         value={draft ?? value}
         onFocus={(event) => {
@@ -131,7 +136,7 @@ function SliceNumberField({
         onBlur={() => {
           if (!disabled && draft !== null && draft.trim() !== '') {
             const slice = Number(draft);
-            if (Number.isInteger(slice) && slice >= 1 && slice <= count) onSelect(slice);
+            if (Number.isInteger(slice) && slice >= minimum && slice <= maximum) onSelect(slice);
           }
           setDraft(null);
         }}
@@ -154,11 +159,14 @@ function SliceNumberField({
 export function SliceLoopNavigator({
   selectedSeqId,
   playbackInstanceCount,
+  reference,
   progress,
   progressRef,
   setProgress,
   interactionBlocked = false,
 }: SliceLoopNavigatorProps) {
+  const referenceOffset = reference?.offset ?? 0;
+  const reverseSliceOrder = reference?.reverseSliceOrder ?? false;
   // Loop playback for slice navigation
   const [loopStart, setLoopStart] = useState(0);
   const [loopEnd, setLoopEnd] = useState(1);
@@ -261,8 +269,12 @@ export function SliceLoopNavigator({
       const dt = Math.min(0.1, (ts - lastTsRef.current) / 1000);
       lastTsRef.current = ts;
 
-      const denom = Math.max(1, playbackInstanceCount - 1);
-      const stepProgress = 1 / denom;
+      const firstSlice = getSliceIndex(playbackInstanceCount, loopStart, referenceOffset);
+      const lastSlice = getSliceIndex(playbackInstanceCount, loopEnd, referenceOffset);
+      if (lastSlice <= firstSlice) {
+        rafRef.current = requestAnimationFrame(step);
+        return;
+      }
 
       loopStepAccumRef.current += dt * baseSlicesPerSecond * loopSpeed;
       let didAdvance = false;
@@ -270,20 +282,21 @@ export function SliceLoopNavigator({
       while (loopStepAccumRef.current >= 1) {
         loopStepAccumRef.current -= 1;
 
-        let next = progressRef.current + stepProgress * loopDirectionRef.current;
+        let nextSlice =
+          getSliceIndex(playbackInstanceCount, progressRef.current, referenceOffset) + loopDirectionRef.current;
 
         // Reflect at bounds (ping-pong).
-        while (next > loopEnd || next < loopStart) {
-          if (next > loopEnd) {
-            next = loopEnd - (next - loopEnd);
+        while (nextSlice > lastSlice || nextSlice < firstSlice) {
+          if (nextSlice > lastSlice) {
+            nextSlice = lastSlice - (nextSlice - lastSlice);
             loopDirectionRef.current = -1;
-          } else if (next < loopStart) {
-            next = loopStart + (loopStart - next);
+          } else if (nextSlice < firstSlice) {
+            nextSlice = firstSlice + (firstSlice - nextSlice);
             loopDirectionRef.current = 1;
           }
         }
 
-        next = clamp01(next);
+        const next = getProgressFromSlice(nextSlice, playbackInstanceCount, referenceOffset);
         if (next !== progressRef.current) {
           progressRef.current = next;
           didAdvance = true;
@@ -304,7 +317,17 @@ export function SliceLoopNavigator({
       lastTsRef.current = null;
       loopStepAccumRef.current = 0;
     };
-  }, [interactionBlocked, isLooping, loopStart, loopEnd, loopSpeed, playbackInstanceCount, progressRef, setProgress]);
+  }, [
+    interactionBlocked,
+    isLooping,
+    loopStart,
+    loopEnd,
+    loopSpeed,
+    playbackInstanceCount,
+    referenceOffset,
+    progressRef,
+    setProgress,
+  ]);
 
   // Stop looping if bounds collapse
   useEffect(() => {
@@ -336,8 +359,15 @@ export function SliceLoopNavigator({
     };
   }, [draggingHandle]);
 
-  const currentSlice =
-    playbackInstanceCount > 0 ? Math.round(clamp01(progress) * (playbackInstanceCount - 1)) + 1 : null;
+  const acquiredSlice = (position: number) =>
+    getEffectiveInstanceIndex(
+      getSliceIndex(playbackInstanceCount, position, referenceOffset),
+      playbackInstanceCount,
+      reverseSliceOrder,
+    ) + 1;
+  const currentSlice = playbackInstanceCount > 0 ? acquiredSlice(progress) : null;
+  const minimumSlice = Math.min(acquiredSlice(0), acquiredSlice(1));
+  const maximumSlice = Math.max(acquiredSlice(0), acquiredSlice(1));
 
   return (
     <div className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-2 sm:flex-nowrap sm:gap-5">
@@ -346,7 +376,7 @@ export function SliceLoopNavigator({
           type="button"
           aria-label={isLooping && !interactionBlocked ? 'Pause slice playback' : 'Play slices'}
           aria-pressed={isLooping && !interactionBlocked}
-          disabled={interactionBlocked || currentSlice === null}
+          disabled={interactionBlocked || currentSlice === null || minimumSlice === maximumSlice}
           className={`inline-flex min-h-9 min-w-9 items-center justify-center rounded-[4px] border disabled:cursor-not-allowed disabled:opacity-50 ${isLooping && !interactionBlocked ? 'border-[var(--signal-metal)] bg-[var(--bg-tertiary)] text-[var(--signal-metal)]' : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
           onClick={() => {
             // Ensure loop window has size before starting
@@ -379,7 +409,15 @@ export function SliceLoopNavigator({
         </div>
       </div>
 
-      <div className="slice-number-control shrink-0 whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
+      <div className="slice-number-control min-w-0 max-w-full flex-wrap whitespace-nowrap font-[family-name:var(--font-mono)] text-xs tabular-nums text-[var(--text-secondary)]">
+        {reference && (
+          <span
+            className="basis-full max-w-full truncate text-[10px] text-[var(--text-tertiary)]"
+            title={`Acquired slice numbers for ${reference.label}${reverseSliceOrder ? ', reversed display order' : ''}`}
+          >
+            Reference: {reference.label}
+          </span>
+        )}
         {currentSlice === null ? (
           'No slices'
         ) : (
@@ -387,9 +425,19 @@ export function SliceLoopNavigator({
             key={selectedSeqId}
             value={currentSlice}
             count={playbackInstanceCount}
+            minimum={minimumSlice}
+            maximum={maximumSlice}
             disabled={interactionBlocked}
             onStartEditing={() => setIsLooping(false)}
-            onSelect={(slice) => setProgress(playbackInstanceCount > 1 ? (slice - 1) / (playbackInstanceCount - 1) : 0)}
+            onSelect={(slice) =>
+              setProgress(
+                getProgressFromSlice(
+                  getEffectiveInstanceIndex(slice - 1, playbackInstanceCount, reverseSliceOrder),
+                  playbackInstanceCount,
+                  referenceOffset,
+                ),
+              )
+            }
           />
         )}
       </div>

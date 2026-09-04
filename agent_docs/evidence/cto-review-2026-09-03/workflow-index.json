@@ -1,0 +1,94 @@
+[
+  {
+    "file": "gpu-run.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/gpu-run.json",
+    "sha256": "50a429790947758238fd2ec9722577d151901cf7025a642214b7820500f54606"
+  },
+  {
+    "file": "gpu.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/gpu-results/gpu-production-shader-matc-a6f89-dent-synthetic-pixel-oracle-gpu/gpu-receipt.json",
+    "sha256": "4e266663965f1be064fe39357ff6f224d740fb4e1268928cb4da98198bc3d336"
+  },
+  {
+    "file": "workflow-run.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-run.json",
+    "sha256": "bc979e39920657e4a2ac21613119e36fa80f215f0177e52b3fa43cd2338982b4"
+  },
+  {
+    "file": "workflow-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/workflow-receipt.json",
+    "sha256": "c53463057fc9456d877735755a3ce3333e0fb532d6b98ab615024fc0b41c798d"
+  },
+  {
+    "file": "source-ownership-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-keeps-saved-sourc-3009a--and-a-later-date-collision-workflow/source-ownership-receipt.json",
+    "sha256": "4c184ef41bc7348c5a2f5096eeb2cb73b152590a5e0ae5e649feb27f5d3aa3ea"
+  },
+  {
+    "file": "custom-model-workflow-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+    "sha256": "61e77433e058631e915d5fa78bbff3b60e00e2d97d085ef02f56dfd80e8cd50b"
+  },
+  {
+    "file": "comparison-replay-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-replays-a-two-exa-0ad96-ls-or-restarting-sharp-work-workflow/comparison-replay-receipt.json",
+    "sha256": "7fab701b4f03bcb909b9b84418f919230460f87f879f12e1025cad4fbe5b8963"
+  },
+  {
+    "file": "visible-alignment-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-settles-the-displ-e1e49-on-cold-and-warm-navigation-workflow/visible-alignment-receipt.json",
+    "sha256": "b5ae2cb9eb2e67ee1cdf2cdd3a373976bbcaa767af956b01926b6b9a0970bf33"
+  },
+  {
+    "file": "performance-run.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-run.json",
+    "sha256": "9deb44ab2898a1aadca7edae54661b83c2e4b15a07c8734a5ed01ae907f9adf6"
+  },
+  {
+    "file": "coarse-estimate-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-results/performance-coarse-pose-on-dbb09-returning-a-discarded-image-performance/coarse-estimate-receipt.json",
+    "sha256": "8cd859b1a99048fda40de001e44cd17ddefb4619849b5581f7bb44d2c6db3160"
+  },
+  {
+    "file": "final-scoring-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-results/performance-final-affine-s-c1f72-d-terminates-during-ranking-performance/final-scoring-receipt.json",
+    "sha256": "889e447af95c7d26de2fc67fec27a9b4a8ef371f75b686615dc25d31541945f6"
+  },
+  {
+    "file": "derived-storage-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-results/performance-maximum-size-d-62e48-void-unrelated-pixel-clones-performance/derived-storage-receipt.json",
+    "sha256": "3955f1294df8237736e8812a2107b434195cb77a2a28f78b1ee2c102acc535a4"
+  },
+  {
+    "file": "inference-run.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-run.json",
+    "sha256": "56d16f1a0601a8d3d8dcf9d07fba2473aed3d0ad40b691a5823918a93b46ef32"
+  },
+  {
+    "file": "custom-model-calibration-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-results/inference-128-cube-custom--c8e69--renderer-memory-high-water-inference/custom-model-calibration-receipt.json",
+    "sha256": "eea01a149518f6852b280098eaa26fb831143435e154f2fa80b66e924e037ee2"
+  },
+  {
+    "file": "custom-model-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-results/inference-custom-model-wor-1b801-w-graph-and-recover-locally-inference/custom-model-receipt.json",
+    "sha256": "a20efaed9e98ea4827edcfd8f8b07acf695f146f553c867afa4ae73e2082b2a1"
+  },
+  {
+    "file": "inference-receipt.json",
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-results/inference-real-pinned-infe-ed282-ffline-cancels-and-recovers-inference/inference-receipt.json",
+    "sha256": "20e3a6ad8a450d163deb171bd98dc19da2b6310ccdab8c96e4b218ccb60b71cd"
+  },
+  {
+    "file": "settings-read-retry.png",
+    "original": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/settings-read-retry.png",
+    "sha256": "4cbea41f9d5311838d192aa788a0e5cf5d58bf6f8915b03a31478dc357c66016",
+    "inspection": "Rater image-preview corruption: aesthetic verdict withheld. Recovery geometry, hit-testing, browsing and persistence independently passed."
+  },
+  {
+    "file": "settings-read-retry-mobile.png",
+    "original": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/settings-read-retry-mobile.png",
+    "sha256": "1cb82bd92e259124331d2e11cf7412d1cad96ced7d6b4526aeef0ae03fbbad95",
+    "inspection": "Rater image-preview corruption: aesthetic verdict withheld. Recovery geometry, hit-testing, browsing and persistence independently passed."
+  }
+]

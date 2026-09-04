@@ -1,10 +1,12 @@
 import {
   registerAndResliceLongitudinal,
+  estimateLongitudinalRegistration,
   resliceDenseLongitudinalPlane,
   type DenseLongitudinalResliceOptions,
   type DenseLongitudinalResliceResult,
   type LongitudinalRegistrationFailure,
   type LongitudinalRegistrationResult,
+  type LongitudinalRegistrationEstimate,
   type RegisterLongitudinalOptions,
 } from './longitudinalRegistration';
 import type {
@@ -16,7 +18,7 @@ import type {
 const LONGITUDINAL_REGISTRATION_TIMEOUT_MS = 120_000;
 type LongitudinalWorkerResult = LongitudinalWorkerResponse['result'];
 type LongitudinalWorkerInput =
-  | { type: 'run'; options: RegisterLongitudinalOptions }
+  | { type: 'run' | 'estimate'; options: RegisterLongitudinalOptions }
   | { type: 'reslice'; options: DenseLongitudinalResliceOptions };
 
 function cancellation(): LongitudinalRegistrationFailure {
@@ -41,7 +43,9 @@ async function runLongitudinalWorker(
     if (import.meta.env.MODE === 'test') {
       return request.type === 'reslice'
         ? resliceDenseLongitudinalPlane({ ...request.options, signal: effectiveSignal })
-        : registerAndResliceLongitudinal({ ...request.options, signal: effectiveSignal });
+        : request.type === 'estimate'
+          ? estimateLongitudinalRegistration({ ...request.options, signal: effectiveSignal })
+          : registerAndResliceLongitudinal({ ...request.options, signal: effectiveSignal });
     }
     return failed('Longitudinal registration requires Web Worker support');
   }
@@ -105,7 +109,7 @@ async function runLongitudinalWorker(
     const { signal: _inputSignal, ...options } = input;
     void _inputSignal;
     const sourceSlices =
-      request.type === 'run'
+      request.type !== 'reslice'
         ? [...request.options.referenceSlices, ...request.options.targetSlices]
         : [...request.options.targetSlices, ...(request.options.nativeReferenceSlices ?? [])];
     const transfer = new Set<ArrayBuffer>();
@@ -119,8 +123,8 @@ async function runLongitudinalWorker(
 
     try {
       const message: LongitudinalWorkerRequest =
-        request.type === 'run'
-          ? { type: 'run', options: options as LongitudinalWorkerOptions }
+        request.type !== 'reslice'
+          ? { type: request.type, options: options as LongitudinalWorkerOptions }
           : { type: 'reslice', options: options as Omit<DenseLongitudinalResliceOptions, 'signal'> };
       worker.postMessage(message, Array.from(transfer));
     } catch (error) {
@@ -133,13 +137,25 @@ async function runLongitudinalWorker(
   });
 }
 
-/** A worker owns the transferred coarse stacks; every terminal path reclaims it. */
+/** Test-only historical image-producing oracle for the retained pose/pixel parity benchmark. */
 export async function runLongitudinalRegistration(
   input: RegisterLongitudinalOptions,
   signal?: AbortSignal,
 ): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure> {
+  if (import.meta.env.MODE !== 'test' && import.meta.env.MODE !== 'browser-test')
+    return failed('The historical image-producing registration oracle is test-only.');
   return (await runLongitudinalWorker({ type: 'run', options: input }, signal)) as
     | LongitudinalRegistrationResult
+    | LongitudinalRegistrationFailure;
+}
+
+/** Coarse application work owns pose evidence only; the native pass publishes pixels. */
+export async function runLongitudinalEstimate(
+  input: RegisterLongitudinalOptions,
+  signal?: AbortSignal,
+): Promise<LongitudinalRegistrationEstimate | LongitudinalRegistrationFailure> {
+  return (await runLongitudinalWorker({ type: 'estimate', options: input }, signal)) as
+    | LongitudinalRegistrationEstimate
     | LongitudinalRegistrationFailure;
 }
 

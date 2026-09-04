@@ -8,6 +8,7 @@ import {
 import {
   computeMindDescriptor2D,
   createMindDescriptorScratch,
+  MIND_DESCRIPTOR_FOOTPRINT_RADIUS,
   scoreMindDescriptorAgreement,
   type MindDescriptor2D,
   type MindDescriptorScratch,
@@ -60,6 +61,11 @@ type PreparedPerceptualScale = {
 export type PreparedPerceptualReference = {
   sourceSize: number;
   scales: PreparedPerceptualScale[];
+};
+
+export type PreparedPerceptualCoverage = {
+  sourceSize: number;
+  scales: Pick<PreparedPerceptualScale, 'size' | 'weights' | 'totalWeight'>[];
 };
 
 export type PerceptualScoringScratch = { descriptorBySize: Map<number, MindDescriptorScratch> };
@@ -413,11 +419,11 @@ function buildReferenceWeights(
   return weights;
 }
 
-export function preparePerceptualReference(
+function prepareReferenceSupport(
   normalizedReference: Float32Array,
   size: number,
   options: PreparePerceptualReferenceOptions = {},
-): PreparedPerceptualReference {
+): Pick<PreparedPerceptualScale, 'size' | 'reference' | 'weights' | 'totalWeight'>[] {
   assertSquare(normalizedReference, size, 'preparePerceptualReference');
   if (options.validity && options.validity.length !== normalizedReference.length) {
     throw new Error('preparePerceptualReference: validity does not match reference image dimensions');
@@ -431,7 +437,7 @@ export function preparePerceptualReference(
   const scaleSizes = [...uniqueScales].sort((a, b) => b - a);
   if (scaleSizes.length === 0) scaleSizes.push(size);
 
-  const scales = scaleSizes.map((scaleSize): PreparedPerceptualScale => {
+  return scaleSizes.map((scaleSize) => {
     const scaled = options.validity
       ? scaleSize === size
         ? { pixels: Float32Array.from(normalizedReference), validity: Float32Array.from(options.validity) }
@@ -444,8 +450,7 @@ export function preparePerceptualReference(
           validity: undefined,
         };
     const reference = scaled.pixels;
-    const mind = computeMindDescriptor2D(reference, scaleSize);
-    const safeBorder = Math.max(LOCAL_RADIUS + 1, mind.footprintRadius);
+    const safeBorder = Math.max(LOCAL_RADIUS + 1, MIND_DESCRIPTOR_FOOTPRINT_RADIUS);
     const descriptorValidity = scaled.validity
       ? erodeFractionalSupportSquare(scaled.validity, scaleSize, safeBorder)
       : undefined;
@@ -457,21 +462,69 @@ export function preparePerceptualReference(
       descriptorValidity,
       options.focusRect ?? options.exclusionRect,
     );
-    const gradients = computeCentralGradients(reference, scaleSize);
     let totalWeight = 0;
     for (let i = 0; i < weights.length; i++) totalWeight += weights[i] ?? 0;
     return {
       size: scaleSize,
       reference,
       weights,
-      gradientX: gradients.x,
-      gradientY: gradients.y,
-      mind,
       totalWeight,
     };
   });
+}
 
+export function preparePerceptualReference(
+  normalizedReference: Float32Array,
+  size: number,
+  options: PreparePerceptualReferenceOptions = {},
+): PreparedPerceptualReference {
+  const scales = prepareReferenceSupport(normalizedReference, size, options).map((scale) => {
+    const gradients = computeCentralGradients(scale.reference, scale.size);
+    return {
+      ...scale,
+      gradientX: gradients.x,
+      gradientY: gradients.y,
+      mind: computeMindDescriptor2D(scale.reference, scale.size),
+    };
+  });
   return { sourceSize: size, scales };
+}
+
+/** Coverage uses the identical anatomical weights, but needs no appearance descriptors. */
+export function preparePerceptualCoverage(
+  normalizedReference: Float32Array,
+  size: number,
+  options: PreparePerceptualReferenceOptions = {},
+): PreparedPerceptualCoverage {
+  return {
+    sourceSize: size,
+    scales: prepareReferenceSupport(normalizedReference, size, options).map(({ size, weights, totalWeight }) => ({
+      size,
+      weights,
+      totalWeight,
+    })),
+  };
+}
+
+export function scoreAlignedCoverage(
+  prepared: PreparedPerceptualCoverage,
+  validity: Float32Array,
+  alignedSize: number,
+): number {
+  assertSquare(validity, alignedSize, 'scoreAlignedCoverage validity');
+  let numerator = 0;
+  let denominator = 0;
+  for (const scale of prepared.scales) {
+    const support =
+      scale.size === alignedSize
+        ? validity
+        : resample2dAreaAverage(validity, alignedSize, alignedSize, scale.size, scale.size);
+    let scaleNumerator = 0;
+    for (let i = 0; i < scale.weights.length; i++) scaleNumerator += (scale.weights[i] ?? 0) * clamp01(support[i] ?? 0);
+    numerator += scaleNumerator;
+    denominator += scale.totalWeight;
+  }
+  return denominator > 0 ? clamp01(numerator / denominator) : 0;
 }
 
 function weightedLowerQuartile(histogram: Float64Array, totalWeight: number): number {

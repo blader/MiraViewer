@@ -7,9 +7,12 @@ const AXIS = { x: 0, y: 1, z: 2 } as const;
 type Triple = [number, number, number];
 
 /**
- * A zero EDITING plane separates 26-connected cells only when consecutive
- * editing sections sample consecutive native frames. An empty native plane
- * between coarse editing sections is not a separator: [1,0,1] can sample [1,1].
+ * A zero EDITING plane separates 26-connected cells when all of its samples
+ * belong to the observed native frame, including exact integer-stride grids.
+ * An empty native plane between coarse editing sections is not a separator:
+ * [1,0,1] can sample [1,1]. Only sampled editing sections certify an empty separator.
+ * An observed frame strictly past the complete editing-center footprint also
+ * certifies a stop: no remaining native frame can supply an editing sample.
  * The caller must already have validated the grids and literal mark ownership.
  */
 export async function prepareEmptyEditingPlanePruning(
@@ -62,7 +65,6 @@ export async function prepareEmptyEditingPlanePruning(
   if (new Set(nativeToEditing).size !== 3) return null;
   const editingAxis = nativeToEditing[trackingAxis]!;
   const trackingStep = lattice[editingAxis]![trackingAxis]!;
-  if (Math.abs(trackingStep) !== 1) return null;
   const mapped = (point: Triple): Triple =>
     [0, 1, 2].map((axis) =>
       Math.round(
@@ -87,7 +89,9 @@ export async function prepareEmptyEditingPlanePruning(
   const inside = new Set(seeds.foreground),
     outside = new Set(seeds.background);
   if (!inside.size) return null;
-  // Use ALL literal marks, not compressed prompts; off-anchor Remove marks also disable pruning.
+  let markedMin = anchor,
+    markedMax = anchor;
+  // Use ALL literal marks, not compressed prompts; Add and Remove planes both fence pruning.
   for (const indices of [inside, outside]) {
     let count = 0;
     for (const index of indices) {
@@ -101,7 +105,9 @@ export async function prepareEmptyEditingPlanePruning(
         Math.floor(index / editing.dims[0]) % editing.dims[1],
         Math.floor(index / (editing.dims[0] * editing.dims[1])),
       ];
-      if (mapped(point)[trackingAxis] !== anchor) return null;
+      const frame = mapped(point)[trackingAxis];
+      markedMin = Math.min(markedMin, frame);
+      markedMax = Math.max(markedMax, frame);
     }
   }
   // The reader otherwise validates lazily. Pruning must not hide a corrupt future frame.
@@ -115,8 +121,17 @@ export async function prepareEmptyEditingPlanePruning(
   const inPlane = [0, 1, 2].filter((axis) => axis !== editingAxis);
   return async (frame, direction, nativeMask) => {
     signal.throwIfAborted();
-    if (!Number.isSafeInteger(frame) || (frame - anchor) * direction <= 0) return false;
+    if (
+      !Number.isSafeInteger(frame) ||
+      frame < 0 ||
+      frame >= native.dims[trackingAxis]! ||
+      (direction === 1 ? frame <= markedMax : frame >= markedMin)
+    )
+      return false;
     const section = (frame - phase[trackingAxis]!) / trackingStep;
+    // Use the whole editing grid, not support/mark bounds. Coarse off-lattice
+    // frames can finish this footprint but cannot separate sections within it.
+    if (direction * trackingStep > 0 ? section > editing.dims[editingAxis]! - 1 : section < 0) return true;
     if (!Number.isSafeInteger(section) || section < 0 || section >= editing.dims[editingAxis]!) return false;
     const point: Triple = [0, 0, 0];
     point[editingAxis] = section;

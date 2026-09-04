@@ -1,0 +1,1044 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-results/performance-final-affine-s-c1f72-d-terminates-during-ranking-performance/final-scoring-receipt.json",
+    "sha256": "889e447af95c7d26de2fc67fec27a9b4a8ef371f75b686615dc25d31541945f6"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:30:36.062Z",
+    "fixture": "synthetic only",
+    "browserVersion": "152.0.7977.82",
+    "workload": "256-square structural ranking, seed plus one affine; alternating order, each worker newly initialized",
+    "evidence": "synthetic scoring boundary and main-thread responsiveness; not full alignment or hardware performance",
+    "measurements": [
+      {
+        "mode": "inline",
+        "size": 256,
+        "elapsedMs": 146.4300000667572,
+        "framesWhileScoring": 0,
+        "largestTimerGapMs": 146.87000012397766,
+        "ownedInputBytes": 1048576,
+        "selection": {
+          "proposals": [
+            {
+              "kind": "seed-only",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "deformationMagnitude": 0,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9002787520704635,
+                      "rawContrastStructure": 0.800557504140927,
+                      "lncc": 0.8959637497222551,
+                      "rawLncc": 0.7919274994445102,
+                      "ngf": 0.6269629764111985,
+                      "rawNgf": 0.25392595282239694,
+                      "mind": 0.8084534773876415,
+                      "rawMindDistance": 0.19154652261236907,
+                      "lowerQuartile": 0.7142857142857143
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.886652181437938,
+                      "rawContrastStructure": 0.773304362875876,
+                      "lncc": 0.9136735774463964,
+                      "rawLncc": 0.8273471548927929,
+                      "ngf": 0.7222422035592592,
+                      "rawNgf": 0.44448440711851833,
+                      "mind": 0.8471847534187449,
+                      "rawMindDistance": 0.15281524658125556,
+                      "lowerQuartile": 0.7619047619047619
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.8992477297297741,
+                      "rawContrastStructure": 0.7984954594595481,
+                      "lncc": 0.9336163385099187,
+                      "rawLncc": 0.8672326770198373,
+                      "ngf": 0.7411204890888956,
+                      "rawNgf": 0.4822409781777912,
+                      "mind": 0.8933501668764967,
+                      "rawMindDistance": 0.10664983312350183,
+                      "lowerQuartile": 0.8095238095238095
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.8496627992276277,
+              "ngfScore": 0.6967752230197845,
+              "structuralScore": 0.7732190111237061,
+              "bidirectionalCoverage": 1
+            },
+            {
+              "kind": "structure-elastix",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "deformationMagnitude": 0.0078125,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9654087091527224,
+                      "rawContrastStructure": 0.9308174183054447,
+                      "lncc": 0.9942805509512332,
+                      "rawLncc": 0.9885611019024665,
+                      "ngf": 0.7984856445793133,
+                      "rawNgf": 0.5969712891586265,
+                      "mind": 0.9862057663790874,
+                      "rawMindDistance": 0.009699834142649173,
+                      "lowerQuartile": 0.9047619047619048
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.9603345663118315,
+                      "rawContrastStructure": 0.9206691326236629,
+                      "lncc": 0.998384781969324,
+                      "rawLncc": 0.996769563938648,
+                      "ngf": 0.9203513450922677,
+                      "rawNgf": 0.8407026901845354,
+                      "mind": 0.993253866451752,
+                      "rawMindDistance": 0.0067461335482489945,
+                      "lowerQuartile": 0.9682539682539683
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.9594452660433987,
+                      "rawContrastStructure": 0.9188905320867975,
+                      "lncc": 0.9993792030249081,
+                      "rawLncc": 0.9987584060498162,
+                      "ngf": 0.9640921103505851,
+                      "rawNgf": 0.9281842207011701,
+                      "mind": 0.991749798123446,
+                      "rawMindDistance": 0.008250201876555435,
+                      "lowerQuartile": 0.9841269841269841
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.9904031436514286,
+              "ngfScore": 0.8943097000073887,
+              "structuralScore": 0.9423564218294087,
+              "bidirectionalCoverage": 1
+            }
+          ],
+          "selected": {
+            "kind": "structure-elastix",
+            "residualMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "totalMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "deformationMagnitude": 0.0078125,
+            "eligible": true,
+            "components": {
+              "forward": {
+                "coverage": 1,
+                "perScale": [
+                  {
+                    "size": 256,
+                    "contrastStructure": 0.9654087091527224,
+                    "rawContrastStructure": 0.9308174183054447,
+                    "lncc": 0.9942805509512332,
+                    "rawLncc": 0.9885611019024665,
+                    "ngf": 0.7984856445793133,
+                    "rawNgf": 0.5969712891586265,
+                    "mind": 0.9862057663790874,
+                    "rawMindDistance": 0.009699834142649173,
+                    "lowerQuartile": 0.9047619047619048
+                  },
+                  {
+                    "size": 128,
+                    "contrastStructure": 0.9603345663118315,
+                    "rawContrastStructure": 0.9206691326236629,
+                    "lncc": 0.998384781969324,
+                    "rawLncc": 0.996769563938648,
+                    "ngf": 0.9203513450922677,
+                    "rawNgf": 0.8407026901845354,
+                    "mind": 0.993253866451752,
+                    "rawMindDistance": 0.0067461335482489945,
+                    "lowerQuartile": 0.9682539682539683
+                  },
+                  {
+                    "size": 64,
+                    "contrastStructure": 0.9594452660433987,
+                    "rawContrastStructure": 0.9188905320867975,
+                    "lncc": 0.9993792030249081,
+                    "rawLncc": 0.9987584060498162,
+                    "ngf": 0.9640921103505851,
+                    "rawNgf": 0.9281842207011701,
+                    "mind": 0.991749798123446,
+                    "rawMindDistance": 0.008250201876555435,
+                    "lowerQuartile": 0.9841269841269841
+                  }
+                ]
+              },
+              "sourceCoverage": 1
+            },
+            "mindScore": 0.9904031436514286,
+            "ngfScore": 0.8943097000073887,
+            "structuralScore": 0.9423564218294087,
+            "bidirectionalCoverage": 1
+          }
+        }
+      },
+      {
+        "mode": "worker",
+        "size": 256,
+        "elapsedMs": 154.45000004768372,
+        "framesWhileScoring": 20,
+        "largestTimerGapMs": 4.574999809265137,
+        "workerStartupMs": 8.039999961853027,
+        "ownedInputBytes": 1048576,
+        "selection": {
+          "proposals": [
+            {
+              "kind": "seed-only",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "deformationMagnitude": 0,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9002787520704635,
+                      "rawContrastStructure": 0.800557504140927,
+                      "lncc": 0.8959637497222551,
+                      "rawLncc": 0.7919274994445102,
+                      "ngf": 0.6269629764111985,
+                      "rawNgf": 0.25392595282239694,
+                      "mind": 0.8084534773876415,
+                      "rawMindDistance": 0.19154652261236907,
+                      "lowerQuartile": 0.7142857142857143
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.886652181437938,
+                      "rawContrastStructure": 0.773304362875876,
+                      "lncc": 0.9136735774463964,
+                      "rawLncc": 0.8273471548927929,
+                      "ngf": 0.7222422035592592,
+                      "rawNgf": 0.44448440711851833,
+                      "mind": 0.8471847534187449,
+                      "rawMindDistance": 0.15281524658125556,
+                      "lowerQuartile": 0.7619047619047619
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.8992477297297741,
+                      "rawContrastStructure": 0.7984954594595481,
+                      "lncc": 0.9336163385099187,
+                      "rawLncc": 0.8672326770198373,
+                      "ngf": 0.7411204890888956,
+                      "rawNgf": 0.4822409781777912,
+                      "mind": 0.8933501668764967,
+                      "rawMindDistance": 0.10664983312350183,
+                      "lowerQuartile": 0.8095238095238095
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.8496627992276277,
+              "ngfScore": 0.6967752230197845,
+              "structuralScore": 0.7732190111237061,
+              "bidirectionalCoverage": 1
+            },
+            {
+              "kind": "structure-elastix",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "deformationMagnitude": 0.0078125,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9654087091527224,
+                      "rawContrastStructure": 0.9308174183054447,
+                      "lncc": 0.9942805509512332,
+                      "rawLncc": 0.9885611019024665,
+                      "ngf": 0.7984856445793133,
+                      "rawNgf": 0.5969712891586265,
+                      "mind": 0.9862057663790874,
+                      "rawMindDistance": 0.009699834142649173,
+                      "lowerQuartile": 0.9047619047619048
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.9603345663118315,
+                      "rawContrastStructure": 0.9206691326236629,
+                      "lncc": 0.998384781969324,
+                      "rawLncc": 0.996769563938648,
+                      "ngf": 0.9203513450922677,
+                      "rawNgf": 0.8407026901845354,
+                      "mind": 0.993253866451752,
+                      "rawMindDistance": 0.0067461335482489945,
+                      "lowerQuartile": 0.9682539682539683
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.9594452660433987,
+                      "rawContrastStructure": 0.9188905320867975,
+                      "lncc": 0.9993792030249081,
+                      "rawLncc": 0.9987584060498162,
+                      "ngf": 0.9640921103505851,
+                      "rawNgf": 0.9281842207011701,
+                      "mind": 0.991749798123446,
+                      "rawMindDistance": 0.008250201876555435,
+                      "lowerQuartile": 0.9841269841269841
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.9904031436514286,
+              "ngfScore": 0.8943097000073887,
+              "structuralScore": 0.9423564218294087,
+              "bidirectionalCoverage": 1
+            }
+          ],
+          "selected": {
+            "kind": "structure-elastix",
+            "residualMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "totalMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "deformationMagnitude": 0.0078125,
+            "eligible": true,
+            "components": {
+              "forward": {
+                "coverage": 1,
+                "perScale": [
+                  {
+                    "size": 256,
+                    "contrastStructure": 0.9654087091527224,
+                    "rawContrastStructure": 0.9308174183054447,
+                    "lncc": 0.9942805509512332,
+                    "rawLncc": 0.9885611019024665,
+                    "ngf": 0.7984856445793133,
+                    "rawNgf": 0.5969712891586265,
+                    "mind": 0.9862057663790874,
+                    "rawMindDistance": 0.009699834142649173,
+                    "lowerQuartile": 0.9047619047619048
+                  },
+                  {
+                    "size": 128,
+                    "contrastStructure": 0.9603345663118315,
+                    "rawContrastStructure": 0.9206691326236629,
+                    "lncc": 0.998384781969324,
+                    "rawLncc": 0.996769563938648,
+                    "ngf": 0.9203513450922677,
+                    "rawNgf": 0.8407026901845354,
+                    "mind": 0.993253866451752,
+                    "rawMindDistance": 0.0067461335482489945,
+                    "lowerQuartile": 0.9682539682539683
+                  },
+                  {
+                    "size": 64,
+                    "contrastStructure": 0.9594452660433987,
+                    "rawContrastStructure": 0.9188905320867975,
+                    "lncc": 0.9993792030249081,
+                    "rawLncc": 0.9987584060498162,
+                    "ngf": 0.9640921103505851,
+                    "rawNgf": 0.9281842207011701,
+                    "mind": 0.991749798123446,
+                    "rawMindDistance": 0.008250201876555435,
+                    "lowerQuartile": 0.9841269841269841
+                  }
+                ]
+              },
+              "sourceCoverage": 1
+            },
+            "mindScore": 0.9904031436514286,
+            "ngfScore": 0.8943097000073887,
+            "structuralScore": 0.9423564218294087,
+            "bidirectionalCoverage": 1
+          }
+        }
+      },
+      {
+        "mode": "worker",
+        "size": 256,
+        "elapsedMs": 151.625,
+        "framesWhileScoring": 19,
+        "largestTimerGapMs": 4.125,
+        "workerStartupMs": 5.625,
+        "ownedInputBytes": 1048576,
+        "selection": {
+          "proposals": [
+            {
+              "kind": "seed-only",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "deformationMagnitude": 0,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9002787520704635,
+                      "rawContrastStructure": 0.800557504140927,
+                      "lncc": 0.8959637497222551,
+                      "rawLncc": 0.7919274994445102,
+                      "ngf": 0.6269629764111985,
+                      "rawNgf": 0.25392595282239694,
+                      "mind": 0.8084534773876415,
+                      "rawMindDistance": 0.19154652261236907,
+                      "lowerQuartile": 0.7142857142857143
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.886652181437938,
+                      "rawContrastStructure": 0.773304362875876,
+                      "lncc": 0.9136735774463964,
+                      "rawLncc": 0.8273471548927929,
+                      "ngf": 0.7222422035592592,
+                      "rawNgf": 0.44448440711851833,
+                      "mind": 0.8471847534187449,
+                      "rawMindDistance": 0.15281524658125556,
+                      "lowerQuartile": 0.7619047619047619
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.8992477297297741,
+                      "rawContrastStructure": 0.7984954594595481,
+                      "lncc": 0.9336163385099187,
+                      "rawLncc": 0.8672326770198373,
+                      "ngf": 0.7411204890888956,
+                      "rawNgf": 0.4822409781777912,
+                      "mind": 0.8933501668764967,
+                      "rawMindDistance": 0.10664983312350183,
+                      "lowerQuartile": 0.8095238095238095
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.8496627992276277,
+              "ngfScore": 0.6967752230197845,
+              "structuralScore": 0.7732190111237061,
+              "bidirectionalCoverage": 1
+            },
+            {
+              "kind": "structure-elastix",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "deformationMagnitude": 0.0078125,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9654087091527224,
+                      "rawContrastStructure": 0.9308174183054447,
+                      "lncc": 0.9942805509512332,
+                      "rawLncc": 0.9885611019024665,
+                      "ngf": 0.7984856445793133,
+                      "rawNgf": 0.5969712891586265,
+                      "mind": 0.9862057663790874,
+                      "rawMindDistance": 0.009699834142649173,
+                      "lowerQuartile": 0.9047619047619048
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.9603345663118315,
+                      "rawContrastStructure": 0.9206691326236629,
+                      "lncc": 0.998384781969324,
+                      "rawLncc": 0.996769563938648,
+                      "ngf": 0.9203513450922677,
+                      "rawNgf": 0.8407026901845354,
+                      "mind": 0.993253866451752,
+                      "rawMindDistance": 0.0067461335482489945,
+                      "lowerQuartile": 0.9682539682539683
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.9594452660433987,
+                      "rawContrastStructure": 0.9188905320867975,
+                      "lncc": 0.9993792030249081,
+                      "rawLncc": 0.9987584060498162,
+                      "ngf": 0.9640921103505851,
+                      "rawNgf": 0.9281842207011701,
+                      "mind": 0.991749798123446,
+                      "rawMindDistance": 0.008250201876555435,
+                      "lowerQuartile": 0.9841269841269841
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.9904031436514286,
+              "ngfScore": 0.8943097000073887,
+              "structuralScore": 0.9423564218294087,
+              "bidirectionalCoverage": 1
+            }
+          ],
+          "selected": {
+            "kind": "structure-elastix",
+            "residualMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "totalMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "deformationMagnitude": 0.0078125,
+            "eligible": true,
+            "components": {
+              "forward": {
+                "coverage": 1,
+                "perScale": [
+                  {
+                    "size": 256,
+                    "contrastStructure": 0.9654087091527224,
+                    "rawContrastStructure": 0.9308174183054447,
+                    "lncc": 0.9942805509512332,
+                    "rawLncc": 0.9885611019024665,
+                    "ngf": 0.7984856445793133,
+                    "rawNgf": 0.5969712891586265,
+                    "mind": 0.9862057663790874,
+                    "rawMindDistance": 0.009699834142649173,
+                    "lowerQuartile": 0.9047619047619048
+                  },
+                  {
+                    "size": 128,
+                    "contrastStructure": 0.9603345663118315,
+                    "rawContrastStructure": 0.9206691326236629,
+                    "lncc": 0.998384781969324,
+                    "rawLncc": 0.996769563938648,
+                    "ngf": 0.9203513450922677,
+                    "rawNgf": 0.8407026901845354,
+                    "mind": 0.993253866451752,
+                    "rawMindDistance": 0.0067461335482489945,
+                    "lowerQuartile": 0.9682539682539683
+                  },
+                  {
+                    "size": 64,
+                    "contrastStructure": 0.9594452660433987,
+                    "rawContrastStructure": 0.9188905320867975,
+                    "lncc": 0.9993792030249081,
+                    "rawLncc": 0.9987584060498162,
+                    "ngf": 0.9640921103505851,
+                    "rawNgf": 0.9281842207011701,
+                    "mind": 0.991749798123446,
+                    "rawMindDistance": 0.008250201876555435,
+                    "lowerQuartile": 0.9841269841269841
+                  }
+                ]
+              },
+              "sourceCoverage": 1
+            },
+            "mindScore": 0.9904031436514286,
+            "ngfScore": 0.8943097000073887,
+            "structuralScore": 0.9423564218294087,
+            "bidirectionalCoverage": 1
+          }
+        }
+      },
+      {
+        "mode": "inline",
+        "size": 256,
+        "elapsedMs": 87.96499991416931,
+        "framesWhileScoring": 0,
+        "largestTimerGapMs": 88.19000005722046,
+        "ownedInputBytes": 1048576,
+        "selection": {
+          "proposals": [
+            {
+              "kind": "seed-only",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              "deformationMagnitude": 0,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9002787520704635,
+                      "rawContrastStructure": 0.800557504140927,
+                      "lncc": 0.8959637497222551,
+                      "rawLncc": 0.7919274994445102,
+                      "ngf": 0.6269629764111985,
+                      "rawNgf": 0.25392595282239694,
+                      "mind": 0.8084534773876415,
+                      "rawMindDistance": 0.19154652261236907,
+                      "lowerQuartile": 0.7142857142857143
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.886652181437938,
+                      "rawContrastStructure": 0.773304362875876,
+                      "lncc": 0.9136735774463964,
+                      "rawLncc": 0.8273471548927929,
+                      "ngf": 0.7222422035592592,
+                      "rawNgf": 0.44448440711851833,
+                      "mind": 0.8471847534187449,
+                      "rawMindDistance": 0.15281524658125556,
+                      "lowerQuartile": 0.7619047619047619
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.8992477297297741,
+                      "rawContrastStructure": 0.7984954594595481,
+                      "lncc": 0.9336163385099187,
+                      "rawLncc": 0.8672326770198373,
+                      "ngf": 0.7411204890888956,
+                      "rawNgf": 0.4822409781777912,
+                      "mind": 0.8933501668764967,
+                      "rawMindDistance": 0.10664983312350183,
+                      "lowerQuartile": 0.8095238095238095
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.8496627992276277,
+              "ngfScore": 0.6967752230197845,
+              "structuralScore": 0.7732190111237061,
+              "bidirectionalCoverage": 1
+            },
+            {
+              "kind": "structure-elastix",
+              "residualMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "totalMovingToFixed": {
+                "A": {
+                  "m00": 1,
+                  "m01": 0,
+                  "m10": 0,
+                  "m11": 1
+                },
+                "b": {
+                  "x": -2,
+                  "y": -1
+                }
+              },
+              "deformationMagnitude": 0.0078125,
+              "eligible": true,
+              "components": {
+                "forward": {
+                  "coverage": 1,
+                  "perScale": [
+                    {
+                      "size": 256,
+                      "contrastStructure": 0.9654087091527224,
+                      "rawContrastStructure": 0.9308174183054447,
+                      "lncc": 0.9942805509512332,
+                      "rawLncc": 0.9885611019024665,
+                      "ngf": 0.7984856445793133,
+                      "rawNgf": 0.5969712891586265,
+                      "mind": 0.9862057663790874,
+                      "rawMindDistance": 0.009699834142649173,
+                      "lowerQuartile": 0.9047619047619048
+                    },
+                    {
+                      "size": 128,
+                      "contrastStructure": 0.9603345663118315,
+                      "rawContrastStructure": 0.9206691326236629,
+                      "lncc": 0.998384781969324,
+                      "rawLncc": 0.996769563938648,
+                      "ngf": 0.9203513450922677,
+                      "rawNgf": 0.8407026901845354,
+                      "mind": 0.993253866451752,
+                      "rawMindDistance": 0.0067461335482489945,
+                      "lowerQuartile": 0.9682539682539683
+                    },
+                    {
+                      "size": 64,
+                      "contrastStructure": 0.9594452660433987,
+                      "rawContrastStructure": 0.9188905320867975,
+                      "lncc": 0.9993792030249081,
+                      "rawLncc": 0.9987584060498162,
+                      "ngf": 0.9640921103505851,
+                      "rawNgf": 0.9281842207011701,
+                      "mind": 0.991749798123446,
+                      "rawMindDistance": 0.008250201876555435,
+                      "lowerQuartile": 0.9841269841269841
+                    }
+                  ]
+                },
+                "sourceCoverage": 1
+              },
+              "mindScore": 0.9904031436514286,
+              "ngfScore": 0.8943097000073887,
+              "structuralScore": 0.9423564218294087,
+              "bidirectionalCoverage": 1
+            }
+          ],
+          "selected": {
+            "kind": "structure-elastix",
+            "residualMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "totalMovingToFixed": {
+              "A": {
+                "m00": 1,
+                "m01": 0,
+                "m10": 0,
+                "m11": 1
+              },
+              "b": {
+                "x": -2,
+                "y": -1
+              }
+            },
+            "deformationMagnitude": 0.0078125,
+            "eligible": true,
+            "components": {
+              "forward": {
+                "coverage": 1,
+                "perScale": [
+                  {
+                    "size": 256,
+                    "contrastStructure": 0.9654087091527224,
+                    "rawContrastStructure": 0.9308174183054447,
+                    "lncc": 0.9942805509512332,
+                    "rawLncc": 0.9885611019024665,
+                    "ngf": 0.7984856445793133,
+                    "rawNgf": 0.5969712891586265,
+                    "mind": 0.9862057663790874,
+                    "rawMindDistance": 0.009699834142649173,
+                    "lowerQuartile": 0.9047619047619048
+                  },
+                  {
+                    "size": 128,
+                    "contrastStructure": 0.9603345663118315,
+                    "rawContrastStructure": 0.9206691326236629,
+                    "lncc": 0.998384781969324,
+                    "rawLncc": 0.996769563938648,
+                    "ngf": 0.9203513450922677,
+                    "rawNgf": 0.8407026901845354,
+                    "mind": 0.993253866451752,
+                    "rawMindDistance": 0.0067461335482489945,
+                    "lowerQuartile": 0.9682539682539683
+                  },
+                  {
+                    "size": 64,
+                    "contrastStructure": 0.9594452660433987,
+                    "rawContrastStructure": 0.9188905320867975,
+                    "lncc": 0.9993792030249081,
+                    "rawLncc": 0.9987584060498162,
+                    "ngf": 0.9640921103505851,
+                    "rawNgf": 0.9281842207011701,
+                    "mind": 0.991749798123446,
+                    "rawMindDistance": 0.008250201876555435,
+                    "lowerQuartile": 0.9841269841269841
+                  }
+                ]
+              },
+              "sourceCoverage": 1
+            },
+            "mindScore": 0.9904031436514286,
+            "ngfScore": 0.8943097000073887,
+            "structuralScore": 0.9423564218294087,
+            "bidirectionalCoverage": 1
+          }
+        }
+      }
+    ],
+    "cancelled": {
+      "started": true,
+      "published": false,
+      "rejection": "Alignment scoring worker cancelled",
+      "cancelToReturnMs": 0.06499981880187988,
+      "ownedInputBytes": 4194304
+    },
+    "workers": [
+      [
+        "0:http://127.0.0.1:43134/assets/alignmentScoring.worker-z-C4RkuM.js",
+        {
+          "closed": true
+        }
+      ],
+      [
+        "1:http://127.0.0.1:43134/assets/alignmentScoring.worker-z-C4RkuM.js",
+        {
+          "closed": true
+        }
+      ],
+      [
+        "2:http://127.0.0.1:43134/assets/alignmentScoring.worker-z-C4RkuM.js",
+        {
+          "closed": true
+        }
+      ]
+    ],
+    "mainThreads": [
+      {
+        "pid": 41659,
+        "tid": 324456113
+      },
+      {
+        "pid": 41659,
+        "tid": 324456113
+      }
+    ],
+    "scoringThreads": [
+      {
+        "pid": 41659,
+        "tid": 324456242
+      },
+      {
+        "pid": 41659,
+        "tid": 324456280
+      },
+      {
+        "pid": 41659,
+        "tid": 324456317
+      }
+    ]
+  }
+}

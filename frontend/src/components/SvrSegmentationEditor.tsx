@@ -6,10 +6,16 @@ import { useSvrSelection } from '../hooks/useSvrSelection';
 import { useSvrImaging } from './svrImagingContext';
 import { REGION_DETAIL_SPACING_MM } from '../utils/svr/refineRegion';
 import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
-import { hasNativeDetail, volumeDisplayRange, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
+import {
+  defaultVolumeWindow,
+  hasNativeDetail,
+  volumeDisplayRange,
+  volumeSamplingLabel,
+} from '../utils/svr/volumeDisplay';
 import { physicalBrushIndices, SLICE_AXES, type SelectionPatch } from '../utils/segmentation/selectionEditing';
-import { voxelIndex, type VoxelPoint } from '../utils/segmentation/seededVolume';
+import { voxelIndex, type VoxelPoint } from '../utils/segmentation/voxelGeometry';
 import { clamp } from '../utils/math';
+import { SelectionMemoryDetails } from './SelectionMemoryDetails';
 
 type Tool = 'navigate' | 'include' | 'exclude';
 type StrokeScope = {
@@ -433,12 +439,10 @@ function SelectionNativeDetail({
   disabled,
   hasSelection,
   running,
-  prepareMemory,
 }: {
   disabled: boolean;
   hasSelection: boolean;
   running: boolean;
-  prepareMemory: () => number;
 }) {
   const { volume, labels, refineRegion, busy } = useSvrImaging();
   if (!volume?.nativeVoxelSizeMm || hasNativeDetail(volume)) return null;
@@ -458,7 +462,7 @@ function SelectionNativeDetail({
           type="button"
           disabled={unavailable}
           onClick={() => {
-            if (!unavailable && labels) refineRegion?.(labels, prepareMemory);
+            if (!unavailable && labels) refineRegion?.(labels);
           }}
           title={
             refineRegion
@@ -561,7 +565,7 @@ function SelectionDisplayControls({
             }}
           />
         </label>
-        <button type="button" onClick={() => setWindowRange(volume.displayWindow ?? [0, 1])}>
+        <button type="button" onClick={() => setWindowRange(defaultVolumeWindow(volume))}>
           Reset contrast
         </button>
         <button
@@ -734,12 +738,13 @@ export function SvrSegmentationEditor({
   setCutaway: (enabled: boolean) => void;
   onShow3D?: () => void;
   selectionNotice?: ReactNode;
-  children: ReactNode | ((selectionRunning: boolean, prepareEnhancement: () => number) => ReactNode);
+  children: ReactNode | ((selectionRunning: boolean) => ReactNode);
 }) {
-  const { volume, labels = null, proposeSelection } = useSvrImaging();
+  const { volume, labels = null, proposeSelection, operations } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
   const [tool, setTool] = useState<Tool>('navigate');
-  const [autoFill, setAutoFill] = useState(true);
+  const [autoFillPreference, setAutoFill] = useState(true);
+  const autoFill = autoFillPreference && Boolean(proposeSelection);
   const [radiusMm, setRadiusMm] = useState(2);
   const [zoom, setZoom] = useState(1);
   const [expanded, setExpanded] = useState<SvrRoiPlane | 'volume' | null>('volume');
@@ -748,6 +753,13 @@ export function SvrSegmentationEditor({
   const reviewed = labels?.reviewState === 'reviewed';
   const editing = expanded !== 'volume';
   const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill, proposeSelection);
+  useLayoutEffect(
+    () =>
+      operations.register('editor', (kind) => ({
+        retainedBytes: kind === 'selection' ? selection.getRetainedBytes() : selection.prepareHeavyOperation(),
+      })),
+    [operations, selection.getRetainedBytes, selection.prepareHeavyOperation],
+  );
   const show3D = () => {
     setTool('navigate');
     setExpanded('volume');
@@ -869,15 +881,19 @@ export function SvrSegmentationEditor({
               {editing ? (
                 <label
                   className="svr-selection-autofill"
-                  title="Fill nearby tissue after a brush stroke, keeping every Add and Remove mark. Turn off to edit only what you paint."
+                  title={
+                    proposeSelection
+                      ? 'Fill nearby tissue after a brush stroke, keeping every Add and Remove mark. Turn off to edit only what you paint.'
+                      : 'Auto-fill requires an original native source grid. Brush-only editing is available.'
+                  }
                 >
                   <input
                     type="checkbox"
                     checked={autoFill}
-                    disabled={disabled}
+                    disabled={disabled || !proposeSelection}
                     onChange={(event) => {
                       const enabled = event.currentTarget.checked;
-                      if (disabled) return;
+                      if (disabled || !proposeSelection) return;
                       setAutoFill(enabled);
                       if (!enabled) selection.cancel();
                       else if (selection.included > 0 && !reviewed) void selection.grow();
@@ -911,15 +927,12 @@ export function SvrSegmentationEditor({
                     : 'Browse the MRI in 3D, or select tissue to inspect a region.'
                 : autoFill
                   ? 'Add tissue to keep; remove tissue to exclude. Auto-fill follows your brush. Review all three planes, then choose Done.'
-                  : 'Brush-only editing. Only the tissue you paint changes. Review all three planes, then choose Done.'}
+                  : !proposeSelection
+                    ? 'Brush-only editing. Auto-fill requires an original native source grid, which this reconstruction does not provide. Your marks can still be saved and reviewed.'
+                    : 'Brush-only editing. Only the tissue you paint changes. Review all three planes, then choose Done.'}
         </div>
         {editing ? (
-          <SelectionNativeDetail
-            disabled={disabled}
-            hasSelection={hasSelection}
-            running={selection.status.running}
-            prepareMemory={selection.prepareEnhancement}
-          />
+          <SelectionNativeDetail disabled={disabled} hasSelection={hasSelection} running={selection.status.running} />
         ) : null}
         {storageError ? (
           <div className="svr-selection-warning" role="alert">
@@ -949,6 +962,7 @@ export function SvrSegmentationEditor({
         {selection.status.error ? (
           <div className="svr-selection-warning" role="alert">
             {selection.status.error}
+            {selection.status.memoryError ? <SelectionMemoryDetails error={selection.status.memoryError} /> : null}
           </div>
         ) : null}
         {selection.status.boundaryCount ? (
@@ -971,7 +985,7 @@ export function SvrSegmentationEditor({
         ) : null}
       </div>
       <div className="svr-selection-grid" data-expanded={expanded ?? undefined}>
-        {PLANES.map((plane) => (
+        {PLANES.filter((plane) => expanded === null || expanded === plane).map((plane) => (
           <SelectionSlice
             key={plane}
             plane={plane}
@@ -1017,9 +1031,7 @@ export function SvrSegmentationEditor({
             </div>
           </header>
           <div className="svr-selection-volume-content">
-            {typeof children === 'function'
-              ? children(selection.status.running, selection.prepareEnhancement)
-              : children}
+            {typeof children === 'function' ? children(selection.status.running) : children}
           </div>
         </section>
       </div>

@@ -1,41 +1,7 @@
-# MiraViewer Frontend
+# MiraViewer frontend
 
-This package contains the React/TypeScript UI for MiraViewer.
+This package contains the client-side React/TypeScript application. Start with the [project README](../README.md) for setup and user workflows, and the [architecture and validation guide](../agent_docs/design-docs/miraviewer-architecture.md) for the code map, resource ownership, commands and evidence boundaries.
 
-## Development
+From this directory, `npm run dev` starts the fixed-port development server. `npm run lint`, `npm run test -- --maxWorkers=2` and `npm run build` cover local validation. Build browser acceptance output with `npm run build:browser` before running `test:browser`, `test:gpu`, `test:performance` or `test:inference`.
 
-```bash
-npm install
-npm run dev
-```
-
-## Downloadable ZIP (offline)
-
-Build a “download-and-run” ZIP:
-
-```bash
-npm run package:zip
-```
-
-Output:
-- `release/MiraViewer.zip`
-
-End-user instructions are included inside the ZIP as `README.txt`.
-
-## Scripts
-
-- `npm run dev` — start the frontend dev server
-- `npm run build` — typecheck and build production assets
-- `npm run lint` — run ESLint
-- `npm run preview` — serve the production build locally
-
-## Where to look in the code
-
-- `src/components/ComparisonMatrix.tsx` — main UI (grid + overlay views)
-- `src/components/DicomViewer.tsx` — DICOM slice rendering + interactions
-- `src/components/UploadModal.tsx` — DICOM import (folder/ZIP)
-- `src/components/ExportModal.tsx` — export backups
-- `src/hooks/usePanelSettings.ts` — per-date panel settings persistence
-- `src/services/dicomIngestion.ts` — parse/store DICOMs into IndexedDB
-- `src/services/exportBackup.ts` — build ZIP backups from IndexedDB
-- `src/utils/localApi.ts` — local data access layer (IndexedDB)
+`npm run package:zip` produces `release/MiraViewer.zip`; the included `README.txt` explains its local launcher. Preserve the launcher's stable origin to retain access to browser-stored scans.

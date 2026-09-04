@@ -32,7 +32,7 @@ import {
 import { quantileSorted } from '../utils/svr/svrUtils';
 import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
-import { SvrImagingContext } from './svrImagingContext';
+import { createSvrImagingOperations, SvrImagingContext } from './svrImagingContext';
 import { regionalRefinementParameters, selectionFocusRoi } from '../utils/svr/refineRegion';
 import {
   classifySvrAcquisitions,
@@ -42,12 +42,17 @@ import {
 } from '../utils/svr/acquisitionProvenance';
 import { nativePlaneMemoryBytes, planNativeVolume, retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 import { hasNativeDetail, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
-import { createNativeSourceContext } from '../utils/svr/nativeSourceContext';
+import { createNativeSourceContext, type NativeSourceContext } from '../utils/svr/nativeSourceContext';
 import {
   cropInteractiveSelectionContext,
   planInteractiveSelectionContext,
 } from '../utils/svr/interactiveSelectionContext';
-import { admitInteractiveSelection, interactiveSelectionBudgetBytes } from '../utils/segmentation/interactiveAdmission';
+import {
+  admitInteractiveSelection,
+  estimateInteractiveSelectionMemory,
+  interactiveSelectionBudgetBytes,
+} from '../utils/segmentation/interactiveAdmission';
+import { InteractiveTrackingWorker } from '../utils/segmentation/interactiveTrackingWorker';
 import { proposeInteractiveSelection } from '../utils/segmentation/interactiveSelection';
 import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
 import {
@@ -737,6 +742,7 @@ function useSvrReconstructionWorkspace({
   const [generationCollapsed, setGenerationCollapsed] = useState(true);
 
   const { status, isRunning, progress, result, resultIdentity, error, run, cancel, clear } = useSvrReconstruction();
+  const [operations] = useState(createSvrImagingOperations);
 
   const sequenceGroupsForDate = useMemo(() => {
     if (!dateIso) return [];
@@ -1234,16 +1240,50 @@ function useSvrReconstructionWorkspace({
   const displayedPatient = data.patients?.find((patient) => patient.key === data.selected_patient_key)?.patient_name;
   const displayedDate = dateIso ? (data.examinations?.[dateIso]?.date_iso ?? dateIso.split('#')[0] ?? dateIso) : null;
 
+  // Source metadata, normalization and compiled sessions share one accepted-source
+  // lifetime. Per-correction history and ports remain owned by the tracking job.
+  const selectionVolume = acceptedResult?.volume ?? null;
+  const selectionParameters = acceptedResult?.parameters ?? params;
+  const selectionOwner = useRef<{
+    volume: SvrVolume | null;
+    readiness: typeof currentReadiness;
+    running: boolean;
+    context?: NativeSourceContext;
+    worker: InteractiveTrackingWorker;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const owner = {
+      volume: selectionVolume,
+      readiness: currentReadiness,
+      running: isRunning,
+      worker: new InteractiveTrackingWorker(),
+    };
+    selectionOwner.current = owner;
+    const unregister = operations.register('selection-runtime', (kind) => {
+      if (kind !== 'selection') owner.worker.dispose();
+      return {};
+    });
+    return () => {
+      unregister();
+      owner.worker.dispose();
+      if (selectionOwner.current === owner) selectionOwner.current = null;
+    };
+  }, [currentReadiness, isRunning, nativeSource, selectedSeries, selectionParameters, selectionVolume, operations]);
+
   const startReconstruction = useCallback(() => {
     if (!canRun || !workspaceIdentity) return;
     const paramsToRun: SvrParams = { ...(plannedReconstruction?.effectiveParams ?? params), roi: roiWorld ?? null };
-    void run(selectedSeries, paramsToRun, workspaceIdentity).then((outcome) => {
+    void run(selectedSeries, {
+      params: paramsToRun,
+      identity: workspaceIdentity,
+      prepare: () => operations.prepare('reconstruction'),
+    }).then((outcome) => {
       if (outcome.result) setGenerationCollapsed(true);
     });
-  }, [canRun, params, plannedReconstruction, roiWorld, run, selectedSeries, workspaceIdentity]);
+  }, [canRun, params, plannedReconstruction, operations, roiWorld, run, selectedSeries, workspaceIdentity]);
 
   const refineRegion = useCallback(
-    (labels: SvrLabelVolume, retainedBytes: number | (() => number) = 0) => {
+    (labels: SvrLabelVolume) => {
       if (!canRun || !workspaceIdentity || !acceptedResult || !currentReadiness) return;
       const volume = acceptedResult.volume;
       const requested = regionalRefinementParameters(
@@ -1263,10 +1303,11 @@ function useSvrReconstructionWorkspace({
             null,
             volume.sourceProvenance,
           ).effectiveParams;
-      void run(selectedSeries, { ...effectiveParams, roi }, workspaceIdentity, {
-        volume,
-        labels,
-        retainedBytes,
+      void run(selectedSeries, {
+        params: { ...effectiveParams, roi },
+        identity: workspaceIdentity,
+        selectionToRefine: { volume, labels },
+        prepare: () => operations.prepare('refinement'),
       }).then((outcome) => {
         if (!outcome.result) return;
         setRoiWorld(roi);
@@ -1282,6 +1323,7 @@ function useSvrReconstructionWorkspace({
       nativeSource,
       effectiveRoiSeriesUid,
       params,
+      operations,
       run,
       selectedSeries,
       setRoiRect,
@@ -1335,12 +1377,10 @@ function useSvrReconstructionWorkspace({
         nativeSource,
         selectedSeries,
         parameters: acceptedResult.parameters ?? params,
-        retainedBytes,
-        decodedCacheBytes,
-        nativePlaneBytes,
       });
       const roi = await enhancementSelectionRoi(volume, labels, options.signal, context.grid);
-      const plan = context.plan(roi);
+      const memory = { retainedBytes, decodedCacheBytes, nativePlaneBytes };
+      const plan = context.plan(roi, memory);
       if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
       const count = plan.dims.reduce((product, axis) => product * axis, 1);
       await prepareEnhancementMemory(
@@ -1353,7 +1393,7 @@ function useSvrReconstructionWorkspace({
       );
       // Native assembly finishes before enhancement begins. Each phase admits
       // its own peak; future worker/output buffers are not resident during decoding.
-      const source = await context.load(roi, options);
+      const source = await context.load(roi, { ...options, ...memory });
       // Browsing may have populated decoded frames while the native source loaded.
       // Re-admit the actual source and current cache before worker allocations.
       await prepareEnhancementMemory(
@@ -1371,26 +1411,15 @@ function useSvrReconstructionWorkspace({
 
   // A mask edit does not change the source generation. Only accepted geometry,
   // acquisition readiness, or reconstruction ownership can invalidate this job.
-  const selectionVolume = acceptedResult?.volume ?? null;
-  const selectionParameters = acceptedResult?.parameters ?? params;
-  const selectionOwner = useRef<{
-    volume: SvrVolume | null;
-    readiness: typeof currentReadiness;
-    running: boolean;
-  } | null>(null);
-  useLayoutEffect(() => {
-    selectionOwner.current = { volume: selectionVolume, readiness: currentReadiness, running: isRunning };
-    return () => {
-      selectionOwner.current = null;
-    };
-  }, [currentReadiness, isRunning, selectionVolume]);
   const proposeSelection = useCallback<SelectionProposer>(
     async (request) => {
+      const owner = selectionOwner.current;
       const assertCurrent = () => {
         if (request.signal.aborted) throw new DOMException('Interactive selection canceled.', 'AbortError');
         const current = selectionOwner.current;
         if (
           !current ||
+          current !== owner ||
           isRunning ||
           current.running ||
           current.volume !== selectionVolume ||
@@ -1413,7 +1442,9 @@ function useSvrReconstructionWorkspace({
       const measureOwners = () => {
         assertCurrent();
         const retainedBytes =
-          retainedSvrVolumeBytes(selectionVolume) + request.retainedBytes + retainedDerivedAlignmentBytes();
+          retainedSvrVolumeBytes(selectionVolume) +
+          operations.prepare('selection', request).retainedBytes +
+          retainedDerivedAlignmentBytes();
         const nativePlaneBytes = nativePlaneMemoryBytes(selectionVolume.sourceProvenance?.sources ?? []);
         const cache = measureCornerstoneImageMemory(cornerstone);
         const maximum = cache.cacheInfo?.maximumSizeInBytes;
@@ -1423,23 +1454,20 @@ function useSvrReconstructionWorkspace({
         const cacheGrowthBytes = Math.max(0, capacity - cache.reservedPixelCacheBytes);
         return { retainedBytes, nativePlaneBytes, decodedCacheBytes: cache.bytes, cacheGrowthBytes };
       };
-      const createContext = (owners = measureOwners()) =>
-        createNativeSourceContext({
-          volume: selectionVolume,
-          nativeSource,
-          selectedSeries,
-          parameters: selectionParameters,
-          budgetBytes,
-          ...owners,
-        });
-      const context = createContext();
+      const context = (owner!.context ??= createNativeSourceContext({
+        volume: selectionVolume,
+        nativeSource,
+        selectedSeries,
+        parameters: selectionParameters,
+      }));
       const plan = planInteractiveSelectionContext(selectionVolume, context.grid, request.seeds);
       const admit = async () => {
         const owners = measureOwners();
         const sourceLoadPeakBytes =
-          createContext(owners).plan(plan.loaderRoi).memoryPlan.totalBytes + owners.cacheGrowthBytes;
-        const provider = await admitInteractiveSelection({
+          context.plan(plan.loaderRoi, { ...owners, budgetBytes }).memoryPlan.totalBytes + owners.cacheGrowthBytes;
+        const admission = {
           signal: request.signal,
+          retainedRuntimeBytes: owner!.worker.retainedBytes,
           retainedBytes:
             owners.retainedBytes + owners.nativePlaneBytes + owners.decodedCacheBytes + owners.cacheGrowthBytes,
           sourceLoadPeakBytes,
@@ -1449,10 +1477,24 @@ function useSvrReconstructionWorkspace({
           height: plan.height,
           frameCount: plan.frameCount,
           conditioningFrames: plan.conditioningFrames,
-          literalMarkCount: request.seeds.foreground.length + request.seeds.background.length,
-        });
+          maximumFramePrompts: plan.maximumFramePrompts,
+          literalMarkCount: plan.literalMarkCount,
+        };
+        // Warm sessions are reclaimable, not a reason to reject an otherwise
+        // faithful job. Drop a previous larger arena before loading if necessary.
+        if (admission.retainedRuntimeBytes && estimateInteractiveSelectionMemory(admission).totalBytes > budgetBytes) {
+          if (!owner!.worker.releaseIdle())
+            throw new Error('Wait for the current boundary suggestion to finish before starting another.');
+          admission.retainedRuntimeBytes = owner!.worker.retainedBytes;
+        }
+        const retainRuntimeAfterRun =
+          estimateInteractiveSelectionMemory({
+            ...admission,
+            retainRuntimeAfterRun: true,
+          }).totalBytes <= budgetBytes;
+        const admitted = await admitInteractiveSelection({ ...admission, retainRuntimeAfterRun });
         assertCurrent();
-        return provider;
+        return { ...admitted, retainRuntimeAfterRun };
       };
       const progress = (start: number, span: number) => (progress: { current: number; total: number }) => {
         assertCurrent();
@@ -1464,7 +1506,11 @@ function useSvrReconstructionWorkspace({
       const sourceRange = await context.intensityRange({ signal: request.signal, onProgress: progress(0, 0.1) });
       assertCurrent();
       const nativeContext = await (async () => {
-        const loaded = await createContext().load(plan.loaderRoi, {
+        const owners = measureOwners();
+        const loaded = await context.load(plan.loaderRoi, {
+          ...owners,
+          retainedBytes: owners.retainedBytes + owner!.worker.retainedBytes,
+          budgetBytes,
           signal: request.signal,
           onProgress: progress(0.1, 0.2),
         });
@@ -1475,11 +1521,19 @@ function useSvrReconstructionWorkspace({
       })();
       assertCurrent();
       // Browsing can populate decoded/raw frames during the yielding source copy.
-      const provider = await admit();
+      const { provider, estimate, retainRuntimeAfterRun } = await admit();
       const proposal = await proposeInteractiveSelection(
         // The selection hook enforces literal marks and retains only their
         // connected components, so certified separated tails cannot contribute.
-        { nativeContext, sourceRange, provider, retainMarkedComponents: true },
+        {
+          nativeContext,
+          sourceRange,
+          provider,
+          admittedRuntimeBytes: Math.max(estimate.runtimeBytes, estimate.retainedRuntimeBytes),
+          worker: owner!.worker,
+          retainRuntimeAfterRun,
+          retainMarkedComponents: true,
+        },
         {
           ...request,
           onProgress: (value) => {
@@ -1491,7 +1545,7 @@ function useSvrReconstructionWorkspace({
       assertCurrent();
       return proposal;
     },
-    [currentReadiness, isRunning, nativeSource, selectedSeries, selectionParameters, selectionVolume],
+    [currentReadiness, isRunning, nativeSource, selectedSeries, selectionParameters, selectionVolume, operations],
   );
 
   return {
@@ -1544,7 +1598,9 @@ function useSvrReconstructionWorkspace({
     startReconstruction,
     refineRegion,
     loadEnhancementSource,
-    proposeSelection,
+    operations,
+    proposeSelection:
+      nativeSource && currentReadiness && selectionVolume?.sourceProvenance ? proposeSelection : undefined,
     status,
     stepRoiSlice,
     automaticallyAdjustedVoxelSpacing,
@@ -2122,8 +2178,16 @@ export function Svr3DView(props: Svr3DViewProps) {
       refineRegion: workspace.refineRegion,
       loadEnhancementSource: workspace.loadEnhancementSource,
       proposeSelection: workspace.proposeSelection,
+      operations: workspace.operations,
     }),
-    [acceptedResult, isRunning, workspace.refineRegion, workspace.loadEnhancementSource, workspace.proposeSelection],
+    [
+      acceptedResult,
+      isRunning,
+      workspace.refineRegion,
+      workspace.loadEnhancementSource,
+      workspace.proposeSelection,
+      workspace.operations,
+    ],
   );
   const SourcesIcon = generationCollapsed ? ChevronRight : ChevronLeft;
 

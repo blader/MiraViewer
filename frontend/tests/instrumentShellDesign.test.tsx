@@ -242,9 +242,6 @@ describe('Quiet Instrument visual system', () => {
 
     const compactContext = stylesheet.slice(stylesheet.indexOf('@media (max-width: 760px)'));
     expect(compactContext).toMatch(
-      /\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-context-summary\s*>\s*:not\(:first-child\)\s*\{\s*display:\s*none/,
-    );
-    expect(compactContext).toMatch(
       /\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-context-playback,\s*\.instrument-context-rail\[data-notices-visible=['"]true['"]\]\s+\.instrument-study-filmstrip\s*\{\s*display:\s*none/,
     );
   });

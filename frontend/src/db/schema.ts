@@ -273,6 +273,8 @@ export interface DicomInstance {
 export interface PanelSettingsRow {
   comboId: string;
   settings: Record<string, PanelSettings>;
+  /** Canonical source ownership. Rows without this are retained legacy settings. */
+  source?: { studyUid: string; seriesUid: string; legacyOrigin?: { comboId: string; dateIso: string } };
 }
 
 export interface AppStateRow {
@@ -431,6 +433,7 @@ export interface MiraDB {
     indexes: {
       'by-patient': string;
       'by-created-at': number;
+      'by-patient-revision-source': [string, number, string, string];
     };
   };
 }

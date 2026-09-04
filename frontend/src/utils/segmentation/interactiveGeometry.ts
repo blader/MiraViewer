@@ -2,7 +2,7 @@ import type { SvrRoiPlane, SvrSelectionPlane, SvrVolume } from '../../types/svr'
 import type { NativeSourceGrid } from '../svr/nativeSourceContext';
 import { IDENTITY_DIRECTION, patientToVolumeVoxel, volumeVoxelToPatient } from '../svr/volumeGeometry';
 import { SLICE_AXES, selectionPlaneContainsMarks } from './selectionEditing';
-import { voxelIndex, voxelPoint, type VoxelBounds } from './seededVolume';
+import { voxelIndex, voxelPoint, type VoxelBounds } from './voxelGeometry';
 
 const AXIS_INDEX = { x: 0, y: 1, z: 2 } as const;
 const PLANE_BY_AXIS = ['sagittal', 'coronal', 'axial'] as const;

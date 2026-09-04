@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AlignmentReference, ComparisonData, PanelSettings, SeriesRef } from '../types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../utils/constants';
 import { alignmentDisplayBaseline } from '../utils/alignmentAdjustment';
 import { getDerivedAlignmentFrame, subscribeToDerivedAlignmentFrames } from '../utils/derivedAlignmentFrame';
 import { getEffectiveInstanceIndex, getSliceIndex } from '../utils/math';
+import { comparisonReference } from '../utils/comparisonReference';
 import type { OutputGridMode } from '../utils/outputPlaneGrid';
 import type { useAutoAlign } from './useAutoAlign';
 
@@ -11,6 +12,8 @@ type VisibleAlignmentOptions = {
   data: ComparisonData | null;
   sequenceId: string | null;
   columns: readonly { date: string; ref?: SeriesRef }[];
+  /** Currently mounted/compare targets, separate from the stable reference list. */
+  presentedDates?: readonly string[];
   panelSettings: Map<string, PanelSettings>;
   progress: number;
   viewportSize: number;
@@ -22,12 +25,13 @@ type VisibleAlignmentOptions = {
   abort: () => void;
 };
 
-/** One cancellable background operation follows the first visible comparison column. */
+/** One cancellable operation follows the shared stack reference, independent of presented target order. */
 export function useVisibleAlignment(options: VisibleAlignmentOptions) {
   const {
     data,
     sequenceId,
     columns,
+    presentedDates,
     panelSettings,
     progress,
     viewportSize,
@@ -45,7 +49,7 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     document.addEventListener('visibilitychange', changed);
     return () => document.removeEventListener('visibilitychange', changed);
   }, []);
-  const first = columns[0];
+  const first = comparisonReference(columns);
   const series = first?.ref;
   const settings = first ? (panelSettings.get(first.date) ?? DEFAULT_PANEL_SETTINGS) : DEFAULT_PANEL_SETTINGS;
   const sliceIndex = series
@@ -60,9 +64,15 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
       ? (getDerivedAlignmentFrame(series.series_uid, sliceIndex)?.imageId ?? null)
       : null,
   );
-  const targetDates = columns.flatMap(({ date, ref }, index) =>
-    index > 0 && ref && !panelSettings.get(date)?.alignmentPaused ? [date] : [],
+  const targetDates = columns.flatMap(({ date, ref }) =>
+    date !== first?.date && ref && !panelSettings.get(date)?.alignmentPaused ? [date] : [],
   );
+  const presented = new Set(presentedDates ?? targetDates);
+  const presentedRef = useRef<readonly string[]>(presentedDates ?? targetDates);
+  useLayoutEffect(() => {
+    presentedRef.current = presentedDates ?? targetDates;
+  });
+  const getPresentedDates = useCallback(() => presentedRef.current, []);
   const targetSliceOffsets = new Map(
     targetDates.map((date) => [date, panelSettings.get(date)?.alignmentAdjustment?.sliceOffset ?? 0]),
   );
@@ -125,6 +135,7 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
         requestKey,
         reuseRegistration: true,
         targetSliceOffsets,
+        getPresentedDates,
       });
     } catch {
       // The alignment owner publishes an actionable error. Do not retry a failed
@@ -133,7 +144,13 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
   });
   const active = enabled && pageVisible;
   const schedulingDelay = useEffectEvent(() =>
-    reference && canReuseRegistration?.(reference, targetDates, data!.series_map[sequenceId!] ?? {}, outputMode)
+    reference &&
+    canReuseRegistration?.(
+      reference,
+      targetDates.filter((date) => presented.has(date)),
+      data!.series_map[sequenceId!] ?? {},
+      outputMode,
+    )
       ? 0
       : 650,
   );
@@ -152,6 +169,7 @@ export function useVisibleAlignment(options: VisibleAlignmentOptions) {
     setGeneration((value) => value + 1);
   }, [abort]);
   return {
+    referenceDate: first?.date,
     activeRequestKey: active ? requestKey : null,
     // Pausing computation must not revoke the accepted presentation. A selected
     // derived reference uses the engine's original physical anchor and legacy

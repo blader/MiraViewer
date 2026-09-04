@@ -14,16 +14,19 @@ fails: it requires a separate numerical/runtime parity review, never updated pin
 
 import argparse
 import copy
+from contextlib import contextmanager
 import hashlib
 import importlib.machinery
 import importlib.metadata
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 
 FRONTEND = Path(__file__).resolve().parents[1]
 MANIFEST = FRONTEND / "src/utils/segmentation/efficientTam/assetManifest.json"
+ATTENTION_DERIVATION = FRONTEND / "scripts/derive-efficient-tam-attention.mjs"
 SOURCE_REVISION = "abcd061ebd3cc6e7527d152d75b890126aaa53f6"
 # Imported architecture/configuration bytes at the public revision above. These
 # pins also verify archives, without trusting a caller-supplied revision label.
@@ -113,6 +116,54 @@ def asset_records(manifest):
     return records
 
 
+def attention_derivation_contract(manifest):
+    record = manifest["graphs"]["memoryAttention"]
+    if "queryChunking" not in record:
+        return None
+    # The derivation owns its exact source/output pins and static shape contract;
+    # the application manifest must declare the same contract for admission.
+    result = subprocess.run(["node", str(ATTENTION_DERIVATION), "--contract"],
+                            capture_output=True, text=True)
+    require(result.returncode == 0, f"Cannot verify attention derivation contract: {result.stderr}")
+    contract = json.loads(result.stdout)
+    shape = {key: value for key, value in contract.items() if key not in ("sha256", "bytes")}
+    require(json.dumps(record["queryChunking"], sort_keys=True) == json.dumps(shape, sort_keys=True),
+            "The manifest differs from the reviewed query-blocking shape/source contract.")
+    require(record["sha256"] == contract["sha256"] and record["bytes"] == contract["bytes"],
+            "The manifest differs from the reviewed derived attention graph pin.")
+    return contract
+
+
+def derive_exported_attention(output, manifest, contract):
+    # Only the original graph generated in this invocation's fresh output
+    # directory is replaced. Existing public assets are never a destination.
+    record = manifest["graphs"]["memoryAttention"]
+    source = output / record["path"]
+    verify_file(source, {"sha256": contract["sourceSha256"], "bytes": contract["sourceBytes"]})
+    candidate = output / (record["path"] + ".query64")
+    require(not candidate.exists() and not candidate.is_symlink(), "The attention derivation destination already exists.")
+    result = subprocess.run(["node", str(ATTENTION_DERIVATION), str(source), str(candidate)],
+                            capture_output=True, text=True)
+    require(result.returncode == 0, f"Attention derivation failed; new files were preserved: {result.stderr}")
+    verify_file(candidate, record)
+    candidate.replace(source)
+
+
+@contextmanager
+def cpu_export_environment():
+    import torch
+
+    # Pinned get_abs_pos chooses bilinear from host MPS availability, even for
+    # CPU tensors. The reviewed CPU graph requires its bicubic branch instead.
+    available = torch.mps.is_available
+    torch.mps.is_available = lambda: False
+    try:
+        yield
+    finally:
+        torch.mps.is_available = available
+
+
+@cpu_export_environment()
 def export_models(upstream, checkpoint, output, manifest):
     # Third-party imports and model construction occur only after the source,
     # checkpoint, dependencies, notices and untouched destination pass preflight.
@@ -320,6 +371,7 @@ def main(argv=None):
     notices = args.notices or FRONTEND / "public" / manifest["directory"]
     for record in manifest["notices"].values():
         verify_file(notices / record["path"], record)
+    derivation = attention_derivation_contract(manifest)
     report = {"model": manifest["id"], "manifestSha256": file_record(MANIFEST)["sha256"],
               "sourceRevision": SOURCE_REVISION, "checkpointSha256": manifest["upstream"]["checkpoint"]["sha256"],
               "versions": versions, "syntheticTracingOnly": True}
@@ -332,6 +384,8 @@ def main(argv=None):
         with (args.output / record["path"]).open("xb") as target:
             target.write((notices / record["path"]).read_bytes())
     export_models(upstream, args.checkpoint, args.output, manifest)
+    if derivation is not None:
+        derive_exported_attention(args.output, manifest, derivation)
     generated = [file_record(args.output / record["path"]) for record in records]
     matches = all(actual["sha256"] == expected["sha256"] and actual["bytes"] == expected["bytes"]
                   for actual, expected in zip(generated, records))

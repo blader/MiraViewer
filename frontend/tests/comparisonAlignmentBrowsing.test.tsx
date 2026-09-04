@@ -6,15 +6,11 @@ import { DicomViewer } from '../src/components/DicomViewer';
 import { AlignedBrowsingContext } from '../src/hooks/useAlignedFrame';
 import { useComparisonAlignment } from '../src/hooks/useComparisonAlignment';
 import { usePanelSettings } from '../src/hooks/usePanelSettings';
-import type { ComparisonData, PanelSettings, SeriesRef } from '../src/types/api';
+import type { AlignmentResult, ComparisonData, PanelSettings, SeriesRef } from '../src/types/api';
 import { DEFAULT_ALIGNMENT_ADJUSTMENT, applyAlignmentAdjustment } from '../src/utils/alignmentAdjustment';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { RenderedSlice } from '../src/utils/cornerstoneSliceCapture';
-import {
-  clearDerivedAlignmentFrames,
-  getDerivedAlignmentFrameByImageId,
-  type DerivedAlignmentFrame,
-} from '../src/utils/derivedAlignmentFrame';
+import { clearDerivedAlignmentFrames, getDerivedAlignmentFrameByImageId } from '../src/utils/derivedAlignmentFrame';
 import { createDerivedImagePresentation, type DerivedImagePresentation } from '../src/utils/derivedImagePresentation';
 import type { SeriesFrameManifest } from '../src/utils/localApi';
 import { getProgressFromSlice, getSliceIndex } from '../src/utils/math';
@@ -26,6 +22,7 @@ import {
   type LongitudinalRegistrationEstimate,
 } from '../src/utils/svr/longitudinalRegistration';
 import { deferred } from './helpers/deferred';
+import { verifiedSourcesForTest } from './helpers/panelSettings';
 
 const mocks = vi.hoisted(() => ({
   manifest: vi.fn(),
@@ -41,6 +38,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.manifest,
   getPanelSettings: mocks.settings,
+  getPanelSettingsSnapshot: async (combo: string, patient: string | null, sources: Record<string, SeriesRef>) => ({
+    datasetToken: 'test-dataset',
+    settings: await mocks.settings(combo, patient),
+    verifiedSources: verifiedSourcesForTest(sources),
+  }),
   savePanelSettings: vi.fn(async () => {}),
   clearPersistedDerivedAlignmentFrames: vi.fn(async () => {}),
   getImageIdForInstance: vi.fn(async (series: string, index: number) => `miradb:${series}-${index}`),
@@ -50,7 +52,7 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({ renderSliceToPixels: mo
 vi.mock('../src/utils/decodedFrame', () => ({
   loadCornerstoneImage: (imageId: string) => cornerstone.loadImage(imageId),
 }));
-vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({ runLongitudinalRegistration: mocks.register }));
+vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({ runLongitudinalEstimate: mocks.register }));
 vi.mock('../src/utils/svr/longitudinalFrames', async (importOriginal) => ({
   ...(await importOriginal<typeof longitudinalFrames>()),
   prepareLongitudinalReferenceInput: mocks.prepareReference,
@@ -277,7 +279,7 @@ function displayed(date: string) {
   const image = call![1] as unknown as DerivedImagePresentation;
   return {
     image,
-    frame: image.derivedSource?.deref() as DerivedAlignmentFrame | undefined,
+    frame: image.derivedSource?.deref() as AlignmentResult['derivedFrame'],
     element: call![0] as HTMLElement,
   };
 }
@@ -363,7 +365,9 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     await tick(650);
     const first = displayed('warm');
     expect(first.frame?.referenceFrameIndex).toBe(1);
-    expect(first.frame?.manualSliceOffset).toBe(1);
+    const acceptedPacket = getDerivedAlignmentFrameByImageId(first.image.imageId);
+    expect(acceptedPacket?.acceptedResult?.derivedFrame).toBe(first.frame);
+    expect(acceptedPacket?.manualSliceOffset).toBe(1);
     expect(first.frame?.displayTone).toBeDefined();
     expect(first.element.parentElement!.style.filter).toBe('brightness(1.18) contrast(0.85)');
     expect(first.element.parentElement!.style.transform).toContain('matrix(1.04, -0.02, 0.01, 0.98, 0, 0)');
@@ -381,7 +385,7 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     const displaysAfterAcceptance = vi.mocked(cornerstone.displayImage).mock.calls.length;
     rerender(<Comparison ref={handle} sliceIndex={1} includeCold />);
     expect(handle.current!.panel.progress).toBe(1 / 6);
-    fireEvent.wheel(within(getByTestId('reference')).getByRole('button', { name: 'Pan MRI slice 2' }), {
+    fireEvent.wheel(within(getByTestId('reference')).getByRole('group', { name: 'Pan MRI slice 2' }), {
       deltaY: 1,
     });
     expect(handle.current!.panel.progress).toBe(2 / 6);
@@ -418,7 +422,7 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     // Revisit needs neither analysis nor a second native reslice: the exact original
     // array is presented again, with the same manually adjusted transform and tone.
     const reslices = mocks.densify.mock.calls.length;
-    fireEvent.wheel(within(getByTestId('reference')).getByRole('button', { name: 'Pan MRI slice 3' }), {
+    fireEvent.wheel(within(getByTestId('reference')).getByRole('group', { name: 'Pan MRI slice 3' }), {
       deltaY: -1,
     });
     expect(handle.current!.panel.progress).toBe(1 / 6);

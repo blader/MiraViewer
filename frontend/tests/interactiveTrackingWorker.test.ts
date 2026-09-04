@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deferred } from './helpers/deferred';
-import { InteractiveTrackingWorker, TRACKING_INACTIVITY_MS } from '../src/utils/segmentation/interactiveTrackingWorker';
+import {
+  InteractiveTrackingWorker,
+  TRACKING_IDLE_MS,
+  TRACKING_INACTIVITY_MS,
+} from '../src/utils/segmentation/interactiveTrackingWorker';
 import type { TrackingFrameDecision } from '../src/utils/segmentation/interactiveTracking';
 import type {
   InteractiveTrackingFrame,
@@ -9,9 +13,32 @@ import type {
   InteractiveTrackingWorkerResponse,
 } from '../src/utils/segmentation/interactiveTrackingWorker';
 
+class MockPort {
+  peer!: MockPort;
+  onmessage: ((event: MessageEvent<InteractiveTrackingWorkerResponse>) => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+  postMessage: (message: InteractiveTrackingWorkerRequest, transfer?: Transferable[]) => void = () => {};
+  close = vi.fn();
+}
+
+class MockMessageChannel {
+  port1 = new MockPort();
+  port2 = new MockPort();
+  constructor() {
+    this.port1.peer = this.port2;
+    this.port2.peer = this.port1;
+  }
+}
+
 class MockWorker {
   static instances: MockWorker[] = [];
-  onmessage: ((event: MessageEvent<InteractiveTrackingWorkerResponse>) => void) | null = null;
+  port: MockPort | null = null;
+  get onmessage() {
+    return this.port?.onmessage ?? null;
+  }
+  set onmessage(value: ((event: MessageEvent<InteractiveTrackingWorkerResponse>) => void) | null) {
+    if (this.port) this.port.onmessage = value;
+  }
   onerror: (() => void) | null = null;
   onmessageerror: (() => void) | null = null;
   messages: InteractiveTrackingWorkerRequest[] = [];
@@ -21,6 +48,12 @@ class MockWorker {
     MockWorker.instances.push(this);
   }
   postMessage(message: InteractiveTrackingWorkerRequest, transfer: Transferable[] = []) {
+    if (message.type !== 'start') throw new Error('Job replies must use their own message channel.');
+    this.port = (transfer[0] as unknown as MockPort).peer;
+    this.port.postMessage = (reply, transfer = []) => this.record(reply, transfer);
+    this.record(message, []);
+  }
+  private record(message: InteractiveTrackingWorkerRequest, transfer: Transferable[]) {
     const received = structuredClone(message, { transfer });
     if (received.type === 'source') received.pixels = new Float32Array(received.pixels.buffer);
     this.messages.push(received);
@@ -44,6 +77,7 @@ function options(overrides: Partial<InteractiveTrackingWorkerOptions> = {}): Int
     ],
     labels: [1, 0],
     provider: 'wasm',
+    admittedRuntimeBytes: 1200 * 1024 * 1024,
     readFrame: async () => Float32Array.of(0, 1, 2, 3),
     onFrame: () => {},
     ...overrides,
@@ -82,9 +116,26 @@ const adjacentFrames = (anchor = 3) =>
   ] as const;
 
 let runner: InteractiveTrackingWorker;
+function expectRetainedRuntime(worker: MockWorker) {
+  expect(worker.terminate).not.toHaveBeenCalled();
+  expect(worker.port?.close).toHaveBeenCalledOnce();
+  expect(runner.retainedBytes).toBeGreaterThan(0);
+  expect(vi.getTimerCount()).toBe(1);
+}
+async function started(overrides: Partial<InteractiveTrackingWorkerOptions>) {
+  const run = runner.run(options(overrides));
+  let earlyError: unknown;
+  void run.catch((error: unknown) => {
+    earlyError = error;
+  });
+  await flush();
+  if (earlyError) throw earlyError;
+  return { run, worker: MockWorker.instances.at(-1)! };
+}
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal('Worker', MockWorker);
+  vi.stubGlobal('MessageChannel', MockMessageChannel);
   MockWorker.instances = [];
   runner = new InteractiveTrackingWorker();
 });
@@ -93,6 +144,337 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it('retains a completed runtime while each correction starts a fresh source/output exchange', async () => {
+  const first = await started({});
+  await deliver(first.worker, 1, 1);
+  await deliver(first.worker, 3, -1);
+  first.worker.respond({ type: 'done', completedFrames: 2 });
+  await expect(first.run).resolves.toEqual({ completedFrames: 2 });
+  expect(first.worker.terminate).not.toHaveBeenCalled();
+
+  const onFrame = vi.fn();
+  const second = await started({ points: [[1, 0]], labels: [1], onFrame });
+  expect(second.worker).toBe(first.worker);
+  await deliver(second.worker, 1, 1);
+  await deliver(second.worker, 3, -1);
+  second.worker.respond({ type: 'done', completedFrames: 2 });
+  await expect(second.run).resolves.toEqual({ completedFrames: 2 });
+  expect(onFrame.mock.calls.map(([value]) => [value.index, value.direction])).toEqual([
+    [0, 1],
+    [0, -1],
+  ]);
+  expect(MockWorker.instances).toHaveLength(1);
+  runner.dispose();
+  expect(first.worker.terminate).toHaveBeenCalledOnce();
+});
+
+it('expires the idle runtime and creates a fresh one after expiry', async () => {
+  const first = await started({});
+  await deliver(first.worker, 1, 1);
+  await deliver(first.worker, 3, -1);
+  first.worker.respond({ type: 'done', completedFrames: 2 });
+  await first.run;
+  expect(runner.hasWorker).toBe(true);
+  await vi.advanceTimersByTimeAsync(TRACKING_IDLE_MS - 1);
+  expect(first.worker.terminate).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(first.worker.terminate).toHaveBeenCalledOnce();
+  expect(runner.hasWorker).toBe(false);
+  const next = await started({});
+  const rejection = expect(next.run).rejects.toMatchObject({ name: 'AbortError' });
+  expect(next.worker).not.toBe(first.worker);
+  runner.dispose();
+  await rejection;
+});
+
+it('releases the idle runtime on cancellation before selection publication finishes', async () => {
+  const abort = new AbortController();
+  const first = await started({ signal: abort.signal });
+  await deliver(first.worker, 1, 1);
+  await deliver(first.worker, 3, -1);
+  first.worker.respond({ type: 'done', completedFrames: 2 });
+  await first.run;
+  expect(runner.retainedBytes).toBeGreaterThan(0);
+  abort.abort();
+  expect(first.worker.terminate).toHaveBeenCalledOnce();
+  expect(runner.retainedBytes).toBe(0);
+});
+
+it('isolates a later correction from the previous completed signal and message channel', async () => {
+  const abort = new AbortController();
+  const first = await started({ signal: abort.signal });
+  const oldReply = first.worker.onmessage!;
+  await deliver(first.worker, 1, 1);
+  await deliver(first.worker, 3, -1);
+  first.worker.respond({ type: 'done', completedFrames: 2 });
+  await first.run;
+  const second = await started({});
+  abort.abort();
+  oldReply({ data: { type: 'error', message: 'late old failure' } } as MessageEvent<InteractiveTrackingWorkerResponse>);
+  expect(second.worker.terminate).not.toHaveBeenCalled();
+  await deliver(second.worker, 1, 1);
+  await deliver(second.worker, 3, -1);
+  second.worker.respond({ type: 'done', completedFrames: 2 });
+  await expect(second.run).resolves.toEqual({ completedFrames: 2 });
+  expect(second.worker.terminate).not.toHaveBeenCalled();
+});
+
+it('retains the larger runtime allowance across small jobs and reclaims it on provider replacement', async () => {
+  const first = await started({
+    admittedRuntimeBytes: 1500 * 1024 * 1024,
+    points: Array.from({ length: 1000 }, () => [0, 0] as const),
+    labels: Array.from({ length: 1000 }, () => 1 as const),
+  });
+  const largeAllowance = runner.retainedBytes;
+  expect(largeAllowance).toBe(1500 * 1024 * 1024);
+  await deliver(first.worker, 1, 1);
+  await deliver(first.worker, 3, -1);
+  first.worker.respond({ type: 'done', completedFrames: 2 });
+  await first.run;
+  const smaller = await started({});
+  expect(smaller.worker).toBe(first.worker);
+  expect(runner.retainedBytes).toBe(largeAllowance);
+  expect(runner.releaseIdle()).toBe(false);
+  await deliver(smaller.worker, 1, 1);
+  await deliver(smaller.worker, 3, -1);
+  smaller.worker.respond({ type: 'done', completedFrames: 2 });
+  await smaller.run;
+  const replacement = await started({ provider: 'hybrid' });
+  expect(first.worker.terminate).toHaveBeenCalledOnce();
+  expect(replacement.worker).not.toBe(first.worker);
+  expect(runner.retainedBytes).toBeLessThan(largeAllowance);
+  const rejected = expect(replacement.run).rejects.toMatchObject({ name: 'AbortError' });
+  runner.dispose();
+  await rejected;
+  expect(runner.retainedBytes).toBe(0);
+});
+
+describe('multi-plane final-prefix transport', () => {
+  const finalFrames = [
+    [4, 1],
+    [5, 1],
+    [6, 1],
+    [7, 1],
+    [4, -1],
+    [3, -1],
+    [2, -1],
+    [1, -1],
+  ] as const;
+  const stopped = { completedFrames: 8, directionEndpoints: { forward: 7, reverse: 1 } };
+  const start = (overrides: Partial<InteractiveTrackingWorkerOptions> = {}) =>
+    started({
+      frameCount: 9,
+      anchorIndex: 4,
+      allowDirectionStop: true,
+      markedFrames: [
+        { index: 6, points: [[0.5, 1.25]], labels: [0] },
+        { index: 2, points: [[0.25, 1.5]], labels: [1] },
+      ],
+      onFrame: (value) => (value.index === (value.direction === 1 ? 7 : 1) ? 'stop-direction' : undefined),
+      ...overrides,
+    });
+  async function prepare(worker: MockWorker) {
+    let requestId = 0;
+    for (const [index, direction] of [
+      [4, 1],
+      [5, 1],
+      [6, 1],
+      [3, -1],
+      [2, -1],
+    ] as const) {
+      worker.respond({ type: 'read-frame', stage: 'prepare', requestId: ++requestId, index, direction });
+      await flush();
+    }
+    return requestId;
+  }
+  async function emitFinal(worker: MockWorker, requestId: number, index: number, direction: 1 | -1) {
+    if (![2, 4, 6].includes(index)) {
+      worker.respond({ type: 'read-frame', stage: 'final', requestId: ++requestId, index, direction });
+      await flush();
+    }
+    worker.respond({
+      type: 'frame',
+      requestId: ++requestId,
+      frame: { index, direction, initial: index === 4, nativeLogits: new Float32Array(4).fill(-1) },
+    });
+    await flush();
+    return requestId;
+  }
+
+  it('preserves complete preparation inputs and order before acknowledging the observed final endpoints', async () => {
+    const inputs: Float32Array[] = [];
+    const readFrame = vi.fn<InteractiveTrackingWorkerOptions['readFrame']>(async (index) => {
+      const pixels = Float32Array.of(index, index + 0.25, index + 0.5, index + 0.75);
+      inputs.push(pixels);
+      return pixels;
+    });
+    const onFrame = vi.fn<InteractiveTrackingWorkerOptions['onFrame']>((value) =>
+      value.index === (value.direction === 1 ? 7 : 1) ? 'stop-direction' : undefined,
+    );
+    const { run, worker } = await start({ readFrame, onFrame, sourceRange: [0, 9] });
+    expect(worker.messages[0]).toMatchObject({
+      type: 'start',
+      job: {
+        markedFrames: [
+          { index: 6, points: [[0.5, 1.25]], labels: [0] },
+          { index: 2, points: [[0.25, 1.5]], labels: [1] },
+        ],
+        sourceRange: [0, 9],
+      },
+    });
+    let requestId = await prepare(worker);
+    expect(readFrame.mock.calls.map(([index]) => index)).toEqual([4, 5, 6, 3, 2]);
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(worker.messages.filter((message) => message.type === 'consumed')).toEqual([]);
+    expect(
+      worker.messages.filter((message) => message.type === 'source').map((message) => [...message.pixels]),
+    ).toEqual(inputs.map((pixels) => [...pixels]));
+    for (const [index, direction] of finalFrames) requestId = await emitFinal(worker, requestId, index, direction);
+    expect(worker.messages.filter((message) => message.type === 'consumed')).toEqual([
+      { type: 'consumed', requestId: 6 },
+      { type: 'consumed', requestId: 8 },
+      { type: 'consumed', requestId: 9 },
+      { type: 'consumed', requestId: 11, stopDirection: true },
+      { type: 'consumed', requestId: 12 },
+      { type: 'consumed', requestId: 14 },
+      { type: 'consumed', requestId: 15 },
+      { type: 'consumed', requestId: 17, stopDirection: true },
+    ]);
+    worker.respond({ type: 'done', ...stopped });
+    await expect(run).resolves.toEqual(stopped);
+    expect(readFrame.mock.calls.map(([index]) => index)).toEqual([4, 5, 6, 3, 2, 5, 7, 3, 1]);
+    expect(onFrame.mock.calls.map(([value]) => [value.index, value.direction])).toEqual(finalFrames);
+    for (let i = 0; i < inputs.length; i++) {
+      const index = readFrame.mock.calls[i]![0];
+      expect(inputs[i]).toEqual(Float32Array.of(index, index + 0.25, index + 0.5, index + 0.75));
+    }
+    expectRetainedRuntime(worker);
+  });
+
+  it.each([
+    { direction: 1, stop: 5 },
+    { direction: 1, stop: 6 },
+    { direction: -1, stop: 3 },
+    { direction: -1, stop: 2 },
+  ])(
+    'rejects a stop ACK before or on the literal fence at $stop in direction $direction',
+    async ({ direction, stop }) => {
+      const onFrame = vi.fn<InteractiveTrackingWorkerOptions['onFrame']>((value) => {
+        if (value.direction === direction && value.index === stop) return 'stop-direction';
+        if (direction === -1 && value.direction === 1 && value.index === 7) return 'stop-direction';
+      });
+      const { run, worker } = await start({ onFrame });
+      const rejected = expect(run).rejects.toThrow();
+      let requestId = await prepare(worker);
+      for (const [index, currentDirection] of finalFrames) {
+        requestId = await emitFinal(worker, requestId, index, currentDirection);
+        if (currentDirection === direction && index === stop) break;
+      }
+      await rejected;
+      expect(onFrame).toHaveBeenLastCalledWith(expect.objectContaining({ index: stop, direction }));
+      expect(worker.messages.filter((message) => message.type === 'consumed' && message.stopDirection)).toHaveLength(
+        direction === 1 ? 0 : 1,
+      );
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    { completedFrames: 8 },
+    { completedFrames: 10, directionEndpoints: { forward: 7, reverse: 1 } },
+    { completedFrames: 8, directionEndpoints: { forward: 8, reverse: 1 } },
+    { completedFrames: 8, directionEndpoints: { forward: 7, reverse: 0 } },
+  ])('rejects terminal metadata not derived from multi-plane final ACKs: %j', async (terminal) => {
+    const { run, worker } = await start();
+    const rejected = expect(run).rejects.toThrow(/before every source plane/);
+    let requestId = await prepare(worker);
+    for (const [index, direction] of finalFrames) requestId = await emitFinal(worker, requestId, index, direction);
+    worker.respond({ type: 'done', ...terminal });
+    await rejected;
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['provisional-output', 'skipped-preparation', 'early-terminal'] as const)(
+    'rejects %s without turning preparation into final coverage',
+    async (invalid) => {
+      const onFrame = vi.fn();
+      const { run, worker } = await start({ onFrame });
+      const rejected = expect(run).rejects.toThrow(/out-of-order|before every source plane/);
+      if (invalid === 'provisional-output')
+        worker.respond({ type: 'frame', requestId: 1, frame: { ...frame(4), initial: true } });
+      else if (invalid === 'skipped-preparation')
+        worker.respond({ type: 'read-frame', requestId: 1, index: 4, direction: 1, stage: 'final' });
+      else worker.respond({ type: 'done', ...stopped });
+      await rejected;
+      expect(onFrame).not.toHaveBeenCalled();
+      expect(worker.messages.filter((message) => message.type === 'consumed')).toEqual([]);
+      expect(worker.terminate).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('rejects terminal success while a multi-plane stop decision is still unacknowledged', async () => {
+    const sink = deferred<TrackingFrameDecision>();
+    const { run, worker } = await start({ onFrame: (value) => (value.index === 7 ? sink.promise : undefined) });
+    const rejected = expect(run).rejects.toThrow(/before every source plane/);
+    let requestId = await prepare(worker);
+    for (const [index, direction] of finalFrames.slice(0, 4))
+      requestId = await emitFinal(worker, requestId, index, direction);
+    worker.respond({ type: 'done', ...stopped });
+    await rejected;
+    const messages = worker.messages.length;
+    sink.resolve('stop-direction');
+    await flush();
+    expect(worker.messages).toHaveLength(messages);
+    expect(worker.messages.some((message) => message.type === 'consumed' && message.stopDirection)).toBe(false);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['preparation', 'stop-ack'] as const)(
+    'cancels %s without late publication or damage to a replacement job',
+    async (stage) => {
+      const abort = new AbortController(),
+        source = deferred<Float32Array>(),
+        sink = deferred<TrackingFrameDecision>();
+      const onFrame = vi.fn<InteractiveTrackingWorkerOptions['onFrame']>((value) =>
+        value.index === 7 ? sink.promise : undefined,
+      );
+      const { run, worker } = await start({
+        signal: abort.signal,
+        onFrame,
+        readFrame: () => (stage === 'preparation' ? source.promise : new Float32Array(4)),
+      });
+      const rejected = expect(run).rejects.toMatchObject({ name: 'AbortError' });
+      if (stage === 'preparation')
+        worker.respond({ type: 'read-frame', stage: 'prepare', requestId: 1, index: 4, direction: 1 });
+      else {
+        let requestId = await prepare(worker);
+        for (const [index, direction] of finalFrames.slice(0, 4))
+          requestId = await emitFinal(worker, requestId, index, direction);
+      }
+      abort.abort();
+      await rejected;
+      const messages = worker.messages.length;
+      const replacement = runner.run(options());
+      const current = MockWorker.instances.at(-1)!;
+      source.resolve(new Float32Array(4));
+      sink.resolve('stop-direction');
+      await flush();
+      expect(worker.messages).toHaveLength(messages);
+      expect(worker.messages.some((message) => message.type === 'consumed' && message.stopDirection)).toBe(false);
+      expect(onFrame).toHaveBeenCalledTimes(stage === 'preparation' ? 0 : 4);
+      expect(current.terminate).not.toHaveBeenCalled();
+      await deliver(current, 1, 1);
+      await deliver(current, 3, -1);
+      current.respond({ type: 'done', completedFrames: 2 });
+      await expect(replacement).resolves.toEqual({ completedFrames: 2 });
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      expectRetainedRuntime(current);
+    },
+  );
 });
 
 describe('dedicated interactive tracking transport', () => {
@@ -122,8 +504,7 @@ describe('dedicated interactive tracking transport', () => {
     await expect(run).resolves.toEqual({ completedFrames: 4, directionEndpoints: { forward: 4, reverse: 2 } });
     expect(readFrame.mock.calls.map(([index]) => index)).toEqual([3, 4, 3, 2]);
     expect(onFrame).toHaveBeenCalledTimes(4);
-    expect(worker.terminate).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expectRetainedRuntime(worker);
   });
 
   it('derives stop endpoints from validated metadata even if the consumer mutates its owned frame object', async () => {
@@ -242,19 +623,66 @@ describe('dedicated interactive tracking transport', () => {
     },
   );
 
-  it.each([0, 1] as const)('rejects opted off-anchor label%s before creating a worker', async (label) => {
-    await expect(
-      runner.run(
-        options({
-          frameCount: 7,
-          anchorIndex: 3,
-          allowDirectionStop: true,
-          markedFrames: [{ index: 4, points: [[0, 0]], labels: [label] }],
-        }),
-      ),
-    ).rejects.toThrow(/single marked source plane/);
-    expect(MockWorker.instances).toHaveLength(0);
-  });
+  it.each([0, 1] as const)(
+    'prepares off-anchor label%s and acknowledges only final stops past its fence',
+    async (label) => {
+      const onFrame = vi.fn<InteractiveTrackingWorkerOptions['onFrame']>((value) => {
+        if (value.index === (value.direction === 1 ? 5 : 2)) return 'stop-direction';
+      });
+      const { run, worker } = await started({
+        frameCount: 7,
+        anchorIndex: 3,
+        allowDirectionStop: true,
+        onFrame,
+        markedFrames: [{ index: 4, points: [[0, 0]], labels: [label] }],
+      });
+      for (const [requestId, index] of [
+        [1, 3],
+        [2, 4],
+      ]) {
+        worker.respond({ type: 'read-frame', stage: 'prepare', requestId, index, direction: 1 });
+        await flush();
+      }
+      expect(onFrame).not.toHaveBeenCalled();
+      expect(worker.messages.filter((message) => message.type === 'consumed')).toEqual([]);
+      let requestId = 2;
+      for (const [index, direction] of [
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [3, -1],
+        [2, -1],
+      ] as const) {
+        if (index !== 3 && index !== 4) {
+          worker.respond({ type: 'read-frame', stage: 'final', requestId: ++requestId, index, direction });
+          await flush();
+        }
+        worker.respond({
+          type: 'frame',
+          requestId: ++requestId,
+          frame: { ...frame(index, direction), initial: index === 3 },
+        });
+        await flush();
+      }
+      expect(worker.messages.filter((message) => message.type === 'consumed')).toEqual([
+        { type: 'consumed', requestId: 3 },
+        { type: 'consumed', requestId: 4 },
+        { type: 'consumed', requestId: 6, stopDirection: true },
+        { type: 'consumed', requestId: 7 },
+        { type: 'consumed', requestId: 9, stopDirection: true },
+      ]);
+      worker.respond({ type: 'done', completedFrames: 5, directionEndpoints: { forward: 5, reverse: 2 } });
+      await expect(run).resolves.toEqual({ completedFrames: 5, directionEndpoints: { forward: 5, reverse: 2 } });
+      expect(onFrame.mock.calls.map(([value]) => [value.index, value.direction])).toEqual([
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [3, -1],
+        [2, -1],
+      ]);
+      expectRetainedRuntime(worker);
+    },
+  );
 
   it.each([
     { completedFrames: 4 },
@@ -376,7 +804,7 @@ describe('dedicated interactive tracking transport', () => {
     current.respond({ type: 'done', completedFrames: 2 });
     await expect(replacement).resolves.toEqual({ completedFrames: 2 });
     expect(old.terminate).toHaveBeenCalledOnce();
-    expect(current.terminate).toHaveBeenCalledOnce();
+    expectRetainedRuntime(current);
   });
 
   it.each(['hybrid', 'gpu-memory'] as const)(
@@ -389,7 +817,7 @@ describe('dedicated interactive tracking transport', () => {
       await deliver(worker, 3, -1);
       worker.respond({ type: 'done', completedFrames: 2 });
       await expect(run).resolves.toEqual({ completedFrames: 2 });
-      expect(worker.terminate).toHaveBeenCalledOnce();
+      expectRetainedRuntime(worker);
     },
   );
 
@@ -444,7 +872,7 @@ describe('dedicated interactive tracking transport', () => {
     expect(worker.terminate).toHaveBeenCalledOnce();
   });
 
-  it('waits for source and owned-output consumers, includes both anchors, and tears down on completion', async () => {
+  it('waits for source and owned-output consumers, includes both anchors, and closes only the completed job', async () => {
     const source = deferred<Float32Array>();
     const sink = deferred<void>();
     const readFrame = vi
@@ -483,8 +911,7 @@ describe('dedicated interactive tracking transport', () => {
     ]);
     worker.respond({ type: 'done', completedFrames: 2 });
     await expect(run).resolves.toEqual({ completedFrames: 2 });
-    expect(worker.terminate).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expectRetainedRuntime(worker);
     expect(readFrame.mock.calls[0][1].aborted).toBe(true);
     runner.dispose();
     expect(worker.terminate).toHaveBeenCalledOnce();
@@ -696,8 +1123,7 @@ describe('dedicated interactive tracking transport', () => {
       [1, -1],
       [0, -1],
     ]);
-    expect(worker.terminate).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expectRetainedRuntime(worker);
   });
 
   it('checks forward-then-reverse preparation ordering without inventing extra source planes', async () => {

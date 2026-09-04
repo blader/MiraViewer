@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { usePanelSettings } from '../src/hooks/usePanelSettings';
+import { useTestPanelSettings as usePanelSettings, verifiedSourcesForTest } from './helpers/panelSettings';
 import { useVisibleAlignment } from '../src/hooks/useVisibleAlignment';
 import type {
   AlignmentAdjustment,
@@ -15,6 +15,11 @@ import { getEffectiveInstanceIndex, getSliceIndex } from '../src/utils/math';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn(),
+  getPanelSettingsSnapshot: async (combo: string, patient: string | null, sources: Record<string, SeriesRef>) => ({
+    datasetToken: 'test-dataset',
+    settings: await getPanelSettings(combo, patient),
+    verifiedSources: verifiedSourcesForTest(sources),
+  }),
   savePanelSettings: vi.fn(),
   MAX_DERIVED_ALIGNMENT_FRAMES: 32,
   loadDerivedAlignmentFrames: vi.fn().mockResolvedValue([]),
@@ -248,10 +253,8 @@ describe('manual corrections remain linked to automatic alignment', () => {
     act(redo);
     expect(result.current.panelSettings.get(DATE)).toMatchObject({ brightness: 108, offset: 11 });
     expect(savePanelSettings).toHaveBeenLastCalledWith(
-      SEQUENCE,
-      DATE,
+      expect.objectContaining({ studyUid: `${PATIENT}:${DATE}`, datasetToken: 'test-dataset' }),
       expect.objectContaining({ brightness: 108, alignmentAdjustment: expect.objectContaining({ brightness: 13 }) }),
-      PATIENT,
     );
   });
 
@@ -625,7 +628,7 @@ describe('durable manual alignment intent', () => {
     const first = await mountSettings();
     act(() => applyAutomatic(first.result.current, baselineA()));
     act(() => first.result.current.updatePanelSetting(DATE, { offset: 10, zoom: 1.8, brightness: 123 }));
-    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![2];
+    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![1];
     expect(saved.alignmentAdjustment).toMatchObject({ sliceOffset: 2, zoom: 1.5, brightness: 13 });
     first.unmount();
 
@@ -658,7 +661,7 @@ describe('durable manual alignment intent', () => {
     act(() => first.result.current.updatePanelSetting(DATE, { brightness: 200 }));
     act(() => applyAutomatic(first.result.current, baselineB({ brightness: 199 })));
     act(() => window.dispatchEvent(new Event('beforeunload')));
-    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![2];
+    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![1];
     expect(saved).toMatchObject({
       brightness: 200,
       alignmentAdjustment: { brightness: 10 },
@@ -686,7 +689,7 @@ describe('durable manual alignment intent', () => {
         alignmentPaused: true,
       }),
     );
-    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![2];
+    const saved = vi.mocked(savePanelSettings).mock.calls.at(-1)![1];
     expect(saved).toMatchObject({
       alignmentPaused: true,
       brightness: 100,

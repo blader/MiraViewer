@@ -283,7 +283,8 @@ let cachedWorkerPromise: Promise<Worker> | null = null;
 let cachedWorkerInstance: Worker | null = null;
 const cachedParameterMaps = new Map<string, JsonCompatible>();
 
-function terminateWorker(worker: Worker): void {
+export function disposeElastixWorker(worker: Worker): void {
+  invalidateCachedWorker({ worker });
   try {
     worker.terminate();
   } catch {
@@ -313,7 +314,7 @@ function getElastixWorker(): Promise<Worker> {
         if (message.includes('timed out')) {
           // The timeout cannot cancel the worker factory. If it eventually succeeds, terminate
           // the now-unreachable worker instead of leaking it alongside the retry.
-          void initialization.then(terminateWorker, () => undefined);
+          void initialization.then(disposeElastixWorker, () => undefined);
         }
         throw error;
       }
@@ -384,7 +385,7 @@ async function register2DWithElastix(
       opts?.signal,
       () => {
         invalidateCachedWorker({ promise: workerPromise });
-        void workerPromise.then(terminateWorker).catch(() => undefined);
+        void workerPromise.then(disposeElastixWorker).catch(() => undefined);
       },
       'Elastix worker initialization',
     );
@@ -398,7 +399,7 @@ async function register2DWithElastix(
     for (const worker of ownedWorkers) {
       if (!terminatedWorkers.has(worker)) {
         terminatedWorkers.add(worker);
-        terminateWorker(worker);
+        disposeElastixWorker(worker);
       }
       invalidateCachedWorker({ worker });
     }

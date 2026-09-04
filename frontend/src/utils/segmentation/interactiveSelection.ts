@@ -3,9 +3,9 @@ import { transferSelectionAnnotations } from '../svr/annotationTransfer';
 import { patientToVolumeVoxel, volumeVoxelToPatient } from '../svr/volumeGeometry';
 import type { TrackingSourceRange } from './interactiveFrame';
 import type { InteractiveTrackingProvider } from './efficientTam/model';
-import { createInteractivePlaneReader, mapInteractiveMarks, mapInteractivePlane } from './interactiveGeometry';
-import { collectTrackingPrompts } from './interactivePrompts';
-import { InteractiveTrackingWorker } from './interactiveTrackingWorker';
+import { createInteractivePlaneReader, mapInteractiveMarks } from './interactiveGeometry';
+import { planTrackingPrompts } from './interactivePrompts';
+import type { InteractiveTrackingWorker } from './interactiveTrackingWorker';
 import { SELECTION_LABEL_META, SLICE_AXES } from './selectionEditing';
 import type { SelectionProposalRequest, SelectionProposalResult } from './selectionProposal';
 import { prepareEmptyEditingPlanePruning } from './emptyEditingPlane';
@@ -15,6 +15,11 @@ type InteractiveSelectionSource = {
   nativeContext: SvrVolume;
   sourceRange: TrackingSourceRange;
   provider: InteractiveTrackingProvider;
+  admittedRuntimeBytes: number;
+  /** Borrowed from the accepted source; this operation never creates another runtime. */
+  worker: Pick<InteractiveTrackingWorker, 'run' | 'releaseIdle'>;
+  /** Source admission includes this runtime beside projection and publication. */
+  retainRuntimeAfterRun?: boolean;
   /** Opt-in consumer contract: hard marks and foreground-connected components determine the final mask. */
   retainMarkedComponents?: true;
 };
@@ -35,13 +40,21 @@ function limitsEditingGrid(context: SvrVolume, editing: SvrVolume): boolean {
 }
 
 /**
- * A disposable model proposal on real native planes, returned on the existing editing grid.
+ * A model proposal on real native planes, returned on the existing editing grid.
  * Literal brush marks, publication and undo remain owned by the selection hook. No model
  * output is published before coverage is complete or unseen tails are certified
  * irrelevant to the explicitly requested connected selection. No classifier fallback is applied.
  */
 export async function proposeInteractiveSelection(
-  { nativeContext, sourceRange, provider, retainMarkedComponents }: InteractiveSelectionSource,
+  {
+    nativeContext,
+    sourceRange,
+    provider,
+    admittedRuntimeBytes,
+    worker,
+    retainRuntimeAfterRun,
+    retainMarkedComponents,
+  }: InteractiveSelectionSource,
   { volume, seeds, signal, onProgress }: SelectionProposalRequest,
 ): Promise<SelectionProposalResult> {
   const abort = () => {
@@ -52,12 +65,10 @@ export async function proposeInteractiveSelection(
     throw new Error(
       'Add an inside or outside mark on a slice before suggesting a boundary; the editing plane is missing.',
     );
-  const stroke = mapInteractivePlane(volume, nativeContext, seeds.lastStroke);
-  const marks = {
-    foreground: mapInteractiveMarks(volume, nativeContext, seeds.foreground),
-    background: mapInteractiveMarks(volume, nativeContext, seeds.background),
-  };
-  const frames = collectTrackingPrompts(nativeContext, stroke.plane, marks);
+  // Validate every literal mark against the loaded native samples, not just the
+  // representative prompts. Compression never relaxes hard-mark ownership.
+  for (const indices of [seeds.foreground, seeds.background]) mapInteractiveMarks(volume, nativeContext, indices);
+  const { stroke, frames } = planTrackingPrompts(volume, nativeContext, seeds);
   const anchor = frames
     .filter((frame) => frame.labels.includes(1))
     .sort((a, b) => Math.abs(a.index - stroke.slice) - Math.abs(b.index - stroke.slice) || a.index - b.index)[0];
@@ -68,7 +79,7 @@ export async function proposeInteractiveSelection(
     max: { x: nx - 1, y: ny - 1, z: nz - 1 },
   });
   const certifyEmptyPlane =
-    retainMarkedComponents === true && frames.length === 1
+    retainMarkedComponents === true
       ? await prepareEmptyEditingPlanePruning(nativeContext, volume, seeds, stroke.plane, anchor.index, signal)
       : null;
   abort();
@@ -88,6 +99,10 @@ export async function proposeInteractiveSelection(
   const columnStep = editingSteps[axisIndex[axes.column]]!,
     rowStep = editingSteps[axisIndex[axes.row]]!,
     frameStep = editingSteps[axisIndex[axes.slice]]!;
+  const preparationMax = frames[frames.length - 1]!.index;
+  const preparationFrames = frames.length > 1 ? preparationMax - frames[0]!.index + 1 : 0;
+  const progressFrames = preparationFrames + reader.frameCount + 1;
+  let preparedFrames = 0;
   let receivedFrames = 0;
   let boundaryCount = 0;
   let clippedNativeVoxels = 0;
@@ -96,9 +111,9 @@ export async function proposeInteractiveSelection(
     reversing = false,
     pruned = false;
   const barriers: { forward?: number; reverse?: number } = {};
-  const worker = new InteractiveTrackingWorker();
   try {
     const result = await worker.run({
+      admittedRuntimeBytes,
       width: reader.width,
       height: reader.height,
       frameCount: reader.frameCount,
@@ -111,6 +126,22 @@ export async function proposeInteractiveSelection(
       ...(certifyEmptyPlane ? { allowDirectionStop: true as const } : {}),
       signal,
       readFrame: reader.readFrame,
+      onProgress(progress) {
+        if (
+          !preparationFrames ||
+          receivedFrames ||
+          progress.phase !== 'preparing' ||
+          progress.stage !== 'frame-complete'
+        )
+          return;
+        // Preparation visits the anchor through the last mark, then the remaining lower planes.
+        const completed =
+          progress.direction === 1 ? progress.index - anchor.index + 1 : preparationMax - progress.index + 1;
+        if (Number.isSafeInteger(completed) && completed > preparedFrames && completed <= preparationFrames) {
+          preparedFrames = completed;
+          onProgress((0.95 * preparedFrames) / progressFrames);
+        }
+      },
       async onFrame({ index, direction, initial, nativeLogits }) {
         abort();
         if (
@@ -184,7 +215,7 @@ export async function proposeInteractiveSelection(
         // Certified irrelevant work contributes to progress, never to observed coverage.
         const skipped =
           (barriers.forward === undefined ? 0 : reader.frameCount - 1 - barriers.forward) + (barriers.reverse ?? 0);
-        onProgress((0.95 * (receivedFrames + skipped)) / (reader.frameCount + 1));
+        onProgress((0.95 * (preparationFrames + receivedFrames + skipped)) / progressFrames);
         if (barriers[key] === index) return 'stop-direction';
       },
     });
@@ -205,7 +236,7 @@ export async function proposeInteractiveSelection(
       throw new Error('Interactive selection ended before every native source plane was returned.');
     pruned = forward < reader.frameCount - 1 || reverse > 0;
   } finally {
-    worker.dispose();
+    if (!retainRuntimeAfterRun) worker.releaseIdle();
   }
 
   const transferred = await transferSelectionAnnotations(

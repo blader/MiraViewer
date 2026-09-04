@@ -5,7 +5,7 @@ import {
   mapInteractiveMarks,
   mapInteractivePlane,
 } from '../src/utils/segmentation/interactiveGeometry';
-import { voxelIndex, type VoxelBounds } from '../src/utils/segmentation/seededVolume';
+import { voxelIndex, type VoxelBounds } from '../src/utils/segmentation/voxelGeometry';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 
 type Triple = [number, number, number];

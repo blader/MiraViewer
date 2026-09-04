@@ -51,6 +51,7 @@ const CARDINAL_CHANNEL_COUNT = 4;
 const MIN_LOCAL_VARIATION = 1e-6;
 
 const DEFAULT_OFFSETS: readonly MindOffset2D[] = Object.freeze(DIRECTIONS.map(([dx, dy]) => Object.freeze({ dx, dy })));
+export const MIND_DESCRIPTOR_FOOTPRINT_RADIUS = descriptorFootprintRadius(PATCH_RADIUS, DEFAULT_OFFSETS);
 
 export function createMindDescriptorScratch(size: number): MindDescriptorScratch {
   if (!Number.isInteger(size) || size <= 0) {
@@ -156,7 +157,7 @@ export function computeMindDescriptor2D(
   const offsets = DEFAULT_OFFSETS;
   const channelCount = offsets.length;
   const centerCount = size * size;
-  const footprintRadius = descriptorFootprintRadius(PATCH_RADIUS, offsets);
+  const footprintRadius = MIND_DESCRIPTOR_FOOTPRINT_RADIUS;
   const squaredDifferences = scratch?.squaredDifferences ?? new Float32Array(centerCount);
   const horizontalConvolution = scratch?.horizontalConvolution ?? new Float32Array(centerCount);
   const patchDistances = scratch?.patchDistances ?? new Float32Array(centerCount * channelCount);

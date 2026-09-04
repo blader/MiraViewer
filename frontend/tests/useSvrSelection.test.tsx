@@ -3,17 +3,16 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import { useSvrSelection } from '../src/hooks/useSvrSelection';
-import {
-  SeededVolumeWorker,
-  type SeededWorkerRequest,
-  type SeededWorkerResponse,
-} from '../src/utils/segmentation/seededVolumeWorker';
 import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing';
 import type { SelectionProposer, SelectionProposalResult } from '../src/utils/segmentation/selectionProposal';
+import {
+  estimateInteractiveSelectionMemory,
+  InteractiveSelectionMemoryError,
+} from '../src/utils/segmentation/interactiveAdmission';
 import * as seedConnectedSelection from '../src/utils/segmentation/seedConnectedSelection';
 import * as svrUtils from '../src/utils/svr/svrUtils';
 import { deferred } from './helpers/deferred';
-import { proposedRegion } from './helpers/selectionInteraction';
+import { proposedRegion, testSelectionProposer } from './helpers/selectionInteraction';
 
 function volume(size = 12): SvrVolume {
   return {
@@ -25,11 +24,26 @@ function volume(size = 12): SvrVolume {
     boundsMm: { min: [0, 0, 0], max: [size, size, size] },
   };
 }
+function memoryRejection(source: SvrVolume, literalMarkCount = 1) {
+  const counts = { conditioningFrames: 1, maximumFramePrompts: literalMarkCount, literalMarkCount };
+  const retainedBytes = source.data.byteLength + (source.observedSupport?.byteLength ?? 0);
+  const estimate = estimateInteractiveSelectionMemory({
+    retainedBytes,
+    sourceLoadPeakBytes: retainedBytes,
+    contextBytes: source.data.length * 5,
+    editingVoxels: source.data.length,
+    width: source.dims[0],
+    height: source.dims[1],
+    frameCount: source.dims[2],
+    ...counts,
+  });
+  return new InteractiveSelectionMemoryError(estimate, 1024 * 1024 * 1024, counts);
+}
 function setup(
   source = volume(),
   saved: SvrLabelVolume | null = null,
   automatic = false,
-  proposeSelection?: SelectionProposer,
+  proposeSelection: SelectionProposer | undefined = testSelectionProposer,
   onPublish?: (labels: SvrLabelVolume | null) => void,
 ) {
   return renderHook(
@@ -46,36 +60,8 @@ function setup(
     { initialProps: { source, automatic } },
   );
 }
-function selectionWorkers() {
-  const workers: MockWorker[] = [];
-  class MockWorker {
-    onmessage: ((event: MessageEvent<SeededWorkerResponse>) => void) | null = null;
-    postMessage = vi.fn<(message: SeededWorkerRequest) => void>();
-    terminate = vi.fn();
-    constructor() {
-      workers.push(this);
-    }
-    complete(indices: number[]) {
-      const run = this.postMessage.mock.calls.at(-1)?.[0];
-      if (run?.type !== 'run') throw new Error('No pending suggestion.');
-      this.onmessage?.({
-        data: {
-          type: 'done',
-          id: run.id,
-          result: {
-            indices: Uint32Array.from(indices),
-            bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-            boundaryCount: 0,
-            domainVoxels: 1728,
-          },
-        },
-      } as MessageEvent<SeededWorkerResponse>);
-    }
-  }
-  vi.stubGlobal('Worker', MockWorker);
-  return workers;
-}
 beforeEach(() => {
+  testSelectionProposer.mockReset();
   // History tests advance the brush debounce with fake timers. Keep asynchronous
   // postprocessing, without depending on a real MessageChannel macrotask clock.
   vi.spyOn(svrUtils, 'yieldToMain').mockResolvedValue();
@@ -95,7 +81,7 @@ describe('learned selection proposals share the existing editing authority', () 
   }
 
   it('publishes a private supported copy, preserving hard marks, source data, and proposal ownership', async () => {
-    const legacy = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    const legacy = testSelectionProposer;
     const source = volume();
     source.data[31] = NaN;
     source.data[32] = Infinity;
@@ -140,7 +126,7 @@ describe('learned selection proposals share the existing editing authority', () 
 
   it('keeps a failed automatic proposal as just its reversible brush edit, with no legacy fallback', async () => {
     vi.useFakeTimers();
-    const legacy = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    const legacy = testSelectionProposer;
     const proposer = vi.fn<SelectionProposer>().mockRejectedValue(new Error('Native model memory is unavailable.'));
     const { result } = setup(volume(), null, true, proposer);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
@@ -159,6 +145,166 @@ describe('learned selection proposals share the existing editing authority', () 
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(proposer).toHaveBeenCalledOnce();
   });
+
+  it('preserves exact labels, literal marks and history when a typed memory rejection is reported', async () => {
+    const source = volume();
+    const sourceBefore = source.data.slice();
+    const supportBefore = source.observedSupport!.slice();
+    const error = memoryRejection(source, 2);
+    const proposer = vi.fn<SelectionProposer>().mockRejectedValue(error);
+    const publish = vi.fn();
+    const legacy = testSelectionProposer;
+    const { result } = setup(source, null, false, proposer, publish);
+    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
+    const insideOnly = result.current.labels!;
+    act(() => result.current.selection.stroke(Uint32Array.of(35), 'exclude', { plane: 'axial', slice: 0 }));
+    const marked = result.current.labels!;
+    const dataBefore = marked.data.slice();
+    const foreground = marked.seeds!.foreground.slice();
+    const background = marked.seeds!.background.slice();
+    const retainedBytes = result.current.selection.retainedBytes;
+    await act(async () => result.current.selection.grow());
+    expect(result.current.selection.status).toEqual({ running: false, error: error.message, memoryError: error });
+    expect(result.current.selection.status.memoryError).toBe(error);
+    expect(result.current.labels).toBe(marked);
+    expect(result.current.labels!.data).toBe(marked.data);
+    expect(result.current.labels!.seeds).toBe(marked.seeds);
+    expect(marked.data).toEqual(dataBefore);
+    expect(marked.seeds!.foreground).toEqual(foreground);
+    expect(marked.seeds!.background).toEqual(background);
+    expect(result.current.selection.marks).toEqual(
+      new Map([
+        [30, 1],
+        [35, 2],
+      ]),
+    );
+    expect(result.current.selection.retainedBytes).toBe(retainedBytes);
+    expect(result.current.selection.canUndo).toBe(true);
+    expect(result.current.selection.canRedo).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(2);
+    act(() => result.current.selection.travel('undo'));
+    expect(result.current.labels).toEqual(insideOnly);
+    expect(result.current.selection.marks).toEqual(new Map([[30, 1]]));
+    expect(result.current.selection.canRedo).toBe(true);
+    expect(result.current.selection.status.memoryError).toBeUndefined();
+    act(() => result.current.selection.travel('redo'));
+    expect(result.current.labels).toEqual(marked);
+    expect(result.current.labels!.seeds).toBe(marked.seeds);
+    expect(result.current.selection.marks).toEqual(
+      new Map([
+        [30, 1],
+        [35, 2],
+      ]),
+    );
+    expect(proposer).toHaveBeenCalledOnce();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(source.data).toEqual(sourceBefore);
+    expect(source.observedSupport).toEqual(supportBefore);
+  });
+
+  it('clears memory details while retrying and after a successful proposal without losing hard marks', async () => {
+    const source = volume();
+    const error = memoryRejection(source);
+    const completion = deferred<SelectionProposalResult>();
+    const proposer = vi.fn<SelectionProposer>().mockRejectedValueOnce(error).mockReturnValueOnce(completion.promise);
+    const { result } = setup(source, null, false, proposer);
+    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
+    const marked = result.current.labels!;
+    await act(async () => result.current.selection.grow());
+    expect(result.current.selection.status.memoryError).toBe(error);
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.selection.grow();
+    });
+    expect(result.current.selection.status).toEqual({ running: true, progress: 0 });
+    expect(result.current.labels).toBe(marked);
+    const request = proposer.mock.calls[1]![0];
+    expect(request.seeds).toBe(marked.seeds);
+    act(() => request.onProgress(0.5));
+    expect(result.current.selection.status).toEqual({ running: true, progress: 0.5 });
+    await act(async () => {
+      completion.resolve(proposal(source, [31]));
+      await pending;
+    });
+    expect(result.current.selection.status).toEqual({ running: false, boundaryCount: 3, contextLimited: true });
+    expect(result.current.selection.status.memoryError).toBeUndefined();
+    expect(result.current.labels!.data[30]).toBe(1);
+    expect(result.current.labels!.data[31]).toBe(1);
+    expect(result.current.labels!.seeds).toBe(marked.seeds);
+    expect(proposer).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['unsupported', 'mismatched plane'] as const)(
+    'clears an old memory breakdown when a new %s stroke error replaces it',
+    async (reason) => {
+      const source = volume();
+      if (reason === 'unsupported') source.observedSupport![31] = 0;
+      const error = memoryRejection(source);
+      const proposer = vi.fn<SelectionProposer>().mockRejectedValue(error);
+      const { result } = setup(source, null, false, proposer);
+      act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
+      const marked = result.current.labels;
+      await act(async () => result.current.selection.grow());
+      expect(result.current.selection.status.memoryError).toBe(error);
+      act(() =>
+        result.current.selection.stroke(Uint32Array.of(31), 'include', {
+          plane: 'axial',
+          slice: reason === 'unsupported' ? 0 : 1,
+        }),
+      );
+      expect(result.current.selection.status.error).toMatch(
+        reason === 'unsupported' ? /no acquired MRI tissue/ : /stroke plane does not match/,
+      );
+      expect(result.current.selection.status.memoryError).toBeUndefined();
+      expect(result.current.selection.status.running).toBe(false);
+      expect(result.current.labels).toBe(marked);
+      expect(result.current.selection.marks).toEqual(new Map([[30, 1]]));
+      expect(result.current.selection.canUndo).toBe(true);
+      expect(proposer).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['cancel', 'correction', 'hydrate', 'source', 'unmount'] as const)(
+    'ignores typed memory errors and progress arriving after %s',
+    async (action) => {
+      const source = volume();
+      const error = memoryRejection(source);
+      const completion = deferred<void>();
+      const proposer = vi.fn<SelectionProposer>().mockReturnValue(
+        completion.promise.then(() => {
+          throw error;
+        }),
+      );
+      const { result, rerender, unmount } = setup(source, null, false, proposer);
+      act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+      let pending!: Promise<void>;
+      act(() => {
+        pending = result.current.selection.grow();
+      });
+      const request = proposer.mock.calls[0]![0];
+      act(() => {
+        if (action === 'correction') result.current.selection.stroke(Uint32Array.of(31), 'include');
+        else if (action === 'hydrate')
+          result.current.setLabels({ ...result.current.labels!, data: result.current.labels!.data.slice() });
+        else if (action === 'source') rerender({ source: volume(), automatic: false });
+        else if (action === 'unmount') unmount();
+        else result.current.selection.cancel();
+      });
+      expect(request.signal.aborted).toBe(true);
+      const current = result.current.labels;
+      const status = result.current.selection.status;
+      await act(async () => {
+        request.onProgress(0.9);
+        completion.resolve();
+        await pending;
+      });
+      expect(result.current.labels).toBe(current);
+      expect(result.current.selection.status).toBe(status);
+      expect(result.current.selection.status.memoryError).toBeUndefined();
+      expect(result.current.selection.status.error).toBeUndefined();
+      if (action !== 'unmount') expect(result.current.selection.status.running).toBe(false);
+    },
+  );
 
   it('keeps the exact marked bodies and holes while removing unmarked islands before reversible publication', async () => {
     vi.mocked(svrUtils.yieldToMain).mockRestore();
@@ -190,7 +336,7 @@ describe('learned selection proposals share the existing editing authority', () 
       sourceBefore = source.data.slice(),
       supportBefore = source.observedSupport!.slice();
     const proposer = vi.fn<SelectionProposer>().mockResolvedValue(raw);
-    const legacy = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    const legacy = testSelectionProposer;
     const { result } = setup(source, null, false, proposer);
     act(() => result.current.selection.stroke(Uint32Array.of(firstMark), 'include', { plane: 'axial', slice: 2 }));
     act(() => result.current.selection.stroke(Uint32Array.of(secondMark), 'include', { plane: 'axial', slice: 9 }));
@@ -270,7 +416,7 @@ describe('learned selection proposals share the existing editing authority', () 
       else if (kind === 'invalid coverage') raw.clippedNativeVoxels = -1;
       else Object.assign(raw, { contextLimited: 'false' });
       const proposer = vi.fn<SelectionProposer>().mockResolvedValue(raw);
-      const legacy = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+      const legacy = testSelectionProposer;
       const { result } = setup(source, null, false, proposer);
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
       const marked = result.current.labels;
@@ -458,39 +604,43 @@ describe('learned selection proposals share the existing editing authority', () 
     },
   );
 
-  it('does not let a canceled learned failure replace a newer request status', async () => {
-    const source = volume();
-    const first = deferred<void>();
-    const second = deferred<SelectionProposalResult>();
-    const proposer = vi
-      .fn<SelectionProposer>()
-      .mockReturnValueOnce(
-        first.promise.then(() => {
-          throw new Error('Old model failure');
-        }),
-      )
-      .mockReturnValueOnce(second.promise);
-    const { result } = setup(source, null, false, proposer);
-    act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
-    let oldPending!: Promise<void>, newPending!: Promise<void>;
-    act(() => {
-      oldPending = result.current.selection.grow();
-    });
-    act(() => {
-      newPending = result.current.selection.grow();
-    });
-    act(() => proposer.mock.calls[1]![0].onProgress(0.25));
-    await act(async () => {
-      first.resolve();
-      await oldPending;
-    });
-    expect(result.current.selection.status).toEqual({ running: true, progress: 0.25 });
-    await act(async () => {
-      second.resolve(proposal(source, [31]));
-      await newPending;
-    });
-    expect(result.current.labels!.data[31]).toBe(1);
-  });
+  it.each(['generic', 'memory'] as const)(
+    'does not let a canceled %s failure replace a newer request status',
+    async (kind) => {
+      const source = volume();
+      const error = kind === 'memory' ? memoryRejection(source) : new Error('Old model failure');
+      const first = deferred<void>();
+      const second = deferred<SelectionProposalResult>();
+      const proposer = vi
+        .fn<SelectionProposer>()
+        .mockReturnValueOnce(
+          first.promise.then(() => {
+            throw error;
+          }),
+        )
+        .mockReturnValueOnce(second.promise);
+      const { result } = setup(source, null, false, proposer);
+      act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
+      let oldPending!: Promise<void>, newPending!: Promise<void>;
+      act(() => {
+        oldPending = result.current.selection.grow();
+      });
+      act(() => {
+        newPending = result.current.selection.grow();
+      });
+      act(() => proposer.mock.calls[1]![0].onProgress(0.25));
+      await act(async () => {
+        first.resolve();
+        await oldPending;
+      });
+      expect(result.current.selection.status).toEqual({ running: true, progress: 0.25 });
+      await act(async () => {
+        second.resolve(proposal(source, [31]));
+        await newPending;
+      });
+      expect(result.current.labels!.data[31]).toBe(1);
+    },
+  );
 
   it('aborts an old proposer when its source provider changes, without starting a replacement automatically', async () => {
     const source = volume();
@@ -526,7 +676,7 @@ describe('learned selection proposals share the existing editing authority', () 
 describe('SVR selection publication and editing history', () => {
   it('retains the actual stroke plane through automatic publication and reversible history', async () => {
     vi.useFakeTimers();
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([30, 31]));
+    testSelectionProposer.mockResolvedValue(proposedRegion([30, 31]));
     const { result } = setup(volume(), null, true);
     const plane = { plane: 'axial' as const, slice: 0 };
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', plane));
@@ -553,7 +703,7 @@ describe('SVR selection publication and editing history', () => {
 
   it('records a mark-only correction on another real plane without changing the completed mask', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([30, 31]));
+    const run = testSelectionProposer.mockResolvedValue(proposedRegion([30, 31]));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
     await act(async () => vi.advanceTimersByTimeAsync(350));
@@ -573,9 +723,7 @@ describe('SVR selection publication and editing history', () => {
     source.data[31] = NaN;
     source.data[32] = Infinity;
     source.observedSupport![33] = 0;
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(
-      proposedRegion([19, 20, 21, 31, 32, 33, 34, 35, source.data.length]),
-    );
+    testSelectionProposer.mockResolvedValue(proposedRegion([19, 20, 21, 31, 32, 33, 34, 35, source.data.length]));
     const { result } = setup(source);
     act(() => result.current.selection.stroke(Uint32Array.of(30, 31, 32, 33), 'include'));
     act(() => result.current.selection.stroke(Uint32Array.of(35), 'exclude'));
@@ -588,7 +736,7 @@ describe('SVR selection publication and editing history', () => {
 
   it('auto-fills only after a new stroke settles and undoes the stroke and proposal together', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([31, 32]));
+    const run = testSelectionProposer.mockResolvedValue(proposedRegion([31, 32]));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     expect(result.current.labels?.data[30]).toBe(1);
@@ -596,7 +744,7 @@ describe('SVR selection publication and editing history', () => {
     expect(run).not.toHaveBeenCalled();
     act(() => result.current.selection.accept());
     expect(result.current.labels?.reviewState).toBe('draft');
-    expect(() => result.current.selection.prepareEnhancement()).toThrow(/wait/i);
+    expect(result.current.selection.getRetainedBytes()).toBeGreaterThan(0);
     await act(async () => vi.advanceTimersByTimeAsync(350));
     expect(run).toHaveBeenCalledOnce();
     expect(result.current.selection.status.running).toBe(false);
@@ -614,8 +762,8 @@ describe('SVR selection publication and editing history', () => {
 
   it('undoes the just-published automatic result before React commits its new history', async () => {
     vi.useFakeTimers();
-    const completion = deferred<Awaited<ReturnType<SeededVolumeWorker['run']>>>();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockReturnValue(completion.promise);
+    const completion = deferred<SelectionProposalResult>();
+    const run = testSelectionProposer.mockReturnValue(completion.promise);
     const published = deferred<void>();
     const { result } = setup(volume(), null, true, undefined, (labels) => {
       if (labels?.data[31]) published.resolve();
@@ -645,8 +793,8 @@ describe('SVR selection publication and editing history', () => {
       vi.useFakeTimers();
       const proposal = proposedRegion();
       proposal.boundaryCount = 3;
-      proposal.bounds.min.x = 1;
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposal);
+      proposal.contextLimited = true;
+      const run = testSelectionProposer.mockResolvedValue(proposal);
       const { result } = setup(volume(), null, true);
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
       await act(async () => vi.advanceTimersByTimeAsync(350));
@@ -684,8 +832,8 @@ describe('SVR selection publication and editing history', () => {
 
   it('recognizes completion and successive agreeing strokes before React commits their history', async () => {
     vi.useFakeTimers();
-    const completion = deferred<Awaited<ReturnType<SeededVolumeWorker['run']>>>();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockReturnValue(completion.promise);
+    const completion = deferred<SelectionProposalResult>();
+    const run = testSelectionProposer.mockReturnValue(completion.promise);
     const published = deferred<void>();
     const { result } = setup(volume(), null, true, undefined, (labels) => {
       if (labels?.data[31]) published.resolve();
@@ -695,7 +843,7 @@ describe('SVR selection publication and editing history', () => {
     await act(async () => {
       const proposal = proposedRegion();
       proposal.boundaryCount = 4;
-      proposal.bounds.max.z = 10;
+      proposal.contextLimited = true;
       completion.resolve(proposal);
       await published.promise;
       expect(result.current.labels!.data[31]).toBe(0);
@@ -717,7 +865,7 @@ describe('SVR selection publication and editing history', () => {
 
   it.each(['include', 'exclude'] as const)('reruns when any voxel in an %s stroke changes membership', async (kind) => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion());
+    const run = testSelectionProposer.mockResolvedValue(proposedRegion());
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(350));
@@ -739,8 +887,8 @@ describe('SVR selection publication and editing history', () => {
     'does not drop an unfinished %s first fill after an agreeing stroke',
     async (phase) => {
       vi.useFakeTimers();
-      const oldCompletion = deferred<Awaited<ReturnType<SeededVolumeWorker['run']>>>();
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion());
+      const oldCompletion = deferred<SelectionProposalResult>();
+      const run = testSelectionProposer.mockResolvedValue(proposedRegion());
       if (phase === 'running') run.mockReturnValueOnce(oldCompletion.promise);
       const { result } = setup(volume(), null, true);
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
@@ -783,8 +931,8 @@ describe('SVR selection publication and editing history', () => {
     'does not reuse earlier completion after an explicit %s fill, and keeps explicit retry available',
     async (phase) => {
       vi.useFakeTimers();
-      const completion = deferred<Awaited<ReturnType<SeededVolumeWorker['run']>>>();
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion());
+      const completion = deferred<SelectionProposalResult>();
+      const run = testSelectionProposer.mockResolvedValue(proposedRegion());
       const { result } = setup(volume(), null, true);
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
       await act(async () => vi.advanceTimersByTimeAsync(350));
@@ -820,7 +968,7 @@ describe('SVR selection publication and editing history', () => {
     'invalidates known completion on %s without running from restoration alone',
     async (action) => {
       vi.useFakeTimers();
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion());
+      const run = testSelectionProposer.mockResolvedValue(proposedRegion());
       const source = volume();
       const { result, rerender } = setup(source);
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
@@ -848,13 +996,13 @@ describe('SVR selection publication and editing history', () => {
 
   it('keeps an automatic stroke started in the replacement source commit alive', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([31]));
+    const run = testSelectionProposer.mockResolvedValue(proposedRegion([31]));
     const first = volume(),
       second = volume();
     const { result, rerender } = renderHook(
       ({ source, markAtCommit }) => {
         const [labels, setLabels] = useState<SvrLabelVolume | null>(null);
-        const selection = useSvrSelection(source, labels, setLabels, true);
+        const selection = useSvrSelection(source, labels, setLabels, true, testSelectionProposer);
         const { stroke } = selection;
         useLayoutEffect(() => {
           if (markAtCommit) stroke(Uint32Array.of(30), 'include');
@@ -868,7 +1016,7 @@ describe('SVR selection publication and editing history', () => {
     expect(result.current.selection.status.running).toBe(true);
     await act(async () => vi.advanceTimersByTimeAsync(350));
     expect(run).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]![0].volume).toBe(second.data);
+    expect(run.mock.calls[0]![0].volume).toBe(second);
     expect(result.current.selection.status.running).toBe(false);
     expect([30, 31].map((index) => result.current.labels!.data[index])).toEqual([1, 1]);
     expect(first.data.every((value) => value === 0.5)).toBe(true);
@@ -898,7 +1046,7 @@ describe('SVR selection publication and editing history', () => {
     let retained = 0;
     act(() => {
       result.current.selection.stroke(Uint32Array.of(30), 'include');
-      retained = result.current.selection.prepareEnhancement();
+      retained = result.current.selection.getRetainedBytes();
     });
     expect(retained).toBe(10);
     expect(result.current.selection.retainedBytes).toBe(retained);
@@ -909,14 +1057,17 @@ describe('SVR selection publication and editing history', () => {
 
   it('coalesces rapid marks into one solver request without collapsing distinct brush undo steps', async () => {
     vi.useFakeTimers();
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue(proposedRegion([30, 31, 32, 33]));
+    const run = testSelectionProposer.mockResolvedValue(proposedRegion([30, 31, 32, 33]));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(200));
     act(() => result.current.selection.stroke(Uint32Array.of(32), 'exclude'));
     await act(async () => vi.advanceTimersByTimeAsync(350));
     expect(run).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]![0]).toMatchObject({ foreground: Uint32Array.of(30), background: Uint32Array.of(32) });
+    expect(run.mock.calls[0]![0].seeds).toMatchObject({
+      foreground: Uint32Array.of(30),
+      background: Uint32Array.of(32),
+    });
     expect(result.current.labels?.data[32]).toBe(0);
     act(() => result.current.selection.travel('undo'));
     expect(result.current.labels?.data[30]).toBe(1);
@@ -930,7 +1081,7 @@ describe('SVR selection publication and editing history', () => {
     'cancels queued auto-fill on %s and never starts it from restored labels',
     async (action) => {
       vi.useFakeTimers();
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+      const run = testSelectionProposer;
       const source = volume();
       const saved: SvrLabelVolume = {
         data: new Uint8Array(source.data.length),
@@ -961,15 +1112,13 @@ describe('SVR selection publication and editing history', () => {
 
   it('rejects a late automatic proposal after a correction and keeps its latest hard marks', async () => {
     vi.useFakeTimers();
-    const resolvers: Array<(value: Awaited<ReturnType<SeededVolumeWorker['run']>>) => void> = [];
-    const run = vi
-      .spyOn(SeededVolumeWorker.prototype, 'run')
-      .mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    const resolvers: Array<(value: SelectionProposalResult) => void> = [];
+    const run = testSelectionProposer.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
     const { result } = setup(volume(), null, true);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     await act(async () => vi.advanceTimersByTimeAsync(350));
     act(() => result.current.selection.stroke(Uint32Array.of(31), 'exclude'));
-    expect(run.mock.calls[0]![1]?.signal?.aborted).toBe(true);
+    expect(run.mock.calls[0]![0]?.signal?.aborted).toBe(true);
     const proposal = proposedRegion([30, 31, 42]);
     await act(async () => resolvers[0]!(proposal));
     expect(result.current.labels?.data[42]).toBe(0);
@@ -984,70 +1133,36 @@ describe('SVR selection publication and editing history', () => {
     expect(result.current.selection.excluded).toBe(0);
   });
 
-  it('releases the idle suggestion copy before enhancement, preserving labels, marks, history and later suggestions', async () => {
-    const workers = selectionWorkers();
+  it('preserves labels, marks and history through enhancement preparation and later proposals', async () => {
     const source = volume();
     const sourceData = source.data.slice();
     const sourceSupport = source.observedSupport!.slice();
+    testSelectionProposer
+      .mockResolvedValueOnce(proposedRegion([19, 30, 31, 32]))
+      .mockResolvedValueOnce(proposedRegion([19, 20, 31, 33]));
     const { result, rerender } = setup(source);
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     act(() => result.current.selection.stroke(Uint32Array.of(31), 'exclude'));
-    await act(async () => {
-      const pending = result.current.selection.grow();
-      workers[0]!.complete([19, 30, 31, 32]);
-      await pending;
-    });
-    const worker = workers[0]!;
-    expect(worker.postMessage.mock.calls[0]![0]).toMatchObject({
-      type: 'init',
-      volume: source.data,
-      observedSupport: source.observedSupport,
-    });
+    await act(async () => result.current.selection.grow());
     const labels = result.current.labels;
     const values = labels!.data.slice();
     const marks = result.current.selection.marks;
-    const retainedBefore = result.current.selection.retainedBytes;
-    const sourceBytes = source.data.buffer.byteLength + source.observedSupport!.buffer.byteLength;
-    expect(retainedBefore).toBeGreaterThan(sourceBytes);
-    let retainedAfter = 0;
-    act(() => {
-      retainedAfter = result.current.selection.prepareEnhancement();
-    });
-    expect(retainedAfter).toBe(retainedBefore - sourceBytes);
-    expect(worker.terminate).toHaveBeenCalledOnce();
-    expect(result.current.selection.prepareEnhancement()).toBe(retainedAfter);
-    expect(worker.terminate).toHaveBeenCalledOnce();
+    const retained = result.current.selection.retainedBytes;
+    expect(retained).toBeGreaterThan(0);
+    expect(result.current.selection.getRetainedBytes()).toBe(retained);
     expect(result.current.labels).toBe(labels);
-    expect(result.current.labels!.data).toEqual(values);
     expect(result.current.selection.marks).toBe(marks);
-    expect(source.data).toEqual(sourceData);
-    expect(source.observedSupport).toEqual(sourceSupport);
     rerender({ source, automatic: false });
-    expect(result.current.selection.retainedBytes).toBe(retainedAfter);
-
     act(() => result.current.selection.travel('undo'));
     expect(result.current.labels!.data[30]).toBe(1);
     expect(result.current.labels!.data[31]).toBe(0);
     expect(result.current.labels!.data[32]).toBe(0);
     expect(result.current.labels!.seeds).toEqual(labels!.seeds);
-    expect(result.current.selection.canRedo).toBe(true);
     act(() => result.current.selection.travel('redo'));
     expect(result.current.labels!.data).toEqual(values);
-    expect(result.current.labels!.seeds).toEqual(labels!.seeds);
-    expect(result.current.selection.retainedBytes).toBe(retainedAfter);
-
-    await act(async () => {
-      const pending = result.current.selection.grow();
-      expect(workers).toHaveLength(2);
-      expect(workers[1]!.postMessage.mock.calls[0]![0]).toMatchObject({
-        type: 'init',
-        volume: source.data,
-        observedSupport: source.observedSupport,
-      });
-      expect(workers[1]!.postMessage.mock.calls[1]![0]).toMatchObject({ type: 'run', ...labels!.seeds });
-      workers[1]!.complete([19, 20, 31, 33]);
-      await pending;
-    });
+    expect(result.current.selection.retainedBytes).toBe(retained);
+    await act(async () => result.current.selection.grow());
+    expect(testSelectionProposer.mock.calls[1]![0]).toMatchObject({ volume: source, seeds: labels!.seeds });
     expect(result.current.labels!.data[30]).toBe(1);
     expect(result.current.labels!.data[31]).toBe(0);
     expect(result.current.labels!.data[33]).toBe(1);
@@ -1056,8 +1171,9 @@ describe('SVR selection publication and editing history', () => {
     expect(source.observedSupport).toEqual(sourceSupport);
   });
 
-  it('refuses enhancement preparation during a suggestion without canceling it or touching edits', async () => {
-    const workers = selectionWorkers();
+  it('quiesces an in-flight suggestion before another heavy operation without changing edits', async () => {
+    const completion = deferred<SelectionProposalResult>();
+    testSelectionProposer.mockReturnValue(completion.promise);
     const { result } = setup();
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     const before = result.current.labels;
@@ -1065,30 +1181,27 @@ describe('SVR selection publication and editing history', () => {
     act(() => {
       pending = result.current.selection.grow();
     });
-    const worker = workers[0]!;
+    const request = testSelectionProposer.mock.calls[0]![0];
     expect(result.current.selection.status.running).toBe(true);
-    expect(() => result.current.selection.prepareEnhancement()).toThrow(/wait for the boundary suggestion/i);
-    expect(worker.terminate).not.toHaveBeenCalled();
-    expect(worker.postMessage.mock.calls.map(([message]) => message.type)).toEqual(['init', 'run']);
+    act(() => {
+      expect(result.current.selection.prepareHeavyOperation()).toBeGreaterThan(0);
+    });
+    expect(request.signal.aborted).toBe(true);
     expect(result.current.labels).toBe(before);
-    expect(result.current.selection.status.running).toBe(true);
     await act(async () => {
-      worker.complete([30, 31, 32]);
+      completion.resolve(proposedRegion());
       await pending;
     });
-    expect(result.current.labels!.data[32]).toBe(1);
+    expect(result.current.labels).toBe(before);
     expect(result.current.selection.status.running).toBe(false);
-    expect(result.current.selection.prepareEnhancement()).toBeGreaterThan(0);
-    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(result.current.selection.getRetainedBytes()).toBeGreaterThan(0);
   });
 
-  it('counts unique history and hard-mark buffers plus the live worker source, releasing replaced history', async () => {
-    vi.spyOn(SeededVolumeWorker.prototype, 'residentSourceBytes', 'get').mockReturnValue(8192);
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(30, 42),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+  it('counts unique history and hard-mark buffers, releasing replaced history', async () => {
+    testSelectionProposer.mockResolvedValue({
+      ...proposedRegion(Uint32Array.of(30, 42)),
       boundaryCount: 0,
-      domainVoxels: 1728,
+      contextLimited: false,
     });
     const { result } = setup();
     expect(result.current.selection.retainedBytes).toBe(0);
@@ -1098,7 +1211,7 @@ describe('SVR selection publication and editing history', () => {
     act(() => result.current.selection.stroke(Uint32Array.of(31), 'exclude'));
     const before = result.current.selection.retainedBytes;
     await act(async () => result.current.selection.grow());
-    expect(result.current.selection.retainedBytes).toBe(before + 8192 + 6);
+    expect(result.current.selection.retainedBytes).toBe(before + 6);
     const retained = result.current.selection.retainedBytes;
     act(() => result.current.selection.travel('undo'));
     expect(result.current.selection.retainedBytes).toBe(retained);
@@ -1106,7 +1219,7 @@ describe('SVR selection publication and editing history', () => {
     expect(result.current.selection.retainedBytes).toBe(retained);
     act(() => result.current.setLabels(null));
     expect(result.current.selection.canUndo).toBe(false);
-    expect(result.current.selection.retainedBytes).toBe(8192);
+    expect(result.current.selection.retainedBytes).toBe(0);
   });
 
   it('can confirm newly hydrated labels at the first interactive commit', () => {
@@ -1136,7 +1249,7 @@ describe('SVR selection publication and editing history', () => {
     );
   });
   it('requires an inside mark without submitting unmarked or outside-only requests', async () => {
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run');
+    const run = testSelectionProposer;
     const { result } = setup();
     await act(async () => result.current.selection.grow());
     expect(result.current.selection.included).toBe(0);
@@ -1153,11 +1266,10 @@ describe('SVR selection publication and editing history', () => {
   });
 
   it('suggests a draft from inside marks alone and sends an empty outside-mark set', async () => {
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(31, 32, 33),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+    const run = testSelectionProposer.mockResolvedValue({
+      ...proposedRegion(Uint32Array.of(31, 32, 33)),
       boundaryCount: 0,
-      domainVoxels: 1728,
+      contextLimited: false,
     });
     const source = volume();
     const { result } = setup(source);
@@ -1167,10 +1279,8 @@ describe('SVR selection publication and editing history', () => {
     await act(async () => result.current.selection.grow());
     expect(run).toHaveBeenCalledOnce();
     expect(run.mock.calls[0]![0]).toMatchObject({
-      volume: source.data,
-      observedSupport: source.observedSupport,
-      foreground: Uint32Array.of(30),
-      background: new Uint32Array(),
+      volume: source,
+      seeds: { foreground: Uint32Array.of(30), background: new Uint32Array() },
     });
     expect(result.current.labels?.data[30]).toBe(1);
     expect(result.current.labels?.data[33]).toBe(1);
@@ -1189,11 +1299,10 @@ describe('SVR selection publication and editing history', () => {
   it('keeps cross-slice hard marks authoritative over repeated proposals and later outside corrections', async () => {
     const inside = [30, 31, 180, 181, 900, 901];
     const outside = [32, 182, 902];
-    const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.from([...outside, 1044, 1200]),
-      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+    const run = testSelectionProposer.mockResolvedValue({
+      ...proposedRegion(Uint32Array.from([...outside, 1044, 1200])),
       boundaryCount: 0,
-      domainVoxels: 1728,
+      contextLimited: false,
     });
     const { result } = setup();
     act(() => result.current.selection.stroke(Uint32Array.from(inside), 'include'));
@@ -1215,8 +1324,8 @@ describe('SVR selection publication and editing history', () => {
     expect(latestInside.map((index) => result.current.labels!.data[index])).toEqual(latestInside.map(() => 1));
     expect(latestOutside.map((index) => result.current.labels!.data[index])).toEqual(latestOutside.map(() => 0));
     const submitted = run.mock.calls.at(-1)![0];
-    expect([...submitted.foreground].sort((a, b) => a - b)).toEqual(latestInside.sort((a, b) => a - b));
-    expect([...submitted.background].sort((a, b) => a - b)).toEqual(latestOutside.sort((a, b) => a - b));
+    expect([...submitted.seeds.foreground].sort((a, b) => a - b)).toEqual(latestInside.sort((a, b) => a - b));
+    expect([...submitted.seeds.background].sort((a, b) => a - b)).toEqual(latestOutside.sort((a, b) => a - b));
     act(() => result.current.selection.travel('undo'));
     act(() => result.current.selection.travel('undo'));
     expect(result.current.labels?.data[180]).toBe(1);
@@ -1230,18 +1339,8 @@ describe('SVR selection publication and editing history', () => {
     expect(result.current.labels?.seeds?.background).toContain(180);
   });
 
-  it.each([
-    { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 }, contextLimited: false },
-    { min: { x: 1, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 }, contextLimited: true },
-    { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 10, z: 11 }, contextLimited: true },
-    { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 10 }, contextLimited: true },
-  ])('reports contextLimited=$contextLimited from bounds $min to $max', async ({ min, max, contextLimited }) => {
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-      indices: Uint32Array.of(30),
-      bounds: { min, max },
-      boundaryCount: 3,
-      domainVoxels: (max.x - min.x + 1) * (max.y - min.y + 1) * (max.z - min.z + 1),
-    });
+  it.each([false, true])('preserves the proposer context-limited evidence: %s', async (contextLimited) => {
+    testSelectionProposer.mockResolvedValue({ ...proposedRegion([30]), boundaryCount: 3, contextLimited });
     const { result } = setup();
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include'));
     await act(async () => result.current.selection.grow());
@@ -1271,11 +1370,10 @@ describe('SVR selection publication and editing history', () => {
   it.each([true, false])(
     'reuses saved hard constraints with optional outside marks: %s, without growing on correction',
     async (outsideMarks) => {
-      const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockResolvedValue({
-        indices: new Uint32Array([19, 20, 30, 31, 33]),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
+      const run = testSelectionProposer.mockResolvedValue({
+        ...proposedRegion(new Uint32Array([19, 20, 30, 31, 33])),
         boundaryCount: 0,
-        domainVoxels: 1728,
+        contextLimited: false,
       });
       const source = volume();
       const saved: SvrLabelVolume = {
@@ -1289,7 +1387,7 @@ describe('SVR selection publication and editing history', () => {
       expect(result.current.selection.included).toBe(1);
       await act(async () => result.current.selection.grow());
       expect(run).toHaveBeenCalledOnce();
-      expect(run.mock.calls[0]![0]).toMatchObject(saved.seeds!);
+      expect(run.mock.calls[0]![0].seeds).toMatchObject(saved.seeds!);
       expect(result.current.labels?.data[33]).toBe(1);
       act(() => result.current.selection.stroke(new Uint32Array([33]), 'exclude'));
       expect(run).toHaveBeenCalledOnce();
@@ -1302,8 +1400,8 @@ describe('SVR selection publication and editing history', () => {
   );
 
   it('a cancelled late computation cannot overwrite a newer correction', async () => {
-    let resolve!: (result: Awaited<ReturnType<SeededVolumeWorker['run']>>) => void;
-    vi.spyOn(SeededVolumeWorker.prototype, 'run').mockImplementation(
+    let resolve!: (result: SelectionProposalResult) => void;
+    testSelectionProposer.mockImplementation(
       () =>
         new Promise((done) => {
           resolve = done;
@@ -1318,12 +1416,7 @@ describe('SVR selection publication and editing history', () => {
     });
     act(() => result.current.selection.stroke(new Uint32Array([33]), 'include'));
     await act(async () => {
-      resolve({
-        indices: new Uint32Array([99]),
-        bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-        boundaryCount: 0,
-        domainVoxels: 1728,
-      });
+      resolve({ ...proposedRegion(new Uint32Array([99])), boundaryCount: 0, contextLimited: false });
       await pending;
     });
     expect(result.current.labels?.data[33]).toBe(1);

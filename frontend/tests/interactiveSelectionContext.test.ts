@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SvrDirection, SvrRoiPlane, SvrSelectionSeeds, SvrVolume } from '../src/types/svr';
 import { mapInteractiveMarks } from '../src/utils/segmentation/interactiveGeometry';
-import { voxelIndex } from '../src/utils/segmentation/seededVolume';
+import { planTrackingPrompts } from '../src/utils/segmentation/interactivePrompts';
+import { voxelIndex } from '../src/utils/segmentation/voxelGeometry';
 import {
   cropInteractiveSelectionContext,
   planInteractiveSelectionContext,
@@ -63,6 +64,60 @@ describe('source-only interactive context planning', () => {
     expect(planInteractiveSelectionContext(editing, source, marks).conditioningFrames).toBe(1);
     marks.background = Uint32Array.of(at(editing, [6, 6, 5]), at(editing, [7, 6, 7]));
     expect(planInteractiveSelectionContext(editing, source, marks).conditioningFrames).toBe(3);
+  });
+
+  it('plans one mapped prompt for a connected coarse 3-by-3 brush while retaining all nine literal marks', () => {
+    const source = grid([100, 100, 24], [1, 1, 1]);
+    const editing = volume({ dims: [10, 10, 5], voxelSizeMm: [3, 3, 1], originMm: [20, 20, 5] });
+    const marks: SvrSelectionSeeds = {
+      foreground: Uint32Array.from([2, 3, 4].flatMap((y) => [2, 3, 4].map((x) => at(editing, [x, y, 2])))),
+      background: new Uint32Array(),
+      lastStroke: { plane: 'axial', slice: 2 },
+    };
+    const originalMarks = marks.foreground.slice();
+    const result = planInteractiveSelectionContext(editing, source, marks);
+    expect(result).toMatchObject({ conditioningFrames: 1, maximumFramePrompts: 1, literalMarkCount: 9 });
+    expect(planTrackingPrompts(editing, result.grid, marks).frames).toEqual([
+      { index: 7, points: [[29, 29]], labels: [1] },
+    ]);
+    expect(marks.foreground).toEqual(originalMarks);
+  });
+
+  it('reports the largest mapped frame prompt count, including Remove-only frames, rather than the global total', () => {
+    const source = grid([100, 100, 24], [1, 1, 1]);
+    const editing = volume({ dims: [10, 10, 6], voxelSizeMm: [3, 3, 2], originMm: [20, 20, 5] });
+    const marks: SvrSelectionSeeds = {
+      foreground: Uint32Array.from([
+        at(editing, [1, 1, 1]),
+        at(editing, [2, 1, 1]),
+        at(editing, [1, 2, 1]),
+        at(editing, [2, 2, 1]),
+        at(editing, [7, 1, 1]),
+        at(editing, [8, 1, 1]),
+        at(editing, [4, 4, 3]),
+        at(editing, [5, 4, 3]),
+        at(editing, [4, 5, 3]),
+        at(editing, [5, 5, 3]),
+      ]),
+      background: Uint32Array.from([
+        at(editing, [6, 7, 1]),
+        at(editing, [7, 7, 1]),
+        at(editing, [1, 1, 4]),
+        at(editing, [1, 2, 4]),
+        at(editing, [7, 7, 4]),
+        at(editing, [8, 7, 4]),
+      ]),
+      lastStroke: { plane: 'axial', slice: 4 },
+    };
+    const result = planInteractiveSelectionContext(editing, source, marks);
+    const prompts = planTrackingPrompts(editing, result.grid, marks);
+    expect(prompts.frames.map(({ index, labels }) => ({ index, labels }))).toEqual([
+      { index: 7, labels: [1, 1, 0] },
+      { index: 11, labels: [1] },
+      { index: 13, labels: [0, 0] },
+    ]);
+    expect(prompts.frames.reduce((total, frame) => total + frame.points.length, 0)).toBe(6);
+    expect(result).toMatchObject({ conditioningFrames: 3, maximumFramePrompts: 3, literalMarkCount: 16 });
   });
 
   it('uses all literal inside and remove marks across sections, not a selected-label extent', () => {
@@ -169,6 +224,13 @@ describe('source-only interactive context planning', () => {
     const multipleSections = planInteractiveSelectionContext(editing, source, marks);
     expect(multipleSections.conditioningFrames).toBe(2);
     expect([multipleSections.width, multipleSections.height]).toEqual([80, 80]);
+    expect(multipleSections).toMatchObject({ maximumFramePrompts: 2, literalMarkCount: 3 });
+    expect(
+      planTrackingPrompts(editing, multipleSections.grid, marks).frames.map(({ index, labels }) => ({ index, labels })),
+    ).toEqual([
+      { index: 36, labels: [1, 0] },
+      { index: 37, labels: [0] },
+    ]);
   });
 
   it.each([

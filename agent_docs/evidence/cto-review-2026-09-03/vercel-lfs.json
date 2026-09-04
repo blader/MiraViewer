@@ -1,0 +1,11 @@
+{
+  "verifiedAt": "2026-09-04T03:17:34.608558+00:00",
+  "project": "miraviewer",
+  "repository": "blader/MiraViewer",
+  "setting": "gitLFS",
+  "before": false,
+  "after": true,
+  "method": "PATCH then independent GET /v9/projects/{id}",
+  "productionRedeployed": false,
+  "originalReadbackSha256": "b90ce1f5776a2d0748099a4a90bc58b4954e0251cae07a36dc376203fd584ed0"
+}

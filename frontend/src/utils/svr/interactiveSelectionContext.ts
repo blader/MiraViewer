@@ -1,7 +1,8 @@
 import type { SvrRoi, SvrSelectionSeeds, SvrVolume } from '../../types/svr';
 import { mapInteractivePlane } from '../segmentation/interactiveGeometry';
+import { planTrackingPrompts } from '../segmentation/interactivePrompts';
 import { SLICE_AXES } from '../segmentation/selectionEditing';
-import { voxelPoint, type VoxelBounds } from '../segmentation/seededVolume';
+import { voxelPoint, type VoxelBounds } from '../segmentation/voxelGeometry';
 import type { NativeSourceGrid } from './nativeSourceContext';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { IDENTITY_DIRECTION, physicalVolumeBounds, volumeVoxelToPatient } from './volumeGeometry';
@@ -46,7 +47,6 @@ export function planInteractiveSelectionContext(
   // Reuse the physical-plane mapper's exact phase checks, rather than rounding
   // marks with a second tolerance or allocating a fake full-source pixel array.
   const mapped = PLANES.map(() => new Map<number, ReturnType<typeof mapInteractivePlane>>());
-  const conditioningSections = new Set<number>();
   for (const marks of [seeds.foreground, seeds.background])
     for (const index of marks) {
       if (
@@ -65,7 +65,6 @@ export function planInteractiveSelectionContext(
         const nativeAxis = AXIS_INDEX[SLICE_AXES[section.plane].slice];
         lower[nativeAxis] = Math.min(lower[nativeAxis]!, section.slice);
         upper[nativeAxis] = Math.max(upper[nativeAxis]!, section.slice);
-        if (nativeAxis === slice) conditioningSections.add(section.slice);
       }
     }
   const requestedFieldMm = Math.max(
@@ -115,6 +114,7 @@ export function planInteractiveSelectionContext(
     // Oblique patient-axis bounds can load extra native cells. They are not model input.
     boundsMm: physicalVolumeBounds(grid),
   };
+  const prompts = planTrackingPrompts(editing, grid, seeds);
   return {
     bounds,
     grid,
@@ -124,7 +124,9 @@ export function planInteractiveSelectionContext(
     contextBytes,
     width: dims[column]!,
     height: dims[row]!,
-    conditioningFrames: conditioningSections.size,
+    conditioningFrames: prompts.conditioningFrames,
+    maximumFramePrompts: prompts.maximumFramePrompts,
+    literalMarkCount: prompts.literalMarkCount,
     physicalSizeMm: [dims[column]! * source.voxelSizeMm[column]!, dims[row]! * source.voxelSizeMm[row]!] as [
       number,
       number,

@@ -2,11 +2,16 @@ import JSZip from 'jszip';
 import {
   assertStorageHeadroom,
   DATASET_REVISION_STATE_KEY,
+  DATASET_TOKEN_STATE_KEY,
   getDB,
   notifyDatasetMutation,
+  newDatasetToken,
   SELECTED_PATIENT_STATE_KEY,
+  SELECTED_PATIENT_STUDY_STATE_KEY,
 } from '../db/db';
-import { getPatientIdentityKeys } from '../db/patientIdentity';
+import { getPatientIdentityAliases, getPatientIdentityKeys, studyIdentityConflict } from '../db/patientIdentity';
+import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
+import { initializeComparisonState } from '../db/comparisonState';
 import type {
   AppStateRow,
   DerivedAlignmentFrameRow,
@@ -188,6 +193,11 @@ function captureOwnedLocalStorage(): Record<string, string> {
   return records;
 }
 
+function ownsAcquisitionChoice(row: AppStateRow, seriesByUid: ReadonlyMap<string, DicomSeries>): boolean {
+  const source = typeof row.value === 'string' ? seriesByUid.get(row.value) : undefined;
+  return !!source && row.key === acquisitionChoiceKey(source.studyInstanceUid, getSeriesSequenceCombo(source).id);
+}
+
 export async function exportStudiesToZip(
   studyIds: string[],
   onProgress?: (progress: ExportProgress) => void,
@@ -214,6 +224,7 @@ export async function exportStudiesToZip(
   const selectedPatientKey = patientKeys.values().next().value as string | undefined;
   const series = (await db.getAll('series')).filter((item) => selectedStudies.has(item.studyInstanceUid));
   const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
+  const selectedSeriesByUid = new Map(series.map((item) => [item.seriesInstanceUid, item]));
 
   const instances: SnapshotInstance[] = [];
   const totalInstances = Object.values(await localApi.getImageCounts(series)).reduce((count, next) => count + next, 0);
@@ -231,16 +242,34 @@ export async function exportStudiesToZip(
     }
   }
 
-  const panelSettings = (await db.getAll('panel_settings')).filter(
-    (row) => !selectedPatientKey || row.comboId.startsWith(`${selectedPatientKey}::`) || !row.comboId.includes('::'),
-  );
+  const panelSettings = (await db.getAll('panel_settings')).flatMap((row) => {
+    if (row.source)
+      return selectedStudies.has(row.source.studyUid) && selectedSeries.has(row.source.seriesUid) ? [row] : [];
+    const settings = Object.fromEntries(
+      Object.entries(row.settings).filter(([date]) =>
+        studies.some((study) => {
+          const scopeMatches =
+            !row.comboId.includes('::') ||
+            getPatientIdentityAliases(study).some((key) => row.comboId.startsWith(`${key}::`));
+          const timestamp = formatStudyDate(study);
+          return (
+            scopeMatches &&
+            (date === timestamp ||
+              date === `${timestamp}#${study.studyInstanceUid}` ||
+              (!study.studyTime && date === timestamp.split('T')[0]))
+          );
+        }),
+      ),
+    );
+    return Object.keys(settings).length ? [{ ...row, settings }] : [];
+  });
   const tumorSegmentations = (await db.getAll('tumor_segmentations')).filter((row) => selectedStudies.has(row.studyId));
   const tumorGroundTruth = (await db.getAll('tumor_ground_truth')).filter((row) => selectedStudies.has(row.studyId));
 
   const volumeSegmentations: SnapshotVolume[] = [];
   for (const row of await db.getAll('volume_segmentations')) {
     if (row.studyUid && !selectedStudies.has(row.studyUid)) continue;
-    if (row.patientKey && selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
+    if (!row.studyUid && row.patientKey && selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
     if (row.seriesUids?.length && !row.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
     const { labels, seeds: savedSeeds, ...metadata } = row;
     if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
@@ -261,7 +290,7 @@ export async function exportStudiesToZip(
   const derivedAlignmentFrames: SnapshotDerivedFrame[] = [];
   for (const row of await db.getAll('derived_alignment_frames')) {
     if (!selectedStudies.has(row.targetStudyUid)) continue;
-    if (selectedPatientKey && row.patientKey !== selectedPatientKey) continue;
+    if (selectedPatientKey && identityByStudy.get(row.targetStudyUid) !== selectedPatientKey) continue;
     if (row.referenceStudyUid && !selectedStudies.has(row.referenceStudyUid)) continue;
     if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
     const { pixels, valid, ...metadata } = row;
@@ -294,7 +323,13 @@ export async function exportStudiesToZip(
       tumorGroundTruth,
       volumeSegmentations,
       derivedAlignmentFrames,
-      appState: await db.getAll('app_state'),
+      appState: (await db.getAll('app_state')).filter((row) => {
+        if (row.key.startsWith('acquisition:')) return ownsAcquisitionChoice(row, selectedSeriesByUid);
+        if (row.key === SELECTED_PATIENT_STUDY_STATE_KEY) return selectedStudies.has(row.value as string);
+        if (row.key === SELECTED_PATIENT_STATE_KEY) return row.value === selectedPatientKey;
+        // A backup carries its content revision, not another live writer's token.
+        return row.key === DATASET_REVISION_STATE_KEY;
+      }),
       models,
       localStorage: captureOwnedLocalStorage(),
     },
@@ -480,7 +515,6 @@ export async function restoreSnapshot(
       ? instancesByUid.get(frame.referenceSopInstanceUid)
       : undefined;
     if (
-      frame.patientKey !== selectedPatientKey ||
       derivedFrameIds.has(frame.id) ||
       !studyUids.has(frame.targetStudyUid) ||
       target?.studyInstanceUid !== frame.targetStudyUid ||
@@ -562,9 +596,10 @@ export async function restoreSnapshot(
   const existingRevision = await revisionStore.get(DATASET_REVISION_STATE_KEY);
   for (const row of manifest.records.studies) {
     const existing = await tx.objectStore('studies').get(row.studyInstanceUid);
-    if (existing?.patientId && row.patientId && existing.patientId !== row.patientId) {
+    const conflict = studyIdentityConflict(existing, row);
+    if (conflict) {
       await tx.done;
-      throw new Error('A restored examination conflicts with an existing patient identity.');
+      throw new Error(`A restored examination conflicts with an existing patient identity. ${conflict}`);
     }
   }
   for (const row of manifest.records.series) {
@@ -593,23 +628,39 @@ export async function restoreSnapshot(
   for (const row of volumes) await tx.objectStore('volume_segmentations').put(row);
   let archivedRevision = 0;
   for (const row of manifest.records.appState) {
+    if (row.key.startsWith('acquisition:') && !ownsAcquisitionChoice(row, seriesByUid)) continue;
     if (row.key === DATASET_REVISION_STATE_KEY) {
       archivedRevision = typeof row.value === 'number' ? row.value : 0;
       continue;
     }
-    if (row.key === SELECTED_PATIENT_STATE_KEY) continue;
+    if (
+      row.key === SELECTED_PATIENT_STATE_KEY ||
+      row.key === SELECTED_PATIENT_STUDY_STATE_KEY ||
+      row.key === DATASET_TOKEN_STATE_KEY
+    )
+      continue;
     await revisionStore.put(row);
   }
+  const restoredIdentities = getPatientIdentityKeys(await tx.objectStore('studies').getAll());
   if (selectedPatientKey) {
-    await revisionStore.put({ key: SELECTED_PATIENT_STATE_KEY, value: selectedPatientKey });
+    const anchor = manifest.records.studies[0]!.studyInstanceUid;
+    await revisionStore.put({
+      key: SELECTED_PATIENT_STATE_KEY,
+      value: restoredIdentities.get(anchor)!,
+    });
+    await revisionStore.put({ key: SELECTED_PATIENT_STUDY_STATE_KEY, value: anchor });
   }
   const nextRevision =
     Math.max(typeof existingRevision?.value === 'number' ? existingRevision.value : 0, archivedRevision) + 1;
   for (const row of derivedFrames) {
-    await tx.objectStore('derived_alignment_frames').put({ ...row, datasetRevision: nextRevision });
+    await tx
+      .objectStore('derived_alignment_frames')
+      .put({ ...row, patientKey: restoredIdentities.get(row.targetStudyUid)!, datasetRevision: nextRevision });
   }
   await revisionStore.put({ key: DATASET_REVISION_STATE_KEY, value: nextRevision });
+  await revisionStore.put({ key: DATASET_TOKEN_STATE_KEY, value: newDatasetToken() });
   await tx.done;
+  await initializeComparisonState(db);
 
   if (typeof localStorage !== 'undefined') {
     for (const [key, value] of Object.entries(manifest.records.localStorage ?? {})) {

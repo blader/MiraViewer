@@ -14,6 +14,7 @@ import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
 import type * as LongitudinalFrames from '../src/utils/svr/longitudinalFrames';
 import { resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
 import { deferred } from './helpers/deferred';
+import { selectFinalAffineProposal } from '../src/utils/structuralAffineSelection';
 import {
   makeTissueLabelPhantom,
   REFERENCE_CONTRAST,
@@ -35,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   loadCornerstoneImage: vi.fn(),
   createScorer: vi.fn(),
   closeScorer: vi.fn(),
+  scoreFinal: vi.fn(),
 }));
 
 vi.mock('../src/utils/localApi', () => ({
@@ -52,9 +54,11 @@ vi.mock('../src/utils/decodedFrame', () => ({
 
 vi.mock('../src/utils/alignmentScoringRunner', () => ({
   createAlignmentScoringRunner: mocks.createScorer,
+  scoreFinalAffineInWorker: mocks.scoreFinal,
 }));
 
 vi.mock('../src/utils/elastixRegistration', () => ({
+  disposeElastixWorker: (worker: Worker) => worker.terminate(),
   registerRigid2DWithElastix: mocks.register2d,
   registerAffine2DWithElastix: mocks.registerAffine,
 }));
@@ -72,7 +76,7 @@ vi.mock('../src/utils/svr/longitudinalFrames', async (importOriginal) => {
 });
 
 vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({
-  runLongitudinalRegistration: mocks.register3d,
+  runLongitudinalEstimate: mocks.register3d,
 }));
 
 import { useAutoAlign } from '../src/hooks/useAutoAlign';
@@ -268,6 +272,7 @@ async function browseAutomatically(
 describe('physically registered longitudinal auto-alignment', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.scoreFinal.mockImplementation(async (input) => selectFinalAffineProposal(input));
     mocks.loadCornerstoneImage.mockResolvedValue({ windowCenter: 0.5, windowWidth: 1 });
     mocks.captureSlice.mockImplementation(async (series: string, index: number, size: number) => ({
       pixels: Float32Array.from({ length: size * size }, (_, pixel) => (pixel % size) / Math.max(1, size - 1)),
@@ -880,6 +885,50 @@ describe('physically registered longitudinal auto-alignment', () => {
         { cold: { ...target, series_uid: 'uncached-series' }, target },
       ),
     ).toBe(true);
+  });
+
+  it('starts visible cold work before preparing a warm offscreen slab', async () => {
+    await configureAutomaticAlignment(32);
+    const { result } = renderHook(useAutoAlign);
+    await browseAutomatically(result.current, 1, 'accepted-offscreen-target');
+    const previousDenseCalls = mocks.densify.mock.calls.length;
+    const started = deferred<void>(),
+      release = deferred<void>();
+    const original = mocks.captureSlice.getMockImplementation()!;
+    mocks.captureSlice.mockImplementation(async (...args) => {
+      started.resolve();
+      await release.promise;
+      return original(...args);
+    });
+    let pending: Promise<AlignmentResult[]> = Promise.resolve([]);
+    try {
+      await act(async () => {
+        pending = result.current.alignAllDates(
+          { ...reference, sliceIndex: 2, exclusionMask: undefined },
+          ['cold', 'target'],
+          {
+            cold: {
+              ...target,
+              series_uid: 'cold-target-series',
+              study_id: 'study-cold-target-series',
+              study_uid: 'study-cold-target-series',
+            },
+            target,
+          },
+          1,
+          { reuseRegistration: true, requestKey: 'visible-before-offscreen', getPresentedDates: () => ['cold'] },
+        );
+        await started.promise;
+      });
+      expect(result.current.results).toEqual([]);
+      expect(mocks.densify).toHaveBeenCalledTimes(previousDenseCalls);
+    } finally {
+      await act(async () => {
+        result.current.abort();
+        release.resolve();
+        await pending;
+      });
+    }
   });
 
   it.each(['capture', 'preparation'] as const)(
@@ -1503,44 +1552,60 @@ describe('physically registered longitudinal auto-alignment', () => {
       rows: size,
       cols: size,
     });
-    mocks.registerAffine.mockResolvedValue({ movingToFixed: residual, webWorker: undefined });
+    const worker = { terminate: vi.fn() };
+    mocks.registerAffine.mockResolvedValue({ movingToFixed: residual, webWorker: worker });
 
     const [aligned] = await runPhysicalAlignment();
 
     expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
     expect(mocks.createScorer).not.toHaveBeenCalled();
+    expect(mocks.scoreFinal).toHaveBeenCalledOnce();
     expect(aligned).toMatchObject({ outcome: 'aligned', evidence: { geometryMode: 'registered-3d' } });
     expect(aligned?.computedSettings.affine01).not.toBe(0);
     expect(aligned?.computedSettings.rotation).not.toBe(0);
     expect(aligned?.derivedFrame?.pixels).toBe(moving);
     expect(aligned?.derivedFrame?.outputGrid).toMatchObject({ rows: size, columns: size });
+    expect(worker.terminate).toHaveBeenCalledOnce();
   });
 
-  it('retains a verified physical presentation when optional final affine refinement fails', async () => {
-    const size = 64;
-    mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => ({
-      ...manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b'),
-      frames: manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b').frames.map(
-        (frame) => ({ ...frame, rows: size, columns: size }),
-      ),
-    }));
-    const initial = await mocks.register3d();
-    mocks.register3d.mockResolvedValue({
-      ...initial,
-      pixels: Float32Array.from({ length: size * size }, (_, index) => index + 1),
-      rows: size,
-      cols: size,
-    });
-    mocks.registerAffine.mockRejectedValue(new Error('optional affine worker unavailable'));
+  it.each(['refinement', 'scoring'] as const)(
+    'retains a verified physical presentation when optional final affine %s fails',
+    async (phase) => {
+      const size = 64;
+      const worker = { terminate: vi.fn() };
+      mocks.getSeriesFrameManifest.mockImplementation(async (seriesUid: string) => ({
+        ...manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b'),
+        frames: manifest(seriesUid, 'patient-a', seriesUid === 'reference-series' ? 'frame-a' : 'frame-b').frames.map(
+          (frame) => ({ ...frame, rows: size, columns: size }),
+        ),
+      }));
+      const initial = await mocks.register3d();
+      mocks.register3d.mockResolvedValue({
+        ...initial,
+        pixels: Float32Array.from({ length: size * size }, (_, index) => index + 1),
+        rows: size,
+        cols: size,
+      });
+      if (phase === 'refinement')
+        mocks.registerAffine.mockRejectedValue(new Error('optional affine worker unavailable'));
+      else {
+        mocks.registerAffine.mockResolvedValue({
+          movingToFixed: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, b: { x: 0, y: 0 } },
+          webWorker: worker,
+        });
+        mocks.scoreFinal.mockRejectedValue(new Error('optional final scoring worker unavailable'));
+      }
 
-    const [aligned] = await runPhysicalAlignment();
+      const [aligned] = await runPhysicalAlignment();
 
-    expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
-    expect(aligned).toMatchObject({
-      outcome: 'aligned',
-      computedSettings: { affine00: 1, affine01: 0, affine10: 0, affine11: 1, rotation: 0 },
-    });
-  });
+      expect(mocks.registerAffine).toHaveBeenCalledTimes(1);
+      expect(aligned).toMatchObject({
+        outcome: 'aligned',
+        computedSettings: { affine00: 1, affine01: 0, affine10: 0, affine11: 1, rotation: 0 },
+      });
+      if (phase === 'scoring') expect(worker.terminate).toHaveBeenCalledOnce();
+    },
+  );
 
   it('keeps an earlier physical result when a later fallback cannot start its independent 2D worker', async () => {
     const physical = { ...target, series_uid: 'physical-target-series' };

@@ -8,7 +8,7 @@ import {
   SLICE_AXES,
   type SelectionPatch,
 } from '../src/utils/segmentation/selectionEditing';
-import { voxelIndex, voxelPoint } from '../src/utils/segmentation/seededVolume';
+import { voxelIndex, voxelPoint } from '../src/utils/segmentation/voxelGeometry';
 
 function volume(): SvrVolume {
   return {

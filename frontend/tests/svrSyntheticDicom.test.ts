@@ -4,12 +4,74 @@ import { deleteAllStoredMriData } from '../src/db/db';
 import { processDicomFile } from '../src/services/dicomIngestion';
 import { getComparisonData, getSeriesFrameManifest } from '../src/utils/localApi';
 import { createSyntheticSvrDicomFiles } from './svrSyntheticDicom';
+import { resliceDenseLongitudinalPlane, resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
+import type { SvrReconstructionSlice } from '../src/utils/svr/reconstructionCore';
 
 afterEach(async () => {
   await deleteAllStoredMriData();
 });
 
 describe('privacy-safe real-browser SVR fixture', () => {
+  it('preserves padded-source rejection and admits explicitly acquired background without changing pixels', async () => {
+    const sources: SvrReconstructionSlice[][] = [];
+    for (const pixelPaddingValue of [0, null]) {
+      const files = createSyntheticSvrDicomFiles({
+        imageSize: 36,
+        slicesPerOrientation: 24,
+        pixelPaddingValue,
+        studyDate: '20360701',
+      });
+      const slices = await Promise.all(
+        files.slice(10, 13).map(async (file) => {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const data = dicomParser.parseDicom(bytes);
+          expect(data.string('x00080020')).toBe('20360701');
+          expect(data.uint16('x00280120')).toBe(pixelPaddingValue ?? undefined);
+          const rows = data.uint16('x00280010')!;
+          const columns = data.uint16('x00280011')!;
+          const view = new DataView(bytes.buffer, bytes.byteOffset + data.elements.x7fe00010!.dataOffset);
+          const pixels = Float32Array.from({ length: rows * columns }, (_, index) => view.getUint16(index * 2, true));
+          const [x, y, z] = data.string('x00200032')!.split('\\').map(Number) as [number, number, number];
+          return {
+            pixels,
+            valid: Uint8Array.from(pixels, (value) => Number(value !== data.uint16('x00280120'))),
+            dsRows: rows,
+            dsCols: columns,
+            ippMm: { x, y, z },
+            rowDir: { x: 1, y: 0, z: 0 },
+            colDir: { x: 0, y: 1, z: 0 },
+            normalDir: { x: 0, y: 0, z: 1 },
+            rowSpacingDsMm: 1,
+            colSpacingDsMm: 1,
+            sliceThicknessMm: 1,
+            spacingBetweenSlicesMm: 1,
+          } satisfies SvrReconstructionSlice;
+        }),
+      );
+      sources.push(slices);
+      const referencePlane = slices[1]!;
+      const presentation = resliceStackToReferencePlane({ targetSlices: slices, referenceSlice: referencePlane });
+      const admitted = resliceDenseLongitudinalPlane({
+        targetSlices: slices,
+        referencePlane,
+        targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+        centerMm: referencePlane.ippMm,
+        refinePose: false,
+      });
+      if (pixelPaddingValue === null) {
+        expect(presentation.coverage).toBe(1);
+        expect(admitted).toMatchObject({ ok: true, coverage: 1 });
+      } else {
+        expect(presentation.coverage).toBeCloseTo(0.30864197530864196, 12);
+        expect(admitted).toMatchObject({ ok: false, reason: 'insufficient-coverage' });
+      }
+    }
+    for (let index = 0; index < sources[0]!.length; index++) {
+      expect(sources[0]![index]!.pixels).toEqual(sources[1]![index]!.pixels);
+      expect(sources[0]![index]!.ippMm).toEqual(sources[1]![index]!.ippMm);
+    }
+  });
+
   it('creates genuine displayable DICOM stacks with independent geometry and padding-aware pixels', async () => {
     const files = createSyntheticSvrDicomFiles({
       imageSize: 12,

@@ -45,6 +45,54 @@ const settle = async (props?: Options, calls = 1) => {
 };
 
 describe('visible background alignment', () => {
+  it('reprioritizes mounted targets without aborting the cold physical request in flight', async () => {
+    const series = Object.fromEntries(
+      ['may', 'april', 'march', 'february', 'january'].map((date) => [date, { ...target, series_uid: date }]),
+    );
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const props = options({
+      data: { ...data, series_map: { flair: series } },
+      columns: Object.entries(series).map(([date, ref]) => ({ date, ref })),
+      presentedDates: ['february', 'january'],
+      alignAllDates: vi.fn(async () => {
+        await running;
+        return [];
+      }),
+    });
+    const hook = renderHook(useVisibleAlignment, { initialProps: props });
+    await settle(props);
+    const call = vi.mocked(props.alignAllDates).mock.lastCall!;
+    expect(call[0].date).toBe('may');
+    expect(call[1]).toEqual(['april', 'march', 'february', 'january']);
+    expect(call[4]!.getPresentedDates!()).toEqual(['february', 'january']);
+    const previousKey = hook.result.current.activeRequestKey;
+    hook.rerender({ ...props, presentedDates: ['march', 'february'] });
+    await settle(props, 1);
+    expect(hook.result.current.activeRequestKey).toBe(previousKey);
+    expect(props.abort).not.toHaveBeenCalled();
+    expect(call[4]!.getPresentedDates!()).toEqual(['march', 'february']);
+    await act(async () => finish());
+    hook.unmount();
+  });
+
+  it('uses a full stack as the shared reference when the newest examination is a localizer', async () => {
+    const props = options({
+      columns: [
+        { date: 'new', ref: { ...reference, instance_count: 1 } },
+        { date: 'old', ref: target },
+      ],
+    });
+    const hook = renderHook(useVisibleAlignment, { initialProps: props });
+    await settle(props);
+    expect(hook.result.current.referenceDate).toBe('old');
+    expect(vi.mocked(props.alignAllDates).mock.lastCall![0]).toMatchObject({ date: 'old', sliceIndex: 50 });
+    expect(vi.mocked(props.alignAllDates).mock.lastCall![1]).toEqual(['new']);
+    hook.unmount();
+  });
+
   beforeEach(() => {
     clearDerivedAlignmentFrames();
     vi.useFakeTimers();

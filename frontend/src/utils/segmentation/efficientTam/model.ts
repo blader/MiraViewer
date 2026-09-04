@@ -1,4 +1,9 @@
-import { createTrackingController, type TrackingGraph, type TrackingSessions } from '../interactiveTracking';
+import {
+  createTrackingController,
+  type TrackingGraph,
+  type TrackingPhaseTiming,
+  type TrackingSessions,
+} from '../interactiveTracking';
 import { loadOrtAll } from '../onnx/ortLoader';
 import { loadTrackingAsset } from './loadAsset';
 import manifest from './assetManifest.json';
@@ -41,14 +46,26 @@ export async function createInteractiveTrackingModel({
   wasmThreads = 1,
   signal,
   onProgress,
+  onTiming,
 }: {
   provider: InteractiveTrackingProvider;
   /** Normal workers request auto; explicit diagnostic counts and the omitted default remain stable. */
   wasmThreads?: 1 | 4 | 'auto';
   signal?: AbortSignal;
   onProgress?: (asset: TrackingGraph) => void;
+  onTiming?: (timing: TrackingPhaseTiming) => void;
 }) {
   const sessions: Partial<TrackingSessions> = {};
+  const measure = async <T>(
+    stage: TrackingPhaseTiming['stage'],
+    asset: TrackingPhaseTiming['asset'],
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const start = onTiming ? performance.now() : 0;
+    const value = await operation();
+    onTiming?.({ stage, ...(asset ? { asset } : {}), elapsedMs: performance.now() - start });
+    return value;
+  };
   try {
     signal?.throwIfAborted();
     if (provider !== 'wasm' && provider !== 'hybrid' && provider !== 'gpu-memory' && provider !== 'webgpu')
@@ -72,7 +89,7 @@ export async function createInteractiveTrackingModel({
         throw new Error('Four-thread selection diagnostics require an isolated browser with shared WASM memory.');
       if (supported) selectedThreads = 4;
     }
-    const ort = await loadOrtAll();
+    const ort = await measure('runtime-load', undefined, loadOrtAll);
     signal?.throwIfAborted();
     if (selectedThreads === 4 && ort.env.wasm.proxy) {
       if (wasmThreads !== 'auto')
@@ -85,7 +102,7 @@ export async function createInteractiveTrackingModel({
     for (const name of Object.keys(manifest.graphs) as TrackingGraph[]) {
       onProgress?.(name);
       signal?.throwIfAborted();
-      const bytes = await loadTrackingAsset(name, signal);
+      const bytes = await measure('asset-load', name, () => loadTrackingAsset(name, signal));
       signal?.throwIfAborted();
       if (selectedThreads === 4 && ort.env.wasm.numThreads !== 4)
         throw new Error('The runtime did not retain the explicitly requested four WASM threads.');
@@ -95,18 +112,24 @@ export async function createInteractiveTrackingModel({
         (provider === 'gpu-memory' && name === 'memoryAttention')
           ? 'webgpu'
           : 'wasm';
-      sessions[name] = await ort.InferenceSession.create(bytes, {
-        // Diagnostic placement is explicit; failures never select a fallback.
-        executionProviders: [graphProvider],
-        graphOptimizationLevel: 'all',
-        preferredOutputLocation: 'cpu',
+      await measure('session-init', name, async () => {
+        sessions[name] = await ort.InferenceSession.create(bytes, {
+          // Diagnostic placement is explicit; failures never select a fallback.
+          executionProviders: [graphProvider],
+          graphOptimizationLevel: 'all',
+          preferredOutputLocation: 'cpu',
+        });
       });
       signal?.throwIfAborted();
       if (selectedThreads === 4 && ort.env.wasm.numThreads !== 4)
         throw new Error('The runtime did not retain the explicitly requested four WASM threads.');
     }
-    const positionBytes = await loadTrackingAsset('memoryPosition', signal);
-    const temporalBytes = await loadTrackingAsset('temporalPositions', signal);
+    const positionBytes = await measure('asset-load', 'memoryPosition', () =>
+      loadTrackingAsset('memoryPosition', signal),
+    );
+    const temporalBytes = await measure('asset-load', 'temporalPositions', () =>
+      loadTrackingAsset('temporalPositions', signal),
+    );
     signal?.throwIfAborted();
     const floats = (bytes: Uint8Array<ArrayBuffer>) => {
       const values = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
@@ -121,6 +144,7 @@ export async function createInteractiveTrackingModel({
       sessions: sessions as TrackingSessions,
       position: floats(positionBytes),
       temporalPosition: floats(temporalBytes),
+      onTiming,
     });
   } catch (error) {
     await Promise.allSettled(Object.values(sessions).map((session) => session.release()));

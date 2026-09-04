@@ -6,7 +6,7 @@ import {
 } from './alignmentScoringEngine';
 import type { GridSeedTransform } from './alignmentTransform';
 import type { PhaseCorrection } from './phaseCorrelation';
-import type { FinalAffineSelection } from './structuralAffineSelection';
+import { selectFinalAffineProposal, type FinalAffineSelection } from './structuralAffineSelection';
 
 export type AlignmentScoringRunner = {
   scoreCoarse: (
@@ -26,25 +26,14 @@ export type AlignmentScoringRunner = {
 
 type WorkerResponse =
   | { kind: 'ready'; requestId: number }
+  | { kind: 'started'; requestId: number }
   | { kind: 'result'; requestId: number; result: AlignmentScoredCandidate }
   | { kind: 'final-result'; requestId: number; result: FinalAffineSelection }
   | { kind: 'error'; requestId: number; message: string };
 
-/** One worker per run; only deterministic unit/integration tests are allowed an in-process engine. */
-export async function createAlignmentScoringRunner(
-  config: AlignmentScoringConfiguration,
-  signal: AbortSignal,
-): Promise<AlignmentScoringRunner> {
+function createScoringWorker(signal: AbortSignal, onStarted?: () => void) {
+  if (signal.aborted) throw new Error('Alignment scoring worker cancelled');
   if (typeof Worker !== 'function') {
-    if (import.meta.env.MODE === 'test') {
-      const engine = new AlignmentScoringEngine(config);
-      return {
-        scoreCoarse: async (pixels, seed, validity) => engine.scoreCoarse(pixels, seed, validity),
-        scoreFine: async (pixels, seed, phase, validity) => engine.scoreFine(pixels, seed, phase, validity),
-        scoreFinal: async (input) => engine.scoreFinal(input),
-        close: () => undefined,
-      };
-    }
     throw new Error(
       'Auto-alignment requires module worker support; CPU-heavy image analysis cannot run on the UI thread',
     );
@@ -86,6 +75,10 @@ export async function createAlignmentScoringRunner(
   worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
     const pending = active;
     if (!pending || event.data.requestId !== pending.requestId) return;
+    if (event.data.kind === 'started') {
+      onStarted?.();
+      return;
+    }
     clearTimeout(pending.timer);
     active = undefined;
     if (event.data.kind === 'error') pending.reject(new Error(event.data.message));
@@ -125,6 +118,25 @@ export async function createAlignmentScoringRunner(
       }
     });
   };
+
+  return { request, close };
+}
+
+/** One worker per run; only deterministic unit/integration tests are allowed an in-process engine. */
+export async function createAlignmentScoringRunner(
+  config: AlignmentScoringConfiguration,
+  signal: AbortSignal,
+): Promise<AlignmentScoringRunner> {
+  if (typeof Worker !== 'function' && import.meta.env.MODE === 'test') {
+    const engine = new AlignmentScoringEngine(config);
+    return {
+      scoreCoarse: async (pixels, seed, validity) => engine.scoreCoarse(pixels, seed, validity),
+      scoreFine: async (pixels, seed, phase, validity) => engine.scoreFine(pixels, seed, phase, validity),
+      scoreFinal: async (input) => engine.scoreFinal(input),
+      close: () => undefined,
+    };
+  }
+  const { request, close } = createScoringWorker(signal);
 
   const referenceConfig = { ...config };
   const referenceTransfers: Transferable[] = [];
@@ -182,4 +194,36 @@ export async function createAlignmentScoringRunner(
     },
     close,
   };
+}
+
+/** Rank a physical-route refinement without constructing unused coarse/FFT reference state. */
+export async function scoreFinalAffineInWorker(
+  input: Parameters<typeof selectFinalAffineProposal>[0],
+  signal: AbortSignal,
+  onStarted?: () => void,
+): Promise<FinalAffineSelection> {
+  if (signal.aborted) throw new Error('Alignment scoring worker cancelled');
+  if (typeof Worker !== 'function' && import.meta.env.MODE === 'test') return selectFinalAffineProposal(input);
+  const { request, close } = createScoringWorker(signal, onStarted);
+  try {
+    // The UI still owns the accepted plane and its display calibration. Transfer
+    // private copies so cancellation or worker disposal cannot detach them.
+    const copied = {
+      ...input,
+      normalizedReference: Float32Array.from(input.normalizedReference),
+      movingPixels: Float32Array.from(input.movingPixels),
+      referenceValidity: input.referenceValidity ? Float32Array.from(input.referenceValidity) : undefined,
+      movingValidity: input.movingValidity ? Float32Array.from(input.movingValidity) : undefined,
+    };
+    const response = await request({ kind: 'final-only', input: copied }, [
+      copied.normalizedReference.buffer,
+      copied.movingPixels.buffer,
+      ...(copied.referenceValidity ? [copied.referenceValidity.buffer] : []),
+      ...(copied.movingValidity ? [copied.movingValidity.buffer] : []),
+    ]);
+    if (response.kind !== 'final-result') throw new Error('Alignment scoring worker returned an invalid final result');
+    return response.result;
+  } finally {
+    close();
+  }
 }

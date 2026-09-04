@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { segmentSeededVolume } from '../src/utils/segmentation/seededVolume';
+import { segmentSeededVolume } from './helpers/legacySeededVolume';
 import { segmentationEnclosedPhantom } from './helpers/segmentationEnclosedPhantom';
 import { segmentationQuality } from './helpers/segmentationQuality';
 

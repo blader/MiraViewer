@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAlignmentScoringRunner } from '../src/utils/alignmentScoringRunner';
+import { createAlignmentScoringRunner, scoreFinalAffineInWorker } from '../src/utils/alignmentScoringRunner';
 import type { AlignmentScoringConfiguration } from '../src/utils/alignmentScoringEngine';
 
 const config: AlignmentScoringConfiguration = {
@@ -16,7 +16,12 @@ const config: AlignmentScoringConfiguration = {
 type WorkerMessage = {
   kind: string;
   requestId: number;
-  input?: { movingPixels: Float32Array; movingValidity?: Float32Array };
+  input?: {
+    movingPixels: Float32Array;
+    movingValidity?: Float32Array;
+    normalizedReference?: Float32Array;
+    referenceValidity?: Float32Array;
+  };
   config?: AlignmentScoringConfiguration;
   pixels?: Float32Array;
   validity?: Float32Array;
@@ -48,7 +53,7 @@ class FakeScoringWorker {
       const response =
         message.kind === 'initialize'
           ? { kind: 'ready', requestId: message.requestId }
-          : message.kind === 'final'
+          : message.kind === 'final' || message.kind === 'final-only'
             ? {
                 kind: 'final-result',
                 requestId: message.requestId,
@@ -65,6 +70,16 @@ class FakeScoringWorker {
 }
 
 describe('bounded alignment scoring worker lifecycle', () => {
+  const finalInput = () => ({
+    normalizedReference: new Float32Array(64).fill(0.25),
+    referenceValidity: new Float32Array(64).fill(1),
+    movingPixels: new Float32Array(64).fill(0.75),
+    movingValidity: new Float32Array(64).fill(1),
+    size: 8,
+    scales: [8],
+    winningWarp: { A: { m00: 1, m01: 0, m10: 0, m11: 1 }, translateX: 0, translateY: 0 },
+    optimizerProposals: [],
+  });
   beforeEach(() => {
     FakeScoringWorker.instances = [];
     FakeScoringWorker.mode = 'ready';
@@ -74,6 +89,50 @@ describe('bounded alignment scoring worker lifecycle', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('ranks a physical final-only request without initializing coarse state or detaching UI buffers', async () => {
+    const input = finalInput();
+    await scoreFinalAffineInWorker(input, new AbortController().signal);
+    const worker = FakeScoringWorker.instances[0]!;
+    expect(worker.postMessage).toHaveBeenCalledOnce();
+    const [message, transfer] = worker.postMessage.mock.calls[0]!;
+    expect(message.kind).toBe('final-only');
+    expect(transfer).toHaveLength(4);
+    for (const field of ['normalizedReference', 'referenceValidity', 'movingPixels', 'movingValidity'] as const) {
+      expect(message.input![field]).not.toBe(input[field]);
+      expect(Array.from(message.input![field]!)).toEqual(Array.from(input[field]));
+    }
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['abort', 'timeout'] as const)('terminates final ranking on %s and rejects late replies', async (reason) => {
+    vi.useFakeTimers();
+    FakeScoringWorker.mode = 'no-response';
+    const controller = new AbortController();
+    const pending = scoreFinalAffineInWorker(finalInput(), controller.signal);
+    const rejected = expect(pending).rejects.toThrow(reason === 'abort' ? 'cancelled' : 'deadline');
+    const worker = FakeScoringWorker.instances[0]!;
+    if (reason === 'abort') controller.abort();
+    else await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+    worker.onmessage?.({ data: { kind: 'final-result', requestId: 1, result: { selected: {} } } } as MessageEvent);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it('reports worker entry without settling the request or extending its deadline', async () => {
+    vi.useFakeTimers();
+    FakeScoringWorker.mode = 'no-response';
+    const onStarted = vi.fn();
+    const pending = scoreFinalAffineInWorker(finalInput(), new AbortController().signal, onStarted);
+    const rejected = expect(pending).rejects.toThrow('deadline');
+    await vi.advanceTimersByTimeAsync(29_000);
+    FakeScoringWorker.instances[0]!.onmessage?.({
+      data: { kind: 'started', requestId: 1 },
+    } as MessageEvent);
+    expect(onStarted).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rejected;
   });
 
   it('terminates an initialized worker when its run is aborted', async () => {
