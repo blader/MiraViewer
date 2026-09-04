@@ -38,10 +38,14 @@ jobs:
       - run: npm run test -- --maxWorkers=2 --reporter=json --outputFile=tmp/ci-unit-results.json
       - name: Build the shipped application and verify model assets
         run: npm run build:browser -- --production
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium and the software OpenGL driver
+        run: |
+          npx playwright install --with-deps chromium
+          sudo apt-get install --yes --no-install-recommends libgl1-mesa-dri libglx-mesa0
       - name: Exercise import, editing, recovery and backup in the actual app
-        run: npx playwright test --project=workflow --reporter=line,json
+        run: xvfb-run --auto-servernum npx playwright test --project=workflow --headed --reporter=line,json
         env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
           PLAYWRIGHT_JSON_OUTPUT_FILE: tmp/browser-results/results.json
       - name: Verify checks did not change source
         run: git diff --exit-code

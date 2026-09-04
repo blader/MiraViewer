@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "checkpoint": "Post-reduction local production acceptance; CI completion is recorded separately",
+  "source": {
+    "head": "736c24e6be7112b85a9fc4588c7dadb7e1f9e281",
+    "sourceSha256": "f38e0d01ecb09ddfb7e076286fc98b2bd1609708243b4c15e0c85e9ec2de0272",
+    "applicationSourceSha256": "afc81e97be47916526aaa310cf6f3e7778ed7eb02ec03cec5b3d06031a020028",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceState": "Parent commit plus the uncommitted browser cancellation-test coordination repair; no production implementation edits after the recorded build.",
+  "build": {
+    "head": "5f5f4d3d340180dfc75ef2cbb12e407167d49ead",
+    "sourceSha256": "b8e1d822f53a621bff2c634a734bb9b4d9e98d8ab2969bdbe82dc7f2bd7ac0aa",
+    "applicationSourceSha256": "afc81e97be47916526aaa310cf6f3e7778ed7eb02ec03cec5b3d06031a020028",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T12:23:37.986Z",
+    "fixture": "synthetic only"
+  },
+  "buildReuse": "Full-source hashes differ because the browser-test sequencing changed after this normal production build. The application and pinned-model fingerprints match; no acceptance probes were emitted.",
+  "unit": {
+    "runUrl": "https://github.com/blader/MiraViewer/actions/runs/33870571156",
+    "prHead": "5f5f4d3d340180dfc75ef2cbb12e407167d49ead",
+    "actualCheckout": {
+      "head": "648d5ffd59a8018e711bb462d46b677bae0eb463",
+      "sourceSha256": "01397f93232dc570e15a9fe9f5ed53703b2e15a5aa9dc7f69754dfc3ae5ee663",
+      "applicationSourceSha256": "41759d4e0c47dd5e13b13ac44081aafe86d98b608b0acea45474f7dc559bb1f5",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "node": "v22.22.0",
+      "fixture": "synthetic only"
+    },
+    "passed": 3254,
+    "failed": 0,
+    "existingOptionalSkips": 54,
+    "scope": "Hosted full unit run after production reduction, before the regular-Chromium workflow configuration and browser-only sequencing repairs. Not final-head CI clearance."
+  },
+  "browser": {
+    "version": "151.0.7922.34",
+    "channel": "chromium",
+    "headless": true,
+    "platform": "darwin",
+    "route": "http://127.0.0.1:43134/",
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "fixture": "synthetic only",
+    "probes": false,
+    "tracing": false,
+    "stats": {
+      "startTime": "2026-09-04T12:29:28.226Z",
+      "duration": 41980.546,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "tests": [
+      {
+        "name": "shows a clear metadata-only repair summary for existing scans on desktop and mobile",
+        "durationMs": 1095,
+        "status": "passed"
+      },
+      {
+        "name": "upgrades a legacy database for physical viewing and preserves original bytes and saved work through backup restore",
+        "durationMs": 3902,
+        "status": "passed"
+      },
+      {
+        "name": "keeps exact source-bound selections through unrelated import, legacy recovery, editing and fresh-context restore",
+        "durationMs": 4538,
+        "status": "passed"
+      },
+      {
+        "name": "backup controls show per-file limits and a reachable direct-save action",
+        "durationMs": 825,
+        "status": "passed"
+      },
+      {
+        "name": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+        "durationMs": 11756,
+        "status": "passed"
+      },
+      {
+        "name": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+        "durationMs": 5799,
+        "status": "passed"
+      },
+      {
+        "name": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+        "durationMs": 1522,
+        "status": "passed"
+      },
+      {
+        "name": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+        "durationMs": 2295,
+        "status": "passed"
+      },
+      {
+        "name": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+        "durationMs": 5089,
+        "status": "passed"
+      },
+      {
+        "name": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+        "durationMs": 3698,
+        "status": "passed"
+      }
+    ]
+  },
+  "savedWork": {
+    "revisions": [24, 48, 49],
+    "restoredDicomCount": 48,
+    "restoredFramesAndHashesMatch": true,
+    "reviewedSelectedCount": 13,
+    "reviewedLabelsSha256": "2e0be2fc085136c6038c220659abf4115f85c39619ff40781fdb0243650faabf",
+    "literalMarks": {
+      "foreground": 13,
+      "background": 13
+    },
+    "editedSelectedCounts": [13, 26],
+    "clearedSelectedCounts": [13, 0],
+    "legacyOriginalUnchanged": true,
+    "errors": []
+  },
+  "customModel": {
+    "draft": [
+      {
+        "volumeKey": "{\"version\":2,\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"reconstruction\":\"native-v2-470b775ecacf180a\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "brats-tumor-v1",
+        "reviewState": "draft",
+        "labelBytes": 31104,
+        "selectedCount": 31104,
+        "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+      }
+    ],
+    "reopenedMatches": true,
+    "workersClosed": 3,
+    "cancelToReadyObservedMs": 2912.251166,
+    "timingScope": "Includes Playwright action and worker-closure polling; not a hardware performance or direct UI-latency guarantee.",
+    "replacementTrigger": "The ordinary reconstruction button runs from the real worker inference-start message, before a completion message can publish; explicit Cancel still uses Playwright input.",
+    "errors": []
+  },
+  "failuresRetained": [
+    {
+      "run": "https://github.com/blader/MiraViewer/actions/runs/33870571156",
+      "result": "7 browser passes; 3 3D timeouts in the separate default headless shell. Full units, lint and production build passed."
+    },
+    {
+      "attempt": "attempt-03",
+      "result": "Unchanged production bundle fails in headless-shell SwiftShader and passes the same focused identity workflow in full Chromium headless on Metal; no Linux claim."
+    },
+    {
+      "attempt": "attempt-04",
+      "result": "9/10 full workflows passed. The custom-model test incorrectly expected cancellation after the slow fixture had already completed."
+    },
+    {
+      "attempt": "attempt-05",
+      "result": "Trace: completion at 8138.55 ms, worker retirement at 8139.07 ms, source-menu click at 8165.87 ms, reconstruction click at 8211.82 ms."
+    },
+    {
+      "attempt": "attempt-06",
+      "result": "Repaired focused trace passes: inference at 8111.86 ms, reconstruction click at 8111.91 ms, worker termination at 8112.19 ms; no completion message from that worker."
+    },
+    {
+      "run": "https://github.com/blader/MiraViewer/actions/runs/33872668207",
+      "result": "Regular Chromium on hosted Linux also has seven passes and three 3D timeouts, with GL readback stalls; unit/lint/build pass. Local Metal success is not Linux clearance."
+    }
+  ],
+  "images": [
+    {
+      "path": "post-reduction/durable-grid-recovered-desktop.png",
+      "originalPath": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-recovered-desktop.png",
+      "sha256": "32ba4a9c4670b2bf7f6aba247e37f989723216d7b69a3ac77dd4a6c24b1184a5",
+      "inspection": "Viewed individually at original detail, each followed immediately by a source-specific user-visible audit. PASS for visible static layout; not below-fold, motion or anatomy."
+    },
+    {
+      "path": "post-reduction/durable-grid-restored-desktop.png",
+      "originalPath": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-restored-desktop.png",
+      "sha256": "a4eac12165c762d9bf9a8d4d31f3e9d836c093b0daf0efb0b77e1f5e21382b02",
+      "inspection": "Viewed individually at original detail, each followed immediately by a source-specific user-visible audit. PASS for visible static layout; not below-fold, motion or anatomy."
+    },
+    {
+      "path": "post-reduction/durable-grid-cleared-reopened.png",
+      "originalPath": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-cleared-reopened.png",
+      "sha256": "dd1823ccd2b543e7c20b59ecc93f012547adf7c1aff7c5a527a81c8686e2fc19",
+      "inspection": "Viewed individually at original detail, each followed immediately by a source-specific user-visible audit. PASS for visible static layout; not below-fold, motion or anatomy."
+    }
+  ],
+  "cleanup": {
+    "currentBatch": "CLEAR",
+    "staleOwned": "CLEAR",
+    "preservation": "CLEAR - read-only audit; no process, browser, profile, source, or private artifact changed.",
+    "receiptCount": 35,
+    "port43134": "free",
+    "status": "CLOSED"
+  },
+  "originalReceipts": [
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-run.json",
+      "sha256": "c81c57a0e27932af217cf3edaad2401e320f6febdfce7c09058b7f87a3e49750"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/results.json",
+      "sha256": "298d8cbc643b15213a53c525508f2236f50305959656e1c2e07272bbdaeef351"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/inspection-audit.json",
+      "sha256": "1da40d396af373e0352d5c9e99723315b432971211ad47ece4b3a54b1eb2620b"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/workflow-keeps-exact-sourc-cfe0f-g-and-fresh-context-restore-workflow/durable-grid-receipt.json",
+      "sha256": "cc38040f53de8080e5808ccb036791ea7741c728b416708ca9cddc6f1d362ec6"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-07/candidate-workflow-results/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+      "sha256": "078a525baa089f9d1f6accace2ae51ddad16eed1b3e02cdc55b76fc3b64e07d9"
+    },
+    {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33870571156/ci-unit-results.json",
+      "sha256": "1a068fa8c3107aec4454ab869d629916f080d0e51d47cb4c14bb0cd98d90495d"
+    },
+    {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33870571156/ci-source.json",
+      "sha256": "90b095bde2b874ccbd15ef5958ed8975959d0abaf6266d0787eb5e6ff8043e0a"
+    },
+    {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33870571156/browser-dist/browser-build.json",
+      "sha256": "36b0c5ae324fbc4873d6370c932d55d1578457b105495be5190acbf6760f1f2d"
+    },
+    {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/ci-run-33870571156/full-job.log",
+      "sha256": "12c44e4c0b8f50893960e3abf3bfca0cf1a17a4e28c1d949ec87d486e9ddf3c0"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-08/candidate-workflow-run.json",
+      "sha256": "0532cd0bcc70c7e380b0c349fdc0bd253c0f5efb4ddb7051dc5b26ede441685e"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-08/candidate-workflow-results/results.json",
+      "sha256": "602e083c20e8ed9b11634bbf457a1e88d67d1b5149e38f3aad9ce961a37e0fc8"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-08/cleanup-audit.json",
+      "sha256": "d750fe9e62e207e7461911a81325f92ab1cd1c27f867f8b82d3f91ecb22fef6a"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-08/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/browser-environment.json",
+      "sha256": "8a41ec3c78eedbb5f0b489e03e27f1163411a77d87c163d7f15ecec68aa850b0"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-09/candidate-workflow-run.json",
+      "sha256": "006cf08037817fc6d1a31cb941edc8364a30f2591167efb5136fb2f3cff3935c"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-09/candidate-workflow-results/results.json",
+      "sha256": "2a3edf191d003e28d0e8f11e7dd69860933d9e96d7e45655ca3c4a830da28c80"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-09/cleanup-audit.json",
+      "sha256": "2f43c7f0b1222fc8822e9849ff72d3fa8f52966d1dbb74590d3ae9e46ce4f411"
+    },
+    {
+      "path": "artifacts/performance/audit-durable-identity-2026-09-04/attempt-09/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/browser-environment.json",
+      "sha256": "8a41ec3c78eedbb5f0b489e03e27f1163411a77d87c163d7f15ecec68aa850b0"
+    }
+  ],
+  "limitations": [
+    "Synthetic workflow evidence, not anatomical acceptance.",
+    "Static capture inspection does not prove motion, performance or hidden page areas.",
+    "No software-versus-hardware performance claim; runtime diagnosis is scoped to its recorded local browser.",
+    "Linux CI and final-head Hall Monitor clearance remain separate from this local receipt.",
+    "F7 broader warm-navigation/canceled-work measurements and F9 startup/host parity are still open."
+  ],
+  "additionalLocalValidation": {
+    "source": {
+      "head": "736c24e6be7112b85a9fc4588c7dadb7e1f9e281",
+      "sourceSha256": "cd0befc6b6ed4526a8d72b32877c610f5d3db141afe8b8715870d88323dd2ef5",
+      "applicationSourceSha256": "d790405230d02a380034e97907349aed07a7280f4377145c2108654e8fa50777",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "stats": {
+      "startTime": "2026-09-04T12:43:53.637Z",
+      "duration": 42774.269,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "environment": {
+      "browser": "151.0.7922.34",
+      "platform": "darwin",
+      "channel": "chromium",
+      "headless": true,
+      "graphics": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (Apple)",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)"
+      },
+      "scope": "Runtime metadata from a disposable context in the workflow browser, not performance evidence."
+    },
+    "compiledApplicationAssetsIdenticalToEarlierLocalCheckpoint": true,
+    "scope": "Includes runtime-metadata recording and the Linux-specific launch configuration. This Mac run does not execute the Linux OpenGL branch.",
+    "cleanup": "CLOSED",
+    "ownedReceiptCount": 36
+  },
+  "finalLocalValidation": {
+    "source": {
+      "head": "736c24e6be7112b85a9fc4588c7dadb7e1f9e281",
+      "sourceSha256": "1f77ad87c5029417eb8f3a66719905c5f34f3ebaedb18d6374acf648df2f80b9",
+      "applicationSourceSha256": "d790405230d02a380034e97907349aed07a7280f4377145c2108654e8fa50777",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "stats": {
+      "startTime": "2026-09-04T12:47:18.318Z",
+      "duration": 42966.835999999996,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "environment": {
+      "browser": "151.0.7922.34",
+      "platform": "darwin",
+      "channel": "chromium",
+      "headless": true,
+      "graphics": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (Apple)",
+        "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)"
+      },
+      "scope": "Runtime metadata from a disposable context in the workflow browser, not performance evidence."
+    },
+    "webglCapabilityAssertion": true,
+    "cleanup": "CLOSED",
+    "ownedReceiptCount": 37,
+    "scope": "Full local workflow after the fail-fast WebGL2 requirement. Same normal-production application/model as attempt-08; browser test only changed. Linux CI remains separate."
+  }
+}

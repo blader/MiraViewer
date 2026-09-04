@@ -83,8 +83,24 @@ From `frontend/`:
 
 ```sh
 npm run test -- tests/svrSourceAdmission.test.ts tests/svrSelectionMigration.test.ts tests/SvrVolume3DViewer.test.tsx tests/localApi.test.ts tests/exportBackup.test.ts --maxWorkers=2
-npm run build:browser
+npm run build:browser -- --production
 PLAYWRIGHT_HTML_OPEN=never npm run test:browser -- --grep 'keeps exact source-bound selections' --reporter=line
 ```
 
 The retained normal-production run used the same checked-in workflow with a separate output directory and headed-Chrome wrapper. Do not point tests at a user's MRI origin or browser profile.
+
+## Post-reduction acceptance and browser-runtime repair
+
+The [post-reduction receipt](post-reduction.json) preserves a later **10/10 passing normal-production workflow run in 42.0 seconds**, with no failures, skips or retries. It used regular Chromium 151.0.7922.34 in headless mode, the actual application at `http://127.0.0.1:43134/`, and isolated synthetic data. The source fingerprint was `f38e0d01ecb09ddfb7e076286fc98b2bd1609708243b4c15e0c85e9ec2de0272`; the application fingerprint was `afc81e97be47916526aaa310cf6f3e7778ed7eb02ec03cec5b3d06031a020028`. The receipt records the uncommitted browser-test repair over parent `736c24e`, not an invented implementation commit. The retained production bundle's application/model fingerprints match; only test sequencing changed after its build.
+
+The first [hosted run](https://github.com/blader/MiraViewer/actions/runs/33870571156) supplied a complete post-reduction unit report: **3,254 passes, zero failures and 54 existing optional skips**, plus passing lint and production type/build steps. That run failed overall: seven browser workflows passed and three timed out opening 3D. Its actual checkout was GitHub's merge commit `648d5ffd59a8018e711bb462d46b677bae0eb463`, whose source/model fingerprints matched PR head `5f5f4d3`.
+
+Local tracing reproduced the 3D failure in Playwright's separate headless shell using SwiftShader. The same unchanged application passed the focused workflow in regular Chromium headless on Metal. The workflow project now selects the regular Chromium channel; other browser projects, timeouts, retries and pixel/state assertions are unchanged. This local result does not establish Linux graphics behavior or hardware performance.
+
+The first complete regular-Chromium replay then caught a test-ordering error. The synthetic model completed before the test opened reconstruction controls, so its new empty draft was a legitimate completed result, not a late canceled write. The existing worker-start observer now triggers the real reconstruction button at inference start. A fresh trace showed termination before any completion message, and the uninstrumented full run retained the exact original draft through explicit Cancel, reconstruction replacement and reload. No production cancellation/storage code, model workload or deadline was changed for this repair.
+
+The current [recovered](post-reduction/durable-grid-recovered-desktop.png), [restored](post-reduction/durable-grid-restored-desktop.png) and [cleared/reopened](post-reduction/durable-grid-cleared-reopened.png) captures were each inspected at original detail with an immediate source-specific audit. Their visible static layout passed; lower content, motion and anatomical quality remain outside that verdict. The earlier captures and receipts above are retained under their original scope. A 35-receipt ownership audit found no current or stale owned browser/server/profile; port 43134 was free and user/other-worktree state was preserved.
+
+This checkpoint is local acceptance, not final-head hosted CI or merge clearance. The current [PR checks](https://github.com/blader/MiraViewer/pull/15/checks), completed raw CI receipts and Hall Monitor readback own that decision. F7 warm-navigation/canceled-work measurements and F9 startup/host parity remain separate open work.
+
+The [regular-Chromium Linux rerun](https://github.com/blader/MiraViewer/actions/runs/33872668207) also passed lint, the full unit command and the production build, but repeated all three 3D timeouts; its traces record GL readback stalls. Changing the binary was not sufficient on that host. The CI configuration now supplies Xvfb and Mesa OpenGL and records actual renderer metadata before the workflows. This profile needs its own completed CI result; it does not lower image quality, test coverage or deadlines.

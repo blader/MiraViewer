@@ -11,6 +11,7 @@ declare global {
   interface Window {
     replayWorkerStarts: number;
     customInferenceStarted: boolean;
+    customInferenceAction?: () => void;
     finishPanelWriteAudit: () => { writeStores: string[][]; sourceCatalogReads: number };
     alignmentRequests: {
       type: string;
@@ -22,6 +23,36 @@ declare global {
     }[];
   }
 }
+
+test.beforeAll(async ({ browser }, info) => {
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    const graphics = await page.evaluate(() => {
+      const gl = document.createElement('canvas').getContext('webgl2', { powerPreference: 'high-performance' });
+      if (!gl) return null;
+      const debug = gl.getExtension('WEBGL_debug_renderer_info');
+      const result = {
+        version: gl.getParameter(gl.VERSION),
+        vendor: gl.getParameter(debug?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR),
+        renderer: gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER),
+      };
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      return result;
+    });
+    await attachReceipt(info, 'browser-environment', {
+      browser: browser.version(),
+      platform: process.platform,
+      channel: info.project.use.channel,
+      headless: info.project.use.headless,
+      graphics,
+      scope: 'Runtime metadata from a disposable context in the workflow browser, not performance evidence.',
+    });
+    expect(graphics, 'The workflow browser must provide WebGL2 for its 3D scenarios').not.toBeNull();
+  } finally {
+    await context.close();
+  }
+});
 
 async function readSaved(page: Page) {
   return page.evaluate(async () => {
@@ -693,7 +724,10 @@ test('normal custom-model controls save a real draft, cancel and replace active 
         super(url, options);
         if (String(url).includes('customModel.worker'))
           this.addEventListener('message', (event) => {
-            if (event.data?.type === 'inference') window.customInferenceStarted = true;
+            if (event.data?.type === 'inference') {
+              window.customInferenceStarted = true;
+              window.customInferenceAction?.();
+            }
           });
       }
     };
@@ -726,10 +760,17 @@ test('normal custom-model controls save a real draft, cancel and replace active 
     );
     await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
   };
-  const start = async () => {
+  const start = async (onInference?: Locator) => {
     await page.evaluate(() => {
       window.customInferenceStarted = false;
+      window.customInferenceAction = undefined;
     });
+    if (onInference) {
+      await expect(onInference).toBeEnabled();
+      await onInference.evaluate((button) => {
+        window.customInferenceAction = () => (button as HTMLButtonElement).click();
+      });
+    }
     await custom.getByRole('button', { name: 'Suggest with model' }).click();
     await page.waitForFunction(() => window.customInferenceStarted);
   };
@@ -757,9 +798,10 @@ test('normal custom-model controls save a real draft, cancel and replace active 
 
   // The ordinary reconstruction action must also retire custom inference before
   // admitting another source image, not wait for its React busy-state effect.
-  await start();
+  // Trigger its real button at inference start: a fast model can otherwise
+  // finish legitimately between the two Playwright clicks before replacement.
   await page.getByRole('button', { name: 'Show reconstruction sources and controls' }).click();
-  await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+  await start(page.getByRole('button', { name: 'Open 3D volume', exact: true }));
   await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
   await expect(page.getByRole('button', { name: 'Show reconstruction sources and controls' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
