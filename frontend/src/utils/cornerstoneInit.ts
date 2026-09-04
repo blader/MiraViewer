@@ -1,8 +1,5 @@
 import cornerstone from 'cornerstone-core';
 import cornerstoneWADOImageLoader from 'cornerstone-wado-image-loader';
-import cornerstoneTools from 'cornerstone-tools';
-import cornerstoneMath from 'cornerstone-math';
-import Hammer from 'hammerjs';
 import dicomParser from 'dicom-parser';
 import { getDB } from '../db/db';
 import { getDerivedAlignmentFrameByImageId } from './derivedAlignmentFrame';
@@ -11,9 +8,6 @@ import { createDerivedImagePresentation } from './derivedImagePresentation';
 // Configure external dependencies
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
 cornerstoneWADOImageLoader.external.dicomParser = dicomParser;
-cornerstoneTools.external.cornerstone = cornerstone;
-cornerstoneTools.external.Hammer = Hammer;
-cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 
 let initialized = false;
 
@@ -119,9 +113,6 @@ export function initCornerstone() {
   } catch {
     // Ignore.
   }
-
-  // Initialize tools
-  cornerstoneTools.init();
 
   // The installed bundled WADO loader includes its JPEG-lossless worker and codecs. Start workers
   // lazily and cap concurrency so compressed MRI decoding works offline without untracked assets.

@@ -80,9 +80,27 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
     scheduleRealignment();
   }, [clearRegistrationCache, columns, panelSettings, scheduleRealignment, updatePanelSetting]);
 
+  const currentResults = engine.results.filter(
+    (result) => !result.requestKey || result.requestKey === visible.activeRequestKey,
+  );
+  // Automatic navigation waits only for the currently presented targets. A
+  // completed visible pair must not be held by an offscreen registration.
+  const waitingForVisibleAlignment = Boolean(
+    visible.activeRequestKey &&
+    engine.isAligning &&
+    columns.some(
+      ({ date, ref }) =>
+        ref &&
+        visible.browsing?.targetSeriesUids.has(ref.series_uid) &&
+        (!view.presentedDates || view.presentedDates.includes(date)) &&
+        !currentResults.some((result) => result.date === date && result.outcome !== 'cancelled'),
+    ),
+  );
+
   return {
     ...engine,
-    results: engine.results.filter((result) => !result.requestKey || result.requestKey === visible.activeRequestKey),
+    results: currentResults,
+    waitingForVisibleAlignment,
     error: !engine.requestKey || engine.requestKey === visible.activeRequestKey ? engine.error : null,
     targetCount: visible.targetCount,
     browsing: visible.browsing

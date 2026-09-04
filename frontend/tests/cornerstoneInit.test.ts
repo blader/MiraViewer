@@ -13,13 +13,6 @@ vi.mock('cornerstone-core', () => ({
   },
 }));
 
-vi.mock('cornerstone-tools', () => ({
-  default: {
-    init: vi.fn(),
-    external: {},
-  },
-}));
-
 vi.mock('cornerstone-wado-image-loader', () => ({
   default: {
     external: {},
@@ -28,15 +21,12 @@ vi.mock('cornerstone-wado-image-loader', () => ({
   },
 }));
 
-vi.mock('cornerstone-math', () => ({ default: {} }));
-vi.mock('hammerjs', () => ({ default: {} }));
 vi.mock('dicom-parser', () => ({ default: {} }));
 vi.mock('../src/db/db', () => ({ getDB: async () => ({ get: sources.instance }) }));
 vi.mock('../src/utils/derivedAlignmentFrame', () => ({ getDerivedAlignmentFrameByImageId: sources.derived }));
 vi.mock('../src/utils/decodedFrame', () => ({ loadCornerstoneImage: sources.decoded }));
 
 import cornerstone from 'cornerstone-core';
-import cornerstoneTools from 'cornerstone-tools';
 import cornerstoneWADOImageLoader from 'cornerstone-wado-image-loader';
 import { initCornerstone } from '../src/utils/cornerstoneInit';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
@@ -52,7 +42,6 @@ describe('cornerstoneInit', () => {
     expect(cornerstone.registerImageLoader).toHaveBeenCalledTimes(2);
     expect(cornerstone.registerImageLoader).toHaveBeenCalledWith('miradb', expect.any(Function));
     expect(cornerstone.registerImageLoader).toHaveBeenCalledWith('miraderived', expect.any(Function));
-    expect(cornerstoneTools.init).toHaveBeenCalledTimes(1);
     expect(cornerstoneWADOImageLoader.webWorkerManager.initialize).toHaveBeenCalledWith(
       expect.objectContaining({
         maxWebWorkers: expect.any(Number),

@@ -1,4 +1,14 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react';
 import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
 import { SvrSegmentationEditor } from './SvrSegmentationEditor';
@@ -420,7 +430,6 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     proposeSelection,
     operations,
   } = useSvrImaging();
-  const enhancementRenderRef = useRef<ReturnType<typeof useSvrEnhancement> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -809,6 +818,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     prepare: useCallback(() => operations.prepare('enhancement').retainedBytes, [operations]),
     blocked: Boolean(busy || onnxSegRunning || savedMigration?.running),
   });
+  const getEnhancementDisplay = useEffectEvent(() => enhancement);
   const glEnhancementRef = useRef<EnhancedVolumeBinding | null>(null);
   const { running: enhancing, cancel: cancelEnhancement, retainedBytes: enhancementBytes } = enhancement;
   useLayoutEffect(
@@ -1141,9 +1151,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   // frame ~180ms after the last interaction event.
   const requestRenderRef = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
-    enhancementRenderRef.current = enhancement;
     requestRenderRef.current?.();
-  }, [enhancement]);
+  }, [enhancement.result, enhancement.source, enhancement.enabled, enhancement.strength]);
   const interactingRef = useRef(false);
   const settleTimerRef = useRef<number | null>(null);
 
@@ -2004,19 +2013,18 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           interpolate: native.interpolate,
         });
 
-        const enhanced = enhancementRenderRef.current;
-        if (enhanced)
-          try {
-            glEnhancementRef.current?.upload(enhanced.result, enhanced.source);
-            glEnhancementRef.current?.apply({
-              enabled: enhanced.enabled && Boolean(enhanced.result),
-              strength: enhanced.strength,
-              smoothSurface: enhanced.enabled && enhanced.strength > 0,
-            });
-          } catch (error) {
-            glEnhancementRef.current?.apply({ enabled: false, strength: 0, smoothSurface: false });
-            if (enhanced.result) enhanced.failDisplay(enhanced.result, error);
-          }
+        const enhanced = getEnhancementDisplay();
+        try {
+          glEnhancementRef.current?.upload(enhanced.result, enhanced.source);
+          glEnhancementRef.current?.apply({
+            enabled: enhanced.enabled && Boolean(enhanced.result),
+            strength: enhanced.strength,
+            smoothSurface: enhanced.enabled && enhanced.strength > 0,
+          });
+        } catch (error) {
+          glEnhancementRef.current?.apply({ enabled: false, strength: 0, smoothSurface: false });
+          if (enhanced.result) enhanced.failDisplay(enhanced.result, error);
+        }
 
         // Bind textures
         gl.activeTexture(gl.TEXTURE0);

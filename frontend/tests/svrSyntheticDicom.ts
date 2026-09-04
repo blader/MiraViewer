@@ -5,6 +5,7 @@ export type SyntheticSvrFixtureOptions = {
   studyUid?: string;
   studyDate?: string;
   seriesNumberOffset?: number;
+  transferSyntax?: 'explicit-vr-le' | 'rle';
   /** Null makes zero-valued background acquired data instead of DICOM padding. */
   pixelPaddingValue?: number | null;
 };
@@ -40,7 +41,7 @@ const SYNTHETIC_ORIENTATIONS: SyntheticOrientation[] = [
 const LONG_VALUE_REPRESENTATIONS = new Set(['OB', 'OD', 'OF', 'OL', 'OW', 'SQ', 'UC', 'UN', 'UR', 'UT']);
 
 /**
- * Genuine explicit-VR, uncompressed DICOM fixtures for real-browser SVR.
+ * Genuine explicit-VR DICOM fixtures, optionally RLE-encapsulated, for real-browser SVR.
  *
  * Every value and image pixel is synthetic; these files contain no patient data.
  */
@@ -65,14 +66,58 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
     if (bytes.length % 2) bytes.push(vr === 'UI' ? 0 : 32);
     return bytes;
   };
-  const element = (group: number, tag: number, vr: string, value: number[] | Uint8Array): number[] => {
+  const element = (
+    group: number,
+    tag: number,
+    vr: string,
+    value: number[] | Uint8Array,
+    undefinedLength = false,
+  ): number[] => {
     const bytes = Array.from(value);
     return [
       ...uint16(group),
       ...uint16(tag),
       ...encoder.encode(vr),
-      ...(LONG_VALUE_REPRESENTATIONS.has(vr) ? [0, 0, ...uint32(bytes.length)] : uint16(bytes.length)),
+      ...(LONG_VALUE_REPRESENTATIONS.has(vr)
+        ? [0, 0, ...uint32(undefinedLength ? 0xffffffff : bytes.length)]
+        : uint16(bytes.length)),
       ...bytes,
+    ];
+  };
+  const encodeRle = (pixels: Uint8Array): number[] => {
+    // DICOM RLE stores most-significant byte planes first; packets never cross a row.
+    const segments = [1, 0].map((byte) => {
+      const encoded: number[] = [];
+      for (let row = 0; row < size; row++) {
+        for (let column = 0; column < size; ) {
+          const value = pixels[(row * size + column) * 2 + byte]!;
+          let run = 1;
+          while (run < 128 && column + run < size && pixels[(row * size + column + run) * 2 + byte] === value) run++;
+          encoded.push(run === 1 ? 0 : 257 - run, value);
+          column += run;
+        }
+      }
+      return encoded;
+    });
+    const frame = [
+      ...uint32(2),
+      ...uint32(64),
+      ...uint32(64 + segments[0]!.length),
+      ...new Uint8Array(52),
+      ...segments[0]!,
+      ...segments[1]!,
+    ];
+    return [
+      ...uint16(0xfffe),
+      ...uint16(0xe000),
+      ...uint32(0),
+      ...uint16(0xfffe),
+      ...uint16(0xe000),
+      ...uint32(frame.length),
+      ...frame,
+      ...uint16(0xfffe),
+      ...uint16(0xe0dd),
+      ...uint32(0),
     ];
   };
 
@@ -106,7 +151,12 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
         ...element(0x0002, 0x0001, 'OB', [0, 1]),
         ...element(0x0002, 0x0002, 'UI', text('1.2.840.10008.5.1.4.1.1.4', 'UI')),
         ...element(0x0002, 0x0003, 'UI', text(sopUid, 'UI')),
-        ...element(0x0002, 0x0010, 'UI', text('1.2.840.10008.1.2.1', 'UI')),
+        ...element(
+          0x0002,
+          0x0010,
+          'UI',
+          text(options.transferSyntax === 'rle' ? '1.2.840.10008.1.2.5' : '1.2.840.10008.1.2.1', 'UI'),
+        ),
       ];
       const dataset = [
         ...element(0x0008, 0x0008, 'CS', text('ORIGINAL\\PRIMARY', 'CS')),
@@ -145,7 +195,9 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
         ...element(0x0028, 0x1051, 'DS', text('1000', 'DS')),
         ...element(0x0028, 0x1052, 'DS', text('0', 'DS')),
         ...element(0x0028, 0x1053, 'DS', text('1', 'DS')),
-        ...element(0x7fe0, 0x0010, 'OW', pixels),
+        ...(options.transferSyntax === 'rle'
+          ? element(0x7fe0, 0x0010, 'OB', encodeRle(pixels), true)
+          : element(0x7fe0, 0x0010, 'OW', pixels)),
       ];
       const bytes = new Uint8Array([...new Uint8Array(128), 68, 73, 67, 77, ...media, ...dataset]);
       files.push(

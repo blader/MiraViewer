@@ -11,7 +11,7 @@ type PersistedComparisonUiState = {
   sharpSlices: boolean;
 };
 
-type InstrumentDialog = 'help' | 'upload' | 'export' | 'clear' | null;
+export type InstrumentDialog = 'help' | 'upload' | 'export' | 'clear' | null;
 
 const DEFAULT_COMPARISON_UI_STATE: PersistedComparisonUiState = {
   sidebarOpen: true,

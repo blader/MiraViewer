@@ -90,7 +90,7 @@ export default defineConfig(({ mode }) => {
       // Cross-origin isolation unlocks multithreaded WASM for ONNX inference (see
       // ortLoader.ts, which keys off crossOriginIsolated). Safe here because every runtime
       // asset (ORT, ITK pipelines, DICOM data) is same-origin. The offline launcher sends
-      // the same headers; unisolated custom hosts safely fall back to one WASM thread.
+      // the same headers as Vercel; unisolated custom hosts safely fall back to one WASM thread.
       headers: {
         'Cross-Origin-Opener-Policy': 'same-origin',
         'Cross-Origin-Embedder-Policy': 'require-corp',

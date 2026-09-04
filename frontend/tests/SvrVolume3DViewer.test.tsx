@@ -877,6 +877,26 @@ describe('SvrVolume3DViewer evidence-aware interaction', () => {
     expect(recorder.texImage3D).toHaveBeenCalledTimes(initialTextureAllocations);
   });
 
+  it('does not redraw unchanged pixels for model-status updates, but still redraws display changes', async () => {
+    const recorder = createViewportRecorder({ width: 800, height: 600 });
+    const { rerender } = render(<SvrVolume3DViewer volume={observedVolume} />);
+    await waitFor(() => expect(recorder.drawArrays).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    const draws = recorder.drawArrays.mock.calls.length;
+
+    for (const message of ['Loading model', 'Running model', 'Model canceled']) {
+      modelSession.message = message;
+      rerender(<SvrVolume3DViewer volume={observedVolume} />);
+      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+      expect(screen.getByText(message)).toBeInTheDocument();
+      expect(recorder.drawArrays).toHaveBeenCalledTimes(draws);
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'MRI slice', exact: true }));
+    await waitFor(() => expect(recorder.drawArrays.mock.calls.length).toBeGreaterThan(draws));
+    expect(recorder.latestInteger('u_nativeEnabled')).toBe(0);
+  });
+
   it('announces graphics-context loss and waits for safe restoration', async () => {
     render(<SvrVolume3DViewer volume={observedVolume} />);
     const viewer = screen.getByRole('application', { name: /three-dimensional reconstructed mri volume/i });

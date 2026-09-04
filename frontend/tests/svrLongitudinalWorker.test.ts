@@ -6,6 +6,7 @@ import {
   runLongitudinalDenseReslice,
   runLongitudinalRegistration,
   runLongitudinalEstimate,
+  LongitudinalResliceRuntime,
 } from '../src/utils/svr/runLongitudinalRegistration';
 
 class MockWorker {
@@ -38,6 +39,83 @@ function input(): RegisterLongitudinalOptions {
 }
 
 describe('svr/longitudinal registration worker ownership', () => {
+  const denseInput = () => {
+    const source = input();
+    const { pixels: _pixels, ...referencePlane } = source.referenceSlices[0]!;
+    void _pixels;
+    return {
+      targetSlices: source.targetSlices,
+      referencePlane,
+      targetToReference: { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 },
+      centerMm: { x: 0, y: 0, z: 0 },
+    };
+  };
+  const complete = (worker: MockWorker) => {
+    const result = {
+      ok: true as const,
+      pixels: new Float32Array(4),
+      valid: new Uint8Array(4),
+      rows: 2,
+      cols: 2,
+      coverage: 1,
+    };
+    worker.onmessage?.({ data: { type: 'done', result } } as MessageEvent<LongitudinalWorkerResponse>);
+    return result;
+  };
+
+  it('reuses successful reslicing runtimes with fresh inputs, but terminates canceled work before replacement', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Worker', MockWorker);
+    const runtime = new LongitudinalResliceRuntime();
+    const first = runLongitudinalDenseReslice(denseInput(), undefined, runtime);
+    const worker = MockWorker.instances[0]!;
+    await expect(first).resolves.toEqual(complete(worker));
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(worker.onmessage).toBeNull();
+
+    const nextInput = denseInput();
+    nextInput.targetSlices[0]!.pixels.fill(9);
+    const controller = new AbortController();
+    const next = runLongitudinalDenseReslice(nextInput, controller.signal, runtime);
+    expect(MockWorker.instances).toHaveLength(1);
+    expect(worker.postMessage).toHaveBeenLastCalledWith({ type: 'reslice', options: nextInput }, [
+      nextInput.targetSlices[0]!.pixels.buffer,
+    ]);
+    const lateMessage = worker.onmessage;
+    controller.abort();
+    await expect(next).resolves.toMatchObject({ ok: false, reason: 'cancelled' });
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    lateMessage?.({ data: { type: 'done', result: { ok: true } } } as MessageEvent<LongitudinalWorkerResponse>);
+    const replacement = runLongitudinalDenseReslice(denseInput(), undefined, runtime);
+    expect(MockWorker.instances).toHaveLength(2);
+    const fresh = MockWorker.instances[1]!;
+    await expect(replacement).resolves.toEqual(complete(fresh));
+    runtime.dispose();
+    expect(fresh.terminate).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains at most one idle worker, expires it, and cannot retain a completion after disposal', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Worker', MockWorker);
+    const runtime = new LongitudinalResliceRuntime();
+    const first = runLongitudinalDenseReslice(denseInput(), undefined, runtime);
+    const second = runLongitudinalDenseReslice(denseInput(), undefined, runtime);
+    const [one, two] = MockWorker.instances;
+    await expect(first).resolves.toEqual(complete(one!));
+    await expect(second).resolves.toEqual(complete(two!));
+    expect(one!.terminate).toHaveBeenCalledOnce();
+    expect(two!.terminate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(two!.terminate).toHaveBeenCalledOnce();
+    const pending = runLongitudinalDenseReslice(denseInput(), undefined, runtime);
+    const three = MockWorker.instances[2]!;
+    runtime.dispose();
+    await expect(pending).resolves.toEqual(complete(three));
+    expect(three.terminate).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('requests pose evidence without an image and retains the same cancellation owner', async () => {
     vi.stubGlobal('Worker', MockWorker);
     const controller = new AbortController();

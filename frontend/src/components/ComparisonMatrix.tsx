@@ -1,10 +1,7 @@
 import { lazy, Suspense } from 'react';
 import type { ComparisonData } from '../types/api';
 import { CalendarDays, Upload } from 'lucide-react';
-import { HelpModal } from './HelpModal';
-import { UploadModal } from './UploadModal';
-import { ExportModal } from './ExportModal';
-import { ClearDataModal } from './ClearDataModal';
+import { ComparisonDialog } from './comparison/ComparisonDialog';
 import { SliceLoopNavigator } from './comparison/SliceLoopNavigator';
 import { GridView } from './comparison/GridView';
 import { OverlayView } from './comparison/OverlayView';
@@ -244,19 +241,14 @@ export function ComparisonMatrix() {
 
   return (
     <div className="instrument-shell flex flex-col">
-      {/* Help Modal */}
-      {activeDialog === 'help' && <HelpModal onClose={() => setActiveDialog(null)} />}
-
-      {/* Upload Modal */}
-      {activeDialog === 'upload' && (
-        <UploadModal
+      {activeDialog && (
+        <ComparisonDialog
+          key={activeDialog}
+          dialog={activeDialog}
           onClose={() => setActiveDialog(null)}
           onUploadComplete={() => reload(undefined, { background: true })}
+          onReset={() => window.location.reload()}
         />
-      )}
-      {activeDialog === 'export' && <ExportModal onClose={() => setActiveDialog(null)} />}
-      {activeDialog === 'clear' && (
-        <ClearDataModal onClose={() => setActiveDialog(null)} onReset={() => window.location.reload()} />
       )}
 
       <ComparisonInstrumentHeader
@@ -430,6 +422,7 @@ export function ComparisonMatrix() {
       {hasData && viewMode !== 'svr3d' ? (
         <SliceLoopNavigator
           interactionBlocked={interactionBlocked}
+          waitingForAlignment={alignment.waitingForVisibleAlignment}
           selectedSeqId={selectedSeqId}
           playbackInstanceCount={playbackInstanceCount}
           reference={

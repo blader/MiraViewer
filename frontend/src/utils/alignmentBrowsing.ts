@@ -18,6 +18,7 @@ import { clamp } from './math';
 import { buildOutputPlaneGrid, outputGridFingerprint, type OutputGridMode } from './outputPlaneGrid';
 import { affineAboutCenterToPanelGeometry, panelGeometryToAffineAboutCenter } from './panelTransform';
 import { densifyLongitudinalRegistration, getLongitudinalReferencePlane } from './svr/longitudinalFrames';
+import type { LongitudinalResliceRuntime } from './svr/runLongitudinalRegistration';
 import type { LongitudinalRegistrationEstimate } from './svr/longitudinalRegistration';
 
 /** One accepted scan-pair model; browsing changes its output plane, never its fitted pose or calibration. */
@@ -142,6 +143,7 @@ export async function browseAcceptedAlignment({
   outputMode = 'native',
   manualSliceOffset = 0,
   signal,
+  runtime,
 }: {
   model: PhysicalAlignmentModel;
   reference: AlignmentReference;
@@ -153,6 +155,7 @@ export async function browseAcceptedAlignment({
   outputMode?: OutputGridMode;
   manualSliceOffset?: number;
   signal: AbortSignal;
+  runtime?: LongitudinalResliceRuntime;
 }): Promise<AlignmentResult> {
   signal.throwIfAborted();
   const { referenceManifest, targetManifest } = model;
@@ -238,6 +241,7 @@ export async function browseAcceptedAlignment({
       minCoverage: 0.55,
       refinePose: false,
       signal,
+      runtime,
     },
   );
   signal.throwIfAborted();

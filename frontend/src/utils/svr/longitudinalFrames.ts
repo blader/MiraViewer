@@ -29,7 +29,7 @@ import {
   mat3MulVec3,
   type RigidParams,
 } from './rigidRegistration';
-import { runLongitudinalDenseReslice } from './runLongitudinalRegistration';
+import { runLongitudinalDenseReslice, type LongitudinalResliceRuntime } from './runLongitudinalRegistration';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { dot, v3, type Vec3 } from './vec3';
 
@@ -82,6 +82,7 @@ export type PreparedDenseLongitudinalResliceInput = Omit<DenseLongitudinalReslic
 };
 
 type DenseLongitudinalOptions = {
+  runtime?: LongitudinalResliceRuntime;
   /** A previously verified series pose can be resliced without optimizing it again. */
   refinePose?: boolean;
   signal?: AbortSignal;
@@ -848,7 +849,7 @@ export async function prepareDenseLongitudinalResliceInput(
   };
 }
 
-/** Replace a coarse-stack preview with native through-plane anatomy in a fresh worker. */
+/** Replace a coarse-stack preview with native through-plane anatomy in a bounded worker. */
 export function densifyLongitudinalRegistration(
   targetManifest: SeriesFrameManifest,
   selectedReference: LongitudinalReferencePlane,
@@ -968,6 +969,7 @@ export async function densifyLongitudinalRegistration(
         signal: options.signal,
       },
       options.signal,
+      options.runtime,
     );
     if (!result.ok) return result;
     if ((nativeCandidatePoses?.length ?? 0) > 1 && !result.nativeRefinement) {
