@@ -14,6 +14,7 @@ import {
 } from '../services/exportBackup';
 import { yieldToMain } from '../utils/svr/svrUtils';
 import { AccessibleDialog } from './ui/AccessibleDialog';
+import { formatBytes } from '../utils/format';
 
 interface UploadModalProps {
   onClose: () => void;
@@ -107,18 +108,6 @@ function isAbortError(error: unknown): boolean {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Import canceled', 'AbortError');
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = bytes / 1024;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
 async function* iterateDirectory(
@@ -219,7 +208,9 @@ function IntakeManifest({
           </p>
           {backupExceedsLimit && (
             <div className="intake-notice intake-notice-error" role="alert">
-              This complete backup exceeds the 512 MiB safe restore limit. Import the original DICOM files instead.
+              This complete backup exceeds the {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)} safe restore limit. Keep the
+              archive and your local data: DICOM reimport alone does not restore saved annotations, selections, settings
+              or models.
             </div>
           )}
           <ul>

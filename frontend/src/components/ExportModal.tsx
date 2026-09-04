@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import { getStudies } from '../utils/localApi';
-import { exportStudiesToZip, type ExportProgress } from '../services/exportBackup';
+import { exportStudiesToZip, MAX_SNAPSHOT_RESTORE_BYTES, type ExportProgress } from '../services/exportBackup';
 import { AccessibleDialog } from './ui/AccessibleDialog';
+import { formatBytes } from '../utils/format';
 
 type StudyItem = {
   study_id: string;
@@ -30,6 +31,8 @@ export function ExportModal({ onClose }: ExportModalProps) {
   const [status, setStatus] = useState<'idle' | 'exporting' | 'success' | 'error'>('idle');
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const exportRef = useRef<AbortController | null>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +49,9 @@ export function ExportModal({ onClose }: ExportModalProps) {
     })();
     return () => {
       cancelled = true;
+      exportRef.current?.abort();
+      exportRef.current = null;
+      if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
     };
   }, []);
 
@@ -63,13 +69,22 @@ export function ExportModal({ onClose }: ExportModalProps) {
   };
 
   const handleExport = async () => {
-    if (!canExport) return;
+    if (!canExport || exportRef.current) return;
+    const controller = new AbortController();
+    exportRef.current = controller;
     setStatus('exporting');
     setErrorMessage(null);
-    setProgress({ stage: 'collecting', current: 0, total: 1 });
+    setProgress({ stage: 'checking', current: 0, total: 1 });
     try {
       const studyIds = Array.from(selected);
-      const blob = await exportStudiesToZip(studyIds, setProgress);
+      const blob = await exportStudiesToZip(
+        studyIds,
+        (next) => {
+          if (exportRef.current === controller && !controller.signal.aborted) setProgress(next);
+        },
+        { signal: controller.signal },
+      );
+      if (exportRef.current !== controller || controller.signal.aborted) return;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -79,20 +94,31 @@ export function ExportModal({ onClose }: ExportModalProps) {
       a.remove();
       URL.revokeObjectURL(url);
       setStatus('success');
-      setTimeout(() => onClose(), 1500);
+      closeTimerRef.current = setTimeout(onClose, 1500);
     } catch (e) {
+      if (exportRef.current !== controller || controller.signal.aborted) return;
       setStatus('error');
       setErrorMessage(e instanceof Error ? e.message : 'Export failed');
+    } finally {
+      if (exportRef.current === controller) exportRef.current = null;
     }
+  };
+
+  const close = () => {
+    exportRef.current?.abort();
+    exportRef.current = null;
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    onClose();
   };
 
   const progressLabel = useMemo(() => {
     if (!progress) return '';
+    if (progress.stage === 'checking') return 'Checking backup size…';
     if (progress.stage === 'collecting') {
       return `Collecting files (${progress.current}/${progress.total}) ${progress.detail || ''}`.trim();
     }
     if (progress.stage === 'zipping') {
-      return `Compressing (${progress.current}%)`;
+      return `Packaging (${progress.current}%)`;
     }
     return 'Finalizing…';
   }, [progress]);
@@ -101,11 +127,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
     <AccessibleDialog
       title="Export Backup (ZIP)"
       description="Create a complete local backup of the selected patient's imaging and saved work."
-      onClose={() => {
-        if (status !== 'exporting') onClose();
-      }}
-      closeOnBackdrop={status !== 'exporting'}
-      closeOnEscape={status !== 'exporting'}
+      onClose={close}
     >
       <div className="overflow-y-auto px-5 py-6 sm:px-7">
         {status === 'success' ? (
@@ -122,8 +144,12 @@ export function ExportModal({ onClose }: ExportModalProps) {
               COMPLETE BACKUP
             </p>
             <div className="mb-5 text-[0.82rem] leading-relaxed text-[var(--text-secondary)]">
-              This creates a complete, restorable backup of the selected patient’s scans, annotations, ground truth,
-              viewer settings, saved 3D segmentations, and local models.
+              The archive includes selected scans, annotations, ground truth, viewer settings, 3D selections and shared
+              local models.
+              <p className="mt-2">
+                The current restore limit is {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)} of uncompressed payloads,
+                including shared models. Export checks this limit before reading file contents.
+              </p>
             </div>
 
             <div className="mb-2 flex items-center justify-between gap-3">
@@ -148,6 +174,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={status === 'exporting'}
                         onChange={() => handleToggle(study.study_id)}
                         className="mt-1 accent-[var(--signal-metal)]"
                       />
@@ -187,11 +214,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={onClose}
-                  disabled={status === 'exporting'}
+                  onClick={close}
                   className="min-h-11 rounded-[3px] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Cancel
+                  {status === 'exporting' ? 'Cancel export' : 'Cancel'}
                 </button>
                 <button
                   type="button"

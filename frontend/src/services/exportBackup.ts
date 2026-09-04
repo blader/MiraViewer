@@ -30,12 +30,13 @@ import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/mo
 import * as localApi from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
-import { readArchiveEntry } from './archiveSafety';
+import { loadSafeArchive, readArchiveEntry } from './archiveSafety';
 import { isSelectionContextValid, isSelectionCoverageValid } from '../utils/segmentation/selectionEditing';
 import type { ArchiveReadOptions } from './archiveSafety';
+import { formatBytes } from '../utils/format';
 
 export type ExportProgress = {
-  stage: 'collecting' | 'zipping' | 'finalizing';
+  stage: 'checking' | 'collecting' | 'zipping' | 'finalizing';
   current: number;
   total: number;
   detail?: string;
@@ -51,8 +52,17 @@ export type RestoreSnapshotResult = ProcessFilesResult & {
 
 export const MAX_SNAPSHOT_RESTORE_BYTES = 512 * 1024 * 1024;
 
-function throwIfRestoreAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new DOMException('Backup restoration cancelled.', 'AbortError');
+function throwIfSnapshotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException('Backup operation cancelled.', 'AbortError');
+}
+
+/** Both directions must admit the restored payload, not the compressed ZIP size. */
+export function assertSnapshotCapacity(bytes: number): void {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('The backup declares an invalid payload size.');
+  if (bytes > MAX_SNAPSHOT_RESTORE_BYTES)
+    throw new Error(
+      `This complete backup exceeds the ${formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)} safe restore limit. Larger complete backups are not supported yet. Keep your local data and existing backups: DICOM reimport alone does not restore saved work.`,
+    );
 }
 
 type SnapshotFile = {
@@ -142,24 +152,28 @@ function decodeSnapshotSeeds(value: unknown, dims: VolumeSegmentationRow['dims']
   return seeds;
 }
 
-/** Complete restores must remain atomic; verified payloads cannot yet be staged without a schema migration. */
-export function getSnapshotRestoreBytes(manifest: SnapshotManifest): number {
+function snapshotFileBytes(files: Iterable<SnapshotFile>): number {
   let total = 0;
-  const add = (file: SnapshotFile) => {
-    if (!Number.isSafeInteger(file.byteLength) || file.byteLength < 0) {
+  for (const file of files) {
+    if (!Number.isSafeInteger(file?.byteLength) || file.byteLength < 0) {
       throw new Error('The backup contains a file with an invalid declared size.');
     }
     total += file.byteLength;
     if (!Number.isSafeInteger(total)) throw new Error('The complete backup exceeds the supported browser range.');
-  };
-  for (const entry of manifest.records.instances) add(entry.file);
-  for (const entry of manifest.records.volumeSegmentations) add(entry.file);
-  for (const entry of manifest.records.derivedAlignmentFrames ?? []) {
-    add(entry.file);
-    if (entry.validFile) add(entry.validFile);
   }
-  for (const entry of manifest.records.models) add(entry.file);
   return total;
+}
+
+/** Complete restores remain bounded until verified payloads can be staged durably. */
+export function getSnapshotRestoreBytes(manifest: SnapshotManifest): number {
+  return snapshotFileBytes([
+    ...manifest.records.instances.map((entry) => entry.file),
+    ...manifest.records.volumeSegmentations.map((entry) => entry.file),
+    ...(manifest.records.derivedAlignmentFrames ?? []).flatMap((entry) =>
+      entry.validFile ? [entry.file, entry.validFile] : [entry.file],
+    ),
+    ...manifest.records.models.map((entry) => entry.file),
+  ]);
 }
 
 async function toArrayBuffer(value: Blob | ArrayBuffer | ArrayBufferView): Promise<ArrayBuffer> {
@@ -202,17 +216,26 @@ function ownsAcquisitionChoice(row: AppStateRow, seriesByUid: ReadonlyMap<string
 export async function exportStudiesToZip(
   studyIds: string[],
   onProgress?: (progress: ExportProgress) => void,
+  options: ArchiveReadOptions = {},
 ): Promise<Blob> {
+  const { signal } = options;
+  throwIfSnapshotAborted(signal);
+  onProgress?.({ stage: 'checking', current: 0, total: 1 });
   const db = await getDB();
   const zip = new JSZip();
-  const addSnapshotFile = async (
+  const files: Array<{
+    file: SnapshotFile;
+    read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>;
+  }> = [];
+  const addSnapshotFile = (
     path: string,
-    value: Blob | ArrayBufferView,
-    uncompressed = false,
-  ): Promise<SnapshotFile> => {
-    const bytes = await toArrayBuffer(value);
-    zip.file(path, bytes, uncompressed ? { compression: 'STORE' } : undefined);
-    return describeFile(path, bytes);
+    byteLength: number,
+    read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>,
+  ): SnapshotFile => {
+    throwIfSnapshotAborted(signal);
+    const file = { path, byteLength };
+    files.push({ file, read });
+    return file;
   };
   const selectedStudies = new Set(studyIds);
   const allStudies = await db.getAll('studies');
@@ -228,18 +251,14 @@ export async function exportStudiesToZip(
   const selectedSeriesByUid = new Map(series.map((item) => [item.seriesInstanceUid, item]));
 
   const instances: SnapshotInstance[] = [];
-  const totalInstances = Object.values(await localApi.getImageCounts(series)).reduce((count, next) => count + next, 0);
-  let collected = 0;
-
   for (const item of series) {
+    throwIfSnapshotAborted(signal);
     const rows = await db.getAllFromIndex('instances', 'by-series', item.seriesInstanceUid);
     for (const row of rows) {
       const { fileBlob, ...metadata } = row;
       const path = `studies/${encodeURIComponent(row.studyInstanceUid)}/series/${encodeURIComponent(row.seriesInstanceUid)}/${encodeURIComponent(row.sopInstanceUid)}.dcm`;
-      const file = await addSnapshotFile(path, fileBlob);
+      const file = addSnapshotFile(path, fileBlob.size, () => fileBlob);
       instances.push({ ...metadata, file });
-      collected += 1;
-      onProgress?.({ stage: 'collecting', current: collected, total: Math.max(totalInstances, 1) });
     }
   }
 
@@ -269,28 +288,38 @@ export async function exportStudiesToZip(
 
   const volumeSegmentations: SnapshotVolume[] = [];
   for (const key of await db.getAllKeys('volume_segmentations')) {
-    const transaction = db.transaction(['volume_segmentations', 'volume_segmentation_chunks']);
-    const stored = await transaction.objectStore('volume_segmentations').get(key);
+    throwIfSnapshotAborted(signal);
+    const stored = await db.get('volume_segmentations', key);
     if (!stored) continue;
     if (stored.studyUid && !selectedStudies.has(stored.studyUid)) continue;
     if (!stored.studyUid && stored.patientKey && selectedPatientKey && stored.patientKey !== selectedPatientKey)
       continue;
     if (stored.seriesUids?.length && !stored.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
-    const row = await readStoredVolumeSegmentation(stored, transaction.objectStore('volume_segmentation_chunks'));
-    await transaction.done;
-    const { labels, seeds: savedSeeds, ...metadata } = row;
-    if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
-      throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
-    const seeds = decodeSnapshotSeeds(savedSeeds, row.dims);
-    const path = `segmentations/${encodeURIComponent(row.volumeKey)}.labels`;
-    // Sparse label masks can legitimately exceed archive expansion-ratio guards.
-    const file = await addSnapshotFile(path, labels, true);
-    volumeSegmentations.push({
-      ...metadata,
-      file,
-      ...(seeds && {
-        seeds: { ...seeds, foreground: Array.from(seeds.foreground), background: Array.from(seeds.background) },
-      }),
+    const path = `segmentations/${encodeURIComponent(stored.volumeKey)}.labels`;
+    // Sparse label masks can legitimately exceed archive expansion-ratio guards;
+    // complete archives use STORE for these and every other payload below.
+    addSnapshotFile(path, 'labels' in stored ? stored.labels.byteLength : stored.labelBytes, async (file) => {
+      const transaction = db.transaction(['volume_segmentations', 'volume_segmentation_chunks']);
+      const current = await transaction.objectStore('volume_segmentations').get(key);
+      if (
+        !current ||
+        ('labels' in current ? 'legacy' : current.revision) !== ('labels' in stored ? 'legacy' : stored.revision)
+      )
+        throw new Error('A saved selection changed while preparing the backup. Retry export to include it.');
+      const row = await readStoredVolumeSegmentation(current, transaction.objectStore('volume_segmentation_chunks'));
+      await transaction.done;
+      const { labels, seeds: savedSeeds, ...metadata } = row;
+      if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
+        throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
+      const seeds = decodeSnapshotSeeds(savedSeeds, row.dims);
+      volumeSegmentations.push({
+        ...metadata,
+        file,
+        ...(seeds && {
+          seeds: { ...seeds, foreground: Array.from(seeds.foreground), background: Array.from(seeds.background) },
+        }),
+      });
+      return labels;
     });
   }
 
@@ -302,9 +331,9 @@ export async function exportStudiesToZip(
     if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
     const { pixels, valid, ...metadata } = row;
     const path = `derived-frames/${encodeURIComponent(row.id)}.f32`;
-    const file = await addSnapshotFile(path, pixels, true);
+    const file = addSnapshotFile(path, pixels.byteLength, () => pixels);
     const validFile = valid
-      ? await addSnapshotFile(`derived-frames/${encodeURIComponent(row.id)}.valid`, valid, true)
+      ? addSnapshotFile(`derived-frames/${encodeURIComponent(row.id)}.valid`, valid.byteLength, () => valid)
       : undefined;
     derivedAlignmentFrames.push({ ...metadata, file, ...(validFile && { validFile }) });
   }
@@ -312,8 +341,26 @@ export async function exportStudiesToZip(
   const models: SnapshotModel[] = [];
   for (const model of await getAllModelRecords()) {
     const path = `models/${encodeURIComponent(model.key)}.onnx`;
-    const file = await addSnapshotFile(path, model.blob);
+    const file = addSnapshotFile(path, model.blob.size, () => model.blob);
     models.push({ key: model.key, savedAtMs: model.savedAtMs, file });
+  }
+
+  // Admit the complete payload before reading Blob contents, materializing
+  // chunked labels, hashing, or packaging any file. Descriptors are shared
+  // with the final manifest so these two phases cannot count different files.
+  assertSnapshotCapacity(snapshotFileBytes(files.map(({ file }) => file)));
+  for (let index = 0; index < files.length; index++) {
+    throwIfSnapshotAborted(signal);
+    const { file, read } = files[index]!;
+    const bytes = await toArrayBuffer(await read(file));
+    throwIfSnapshotAborted(signal);
+    if (bytes.byteLength !== file.byteLength) throw new Error('A backup payload changed size. Retry export.');
+    Object.assign(file, await describeFile(file.path, bytes));
+    throwIfSnapshotAborted(signal);
+    // A local byte view also accepts Blob buffers from another browser realm;
+    // JSZip's ArrayBuffer detection otherwise relies on instanceof identity.
+    zip.file(file.path, new Uint8Array(bytes));
+    onProgress?.({ stage: 'collecting', current: index + 1, total: files.length });
   }
 
   const manifest: SnapshotManifest = {
@@ -343,11 +390,33 @@ export async function exportStudiesToZip(
   };
   zip.file('export.json', JSON.stringify(manifest));
 
+  throwIfSnapshotAborted(signal);
   onProgress?.({ stage: 'zipping', current: 0, total: 100 });
-  const blob = await zip.generateAsync(
-    { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
-    (metadata) => onProgress?.({ stage: 'zipping', current: Math.round(metadata.percent), total: 100 }),
-  );
+  throwIfSnapshotAborted(signal);
+  // Any sparse input (including models and JSON) can exceed our import
+  // expansion guard. STORE preserves all bytes without relaxing that guard.
+  const stream = zip.generateInternalStream({ type: 'blob', compression: 'STORE' });
+  let abort: () => void = () => {};
+  let blob: Blob;
+  try {
+    blob = await new Promise<Blob>((resolve, reject) => {
+      abort = () => {
+        stream.pause();
+        reject(new DOMException('Backup export cancelled.', 'AbortError'));
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      stream
+        .accumulate((metadata) => onProgress?.({ stage: 'zipping', current: Math.round(metadata.percent), total: 100 }))
+        .then(resolve, reject);
+    });
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+  throwIfSnapshotAborted(signal);
+  // Share the actual reader's container limits, including directory and member
+  // sizes. This reads ZIP metadata, not the archive's image/model payloads.
+  await loadSafeArchive(blob, { signal, deferStorageCheck: true });
+  throwIfSnapshotAborted(signal);
   onProgress?.({ stage: 'finalizing', current: 1, total: 1 });
   return blob;
 }
@@ -356,13 +425,13 @@ export async function readSnapshotManifest(
   zip: JSZip,
   options: ArchiveReadOptions = {},
 ): Promise<SnapshotManifest | null> {
-  throwIfRestoreAborted(options.signal);
+  throwIfSnapshotAborted(options.signal);
   const entry = zip.file('export.json');
   if (!entry) return null;
   let parsed: unknown;
   try {
     const bytes = await (await readArchiveEntry(entry, options)).arrayBuffer();
-    throwIfRestoreAborted(options.signal);
+    throwIfSnapshotAborted(options.signal);
     parsed = JSON.parse(new TextDecoder().decode(bytes));
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
@@ -401,7 +470,7 @@ async function readVerifiedFile(
   signal?: AbortSignal,
   integrityWarnings?: Set<string>,
 ): Promise<Blob> {
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   const entry = zip.file(descriptor.path);
   if (!entry) throw new Error('The backup is incomplete: a referenced file is missing.');
   const blob = await readArchiveEntry(entry, { signal });
@@ -414,7 +483,7 @@ async function readVerifiedFile(
       integrityWarnings?.add('SHA-256 verification was unavailable; every archive member passed its CRC32 check.');
     }
   }
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   return blob;
 }
 
@@ -426,15 +495,11 @@ export async function restoreSnapshot(
 ): Promise<RestoreSnapshotResult> {
   const { signal, onCommitStart } = options;
   const integrityWarnings = new Set<string>();
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   const restoreBytes = getSnapshotRestoreBytes(manifest);
-  if (restoreBytes > MAX_SNAPSHOT_RESTORE_BYTES) {
-    throw new Error(
-      'This complete backup exceeds the 512 MiB safe restore limit. Import the original DICOM files instead.',
-    );
-  }
+  assertSnapshotCapacity(restoreBytes);
   await assertStorageHeadroom(restoreBytes);
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   const studyUids = new Set(manifest.records.studies.map((study) => study.studyInstanceUid));
   if (studyUids.size !== manifest.records.studies.length) {
     throw new Error('The backup contains duplicate examination identifiers.');
@@ -443,7 +508,7 @@ export async function restoreSnapshot(
   if (patientKeys.size > 1) throw new Error('This backup contains multiple patients and cannot be safely restored.');
   const selectedPatientKey = patientKeys.values().next().value as string | undefined;
   for (const series of manifest.records.series) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     if (!studyUids.has(series.studyInstanceUid)) throw new Error('The backup contains an orphaned series.');
   }
   const seriesByUid = new Map(manifest.records.series.map((series) => [series.seriesInstanceUid, series]));
@@ -454,7 +519,7 @@ export async function restoreSnapshot(
   const instancesByUid = new Map<string, DicomInstance>();
   let current = 0;
   for (const metadata of manifest.records.instances) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     const parentSeries = seriesByUid.get(metadata.seriesInstanceUid);
     if (!studyUids.has(metadata.studyInstanceUid) || parentSeries?.studyInstanceUid !== metadata.studyInstanceUid) {
       throw new Error('The backup contains an orphaned image.');
@@ -467,7 +532,7 @@ export async function restoreSnapshot(
       fileBlob: await readVerifiedFile(zip, file, signal, integrityWarnings),
     });
     onProgress?.(++current, manifest.records.instances.length);
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
   }
   const instances = Array.from(instancesByUid.values());
   const orderedInstancesForSeries = (seriesUid: string): DicomInstance[] => {
@@ -486,7 +551,7 @@ export async function restoreSnapshot(
   };
 
   for (const annotation of [...manifest.records.tumorSegmentations, ...manifest.records.tumorGroundTruth]) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     const parentSeries = seriesByUid.get(annotation.seriesUid);
     if (
       parentSeries?.studyInstanceUid !== annotation.studyId ||
@@ -498,7 +563,7 @@ export async function restoreSnapshot(
 
   const volumes: VolumeSegmentationRow[] = [];
   for (const metadata of manifest.records.volumeSegmentations) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     const { file, seeds: savedSeeds, ...volume } = metadata;
     if (!isSelectionCoverageValid(volume.clippedNativeVoxels) || !isSelectionContextValid(volume.contextLimited))
       throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
@@ -513,7 +578,7 @@ export async function restoreSnapshot(
   const derivedFrames: DerivedAlignmentFrameRow[] = [];
   const derivedFrameIds = new Set<string>();
   for (const metadata of manifest.records.derivedAlignmentFrames ?? []) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     const { file, validFile, ...frame } = metadata;
     const target = seriesByUid.get(frame.targetSeriesUid);
     const targetInstance = frame.targetSopInstanceUid ? instancesByUid.get(frame.targetSopInstanceUid) : undefined;
@@ -576,14 +641,14 @@ export async function restoreSnapshot(
 
   const models = [] as Array<{ key: string; blob: Blob }>;
   for (const model of manifest.records.models) {
-    throwIfRestoreAborted(signal);
+    throwIfSnapshotAborted(signal);
     models.push({ key: model.key, blob: await readVerifiedFile(zip, model.file, signal, integrityWarnings) });
   }
 
   const db = await getDB();
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   if (models.length > 0) await putModelBlobs(models, { signal });
-  throwIfRestoreAborted(signal);
+  throwIfSnapshotAborted(signal);
   onCommitStart?.();
   const tx = db.transaction(
     [

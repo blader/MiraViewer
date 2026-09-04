@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { Blob as NativeBlob, File as NativeFile } from 'node:buffer';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import JSZip from 'jszip';
@@ -37,6 +38,14 @@ import {
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { ClearDataModal } from '../src/components/ClearDataModal';
+
+// Match the platform values cloned by fake IndexedDB; jsdom Blob/File values
+// become empty objects in Node's structuredClone and hide payload loss.
+beforeAll(() => {
+  vi.stubGlobal('Blob', NativeBlob);
+  vi.stubGlobal('File', NativeFile);
+});
+afterAll(() => vi.unstubAllGlobals());
 
 describe('3D selection transaction ordering', () => {
   const selection = (voxel: number): VolumeSegmentationRow => ({
@@ -699,7 +708,7 @@ describe('durable MRI storage and import contracts', () => {
     await getComparisonData();
     await saveDerivedAlignmentFrame(makeDerivedFrame({ datasetRevision: 2 }));
     const original = await exportStudiesToZip(['1.2.3']);
-    const altered = await JSZip.loadAsync(original);
+    const altered = await JSZip.loadAsync(new Uint8Array(await original.arrayBuffer()));
     const originalManifest = JSON.parse(await altered.file('export.json')!.async('string'));
     originalManifest.records.derivedAlignmentFrames[0].targetSopInstanceUid = '1.2.3.5.1';
     originalManifest.records.derivedAlignmentFrames[0].sourceImageId = 'miradb:1.2.3.5.1';
@@ -719,7 +728,7 @@ describe('durable MRI storage and import contracts', () => {
   it('restores prior complete v2 snapshots that have no registered-frame manifest field', async () => {
     await processDicomFile(makeImplicitDicom());
     const original = await exportStudiesToZip(['1.2.3']);
-    const altered = await JSZip.loadAsync(original);
+    const altered = await JSZip.loadAsync(new Uint8Array(await original.arrayBuffer()));
     const originalManifest = JSON.parse(await altered.file('export.json')!.async('string'));
     delete originalManifest.records.derivedAlignmentFrames;
     altered.file('export.json', JSON.stringify(originalManifest));
@@ -735,7 +744,7 @@ describe('durable MRI storage and import contracts', () => {
   it('rejects incomplete backups before restoring any images or annotations', async () => {
     await processDicomFile(makeImplicitDicom());
     const original = await exportStudiesToZip(['1.2.3']);
-    const altered = await JSZip.loadAsync(original);
+    const altered = await JSZip.loadAsync(new Uint8Array(await original.arrayBuffer()));
     const imagePath = Object.keys(altered.files).find((name) => name.endsWith('.dcm'));
     altered.remove(imagePath!);
     const broken = await altered.generateAsync({ type: 'blob' });
