@@ -1,0 +1,64 @@
+{
+  "sourceBefore": {
+    "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+    "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+    "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "project": "workflow",
+  "startedAt": "2026-09-04T04:19:42.093Z",
+  "finishedAt": "2026-09-04T04:20:25.387Z",
+  "exitCode": 0,
+  "cleanup": "CLOSED",
+  "fixture": "Synthetic DICOM/ONNX and actual application/worker/GPU paths for the CTO review. No private data.",
+  "harness": [
+    {
+      "path": "frontend/tmp/custom-model.config.ts",
+      "sha256": "72d1668bdcc1e56f56dfd994be22a60f4c809b9e76e89a18a92c15fc01a77a92"
+    },
+    {
+      "path": "frontend/tmp/run-turbovac-20260903-11.mjs",
+      "sha256": "25c05a782ac696080d83935f3ab2ca0ff0e3a1986ad4ac59b16efdb5d47eaa97"
+    }
+  ],
+  "origin": "http://127.0.0.1:43134/",
+  "stats": {
+    "startTime": "2026-09-04T04:19:42.602Z",
+    "duration": 41646.056,
+    "expected": 6,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "remainingOwnedProcessCount": 0,
+  "serverPortReleased": true,
+  "remainingTemporaryProfiles": 0,
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-run.json",
+    "sha256": "5d9008634933fd2fe1b2eb6d963be68ea32546d1e6b4410af92301b7aa1a7c8f"
+  },
+  "captures": [
+    {
+      "published": "settings-read-retry.png",
+      "original": {
+        "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/settings-read-retry.png",
+        "sha256": "4cbea41f9d5311838d192aa788a0e5cf5d58bf6f8915b03a31478dc357c66016"
+      },
+      "byteIdenticalToPreservedCapture": true
+    },
+    {
+      "published": "settings-read-retry-mobile.png",
+      "original": {
+        "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/settings-read-retry-mobile.png",
+        "sha256": "1cb82bd92e259124331d2e11cf7412d1cad96ced7d6b4526aeef0ae03fbbad95"
+      },
+      "byteIdenticalToPreservedCapture": true
+    }
+  ],
+  "visualInspection": "Raster/aesthetic approval remains withheld: this run did not repair the earlier image-preview failure. DOM/input/persistence checks passed independently; no Storybook evidence."
+}

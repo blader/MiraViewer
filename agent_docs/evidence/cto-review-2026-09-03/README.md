@@ -2,7 +2,20 @@
 
 This directory contains curated synthetic evidence for the [remediation ledger](../../exec-plans/active/2026-09-02-full-codebase-audit-implementation.md). No private MRI, private weights, saved marks, raw browser profiles or original process traces are included. Each receipt identifies its protected local original and SHA-256.
 
-**Validated source fingerprint:** `dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4`. Base commit: `5f0efa433b6c8b6672add9a30184ec1140b2b5a3`. These are working-tree checks, not remote CI or merge clearance.
+## Post-reduction publication verification
+
+Current source fingerprint: `526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa`, code/test commit `34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8`. Subsequent publication edits contain documentation/evidence only. [PR #11](https://github.com/blader/MiraViewer/pull/11) owns the live CI and merge state.
+
+- [Current unit suite](turbovac-unit-suite.json): **3,169 passed, zero failed, 54 existing skips**. A preceding run's single five-second watchdog failure is preserved; the full-size source-admission fixture/assertions are unchanged, with a test-local 15-second watchdog. Focused replay and the complete repeat both passed.
+- [Current production workflow run](turbovac-workflow-run.json): **six passed**, unchanged source and `Cleanup: CLOSED`. The normal app was exercised in disposable headed Chrome profiles at `http://127.0.0.1:43134/`; this was not the acceptance-probe build.
+- [Persistence/recovery](turbovac-workflow-receipt.json): one measured pan wrote once to `app_state`/`panel_settings`, with zero source-catalog scans. Failed-read browsing/Retry, decoder retry, annotations, reload, backup restore and clear passed.
+- [Acquisition ownership](turbovac-source-ownership-receipt.json), [custom-model controls](turbovac-custom-model-workflow-receipt.json), [visible alignment](turbovac-visible-alignment-receipt.json) and [exact replay](turbovac-comparison-replay-receipt.json) preserve the individual observations and their limits.
+
+TypeScript, full lint with zero warnings, formatting, the isolated production build and copied pinned-model byte verification passed. Both recovery PNGs were byte-identical to the existing files linked below; their new custody hashes are in the current run receipt. Raster/aesthetic sign-off remains withheld for the image-preview limitation described below. No Storybook evidence is accepted. The seven earlier GPU/performance/inference tests below were not rerun during publication and retain their original fingerprint; they are not new current-head measurements.
+
+## Original CTO verification batch
+
+**Validated source fingerprint:** `dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4`. Base commit: `5f0efa433b6c8b6672add9a30184ec1140b2b5a3`. These are scoped working-tree checks, not remote CI or merge clearance.
 
 ## Checks and useful measurements
 

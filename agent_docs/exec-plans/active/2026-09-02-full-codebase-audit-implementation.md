@@ -52,15 +52,15 @@ The starting commit is `5f0efa433b6c8b6672add9a30184ec1140b2b5a3` on `blader/siq
 ## Repository and delivery hygiene
 
 - `.baton/` and new raw `artifacts/` outputs are ignored, not deleted. Previously tracked reviewed images remain preserved. Vercel CLI uploads also exclude handoffs, artifacts and agent documents.
-- Pinned public ONNX graphs are LFS-managed through `.gitattributes`. Hash/size verification fails helpfully on an unresolved pointer. Local LFS hooks were installed. MiraViewer's Vercel Git LFS setting was enabled and independently read back on September 3; no production redeployment was triggered. Actual LFS upload and Git-deployment hydration still need the eventual push/deployment evidence.
+- Pinned public ONNX graphs are LFS-managed through `.gitattributes`. Hash/size verification fails helpfully on an unresolved pointer. Local LFS hooks were installed. MiraViewer's Vercel Git LFS setting was enabled and independently read back on September 3. The first TurboVac publication uploaded all four ONNX objects (75 MB); Git-deployment hydration is checked separately from successful upload.
 - Generated DICOM files and large synthetic model bytes stay out of Git. Checked-in generators reconstruct fixtures; the 20 MiB model helper stores a compact generation recipe.
 - `tsconfig.browser-tests.json` is a TypeScript project reference. Browser probes/specs now receive typechecking, not just ESLint parsing or runtime checking.
 - Seventeen older execution plans moved to `exec-plans/historical/`, with their links rebased and historical status explicit. The CTO input stays at the user-specified path. Original pre-redaction documents and hashes are retained under ignored `artifacts/private-authoring/cto-review-2026-09-03/`.
 - Reviewer evidence belongs under `agent_docs/evidence/`; copies must be path-scrubbed and identify their original receipt hash. Original receipts, source captures, fixtures, MRI, marks and models remain protected.
 
-## Acceptance record
+## CTO acceptance record, before publication reduction
 
-Final source fingerprint: `dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4`. [Curated receipts and limitations](../../evidence/cto-review-2026-09-03/README.md) preserve original receipt paths and hashes. No remote CI or PR readiness is claimed.
+Source fingerprint for this acceptance batch: `dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4`. [Curated receipts and limitations](../../evidence/cto-review-2026-09-03/README.md) preserve original receipt paths and hashes. These remain scoped measurements of that source, not new post-reduction runs or remote CI clearance.
 
 | Check                                    | Final result                                                                                                                                                                                                                                                                          |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -103,19 +103,45 @@ The original F1–F13 contract and later N/A-numbered findings are preserved in 
 | F12 legacy geometry enrichment   | Still open.                                                                                                                                                                                                                                                                        |
 | F13 custom worker lifecycle      | **Implemented**, including manifest/source/output guards, bounded worker lifecycle, fresh-provider recovery and device-derived admission. Real cancel/recovery/custom-oracle evidence exists; no blanket arbitrary-model memory claim.                                             |
 
-## TurboVac delivery state
+## TurboVac publication checkpoint
 
-The requested review fixes are kept together; no PR-splitting work was performed.
-
-| Stage           | State       |
-| --------------- | ----------- |
-| First clean-pr  | Running     |
-| Diff reduction  | Not started |
-| Second clean-pr | Not started |
-| Hall Monitor    | Not started |
+The requested review fixes are kept together in [PR #11](https://github.com/blader/MiraViewer/pull/11); no PR-splitting work was performed. First clean-pr and diff reduction completed before this publication checkpoint. The live PR is the authority for subsequent current-head CI, review and merge state; this implementation ledger does not duplicate that changing state as a static checklist.
 
 The user has authorized TurboVac and merge of this branch. The publication pass preserves the synthetic receipts above, excludes raw artifacts and private inputs, and keeps the broader audit's open scope explicit. Six TypeScript files received formatting-only changes after the recorded fingerprint; those receipts remain evidence for the exact source they identify, not a claim of remote CI clearance.
 
-First publication checks after formatting: TypeScript passed; lint passed with two hook-dependency warnings queued for reduction review; the six focused test files passed 143 tests with 23 existing skips. All four public ONNX files were verified as Git LFS pointers in the index. Public candidate scanning found no credential patterns or private local paths (the review contains only an explicit `/Users/<local-user>` placeholder); DICOM UIDs in the curated receipts match the synthetic fixture generator.
+First publication checks after formatting: TypeScript passed; lint passed with two hook-dependency warnings subsequently fixed during reduction; the six focused test files passed 143 tests with 23 existing skips. All four public ONNX files were verified as Git LFS pointers in the index. Public candidate scanning found no credential patterns or private local paths (the review contains only an explicit `/Users/<local-user>` placeholder); DICOM UIDs in the curated receipts match the synthetic fixture generator. The published evidence README and both PNGs returned HTTP 200, correct content types and exact local hashes.
 
-Success for this delivery is a merged PR after both clean-pr passes, whole-diff reduction, and current-head CI/review/mergeability clearance. Reusing valid evidence avoids unnecessary full browser replays; any semantic reduction will receive focused checks, and final publication will distinguish retained evidence from newly verified code. No stage is complete merely because tests, a document or a local patch exist. The larger audit goal remains unfinished.
+### Reduction result
+
+The actual base is `origin/main`, merge base `5f0efa433b6c8b6672add9a30184ec1140b2b5a3`. Two full-file analysis passes covered 403 base/current file versions and all 1,612 diff hunks. The first read 193,903 text lines; the final pass read 193,889. Code/JSON parsing, line coverage and complete diff receipts are preserved under ignored `artifacts/turbovac/2026-09-03/reduction/`. Whole-file automated coverage was combined with direct architectural review of candidate implementations and their callers; this is not a claim of manual inspection of every preserved prose/lockfile line or anatomical/aesthetic approval.
+
+One normal reduction commit, `d8686ab73f700548f7449da9d5d02cdac89728ca`, made three source-file changes: common settings-owner publication after a read, direct use of the existing optional-source API, and precise callback captures for editor/viewer registration. Ordering, null write authority after read failure, cancellation, retained-byte accounting and all comments remain unchanged. Formatting, lint, TypeScript and **285 focused tests** passed. The final pass found no further viable scope-preserving cut; the temporary `trim-codex.md` was removed, and the worktree was clean before second clean-pr.
+
+| Reduction-window metric | Before |  After |
+| ----------------------- | -----: | -----: |
+| Full PR insertions      | 27,851 | 27,837 |
+| Full PR deletions       |  8,395 |  8,395 |
+| Full PR churn           | 36,246 | 36,232 |
+| Non-comment insertions  | 27,556 | 27,542 |
+| Non-comment deletions   |  8,012 |  8,012 |
+| Non-comment churn       | 35,568 | 35,554 |
+| Comment-only additions  |    295 |    295 |
+| Untracked code lines    |      0 |      0 |
+
+This is a 14-line reduction: 0.0508% of non-comment insertions and 0.0394% of non-comment churn; runtime TS/JS non-comment insertions fell from 4,015 to 4,001 (0.3487%). Prose, receipts, locks and generated assets remain included in the full-PR totals. Comment accounting includes TS/JS comments, Python comments/docstrings, CSS/HTML blocks and Git configuration comments; mixed code/comment lines and embedded-language strings count as code. These are the reduction-window measurements, before later validation and publication bookkeeping.
+
+The larger proposed cuts were rejected for specific reasons: per-run scoring, one-shot custom inference and retained tracking require different worker lifetimes; main/worker snapshot checks protect separate copy boundaries; existing database-reset helpers predate this diff; identical gray-interior assertions bind different historical/candidate solvers; and legacy settings, model derivation, numerical oracles and saved evidence still have required consumers. Common acquisition identity/counting already has shared helpers. No test or compatibility boundary was removed for line savings.
+
+### Post-reduction verification
+
+The first full run at source `a0334f1028a6593d2fb587658838bb8c5792ebe078f2462ac3681a7461ec17c0` passed 3,168 tests, with one full-size native-context test hitting Vitest's default five-second watchdog. Its isolated 43-test file then passed, with the affected case taking 1.19 seconds (the earlier CTO full run took 0.98 seconds). The test checks memory/source admission on the real 221-frame fixture, not a latency target; only that test's watchdog was made explicit at 15 seconds, with its fixture/assertions unchanged. The follow-up focused file passed all 43 tests. The failed full run and both focused receipts are preserved.
+
+The second full run passed **3,169 tests, zero failures, 54 existing skips** across 167 passing and six skipped files. See the [current unit receipt](../../evidence/cto-review-2026-09-03/turbovac-unit-suite.json). Current validated source fingerprint: `526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa`, code/test commit `34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8`; later publication changes only add documentation/evidence. TypeScript, final full lint (zero warnings), focused formatting and the isolated production build passed. The copied model allowlist passed its size/hash verification; existing large-chunk warnings remain part of the broader startup work.
+
+All **six normal production browser workflows** passed at that fingerprint in 41.6 seconds, using synthetic scans and disposable headed Chrome at `http://127.0.0.1:43134/`. The [current run receipt](../../evidence/cto-review-2026-09-03/turbovac-workflow-run.json) records unchanged source, all owned resources closed, no remaining profiles and a released port. The measured pan still produced one `app_state`/`panel_settings` write transaction and zero source-catalog reads. Source adjustments survived acquisition switches/date collisions; custom-model draft bytes survived save/reopen; cancel/reconstruction replacement retired workers; read failure/Retry, restore, annotations and cold/warm visible alignment passed.
+
+The desktop/mobile recovery PNGs were byte-identical to the preserved captures, so no duplicate images were published. **Raster/aesthetic sign-off remains withheld** for the earlier image-preview failure; DOM/input/persistence checks and file identity do not substitute for reliable aesthetic inspection. Storybook was not used. Original GPU, large-model calibration and inference receipts retain their original fingerprint and limits; they were not rerun or relabeled as current measurements.
+
+The new generated production bundle was released after its consumers closed, not deleted. Its exact location is in ignored `artifacts/turbovac/2026-09-03/released-builds.json`. All canonical weights, MRI, marks, authored harnesses, raw attempts, captures and receipts remain protected.
+
+Merge requires current-head CI/review/mergeability clearance after the refreshed publication. No stage is complete merely because tests, a document or a local patch exist. The larger audit goal remains unfinished.

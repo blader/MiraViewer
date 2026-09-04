@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "numPassedTests": 3169,
+  "numFailedTests": 0,
+  "numPendingTests": 54,
+  "numTotalTests": 3223,
+  "startTime": 1788495153768,
+  "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+  "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+  "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+  "original": {
+    "path": "artifacts/turbovac/2026-09-03/validation/turbovac-final-unit-tests-02.json",
+    "sha256": "9882fb1457a4bc304c3824f5e8da3fd7c1144101eb2721947e248039e726a104"
+  },
+  "previousAttempt": {
+    "path": "artifacts/turbovac/2026-09-03/validation/turbovac-final-unit-tests.json",
+    "passed": 3168,
+    "failed": 1,
+    "reason": "The full-size source-admission test hit the default five-second test watchdog; isolated replay passed. Its fixture and assertions were unchanged when making its watchdog explicit at 15 seconds."
+  }
+}

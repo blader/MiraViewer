@@ -1,0 +1,40 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/workflow-receipt.json",
+    "sha256": "4adce2c67016d12f6234547f7ce2a9e257ee533c3ba5fc95660a2327bb3742e7"
+  },
+  "receipt": {
+    "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+    "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T04:18:34.439Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "fixtureFiles": 72,
+    "panelWriteAudit": {
+      "writeStores": [["app_state", "panel_settings"]],
+      "sourceCatalogReads": 0
+    },
+    "completed": [
+      "binary import",
+      "acquired pixels",
+      "slice wheel",
+      "pan persistence",
+      "real decoder failure with retained prior image and successful local retry",
+      "compare and overlay",
+      "outline save/reopen",
+      "download and fresh-context restore",
+      "failed settings read keeps slice browsing available and durable work unchanged; Retry restores persistence",
+      "mounted restore retires the old writer before the next progress save",
+      "unclipped mobile plane and sequence context"
+    ],
+    "instances": 72,
+    "outlines": 1,
+    "skipped": [
+      "private anatomical evaluation",
+      "hardware performance",
+      "real model inference (separate command)"
+    ]
+  }
+}
