@@ -6,7 +6,7 @@ The normal production application exported and restored a **2,173,276,563-byte Z
 
 Cancellation, a corrupted payload and a quota exception during final publication left the previous visible dataset unchanged. These are storage and lifecycle results, not anatomical, model-quality or hardware-rendering acceptance.
 
-The [round-trip receipt](round-trip.json) contains the independently verified member hashes, exact recovered records, timing and resource summaries. The [unit receipt](unit-suite.json) identifies the later candidate tree and its complete default test run. All seven [normal-production browser workflows](workflow.json) also passed at that later fingerprint, including backup restoration, annotations, model controls and alignment recovery.
+The [round-trip receipt](round-trip.json) contains the independently verified member hashes, exact recovered records, timing and resource summaries. The original [unit receipt](unit-suite.json) and [normal-production browser workflows](workflow.json) remain unchanged. The [post-reduction receipt](post-reduction.json) records the final code's complete default suite and all seven normal-app workflows, including backup restoration, annotations, model controls and alignment recovery.
 
 ## What changed
 
@@ -22,43 +22,51 @@ A Web Lock serializes cooperating restores and allows abandoned lock-owned stagi
 
 ## Evidence and provenance
 
-| Check | Observed result |
-| --- | --- |
-| Physical large archive | 2,173,276,563 bytes; Python `zipfile` read every referenced member and checked CRC plus manifest SHA-256 |
-| Referenced payload members | 147: 128 DICOM files, labels, derived pixels/support and 16 models |
-| Source images | All recovered hashes matched the original generated DICOM buffers |
-| Label volume | 256 × 256 × 128; exact recovered label hash and review state |
-| Literal marks | Foreground `[0, 4096, 8388607]`, background `[1, 4097]`, last stroke axial/127; exact recovery |
-| Settings | Source-owned zoom 1.25 and pan X 0.12, with the remaining settings preserved |
-| Models | 16 × 128 MiB; every recovered byte checked against its independent constant-byte fixture; original timestamps preserved |
-| Derived frame | Exact float-pixel/support hashes and source/reference identity |
-| Native writable-file output | 42,570,083 bytes; independently checked and restored with the changed labels/settings/models |
-| Export cancellation | No download; read activity settled in 314 ms, including the observer's 250 ms quiet window |
-| Restore cancellation | 54 ms from click to canceled UI after staging had begun; previous records/token unchanged |
-| Corruption | One physical byte flipped in a cloned model member; CRC rejection left previous records/token unchanged |
-| Late quota failure | `QuotaExceededError` injected at the first model write in the final publication transaction, after medical/label writes had been submitted; complete rollback |
-| Staging after each completed attempt | No current-operation rows remained |
-| Browser errors | None in the completed run |
-| Complete default unit suite | 3,209 passed, zero failed, 54 existing optional skips |
-| Final production checks | TypeScript, full lint and isolated production build passed; seven browser workflows passed in 40.8 s with unchanged source |
+| Check                                | Observed result                                                                                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Physical large archive               | 2,173,276,563 bytes; Python `zipfile` read every referenced member and checked CRC plus manifest SHA-256                                                      |
+| Referenced payload members           | 147: 128 DICOM files, labels, derived pixels/support and 16 models                                                                                            |
+| Source images                        | All recovered hashes matched the original generated DICOM buffers                                                                                             |
+| Label volume                         | 256 × 256 × 128; exact recovered label hash and review state                                                                                                  |
+| Literal marks                        | Foreground `[0, 4096, 8388607]`, background `[1, 4097]`, last stroke axial/127; exact recovery                                                                |
+| Settings                             | Source-owned zoom 1.25 and pan X 0.12, with the remaining settings preserved                                                                                  |
+| Models                               | 16 × 128 MiB; every recovered byte checked against its independent constant-byte fixture; original timestamps preserved                                       |
+| Derived frame                        | Exact float-pixel/support hashes and source/reference identity                                                                                                |
+| Native writable-file output          | 42,570,083 bytes; independently checked and restored with the changed labels/settings/models                                                                  |
+| Export cancellation                  | No download; read activity settled in 314 ms, including the observer's 250 ms quiet window                                                                    |
+| Restore cancellation                 | 54 ms from click to canceled UI after staging had begun; previous records/token unchanged                                                                     |
+| Corruption                           | One physical byte flipped in a cloned model member; CRC rejection left previous records/token unchanged                                                       |
+| Late quota failure                   | `QuotaExceededError` injected at the first model write in the final publication transaction, after medical/label writes had been submitted; complete rollback |
+| Staging after each completed attempt | No current-operation rows remained                                                                                                                            |
+| Browser errors                       | None in the completed run                                                                                                                                     |
+| Complete default unit suite          | 3,209 passed, zero failed, 54 existing optional skips                                                                                                         |
+| Final production checks              | TypeScript, full lint and isolated production build passed; seven browser workflows passed in 43.3 s with unchanged source                                    |
 
 The large run used installed, headed Chrome 152.0.7977.82 at `http://127.0.0.1:43134/`, with two separate disposable persistent profiles. Input bytes were generated; no private MRI, private weights or patient media were used. Models in this test are opaque synthetic byte payloads, not inference models.
 
 The native-file route used a real Chromium OPFS `FileSystemWritableFileStream`. Only the OS picker was substituted with the generated file handle. This proves the application writer and native file close/readback path, not interaction with the operating system's save dialog.
 
-The normal production build's application fingerprint was `04b60314aa9a36b39b4403cc35023a39df0ea43ca42774306c3b91d84bc33a25`. The runner also recorded the exact newer test-harness fingerprint and verified source stability for the run. The bundle was reused after test-only changes; it does not import the acceptance probes. The later unit candidate, including the cleanup namespace guard, has application fingerprint `7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619`. Parent HEAD values in raw receipts identify the uncommitted candidate's parent, not a claim that the parent contained these changes.
+The large run's normal production build had application fingerprint `04b60314aa9a36b39b4403cc35023a39df0ea43ca42774306c3b91d84bc33a25`. The runner also recorded the exact newer test-harness fingerprint and verified source stability for the run. The bundle was reused after test-only changes; it does not import the acceptance probes. The later pre-reduction unit candidate, including the cleanup namespace guard, has application fingerprint `7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619`. Parent HEAD values in those raw receipts identify the uncommitted candidate's parent, not a claim that the parent contained these changes.
+
+### Publication reduction and final validation
+
+Commit `4824b5ad08da75be5f2a6a512ff943a9eb572537` makes the native-file destination own abort handling, removes unused writer-abort/buffer-conversion adapters, shares the cancellation guard and folds the one-consumer verified reader into its operation. An extended existing regression preserves the original write error even when abort throws synchronously. No comment text, compatibility path or evidence was removed.
+
+Two complete reduction passes inspected all 30 changed files and 212 modified hunks, combining direct runtime/test review with full-file AST/JSON scans. Generated lock/receipt values were parsed and hashed, not claimed as word-by-word manual review. Against merge base `d4fb10fdfbf2d1e9aac44759eb2387ce1e5ba477`, non-comment code additions fell from 2,006 to 1,873 (**6.6%**), and non-comment code churn from 2,831 to 2,583 (**8.8%**). Comment-only additions changed from 42 to 37 through diff realignment; no comment text was removed. Full additions/deletions were 6,419/853 before and 6,281/732 after, before this publication documentation. The fresh second pass found no further behavior- and scope-preserving cuts.
+
+After 179 focused tests, TypeScript, targeted lint and formatting passed, the final code passed **3,209 default-suite tests, zero failures, 54 existing skips**, full lint, a normal production build and **seven browser workflows in 43.3 s**. Source fingerprint `2933545c9088654bc1f85afcd2a159d6e2eccc8a0c899afd65c8bda68538c570` and application fingerprint `b78d091699bd7b5dc8b302542983ad70db7e062e9f839c8c450a620d45606e6a` stayed unchanged. The [new receipt](post-reduction.json) preserves exact original receipt hashes and reduction metrics. The multi-GiB resource run was not rerun or relabeled; it remains scoped to its earlier fingerprint and unchanged payload algorithm.
 
 ### Resource measurement
 
 The runner sampled the owned browser roots and descendants every 500 ms. **Peak observed aggregate RSS was 2,373.4 MiB (2.32 GiB)** during the two-browser fresh-profile restore. This sums shared pages across processes and includes browser/application overhead; it is not unique memory, a guaranteed instantaneous peak or a promise of the same result on every device.
 
-| Phase | Elapsed time | Peak observed aggregate browser RSS |
-| --- | --- | --- |
-| Large ordinary export, including saving the download | 77.55 s | 1,351.8 MiB |
-| Corrupt restore and cleanup | 4.86 s | 1,488.9 MiB |
-| Late quota failure and rollback/cleanup | 105.78 s | 1,285.4 MiB |
-| Native-file export | 3.35 s | 1,100.9 MiB |
-| Fresh-profile large restore | 71.07 s | 2,373.4 MiB across both browser instances |
+| Phase                                                | Elapsed time | Peak observed aggregate browser RSS       |
+| ---------------------------------------------------- | ------------ | ----------------------------------------- |
+| Large ordinary export, including saving the download | 77.55 s      | 1,351.8 MiB                               |
+| Corrupt restore and cleanup                          | 4.86 s       | 1,488.9 MiB                               |
+| Late quota failure and rollback/cleanup              | 105.78 s     | 1,285.4 MiB                               |
+| Native-file export                                   | 3.35 s       | 1,100.9 MiB                               |
+| Fresh-profile large restore                          | 71.07 s      | 2,373.4 MiB across both browser instances |
 
 The 54 ms restore-cancel interval fell between RSS samples, so no phase-specific peak is claimed. The recorded large export used no Blob array-buffer read larger than 65,557 bytes. Restore observations reached 1 MiB array-buffer reads for labels and 2 MiB native stream chunks. Legacy compressed members and one materialized export selection remain per-entry memory costs, not aggregate archive buffers.
 
@@ -68,7 +76,7 @@ An earlier attempt used Playwright's default incognito-like context. Its databas
 
 The [desktop export dialog](streaming-backup-export-desktop.png) and [mobile export dialog](streaming-backup-export-mobile.png) were individually inspected at original detail. Typography, spacing, wrapping and both export actions passed the static review. The [large-backup review](streaming-backup-restore-review.png) passed for its visible size, storage disclosure and saved-work inventory; consent is below that capture's scroll position and was exercised separately by the test. These are not animation or anatomical verdicts. Storybook was not used.
 
-[Capture hashes and original locations](captures.json) preserve source provenance. The final workflow's desktop/mobile export captures were byte-identical to the preserved images and were individually re-inspected. Every temporary browser/profile and the strict-port server was closed after its batch. A final scoped audit of 19 current/prior task receipts found no remaining owned process or profile. User and other-worktree browsers were not touched.
+[Capture hashes and original locations](captures.json) preserve source provenance. The pre-reduction workflow's desktop/mobile export captures were byte-identical to the preserved images and were individually re-inspected. The final post-reduction workflow again produced identical bytes; it does not add a motion or OS-picker claim. Every temporary browser/profile and the strict-port server was closed after its batch. A final scoped audit of 20 current/prior task receipts found no remaining owned process or profile. User and other-worktree browsers were not touched.
 
 ## Reproduce and limits
 
