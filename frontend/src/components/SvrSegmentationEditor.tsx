@@ -753,12 +753,13 @@ export function SvrSegmentationEditor({
   const reviewed = labels?.reviewState === 'reviewed';
   const editing = expanded !== 'volume';
   const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill, proposeSelection);
+  const { getRetainedBytes, prepareHeavyOperation } = selection;
   useLayoutEffect(
     () =>
       operations.register('editor', (kind) => ({
-        retainedBytes: kind === 'selection' ? selection.getRetainedBytes() : selection.prepareHeavyOperation(),
+        retainedBytes: kind === 'selection' ? getRetainedBytes() : prepareHeavyOperation(),
       })),
-    [operations, selection.getRetainedBytes, selection.prepareHeavyOperation],
+    [operations, getRetainedBytes, prepareHeavyOperation],
   );
   const show3D = () => {
     setTool('navigate');

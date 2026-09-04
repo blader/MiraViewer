@@ -373,9 +373,7 @@ export function usePanelSettings(
 
   // Load panel settings from local storage when the patient, sequence, or dates change.
   const readStoredSettings = useEffectEvent((sequenceId: string, ownerPatient: string | null) =>
-    seriesByDate === undefined
-      ? getPanelSettingsSnapshot(sequenceId, ownerPatient)
-      : getPanelSettingsSnapshot(sequenceId, ownerPatient, seriesByDate),
+    getPanelSettingsSnapshot(sequenceId, ownerPatient, seriesByDate),
   );
   useEffect(() => {
     if (!selectedSeqId) return;
@@ -398,6 +396,18 @@ export function usePanelSettings(
 
     let cancelled = false;
     const replacementVersion = replacementVersionRef.current;
+    const publishOwner = (verifiedSources: SettingsOwner['verifiedSources'], ownerToken: string) => {
+      const owner = {
+        patientKey,
+        sequenceId: selectedSeqId,
+        datasetToken: ownerToken,
+        sourcesKey,
+        loadAttempt,
+        verifiedSources,
+      };
+      currentOwnerRef.current = owner;
+      setSettingsOwner(owner);
+    };
     (async () => {
       try {
         const snapshot = await readStoredSettings(selectedSeqId, patientKey);
@@ -455,16 +465,7 @@ export function usePanelSettings(
         setPersistenceFailure(null);
         setLegacySettings(snapshot.legacySettings ?? []);
         prevDatesRef.current = currentDates;
-        const owner = {
-          patientKey,
-          sequenceId: selectedSeqId,
-          datasetToken: snapshot.datasetToken,
-          sourcesKey,
-          loadAttempt,
-          verifiedSources: snapshot.verifiedSources,
-        };
-        currentOwnerRef.current = owner;
-        setSettingsOwner(owner);
+        publishOwner(snapshot.verifiedSources, snapshot.datasetToken);
 
         // A new acquisition/catalog changes source-bound settings, not the shared
         // browsing position. Only a patient/sequence or saved-work replacement
@@ -504,16 +505,7 @@ export function usePanelSettings(
         setPanelSettings(next);
         setLegacySettings([]);
         prevDatesRef.current = currentDates;
-        const owner = {
-          patientKey,
-          sequenceId: selectedSeqId,
-          datasetToken: datasetToken ?? '',
-          sourcesKey,
-          loadAttempt,
-          verifiedSources: null,
-        };
-        currentOwnerRef.current = owner;
-        setSettingsOwner(owner);
+        publishOwner(null, datasetToken ?? '');
       }
     })();
     return () => {

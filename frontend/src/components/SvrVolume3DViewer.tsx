@@ -703,22 +703,15 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     blocked: Boolean(busy || onnxSegRunning || savedMigration?.running),
   });
   const glEnhancementRef = useRef<EnhancedVolumeBinding | null>(null);
+  const { running: enhancing, cancel: cancelEnhancement, retainedBytes: enhancementBytes } = enhancement;
   useLayoutEffect(
     () =>
       operations.register('viewer', (kind) => {
         if (kind !== 'custom-model') cancelOnnxSegmentation();
-        if (kind !== 'enhancement' && enhancement.running) enhancement.cancel();
-        return { volume, labels, retainedBytes: enhancement.retainedBytes };
+        if (kind !== 'enhancement' && enhancing) cancelEnhancement();
+        return { volume, labels, retainedBytes: enhancementBytes };
       }),
-    [
-      operations,
-      volume,
-      labels,
-      cancelOnnxSegmentation,
-      enhancement.running,
-      enhancement.cancel,
-      enhancement.retainedBytes,
-    ],
+    [operations, volume, labels, cancelOnnxSegmentation, enhancing, cancelEnhancement, enhancementBytes],
   );
 
   // Viewer controls (composite-only)
