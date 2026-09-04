@@ -471,5 +471,48 @@
       "scope": "Existing Playwright runner closed its page/context/browser handles on exit; scoped process and server audits clear. No user or other-worktree browser was signaled."
     }
   },
-  "releaseGate": "Do not infer current-head CI/merge/hosted acceptance from local success. The final rollout is recorded separately in artifacts/turbovac/startup-delivery-2026-09-04/merge-closeout.md."
+  "releaseGate": "Do not infer current-head CI/merge/hosted acceptance from local success. The final rollout is recorded separately in artifacts/turbovac/startup-delivery-2026-09-04/merge-closeout.md.",
+  "focusSynchronization": {
+    "run": 33892490513,
+    "head": "dbbe462a1da09d146c074e373a759be6e3a8302a",
+    "stage": "unit",
+    "passed": 3259,
+    "failed": 1,
+    "skipped": 54,
+    "failures": [
+      {
+        "file": "tests/overlays.test.tsx",
+        "test": "deferred comparison dialogs keeps the app inert through loading and restores the original trigger after the loaded dialog closes"
+      }
+    ],
+    "rawReceipt": {
+      "path": "artifacts/turbovac/startup-delivery-2026-09-04/ci-33892490513/synthetic-acceptance-6095cc404c0852fa0437e497d2cc4a04855e5a20/ci-unit-results.json",
+      "sha256": "e835d4207553d25afc3412bfd8d74ca0bd1a38ccc0f3147f0f052c270a51e614"
+    },
+    "browserExecuted": false,
+    "newRenderRegression": "passed",
+    "diagnosis": "findByRole observes the async dialog DOM commit, before the passive AccessibleDialog effect necessarily applies focus. The assertion was synchronous after that DOM observation.",
+    "repair": "Await the same toHaveFocus assertion using the existing waitFor primitive and default deadline; preserve inert/Escape/trigger-restoration checks. No application code or deadline change.",
+    "focused": {
+      "path": "artifacts/turbovac/startup-delivery-2026-09-04/focus-synchronization-focused.json",
+      "sha256": "7a78492e81bf9a9f6e2b8b78eefe090f740e5f7e6da54da981753f282db38347",
+      "passed": 6,
+      "failed": 0
+    },
+    "fullUnitGate": {
+      "path": "artifacts/turbovac/startup-delivery-2026-09-04/focus-synchronization-full-unit.json",
+      "sha256": "7322c2195904d0725ce925a869552211345295f15de275f3405cc2d3d1b22db4",
+      "passed": 3260,
+      "failed": 0,
+      "skipped": 54,
+      "source": {
+        "head": "dbbe462a1da09d146c074e373a759be6e3a8302a",
+        "sourceSha256": "1c4d37bbd9de3faf30ade68fbf4698f2cacb2a27f51921e5a4f72a7e134152e3",
+        "applicationSourceSha256": "2c21538f1a3b340ba0d94f68784bf41af1754498cc46860fc24e64f18d7024db",
+        "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+      },
+      "sourceUnchanged": true,
+      "applicationMatchesRetainedCandidate06": true
+    }
+  }
 }

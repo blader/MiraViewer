@@ -1,4 +1,4 @@
-import { render, fireEvent, screen } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { HelpModal } from '../src/components/HelpModal';
 import { AccessibleDialog } from '../src/components/ui/AccessibleDialog';
@@ -55,7 +55,7 @@ describe('deferred comparison dialogs', () => {
       expect(appRoot).toHaveAttribute('inert');
       expect(await screen.findByRole('dialog', { name: /help/i })).toBeInTheDocument();
       expect(appRoot).toHaveAttribute('inert');
-      expect(screen.getByRole('button', { name: /close help/i })).toHaveFocus();
+      await waitFor(() => expect(screen.getByRole('button', { name: /close help/i })).toHaveFocus());
       fireEvent.keyDown(document, { key: 'Escape' });
       expect(onClose).toHaveBeenCalledOnce();
       view.unmount();
