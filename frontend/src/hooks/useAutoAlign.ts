@@ -414,6 +414,13 @@ export function useAutoAlign() {
           return captured;
         };
 
+        const readManifest = (seriesUid: string) =>
+          getSeriesFrameManifest(seriesUid, {
+            signal: alignmentAbortController.signal,
+            datasetRevision: reference.datasetRevision,
+            selectedPatientKey: reference.patientKey,
+          });
+
         let verifiedReferenceManifest: SeriesFrameManifest | undefined;
         let referenceAnatomy: LongitudinalReferenceAnatomy | undefined;
         if (displayedDerivedReference) {
@@ -445,7 +452,7 @@ export function useAutoAlign() {
             );
           }
 
-          const displayedManifest = await getSeriesFrameManifest(selectedReference.seriesUid);
+          const displayedManifest = await readManifest(selectedReference.seriesUid);
           ensureNotAborted();
           const displayedNativeFrame = displayedManifest.frames[selectedReference.sliceIndex];
           if (displayedManifest.patientKey !== reference.patientKey) {
@@ -466,7 +473,7 @@ export function useAutoAlign() {
             );
           }
 
-          verifiedReferenceManifest = await getSeriesFrameManifest(originalSeriesUid);
+          verifiedReferenceManifest = await readManifest(originalSeriesUid);
           ensureNotAborted();
           if (verifiedReferenceManifest.patientKey !== reference.patientKey) {
             throw new Error('The selected aligned reference and its acquired anchor belong to different patients');
@@ -610,7 +617,7 @@ export function useAutoAlign() {
 
         const referenceManifest: SeriesFrameManifest | null =
           verifiedReferenceManifest ??
-          (reference.patientKey && reference.studyUid ? await getSeriesFrameManifest(reference.seriesUid) : null);
+          (reference.patientKey && reference.studyUid ? await readManifest(reference.seriesUid) : null);
         const referenceDisplayFrame =
           referenceRender.windowWidth !== undefined
             ? referenceRender
@@ -697,7 +704,7 @@ export function useAutoAlign() {
           const manualSliceOffset = options.targetSliceOffsets?.get(date) ?? 0;
           const physicalFailure = (outcome: NonNullable<AlignmentResult['outcome']>, message: string) =>
             terminalResult(date, seriesRef, outcome, message);
-          const targetManifest = await getSeriesFrameManifest(seriesRef.series_uid);
+          const targetManifest = await readManifest(seriesRef.series_uid);
           targetManifests.set(seriesRef.series_uid, targetManifest);
           if (targetManifest.patientKey !== referenceManifest.patientKey) {
             return physicalFailure('incompatible-geometry', 'Reference and target belong to different patients');

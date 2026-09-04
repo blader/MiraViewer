@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import dicomParser from 'dicom-parser';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { extractDicomAcquisitionMetadata } from '../src/services/dicomAcquisitionMetadata';
+import { extractDicomAcquisitionMetadata } from '../src/services/dicomMetadata';
 import { buildOutputPlaneGrid, outputGridPixelToWorld } from '../src/utils/outputPlaneGrid';
 import { renderSharpSlicePresentation } from '../src/utils/sharpSlicePresentation';
 import { synthesizeSharpSlice } from '../src/utils/sharpSliceSynthesis';

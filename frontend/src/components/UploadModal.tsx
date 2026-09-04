@@ -345,13 +345,14 @@ function useUploadIntake(onUploadComplete: UploadModalProps['onUploadComplete'])
   const reportFailure = (operation: IntakeOperation, error: unknown): void => {
     if (operationRef.current !== operation) return;
     const canceled = isAbortError(error) || operation.controller.signal.aborted;
-    if (operation.committed && operation.committed.ingested > 0) {
-      const { ingested, duplicates, skipped, errors } = operation.committed;
+    if (operation.committed && (operation.committed.ingested > 0 || operation.committed.metadataUpdated)) {
+      const { ingested, duplicates, metadataUpdated, skipped, errors } = operation.committed;
       updateIntake({
         summary: {
           total: operation.total ?? ingested + duplicates + skipped + errors,
           ingested,
           duplicates,
+          ...(metadataUpdated ? { metadataUpdated } : {}),
           skipped,
           errors: errors + (canceled ? 0 : 1),
           errorSamples: [],
@@ -360,7 +361,9 @@ function useUploadIntake(onUploadComplete: UploadModalProps['onUploadComplete'])
         phase: canceled ? 'canceled' : 'partial',
         errorMessage: canceled
           ? null
-          : 'Some images were saved before this import stopped. Review or retry the source.',
+          : ingested > 0
+            ? 'Some images were saved before this import stopped. Review or retry the source.'
+            : 'Some existing scan metadata was updated before this import stopped. Original images and saved work were kept.',
       });
       endOperation(operation);
       void onUploadComplete?.();
@@ -709,7 +712,7 @@ function useUploadIntake(onUploadComplete: UploadModalProps['onUploadComplete'])
         nextPhase = 'complete';
       }
       updateIntake({ summary: result, phase: nextPhase, errorMessage: nextErrorMessage });
-      if (result.ingested > 0) {
+      if (result.ingested > 0 || result.metadataUpdated) {
         try {
           await onUploadComplete?.();
         } catch {
@@ -958,11 +961,13 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
                       ? summary?.errors
                         ? 'Import completed with issues'
                         : 'Import completed with exclusions'
-                      : summary?.ingested === 0 && (summary?.duplicates ?? 0) > 0
-                        ? 'No new scans needed'
-                        : source?.kind === 'complete-backup'
-                          ? 'Complete backup restored'
-                          : 'Import complete'}
+                      : summary?.metadataUpdated && summary.ingested === 0
+                        ? 'Existing scan metadata updated'
+                        : summary?.ingested === 0 && (summary?.duplicates ?? 0) > 0
+                          ? 'No new scans needed'
+                          : source?.kind === 'complete-backup'
+                            ? 'Complete backup restored'
+                            : 'Import complete'}
               </h4>
               <p>
                 {summary
@@ -977,6 +982,9 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
                 <p className="intake-result-detail">
                   {[
                     summary.duplicates ? `${summary.duplicates.toLocaleString()} already stored` : null,
+                    summary.metadataUpdated
+                      ? `${summary.metadataUpdated.toLocaleString()} metadata updated; original images and saved work kept`
+                      : null,
                     summary.skipped ? `${summary.skipped.toLocaleString()} excluded` : null,
                     summary.errors ? `${summary.errors.toLocaleString()} could not be imported` : null,
                   ]
@@ -1039,7 +1047,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         <span className="intake-footer-private">
           {source?.kind === 'complete-backup'
             ? 'Replacement requires confirmation'
-            : 'Duplicates are skipped automatically'}
+            : 'Existing images are kept. Missing metadata may be updated.'}
         </span>
         <div className="intake-footer-actions">
           <button

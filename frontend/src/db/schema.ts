@@ -248,6 +248,8 @@ export interface DicomInstance {
   acquisitionTime?: string;
   acquisitionMetadata?: DicomAcquisitionMetadata;
   numberOfFrames?: number;
+  /** Completed canonical header/geometry enrichment; unknown geometry remains unknown. */
+  metadataVersion?: 1;
   /** Signed patient-space distance along this frame's validated slice normal. */
   physicalSlicePosition?: number;
 

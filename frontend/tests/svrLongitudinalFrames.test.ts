@@ -655,7 +655,7 @@ describe('svr/longitudinalFrames', () => {
     const reference = makeManifest('reference', 121);
     const target = makeManifest('target', 121, { angleDeg: 18 });
     for (const manifest of [reference, target]) {
-      manifest.frames = manifest.frames.map((frame) => ({ ...frame, pixelSpacing: '8\\\\8' }));
+      manifest.frames = manifest.frames.map((frame) => ({ ...frame, pixelSpacing: '8\\8' }));
     }
     const outputGrid = buildOutputPlaneGrid(reference.frames[60]!, {
       frameOfReferenceUid: reference.frameOfReferenceUid,
@@ -1073,7 +1073,7 @@ describe('svr/longitudinalFrames', () => {
     const anatomy = makeManifest('selected', 11);
     anatomy.frames = anatomy.frames.map((frame, index) => ({
       ...frame,
-      imagePositionPatient: `10\\\\20\\\\${index}`,
+      imagePositionPatient: `10\\20\\${index}`,
     }));
     const target = makeManifest('target', 11);
     const outputGrid = buildOutputPlaneGrid(anchor.frames[5]!, {

@@ -1,0 +1,154 @@
+{
+  "sources": {
+    "parentHead": "76e64347f045b07a041a40af8e01d00373d838ce",
+    "sourceSha256": "a98b2533a14d8a8301cbd3386c9cd8ae7de5235af5efbf28c2575ab14d2d44af",
+    "applicationSourceSha256": "5546d0ced083fb92f6c7dcf134c4c1a61b2b521a121958070f5690c1c9d1b27b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "buildSourceSha256": "17f879387e87fab50e57cbe94a7b8ada454830be77336571852ea58990655ff3",
+    "buildMode": "production",
+    "sourceUnchanged": true,
+    "fullSourceMatch": false,
+    "reuseReason": "Normal production bundle reused after browser-test navigation/capture changes only; original build manifest was retained."
+  },
+  "route": "http://127.0.0.1:43134/",
+  "browser": "152.0.7977.82",
+  "channel": "installed Chrome",
+  "headless": false,
+  "stats": {
+    "startTime": "2026-09-04T09:24:32.861Z",
+    "duration": 43298.337,
+    "expected": 9,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "tests": [
+    {
+      "title": "shows a clear metadata-only repair summary for existing scans on desktop and mobile",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1910
+        }
+      ]
+    },
+    {
+      "title": "upgrades a legacy database for physical viewing and preserves original bytes and saved work through backup restore",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 3947
+        }
+      ]
+    },
+    {
+      "title": "backup controls show per-file limits and a reachable direct-save action",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1128
+        }
+      ]
+    },
+    {
+      "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 11686
+        }
+      ]
+    },
+    {
+      "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 5448
+        }
+      ]
+    },
+    {
+      "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1524
+        }
+      ]
+    },
+    {
+      "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 2372
+        }
+      ]
+    },
+    {
+      "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 4824
+        }
+      ]
+    },
+    {
+      "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 3463
+        }
+      ]
+    }
+  ],
+  "harness": [
+    {
+      "path": "frontend/tmp/build-source-metadata.mjs",
+      "sha256": "4bfe4f0ed4a59a5cccc3c972b67ead3fdf1adb931f49da2c5aed0e845930bc42"
+    },
+    {
+      "path": "frontend/tmp/source-metadata.config.ts",
+      "sha256": "8063a08508e981296283e095604f9136908ade610c3bcd8f9f565c45875e0427"
+    },
+    {
+      "path": "frontend/tmp/run-source-metadata.mjs",
+      "sha256": "2010b96cb783d442e57799cf6093e73fb051d5b0f3a56e3b5e4c3566acda2069"
+    }
+  ],
+  "cleanup": {
+    "at": "2026-09-04T09:25:30.608Z",
+    "receiptCount": 24,
+    "currentBatch": "CLEAR",
+    "staleOwned": "CLEAR",
+    "preservation": "CLEAR - read-only audit; no process, browser, profile, source, or private artifact changed.",
+    "port43134": "free",
+    "cleanup": "CLOSED"
+  },
+  "rawEvidence": [
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-run.json",
+      "sha256": "40832bac7fd607d97e3e3ddda65a79fa9ce33cfc2079af2c6413b6fc8c4d4cef"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/results.json",
+      "sha256": "1eae029c4cc83c4c327d1f4c1e77a5ea6d71229ea2415d860c3a9864f91c2c52"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/cleanup-audit.json",
+      "sha256": "c12193a74ff222223391b6d94c460bd08f6a1e05f84c67dad637c32e43924efc"
+    }
+  ]
+}

@@ -3,7 +3,13 @@ import dicomParser from 'dicom-parser';
 import { assertStorageHeadroom, DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation } from '../db/db';
 import { initializeComparisonState } from '../db/comparisonState';
 import type { DicomStudy, DicomSeries, DicomInstance } from '../db/schema';
-import { extractDicomAcquisitionMetadata } from './dicomAcquisitionMetadata';
+import {
+  DICOM_METADATA_VERSION,
+  extractDicomInstanceMetadata,
+  mergeDicomInstanceMetadata,
+  getDicomNumber as getNumber,
+  getDicomText as getText,
+} from './dicomMetadata';
 import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
 import {
   parseImageOrientationPatient,
@@ -13,7 +19,7 @@ import {
 
 export type DicomIngestResult =
   | { status: 'ingested'; fileName: string; sopInstanceUid: string }
-  | { status: 'duplicate'; fileName: string; sopInstanceUid: string }
+  | { status: 'duplicate'; fileName: string; sopInstanceUid: string; metadataUpdated?: true }
   | {
       status: 'skipped';
       fileName: string;
@@ -36,6 +42,7 @@ export type ProcessFilesResult = {
   total: number;
   ingested: number;
   duplicates: number;
+  metadataUpdated?: number;
   skipped: number;
   errors: number;
   /** A small sample of error messages (bounded) for display in the UI. */
@@ -46,7 +53,10 @@ export type ProcessFilesResult = {
   affectedSeriesUids?: string[];
 };
 
-export type ProcessFilesProgress = Pick<ProcessFilesResult, 'ingested' | 'duplicates' | 'skipped' | 'errors'> & {
+export type ProcessFilesProgress = Pick<
+  ProcessFilesResult,
+  'ingested' | 'duplicates' | 'metadataUpdated' | 'skipped' | 'errors'
+> & {
   fileName?: string;
 };
 
@@ -114,69 +124,6 @@ function hasDisplayablePixelData(dataSet: dicomParser.DataSet): boolean {
   return true;
 }
 
-// Helper to get text from a dataset
-function getText(dataSet: dicomParser.DataSet, tag: string): string {
-  return dataSet.string(tag) || '';
-}
-
-const NUMERIC_ACCESSORS = {
-  DS: 'floatString',
-  IS: 'intString',
-  US: 'uint16',
-  SS: 'int16',
-  UL: 'uint32',
-  SL: 'int32',
-  FL: 'float',
-  FD: 'double',
-} as const;
-
-function getNumber(dataSet: dicomParser.DataSet, tag: string): number {
-  // IMPORTANT: Many numeric DICOM tags are *not* stored as ASCII.
-  // For example, Rows/Columns are VR=US (binary). Reading them via dataSet.string()
-  // yields garbage (e.g. 64 => "@").
-  //
-  // We therefore try dicom-parser's typed accessors first, and fall back to
-  // string parsing only if needed.
-
-  const knownVr =
-    tag === 'x00280010' || tag === 'x00280011' || tag === 'x00280103'
-      ? 'US'
-      : tag === 'x00200011' || tag === 'x00200013' || tag === 'x00280008'
-        ? 'IS'
-        : tag === 'x00280120' || tag === 'x00280121'
-          ? getNumber(dataSet, 'x00280103') === 1
-            ? 'SS'
-            : 'US'
-          : undefined;
-  const vr = dataSet.elements?.[tag]?.vr ?? knownVr;
-  const preferred = vr ? NUMERIC_ACCESSORS[vr as keyof typeof NUMERIC_ACCESSORS] : undefined;
-  const candidates = preferred
-    ? [preferred, NUMERIC_ACCESSORS.DS, NUMERIC_ACCESSORS.IS]
-    : Object.values(NUMERIC_ACCESSORS);
-
-  for (const accessor of candidates) {
-    try {
-      const value = dataSet[accessor](tag, 0);
-      if (typeof value === 'number' && Number.isFinite(value)) return value;
-    } catch {
-      // Malformed optional values must not abort an otherwise valid import.
-    }
-  }
-
-  let str: string | undefined;
-  try {
-    str = dataSet.string(tag, 0);
-  } catch {
-    return 0;
-  }
-  if (!str) return 0;
-
-  // Handle multi-value strings by taking the first value.
-  const first = str.includes('\\') ? str.split('\\')[0] : str;
-  const parsed = parseFloat(first);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function inferPlaneFromImageOrientationPatient(iop: string): string | undefined {
   const axes = parseImageOrientationPatient(iop);
   if (!axes) return undefined;
@@ -192,14 +139,6 @@ function inferPlaneFromImageOrientationPatient(iop: string): string | undefined 
   if (ax >= ay && ax >= az) return 'Sagittal';
   if (ay >= ax && ay >= az) return 'Coronal';
   return 'Axial';
-}
-
-function physicalSlicePosition(orientation: string, position: string): number | undefined {
-  const axes = parseImageOrientationPatient(orientation);
-  const point = parseImagePositionPatient(position);
-  if (!axes || !point) return undefined;
-  const projection = axes.normalDir.x * point.x + axes.normalDir.y * point.y + axes.normalDir.z * point.z;
-  return Number.isFinite(projection) ? projection : undefined;
 }
 
 // DICOM Tags
@@ -225,22 +164,14 @@ const TAGS = {
   ImageType: 'x00080008',
   SOPClassUID: 'x00080016',
   SOPInstanceUID: 'x00080018',
-  InstanceNumber: 'x00200013',
   FrameOfReferenceUID: 'x00200052',
   NumberOfFrames: 'x00280008',
 
   Rows: 'x00280010',
   Columns: 'x00280011',
-  PixelPaddingValue: 'x00280120',
-  PixelPaddingRangeLimit: 'x00280121',
-  SliceLocation: 'x00201041',
   ImagePositionPatient: 'x00200032',
   ImageOrientationPatient: 'x00200037',
   PixelSpacing: 'x00280030',
-  SliceThickness: 'x00180050',
-  SpacingBetweenSlices: 'x00180088',
-  WindowCenter: 'x00281050',
-  WindowWidth: 'x00281051',
 };
 
 // Common non-DICOM file extensions to skip
@@ -409,47 +340,8 @@ async function prepareDicomFile(file: File): Promise<DicomIngestResult | Prepare
     sequenceType: parsedSeries.sequenceType,
   };
 
-  // Extract Instance Info
-  // Handle multi-value strings for arrays
-  // Window Center/Width can be multi-value. `getNumber()` takes the first value.
-  const wc = getNumber(dataSet, TAGS.WindowCenter);
-  const ww = getNumber(dataSet, TAGS.WindowWidth);
-
-  const sliceThickness = getNumber(dataSet, TAGS.SliceThickness);
-  const spacingBetweenSlices = getNumber(dataSet, TAGS.SpacingBetweenSlices);
-  const pixelPaddingValue =
-    dataSet.elements?.[TAGS.PixelPaddingValue] || getText(dataSet, TAGS.PixelPaddingValue)
-      ? getNumber(dataSet, TAGS.PixelPaddingValue)
-      : undefined;
-  const pixelPaddingRangeLimit =
-    pixelPaddingValue !== undefined &&
-    (dataSet.elements?.[TAGS.PixelPaddingRangeLimit] || getText(dataSet, TAGS.PixelPaddingRangeLimit))
-      ? getNumber(dataSet, TAGS.PixelPaddingRangeLimit)
-      : undefined;
-
-  const instance: PreparedDicom['instance'] = {
-    sopInstanceUid: instanceUid,
-    seriesInstanceUid: seriesUid,
-    studyInstanceUid: studyUid,
-    instanceNumber: getNumber(dataSet, TAGS.InstanceNumber),
-    frameOfReferenceUid,
-    acquisitionTime,
-    acquisitionMetadata: extractDicomAcquisitionMetadata(dataSet),
-    numberOfFrames,
-    physicalSlicePosition: physicalSlicePosition(iop, imagePosition),
-    rows,
-    columns,
-    sliceLocation: getNumber(dataSet, TAGS.SliceLocation),
-    imagePositionPatient: imagePosition,
-    imageOrientationPatient: iop,
-    pixelSpacing: pixelSpacing,
-    sliceThickness: sliceThickness > 0 ? sliceThickness : undefined,
-    spacingBetweenSlices: spacingBetweenSlices > 0 ? spacingBetweenSlices : undefined,
-    pixelPaddingValue,
-    pixelPaddingRangeLimit,
-    windowCenter: wc,
-    windowWidth: ww,
-  };
+  // Import and legacy header enrichment share one canonical metadata extractor.
+  const instance = extractDicomInstanceMetadata(dataSet);
 
   return {
     status: 'prepared',
@@ -685,7 +577,15 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
     const instanceUid = candidate.instance.sopInstanceUid;
     const existing = ownership.get(instanceUid);
     if (existing) {
-      results[index] = persistedOwnershipResult(existing, candidate);
+      const ownership = persistedOwnershipResult(existing, candidate);
+      if (ownership.status === 'error') results[index] = ownership;
+      else {
+        try {
+          if (mergeDicomInstanceMetadata(existing, candidate.instance) === existing) results[index] = ownership;
+        } catch (error) {
+          results[index] = databaseError(candidate.fileName, error);
+        }
+      }
       continue;
     }
     if (!incoming.has(instanceUid)) {
@@ -693,8 +593,8 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       incrementalBytes += candidate.file.size + ESTIMATED_IMAGE_METADATA_BYTES;
     }
   }
-  if (!incoming.size) return results as DicomIngestResult[];
-  await assertStorageHeadroom(incrementalBytes);
+  if (candidates.every((_, index) => results[index] !== undefined)) return results as DicomIngestResult[];
+  if (incrementalBytes) await assertStorageHeadroom(incrementalBytes);
   if (signal?.aborted) return [];
 
   const tx = db.transaction(['studies', 'series', 'instances', 'app_state'], 'readwrite');
@@ -706,8 +606,8 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
   const stagedSeries = new Map<string, DicomSeries>();
   const changedStudies = new Set<string>();
   const changedSeries = new Set<string>();
-  const stagedInstances = new Map<string, Pick<DicomInstance, 'seriesInstanceUid' | 'studyInstanceUid'>>();
-  const accepted: { candidate: PreparedDicom; index: number }[] = [];
+  const stagedInstances = new Map<string, DicomInstance>();
+  const accepted: { candidate: PreparedDicom; index: number; instance: DicomInstance; isNew: boolean }[] = [];
   try {
     const revision = await state.get(DATASET_REVISION_STATE_KEY);
     for (let index = 0; index < candidates.length; index += 1) {
@@ -717,16 +617,26 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       const instanceUid = candidate.instance.sopInstanceUid;
       const existingInstance = stagedInstances.get(instanceUid) ?? (await instances.get(instanceUid));
       if (existingInstance) {
-        results[index] = persistedOwnershipResult(existingInstance, candidate);
-        continue;
+        const ownership = persistedOwnershipResult(existingInstance, candidate);
+        if (ownership.status === 'error') {
+          results[index] = ownership;
+          continue;
+        }
       }
 
       const studyUid = candidate.study.studyInstanceUid;
       const seriesUid = candidate.series.seriesInstanceUid;
       const existingStudy = stagedStudies.get(studyUid) ?? (await studies.get(studyUid));
       const existingSeries = stagedSeries.get(seriesUid) ?? (await series.get(seriesUid));
+      let instance: DicomInstance;
       try {
         validateCanonicalParents(existingStudy, existingSeries, candidate);
+        instance = existingInstance
+          ? mergeDicomInstanceMetadata(existingInstance, candidate.instance)
+          : {
+              ...candidate.instance,
+              fileBlob: new Blob([candidate.file], { type: candidate.file.type || 'application/dicom' }),
+            };
       } catch (error) {
         if (isLocalizerOrientationConflict(candidate, error)) {
           results[index] = {
@@ -752,9 +662,17 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       stagedSeries.set(seriesUid, mergedSeries.value);
       if (mergedStudy.changed) changedStudies.add(studyUid);
       if (mergedSeries.changed) changedSeries.add(seriesUid);
-      stagedInstances.set(instanceUid, candidate.instance);
-      accepted.push({ candidate, index });
-      results[index] = { status: 'ingested', fileName: candidate.fileName, sopInstanceUid: instanceUid };
+      stagedInstances.set(instanceUid, instance);
+      const changed = instance !== existingInstance || mergedStudy.changed || mergedSeries.changed;
+      if (changed) accepted.push({ candidate, index, instance, isNew: !existingInstance });
+      results[index] = existingInstance
+        ? {
+            status: 'duplicate',
+            fileName: candidate.fileName,
+            sopInstanceUid: instanceUid,
+            ...(changed ? { metadataUpdated: true as const } : {}),
+          }
+        : { status: 'ingested', fileName: candidate.fileName, sopInstanceUid: instanceUid };
     }
 
     if (accepted.length) {
@@ -766,17 +684,15 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
         throwIfImportAborted(signal);
         await series.put(stagedSeries.get(uid)!);
       }
-      for (const { candidate } of accepted) {
+      for (const { instance } of accepted) {
         throwIfImportAborted(signal);
         // Store as Blob to maximize IndexedDB compatibility across browsers.
-        await instances.put({
-          ...candidate.instance,
-          fileBlob: new Blob([candidate.file], { type: candidate.file.type || 'application/dicom' }),
-        });
+        await instances.put(instance);
       }
       throwIfImportAborted(signal);
       const previousRevision = typeof revision?.value === 'number' ? revision.value : 0;
-      await state.put({ key: DATASET_REVISION_STATE_KEY, value: previousRevision + accepted.length });
+      const added = accepted.filter((item) => item.isNew).length;
+      if (added) await state.put({ key: DATASET_REVISION_STATE_KEY, value: previousRevision + added });
     }
     await tx.done;
   } catch (error) {
@@ -805,7 +721,8 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
     const prepared = await prepareDicomFile(file);
     if (prepared.status !== 'prepared') return prepared;
     const result = (await writePreparedBatch([prepared]))[0];
-    if (result.status === 'ingested') await initializeComparisonState(await getDB());
+    if (result.status === 'ingested' || (result.status === 'duplicate' && result.metadataUpdated))
+      await initializeComparisonState(await getDB());
     return result;
   } catch (error) {
     return databaseError(basename(file.name), error);
@@ -838,8 +755,10 @@ export async function processFiles(
 
   const publish = (outcome: DicomIngestResult) => {
     if (outcome.status === 'ingested') result.ingested += 1;
-    else if (outcome.status === 'duplicate') result.duplicates += 1;
-    else if (outcome.status === 'skipped') {
+    else if (outcome.status === 'duplicate') {
+      result.duplicates += 1;
+      if (outcome.metadataUpdated) result.metadataUpdated = (result.metadataUpdated ?? 0) + 1;
+    } else if (outcome.status === 'skipped') {
       result.skipped += 1;
       result.skipReasons ??= {};
       result.skipReasons[outcome.reason] = (result.skipReasons[outcome.reason] ?? 0) + 1;
@@ -857,6 +776,7 @@ export async function processFiles(
       onProgress(completed, result.total, {
         ingested: result.ingested,
         duplicates: result.duplicates,
+        ...(result.metadataUpdated ? { metadataUpdated: result.metadataUpdated } : {}),
         skipped: result.skipped,
         errors: result.errors,
         fileName: outcome.fileName,
@@ -877,8 +797,16 @@ export async function processFiles(
         const candidate = pending[index];
         if (candidate.status !== 'probed') continue;
         const existing = ownership.get(candidate.instance.sopInstanceUid);
-        if (existing) {
-          pending[index] = persistedOwnershipResult(existing, candidate);
+        const existingResult = existing ? persistedOwnershipResult(existing, candidate) : undefined;
+        if (
+          existing &&
+          existingResult &&
+          (existingResult.status === 'error' ||
+            (existing.metadataVersion === DICOM_METADATA_VERSION &&
+              existing.acquisitionMetadata?.version === 1 &&
+              !existing.acquisitionMetadata.unavailable))
+        ) {
+          pending[index] = existingResult;
           if (pending[index].status === 'duplicate') duplicatesFound += 1;
         } else {
           pending[index] = await prepareDicomFile(candidate.file);
@@ -902,7 +830,10 @@ export async function processFiles(
     let writtenIndex = 0;
     for (const candidate of pending) {
       const outcome = candidate.status === 'prepared' ? written[writtenIndex++] : (candidate as DicomIngestResult);
-      if (candidate.status === 'prepared' && outcome.status === 'ingested') {
+      if (
+        candidate.status === 'prepared' &&
+        (outcome.status === 'ingested' || (outcome.status === 'duplicate' && outcome.metadataUpdated))
+      ) {
         affectedSeries.add(candidate.series.seriesInstanceUid);
       }
       // A completed transaction is indivisible: report every durable row even if a

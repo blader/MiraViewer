@@ -1,21 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Blob as NativeBlob, File as NativeFile } from 'node:buffer';
 import dicomParser from 'dicom-parser';
-import { DATASET_REVISION_STATE_KEY, deleteAllStoredMriData, getDB } from '../src/db/db';
+import { DATASET_TOKEN_STATE_KEY, DATASET_REVISION_STATE_KEY, deleteAllStoredMriData, getDB } from '../src/db/db';
 import type { DicomAcquisitionMetadata } from '../src/db/schema';
 import { processDicomFile } from '../src/services/dicomIngestion';
-import * as extraction from '../src/services/dicomAcquisitionMetadata';
+import * as extraction from '../src/services/dicomMetadata';
 import {
   getDatasetRevision,
   getSeriesFrameManifest,
   setSelectedPatientKey,
   type SeriesFrameManifest,
 } from '../src/utils/localApi';
-import {
-  classifySvrAcquisitions,
-  hydrateSvrAcquisitionMetadata,
-  nativeReferenceSources,
-} from '../src/utils/svr/acquisitionProvenance';
+import { classifySvrAcquisitions, nativeReferenceSources } from '../src/utils/svr/acquisitionProvenance';
 import { createSyntheticSvrDicomFiles } from './svrSyntheticDicom';
 
 function metadata(overrides: Partial<DicomAcquisitionMetadata> = {}): DicomAcquisitionMetadata {
@@ -247,8 +243,11 @@ describe('native reference source admission', () => {
   });
 });
 
-async function legacyNativeSeries() {
-  const files = createSyntheticSvrDicomFiles({ imageSize: 3, slicesPerOrientation: 2, orientations: 2 }).slice(0, 2);
+async function legacyNativeSeries(count = 2) {
+  const files = createSyntheticSvrDicomFiles({ imageSize: 3, slicesPerOrientation: count, orientations: 2 }).slice(
+    0,
+    count,
+  );
   let seriesUid = '';
   for (const file of files) {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -263,14 +262,24 @@ async function legacyNativeSeries() {
     seriesUid = original.string('x0020000e')!;
   }
   const db = await getDB();
+  const manifest = await getSeriesFrameManifest(seriesUid);
   const instances = await db.getAllFromIndex('instances', 'by-series', seriesUid);
   for (const instance of instances) {
     const legacy = { ...instance };
     delete legacy.acquisitionMetadata;
+    delete legacy.metadataVersion;
     await db.put('instances', legacy);
   }
   return {
-    manifest: await getSeriesFrameManifest(seriesUid),
+    manifest: {
+      ...manifest,
+      frames: manifest.frames.map((frame) => {
+        const legacy = { ...frame };
+        delete legacy.acquisitionMetadata;
+        delete legacy.metadataVersion;
+        return legacy;
+      }),
+    },
     original: instances,
     revision: await getDatasetRevision(),
   };
@@ -289,7 +298,7 @@ describe('legacy acquisition metadata hydration', () => {
 
   it('hydrates existing raw Blobs without reimport, pixel changes, manifest mutation, or a revision bump', async () => {
     const seeded = await legacyNativeSeries();
-    const [hydrated] = await hydrateSvrAcquisitionMetadata([seeded.manifest], {
+    const hydrated = await getSeriesFrameManifest(seeded.manifest.seriesUid, {
       datasetRevision: seeded.revision,
       selectedPatientKey: seeded.manifest.patientKey,
     });
@@ -302,43 +311,97 @@ describe('legacy acquisition metadata hydration', () => {
       expect(await stored.fileBlob.arrayBuffer()).toEqual(await original.fileBlob.arrayBuffer());
     }
     expect(await getDatasetRevision()).toBe(seeded.revision);
-    const reader = vi.spyOn(extraction, 'readDicomAcquisitionMetadata');
+    const reader = vi.spyOn(extraction, 'readDicomInstanceMetadata');
     const fresh = await getSeriesFrameManifest(seeded.manifest.seriesUid);
-    await hydrateSvrAcquisitionMetadata([fresh]);
+    await getSeriesFrameManifest(fresh.seriesUid);
     expect(reader).not.toHaveBeenCalled();
   });
 
-  it.each(['patient', 'revision', 'frame'] as const)(
+  it.each(['patient', 'revision', 'frame', 'token'] as const)(
     'rejects a concurrent %s change before persisting any stale metadata',
     async (change) => {
       const seeded = await legacyNativeSeries();
-      const read = extraction.readDicomAcquisitionMetadata;
-      vi.spyOn(extraction, 'readDicomAcquisitionMetadata').mockImplementationOnce(async (instance, signal) => {
+      const read = extraction.readDicomInstanceMetadata;
+      vi.spyOn(extraction, 'readDicomInstanceMetadata').mockImplementationOnce(async (instance, signal) => {
         const db = await getDB();
         if (change === 'patient') await setSelectedPatientKey('another-patient');
+        else if (change === 'token')
+          await db.put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'synthetic-replacement-token' });
         else if (change === 'revision')
           await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: seeded.revision + 1 });
         else await db.put('instances', { ...instance, rows: instance.rows + 1 });
         return read(instance, signal);
       });
-      await expect(hydrateSvrAcquisitionMetadata([seeded.manifest])).rejects.toThrow(/changed|selected patient/i);
+      await expect(getSeriesFrameManifest(seeded.manifest.seriesUid)).rejects.toThrow(/changed|selected patient/i);
       const db = await getDB();
       for (const original of seeded.original)
         expect((await db.get('instances', original.sopInstanceUid))?.acquisitionMetadata).toBeUndefined();
     },
   );
 
+  it('recovers absent geometry from a bounded original header before physical and native admission', async () => {
+    const seeded = await legacyNativeSeries();
+    const db = await getDB();
+    for (const original of seeded.original) {
+      const legacy = (await db.get('instances', original.sopInstanceUid))!;
+      legacy.imagePositionPatient = '  ';
+      legacy.imageOrientationPatient = 'invalid cached orientation';
+      legacy.rows = 0;
+      legacy.pixelSpacing = '  ';
+      delete legacy.frameOfReferenceUid;
+      delete legacy.physicalSlicePosition;
+      await db.put('instances', legacy);
+    }
+    const slices = vi.spyOn(NativeBlob.prototype, 'slice');
+    const manifest = await getSeriesFrameManifest(seeded.manifest.seriesUid);
+    expect(manifest.geometryReliable).toBe(true);
+    expect(manifest.ordering).toBe('physical');
+    expect(classifySvrAcquisitions([manifest]).mode).toBe('native-3d');
+    expect(slices.mock.calls.every(([start, end]) => start === 0 && end! <= extraction.MAX_DICOM_HEADER_BYTES)).toBe(
+      true,
+    );
+    for (const original of seeded.original) {
+      const restored = (await db.get('instances', original.sopInstanceUid))!;
+      expect(restored.imagePositionPatient).toBe(original.imagePositionPatient);
+      expect(restored.pixelSpacing).toBe(original.pixelSpacing);
+      expect(await restored.fileBlob.arrayBuffer()).toEqual(await original.fileBlob.arrayBuffer());
+    }
+  });
+
+  it('resumes an interrupted multi-batch upgrade from committed metadata without rereading completed headers', async () => {
+    const seeded = await legacyNativeSeries(35);
+    const controller = new AbortController();
+    const read = extraction.readDicomInstanceMetadata;
+    let reads = 0;
+    const reader = vi.spyOn(extraction, 'readDicomInstanceMetadata').mockImplementation(async (instance, signal) => {
+      if (++reads === 33) controller.abort();
+      return read(instance, signal);
+    });
+    await expect(
+      getSeriesFrameManifest(seeded.manifest.seriesUid, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    const db = await getDB();
+    const partial = await db.getAllFromIndex('instances', 'by-series', seeded.manifest.seriesUid);
+    expect(partial.filter((frame) => frame.metadataVersion === 1)).toHaveLength(32);
+    reader.mockImplementation(read).mockClear();
+    const completed = await getSeriesFrameManifest(seeded.manifest.seriesUid);
+    expect(reader).toHaveBeenCalledTimes(3);
+    expect(completed.frames.every((frame) => frame.metadataVersion === 1)).toBe(true);
+    expect(completed.geometryReliable).toBe(true);
+    expect(await getDatasetRevision()).toBe(seeded.revision);
+  });
+
   it('cancels during header reading without persisting the incomplete batch', async () => {
     const seeded = await legacyNativeSeries();
     const controller = new AbortController();
-    const read = extraction.readDicomAcquisitionMetadata;
-    vi.spyOn(extraction, 'readDicomAcquisitionMetadata').mockImplementationOnce(async (instance, signal) => {
+    const read = extraction.readDicomInstanceMetadata;
+    vi.spyOn(extraction, 'readDicomInstanceMetadata').mockImplementationOnce(async (instance, signal) => {
       controller.abort();
       return read(instance, signal);
     });
-    await expect(hydrateSvrAcquisitionMetadata([seeded.manifest], { signal: controller.signal })).rejects.toMatchObject(
-      { name: 'AbortError' },
-    );
+    await expect(
+      getSeriesFrameManifest(seeded.manifest.seriesUid, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
     const db = await getDB();
     for (const original of seeded.original)
       expect((await db.get('instances', original.sopInstanceUid))?.acquisitionMetadata).toBeUndefined();
@@ -351,7 +414,7 @@ describe('legacy acquisition metadata hydration', () => {
     vi.spyOn(dicomParser, 'parseDicom').mockImplementation(() => {
       throw new Error('PRIVATE DATA MUST NOT ESCAPE');
     });
-    const [hydrated] = await hydrateSvrAcquisitionMetadata([seeded.manifest]);
+    const hydrated = await getSeriesFrameManifest(seeded.manifest.seriesUid);
     expect(hydrated!.frames.every((frame) => frame.acquisitionMetadata?.unavailable)).toBe(true);
     expect(classifySvrAcquisitions([hydrated!]).mode).toBe('unknown');
     expect(errorLog).not.toHaveBeenCalled();
@@ -364,7 +427,7 @@ describe('legacy acquisition metadata hydration', () => {
     const first = (await db.get('instances', seeded.original[0]!.sopInstanceUid))!;
     const second = seeded.original[1]!;
     await db.put('instances', { ...first, fileBlob: second.fileBlob });
-    await expect(hydrateSvrAcquisitionMetadata([seeded.manifest])).rejects.toThrow(/does not match.*identity/i);
+    await expect(getSeriesFrameManifest(seeded.manifest.seriesUid)).rejects.toThrow(/does not match.*identity/i);
     expect((await db.get('instances', first.sopInstanceUid))?.acquisitionMetadata).toBeUndefined();
   });
 });

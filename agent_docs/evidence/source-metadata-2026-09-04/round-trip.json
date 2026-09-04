@@ -1,0 +1,374 @@
+{
+  "fixture": "Synthetic only; generated DICOM bytes, schema-6 metadata, source-owned settings and a retained legacy 2x2x2 label grid. No private MRI or private weights.",
+  "route": "http://127.0.0.1:43134/",
+  "browser": "152.0.7977.82",
+  "channel": "installed Chrome",
+  "headless": false,
+  "sources": {
+    "parentHead": "76e64347f045b07a041a40af8e01d00373d838ce",
+    "sourceSha256": "a98b2533a14d8a8301cbd3386c9cd8ae7de5235af5efbf28c2575ab14d2d44af",
+    "applicationSourceSha256": "5546d0ced083fb92f6c7dcf134c4c1a61b2b521a121958070f5690c1c9d1b27b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "buildSourceSha256": "17f879387e87fab50e57cbe94a7b8ada454830be77336571852ea58990655ff3",
+    "buildMode": "production",
+    "sourceUnchanged": true,
+    "fullSourceMatch": false,
+    "reuseReason": "Normal production bundle reused after browser-test navigation/capture changes only; original build manifest was retained."
+  },
+  "schema": {
+    "before": 6,
+    "after": 10
+  },
+  "revision": {
+    "before": 7,
+    "after": 7
+  },
+  "tokenUnchanged": true,
+  "originalAndRestoredFramesMatch": true,
+  "frames": [
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.1",
+      "originalUpgradedRestoredSha256": "96b7ef0f8e5c91bcd62e7e8cdadd6c6a5343cdc98205992940eefc8f336819b3",
+      "metadataVersion": 1,
+      "physicalPosition": 0,
+      "geometry": {
+        "position": "0\\0\\0",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.10",
+      "originalUpgradedRestoredSha256": "6b157ac86480e022732cc59d5d63f12cae234dbf19ed8aa9a064593d5d838fcb",
+      "metadataVersion": 1,
+      "physicalPosition": 9,
+      "geometry": {
+        "position": "0\\0\\9",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.11",
+      "originalUpgradedRestoredSha256": "3b6a4457cab5f6f61f96a69ae23a22e92e7cd8cebbb236e2751df3c1e48b3e20",
+      "metadataVersion": 1,
+      "physicalPosition": 10,
+      "geometry": {
+        "position": "0\\0\\10",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.12",
+      "originalUpgradedRestoredSha256": "2b5128bca652ab0e16c3771b9395d4cce1a9c9a0beef04a51b43eb6dde5085e7",
+      "metadataVersion": 1,
+      "physicalPosition": 11,
+      "geometry": {
+        "position": "0\\0\\11",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.13",
+      "originalUpgradedRestoredSha256": "25f3d1fedb5530c6f14a1514652a8c14fd0b1767f982a536af94c3a9d74d4c86",
+      "metadataVersion": 1,
+      "physicalPosition": 12,
+      "geometry": {
+        "position": "0\\0\\12",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.14",
+      "originalUpgradedRestoredSha256": "91ba72d87f9b65e1ef8a69850c3a2113ead9b5d08c338644bbf1ada3577d60c4",
+      "metadataVersion": 1,
+      "physicalPosition": 13,
+      "geometry": {
+        "position": "0\\0\\13",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.15",
+      "originalUpgradedRestoredSha256": "aa7126fee5e35a226310a99a0750d96a52bd27717e46e32b89edb10c92cedf6b",
+      "metadataVersion": 1,
+      "physicalPosition": 14,
+      "geometry": {
+        "position": "0\\0\\14",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.16",
+      "originalUpgradedRestoredSha256": "11cbf850758e46649f8cc3adfde41f71f0f9bf3284f9f1bb382517cf1403ae77",
+      "metadataVersion": 1,
+      "physicalPosition": 15,
+      "geometry": {
+        "position": "0\\0\\15",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.17",
+      "originalUpgradedRestoredSha256": "da44a692767eae1052f1e3c2de2d9cd0ddbb029627e78f9124ca65a0c088f256",
+      "metadataVersion": 1,
+      "physicalPosition": 16,
+      "geometry": {
+        "position": "0\\0\\16",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.18",
+      "originalUpgradedRestoredSha256": "79f804cac8e4e2e15121b14c6840a2a49d22aaaa6fd916ae6ef25aabbcf5600d",
+      "metadataVersion": 1,
+      "physicalPosition": 17,
+      "geometry": {
+        "position": "0\\0\\17",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.19",
+      "originalUpgradedRestoredSha256": "42ead70fb9c106ca8ab7c6ca867b13a5aa1f057846601de4ffe69d8f511dc254",
+      "metadataVersion": 1,
+      "physicalPosition": 18,
+      "geometry": {
+        "position": "0\\0\\18",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.2",
+      "originalUpgradedRestoredSha256": "b19e558e85571bd2fab397c77f3d5877e7f73446d70d16c42715fb10bd72350c",
+      "metadataVersion": 1,
+      "physicalPosition": 1,
+      "geometry": {
+        "position": "0\\0\\1",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.20",
+      "originalUpgradedRestoredSha256": "674e8b105c52bac10af7eaa41b1d9b6f56381354eb58edaa5f5dffc30026d25d",
+      "metadataVersion": 1,
+      "physicalPosition": 19,
+      "geometry": {
+        "position": "0\\0\\19",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.21",
+      "originalUpgradedRestoredSha256": "7a1f1f4b28a91c41d92f7dd2ded4c9d330a44cb593eb340faf152e92cd5e0b5b",
+      "metadataVersion": 1,
+      "physicalPosition": 20,
+      "geometry": {
+        "position": "0\\0\\20",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.22",
+      "originalUpgradedRestoredSha256": "97e9ef4c9b3cb263419f9356459d752cc98a9dfce6ca60aff5a3fdb23695f6b5",
+      "metadataVersion": 1,
+      "physicalPosition": 21,
+      "geometry": {
+        "position": "0\\0\\21",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.23",
+      "originalUpgradedRestoredSha256": "9ba15d750c1bfd5c7ccc0b9427634a296c0b5ba1f63666f180e559441e5525af",
+      "metadataVersion": 1,
+      "physicalPosition": 22,
+      "geometry": {
+        "position": "0\\0\\22",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.24",
+      "originalUpgradedRestoredSha256": "0949ff3fa8feff2cab4b68fd21954245531b4eb18a276cbc4721edb18cbe2508",
+      "metadataVersion": 1,
+      "physicalPosition": 23,
+      "geometry": {
+        "position": "0\\0\\23",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.3",
+      "originalUpgradedRestoredSha256": "0f38de2f5ba3b803d23d5b86c11d04174457eb156fc5e347f51daa69d1933620",
+      "metadataVersion": 1,
+      "physicalPosition": 2,
+      "geometry": {
+        "position": "0\\0\\2",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.4",
+      "originalUpgradedRestoredSha256": "573ea90f29ed72957a704bb3720aa373c5619f629b2d6dea8b64d08763d32412",
+      "metadataVersion": 1,
+      "physicalPosition": 3,
+      "geometry": {
+        "position": "0\\0\\3",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.5",
+      "originalUpgradedRestoredSha256": "aa882f149b5caa88b86be2dc888810cd4922dc5a1b5868ee44bed7133b7dd711",
+      "metadataVersion": 1,
+      "physicalPosition": 4,
+      "geometry": {
+        "position": "0\\0\\4",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.6",
+      "originalUpgradedRestoredSha256": "2dac935ae89e0cfd63b1f720cb66a4c01c6e169cfbaf950230844857d34d9348",
+      "metadataVersion": 1,
+      "physicalPosition": 5,
+      "geometry": {
+        "position": "0\\0\\5",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.7",
+      "originalUpgradedRestoredSha256": "d1da96d813ffb53d83f6f48aba04cfbed895e10095eb165938ee416ed6e43828",
+      "metadataVersion": 1,
+      "physicalPosition": 6,
+      "geometry": {
+        "position": "0\\0\\6",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.8",
+      "originalUpgradedRestoredSha256": "76895d94df7abf601022338c9fce8c099e3ce3deabf90db01438a84d80511829",
+      "metadataVersion": 1,
+      "physicalPosition": 7,
+      "geometry": {
+        "position": "0\\0\\7",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    },
+    {
+      "uid": "1.2.826.0.1.3680043.10.543.20370904.1.1.9",
+      "originalUpgradedRestoredSha256": "9384dc7273d675215ebe503c432084e9a188f71b6f37c491591d470d39445685",
+      "metadataVersion": 1,
+      "physicalPosition": 8,
+      "geometry": {
+        "position": "0\\0\\8",
+        "orientation": "1\\0\\0\\0\\1\\0",
+        "spacing": "1\\1",
+        "frame": "1.2.826.0.1.3680043.10.543.20370904.1.999"
+      }
+    }
+  ],
+  "settings": [
+    {
+      "comboId": "source:1.2.826.0.1.3680043.10.543.20370904.1.1",
+      "source": {
+        "studyUid": "1.2.826.0.1.3680043.10.543.20370904.1",
+        "seriesUid": "1.2.826.0.1.3680043.10.543.20370904.1.1"
+      },
+      "settings": {
+        "1.2.826.0.1.3680043.10.543.20370904.1": {
+          "offset": 0,
+          "reverseSliceOrder": false,
+          "zoom": 1.25,
+          "rotation": 0,
+          "brightness": 100,
+          "contrast": 100,
+          "panX": 0.12,
+          "panY": 0,
+          "affine00": 1,
+          "affine01": 0,
+          "affine10": 0,
+          "affine11": 1,
+          "progress": 0
+        }
+      }
+    }
+  ],
+  "retainedSelections": [
+    {
+      "volumeKey": "synthetic-retained-legacy-grid",
+      "dims": [2, 2, 2],
+      "reviewState": "reviewed",
+      "labelBytes": 8,
+      "selectedCount": 1,
+      "labelsSha256": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8",
+      "seeds": {
+        "foreground": [0],
+        "background": [1],
+        "lastStroke": {
+          "plane": "axial",
+          "slice": 0
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "scope": "Synthetic legacy metadata and saved-work preservation. Real source-stack admission, reopen, ZIP export and fresh-context restore; retained legacy labels are storage evidence, not automatic remapping to the newly opened grid or anatomical evidence.",
+  "rawEvidence": [
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/attachments/legacy-metadata-receipt-22987f466267da81181168acd979590dd7dfc952.json",
+      "sha256": "8e0399ba544e9bf911ab5fc159fd94970656873d8ef57be9013f5a12c7494710"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/synthetic-legacy-metadata-backup.zip",
+      "sha256": "2903aabe9af1293b07df85ea0d019d083c7f73616b7bcce565071a8445b08817"
+    }
+  ]
+}

@@ -1,0 +1,1071 @@
+{
+  "source": {
+    "head": "76e64347f045b07a041a40af8e01d00373d838ce",
+    "sourceSha256": "a98b2533a14d8a8301cbd3386c9cd8ae7de5235af5efbf28c2575ab14d2d44af",
+    "applicationSourceSha256": "5546d0ced083fb92f6c7dcf134c4c1a61b2b521a121958070f5690c1c9d1b27b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "tests": {
+    "success": true,
+    "total": 3275,
+    "passed": 3221,
+    "failed": 0,
+    "pending": 54,
+    "files": 173
+  },
+  "files": [
+    {
+      "file": "frontend/tests/AppMain.test.tsx",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/ComparisonMatrix.test.tsx",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/DicomViewer.pan.test.tsx",
+      "status": "passed",
+      "passed": 29,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/DicomViewer.sharpSlices.test.tsx",
+      "status": "passed",
+      "passed": 12,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/DicomViewer.test.tsx",
+      "status": "passed",
+      "passed": 23,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/ExportModal.test.tsx",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/Svr3DView.test.tsx",
+      "status": "passed",
+      "passed": 60,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/SvrNativeWorkflow.test.tsx",
+      "status": "passed",
+      "passed": 9,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/SvrSegmentationEditor.test.tsx",
+      "status": "passed",
+      "passed": 43,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/SvrVolume3DViewer.test.tsx",
+      "status": "passed",
+      "passed": 116,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/UploadModal.test.tsx",
+      "status": "passed",
+      "passed": 28,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/affine2d.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignedBrowsingControls.test.tsx",
+      "status": "passed",
+      "passed": 15,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignedBrowsingPresentation.test.tsx",
+      "status": "passed",
+      "passed": 28,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentAutomaticCorpus.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 3
+    },
+    {
+      "file": "frontend/tests/alignmentBrowsing.test.ts",
+      "status": "passed",
+      "passed": 13,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentConfidence.test.ts",
+      "status": "passed",
+      "passed": 9,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentDesktopCorpusGolden.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/alignmentDisplayTone.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentGeometry.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentManualCorpus.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 9
+    },
+    {
+      "file": "frontend/tests/alignmentRealCorpusGolden.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 2
+    },
+    {
+      "file": "frontend/tests/alignmentScoringRunner.test.ts",
+      "status": "passed",
+      "passed": 11,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentSliceCorrection.test.ts",
+      "status": "passed",
+      "passed": 9,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentSliceSearch.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/alignmentTransform.test.ts",
+      "status": "passed",
+      "passed": 7,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/anatomicalPlaneLandmarks.test.ts",
+      "status": "passed",
+      "passed": 16,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/annotationKeyboardAuthority.test.tsx",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/archiveSafety.test.ts",
+      "status": "passed",
+      "passed": 17,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/comparisonAccessibility.test.tsx",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/comparisonAlignmentBrowsing.test.tsx",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/comparisonQuietInstrument.test.tsx",
+      "status": "passed",
+      "passed": 16,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/contextualAlignment.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/controls.test.tsx",
+      "status": "passed",
+      "passed": 15,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/cornerstoneInit.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/cornerstoneMemory.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/cornerstoneSliceCapture.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/cornerstoneSourceCleanup.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/db.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/decodedFrame.test.ts",
+      "status": "passed",
+      "passed": 13,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/derivedAlignmentFrame.test.ts",
+      "status": "passed",
+      "passed": 44,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/derivedAnnotationSafety.test.tsx",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/derivedImagePresentation.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/dicomAcquisitionMetadata.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/dicomImportRealScout.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/dicomIngestion.test.ts",
+      "status": "passed",
+      "passed": 33,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/dicomSeriesParsing.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/efficientTamAssets.test.ts",
+      "status": "passed",
+      "passed": 32,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/efficientTamDerivation.test.ts",
+      "status": "passed",
+      "passed": 12,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/elastixRegistration.test.ts",
+      "status": "passed",
+      "passed": 12,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/elastixTransform.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/exportBackup.test.ts",
+      "status": "passed",
+      "passed": 80,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/formatDate.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/holisticWorkspaceUx.test.tsx",
+      "status": "passed",
+      "passed": 12,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/hooks.test.tsx",
+      "status": "passed",
+      "passed": 36,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/imageCapture.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/imageFeatures.test.ts",
+      "status": "passed",
+      "passed": 10,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/importRealCorpus.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 2
+    },
+    {
+      "file": "frontend/tests/instrumentShellDesign.test.tsx",
+      "status": "passed",
+      "passed": 14,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interSliceReconstructionCorpus.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 3
+    },
+    {
+      "file": "frontend/tests/interactiveAdmission.test.ts",
+      "status": "passed",
+      "passed": 65,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveAssets.test.ts",
+      "status": "passed",
+      "passed": 14,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveFrame.test.ts",
+      "status": "passed",
+      "passed": 38,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveGeometry.test.ts",
+      "status": "passed",
+      "passed": 37,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveModel.test.ts",
+      "status": "passed",
+      "passed": 71,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactivePrompts.test.ts",
+      "status": "passed",
+      "passed": 24,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveSelection.test.ts",
+      "status": "passed",
+      "passed": 124,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveSelectionContext.test.ts",
+      "status": "passed",
+      "passed": 30,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveTracking.test.ts",
+      "status": "passed",
+      "passed": 72,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveTrackingRuntime.test.ts",
+      "status": "passed",
+      "passed": 26,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/interactiveTrackingWorker.test.ts",
+      "status": "passed",
+      "passed": 85,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/labelPalette.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/legacyAnnotationSafety.test.tsx",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/localApi.test.ts",
+      "status": "passed",
+      "passed": 38,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/manualAlignmentAdjustments.test.tsx",
+      "status": "passed",
+      "passed": 32,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/mindDescriptor.test.ts",
+      "status": "passed",
+      "passed": 16,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/mutualInformation.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/offlineLauncher.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/onnxLogitsToLabels.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/onnxModelManifest.test.ts",
+      "status": "passed",
+      "passed": 11,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/onnxTumorSegmentation.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/onnxVolumeInput.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/ortLoader.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/outputPlaneGrid.test.ts",
+      "status": "passed",
+      "passed": 14,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/overlays.test.tsx",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/patientIdentity.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/patientSelector.test.tsx",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/perceptualAlignmentPipeline.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/perceptualSliceSimilarity.test.ts",
+      "status": "passed",
+      "passed": 38,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/persistence.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/phaseCorrelation.test.ts",
+      "status": "passed",
+      "passed": 21,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/physicalMeasurements.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/seedConnectedSelection.test.ts",
+      "status": "passed",
+      "passed": 69,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/seededVolume.test.ts",
+      "status": "passed",
+      "passed": 35,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/seededVolumeAppearanceSupport.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/seededVolumeLifecycle.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/segmentationCandidateGates.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 22
+    },
+    {
+      "file": "frontend/tests/segmentationGolden.test.ts",
+      "status": "passed",
+      "passed": 25,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/segmentationGoldenCorpus.test.ts",
+      "status": "passed",
+      "passed": 32,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/segmentationNativeCorpus.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 5
+    },
+    {
+      "file": "frontend/tests/segmentationRegression.test.ts",
+      "status": "passed",
+      "passed": 32,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/segmentationSparseCores.test.ts",
+      "status": "passed",
+      "passed": 35,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/segmentationWorkflowAcceptance.test.tsx",
+      "status": "passed",
+      "passed": 7,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/selectionEditing.test.ts",
+      "status": "passed",
+      "passed": 13,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sharpSliceDisplay.test.ts",
+      "status": "passed",
+      "passed": 24,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sharpSlicePresentation.test.ts",
+      "status": "passed",
+      "passed": 14,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sharpSliceSynthesis.test.ts",
+      "status": "passed",
+      "passed": 18,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sliceLoopPlaybackPersistence.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sliceLoopPointerInteraction.test.tsx",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/sparsePlaneComparison.test.tsx",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/storageIntegrity.test.ts",
+      "status": "passed",
+      "passed": 43,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/structuralAffineSelection.test.ts",
+      "status": "passed",
+      "passed": 15,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrAcceptedTransforms.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrAcquisitionProvenance.test.ts",
+      "status": "passed",
+      "passed": 35,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrComputeCore.test.ts",
+      "status": "passed",
+      "passed": 30,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrDicomGeometry.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrDownsample.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrEnhancedVolumeBinding.test.ts",
+      "status": "passed",
+      "passed": 31,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrEnhancementAdmissionCorpus.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/svrEnhancementMemory.test.ts",
+      "status": "passed",
+      "passed": 32,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrFidelityPhantoms.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrFloat16.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrGeometryInvariants.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrLongitudinalFrames.test.ts",
+      "status": "passed",
+      "passed": 36,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrLongitudinalRegistration.test.ts",
+      "status": "passed",
+      "passed": 28,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrLongitudinalWorker.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrMemoryPlan.test.ts",
+      "status": "passed",
+      "passed": 10,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativeFrameWait.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativeInputFidelity.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativePlane.test.tsx",
+      "status": "passed",
+      "passed": 79,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativePlaneUploadRecovery.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativeSourceContext.test.ts",
+      "status": "passed",
+      "passed": 44,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrNativeVolume.test.ts",
+      "status": "passed",
+      "passed": 29,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrOccupancyGrid.test.ts",
+      "status": "passed",
+      "passed": 18,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrPerformance.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrPhantom.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrQuietInstrument.test.tsx",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrRealCorpus.test.ts",
+      "status": "passed",
+      "passed": 0,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/svrRefineRegion.test.ts",
+      "status": "passed",
+      "passed": 50,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrRenderLod.test.ts",
+      "status": "passed",
+      "passed": 30,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrResample2d.test.ts",
+      "status": "passed",
+      "passed": 9,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrRigidRegistration.test.ts",
+      "status": "passed",
+      "passed": 26,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSegmentationSupport.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSelectionMigration.test.ts",
+      "status": "passed",
+      "passed": 55,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSliceRoiCrop.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSourceAdmission.test.ts",
+      "status": "passed",
+      "passed": 43,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSourceMemory.test.ts",
+      "status": "passed",
+      "passed": 10,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSuperResolution.test.ts",
+      "status": "passed",
+      "passed": 39,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSuperResolutionRegion.test.ts",
+      "status": "passed",
+      "passed": 20,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrSyntheticDicom.test.ts",
+      "status": "passed",
+      "passed": 2,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrTextureFidelity.test.ts",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrTrilinear.test.ts",
+      "status": "passed",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrTumorSegmentationGolden.test.ts",
+      "status": "passed",
+      "passed": 12,
+      "skipped": 1
+    },
+    {
+      "file": "frontend/tests/svrVolumeCamera.test.ts",
+      "status": "passed",
+      "passed": 22,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/svrVolumeGeometry.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/tumorFocusedAlignment.test.ts",
+      "status": "passed",
+      "passed": 15,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useApplyAlignmentResults.test.tsx",
+      "status": "passed",
+      "passed": 41,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useAutoAlign.test.tsx",
+      "status": "passed",
+      "passed": 11,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useAutoAlignConfidence.test.tsx",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useAutoAlignPhysical.test.tsx",
+      "status": "passed",
+      "passed": 67,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useComparisonData.test.ts",
+      "status": "passed",
+      "passed": 1,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useComparisonDataBackgroundReload.test.ts",
+      "status": "passed",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useGlobalSliceWheelNavigation.test.tsx",
+      "status": "passed",
+      "passed": 6,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useOnnxTumorSession.test.tsx",
+      "status": "passed",
+      "passed": 43,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useSharpSliceDisplay.test.tsx",
+      "status": "passed",
+      "passed": 10,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useSvrEnhancement.test.tsx",
+      "status": "passed",
+      "passed": 31,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useSvrReconstruction.test.tsx",
+      "status": "passed",
+      "passed": 17,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useSvrSelection.test.tsx",
+      "status": "passed",
+      "passed": 84,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/useVisibleAlignment.test.tsx",
+      "status": "passed",
+      "passed": 23,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/utils.test.ts",
+      "status": "passed",
+      "passed": 7,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/viewTransform.test.ts",
+      "status": "passed",
+      "passed": 3,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/viewportMapping.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "file": "frontend/tests/warpAffine.test.ts",
+      "status": "passed",
+      "passed": 4,
+      "skipped": 0
+    }
+  ],
+  "rawEvidence": [
+    {
+      "path": "frontend/tmp/source-metadata-full-02.json",
+      "sha256": "cf42c804db3c10803eb482e276482e39daa1aa2c9c2142057a51fd0ab19cecf7"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-full-02.log",
+      "sha256": "c677455e4e884cada1cbc51350161d001935de86d760d6a741af465af52a2aa1"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-final-02-after.json",
+      "sha256": "ec15bc7619bfc95233feb78dc2aaf403450207d6023c18c296fefe1c6182f953"
+    }
+  ]
+}

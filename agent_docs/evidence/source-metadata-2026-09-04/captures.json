@@ -1,0 +1,55 @@
+{
+  "sources": {
+    "parentHead": "76e64347f045b07a041a40af8e01d00373d838ce",
+    "sourceSha256": "a98b2533a14d8a8301cbd3386c9cd8ae7de5235af5efbf28c2575ab14d2d44af",
+    "applicationSourceSha256": "5546d0ced083fb92f6c7dcf134c4c1a61b2b521a121958070f5690c1c9d1b27b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "buildSourceSha256": "17f879387e87fab50e57cbe94a7b8ada454830be77336571852ea58990655ff3",
+    "buildMode": "production",
+    "sourceUnchanged": true,
+    "fullSourceMatch": false,
+    "reuseReason": "Normal production bundle reused after browser-test navigation/capture changes only; original build manifest was retained."
+  },
+  "route": "http://127.0.0.1:43134/",
+  "images": [
+    {
+      "file": "legacy-metadata-repair-desktop.png",
+      "sha256": "fab71470c92f30388dc191f921c9396069d06c0142276c56514f9049b6a34aaf",
+      "inspectedSource": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-03/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-desktop.png",
+      "repeatedSource": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-desktop.png",
+      "repeatedBytesMatch": true,
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Static repair-summary composition, typography, contrast, wrapping, visible Done control; not scan-rendering, motion, anatomical, or restoration evidence."
+    },
+    {
+      "file": "legacy-metadata-repair-mobile.png",
+      "sha256": "135c5bb867725127ff7eb63b4bc2bcd8545560706ac5e7c3e8f71a980d248454",
+      "inspectedSource": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-03/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-mobile.png",
+      "repeatedSource": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-mobile.png",
+      "repeatedBytesMatch": true,
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Static repair-summary composition, typography, contrast, wrapping, visible Done control; not scan-rendering, motion, anatomical, or restoration evidence."
+    },
+    {
+      "file": "legacy-metadata-selection.png",
+      "sha256": "7221ce540745e10aad3b681d3138f2f1a43da25f5253468912266a86684fcf62",
+      "inspectedSources": [
+        "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-selection.png",
+        "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-restored-selection.png"
+      ],
+      "separatelyInspected": true,
+      "identicalBytes": true,
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Opened and restored synthetic axial editing views and visible controls. Lower panes extend below the capture; no full-page layout, motion, automatic legacy-label remapping or anatomical verdict."
+    }
+  ],
+  "storybook": false,
+  "cleanup": "CLOSED",
+  "rawCleanup": {
+    "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-04/cleanup-audit.json",
+    "sha256": "c12193a74ff222223391b6d94c460bd08f6a1e05f84c67dad637c32e43924efc"
+  }
+}
