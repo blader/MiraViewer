@@ -1,5 +1,6 @@
 import type JSZip from 'jszip';
 import { BackupZip, type BackupZipSink } from './backupZip';
+import { assertArchiveActive as throwIfSnapshotAborted } from './archiveIntegrity';
 import {
   assertStorageHeadroom,
   DATASET_REVISION_STATE_KEY,
@@ -51,10 +52,6 @@ export type SnapshotWriteOptions = ArchiveReadOptions & {
 export type RestoreSnapshotResult = ProcessFilesResult & {
   integrityWarnings?: string[];
 };
-
-function throwIfSnapshotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new DOMException('Backup operation cancelled.', 'AbortError');
-}
 
 type SnapshotFile = {
   path: string;
@@ -169,17 +166,6 @@ export function getSnapshotRestoreBytes(manifest: SnapshotManifest): number {
   ]);
 }
 
-async function toArrayBuffer(value: Blob | ArrayBuffer | ArrayBufferView): Promise<ArrayBuffer> {
-  if (value instanceof ArrayBuffer) return value;
-  if (ArrayBuffer.isView(value)) {
-    const copy = new Uint8Array(value.byteLength);
-    copy.set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-    return copy.buffer;
-  }
-  if (typeof value.arrayBuffer === 'function') return value.arrayBuffer();
-  return new Blob([value as BlobPart]).arrayBuffer();
-}
-
 function captureOwnedLocalStorage(): Record<string, string> {
   const records: Record<string, string> = {};
   if (typeof localStorage === 'undefined') return records;
@@ -198,222 +184,210 @@ function ownsAcquisitionChoice(row: AppStateRow, seriesByUid: ReadonlyMap<string
 }
 
 async function buildSnapshotZip(
+  zip: BackupZip,
   studyIds: string[],
   onProgress?: (progress: ExportProgress) => void,
   options: SnapshotWriteOptions = {},
-  sink?: BackupZipSink,
 ): Promise<Blob | null> {
   const { signal } = options;
-  const zip = new BackupZip(signal, sink);
-  try {
+  throwIfSnapshotAborted(signal);
+  onProgress?.({ stage: 'checking', current: 0, total: 1 });
+  const db = await getDB();
+  const datasetToken = (await db.get('app_state', DATASET_TOKEN_STATE_KEY))?.value;
+  const files: Array<{
+    file: SnapshotFile;
+    read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>;
+  }> = [];
+  const addSnapshotFile = (
+    path: string,
+    byteLength: number,
+    read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>,
+  ): SnapshotFile => {
     throwIfSnapshotAborted(signal);
-    onProgress?.({ stage: 'checking', current: 0, total: 1 });
-    const db = await getDB();
-    const datasetToken = (await db.get('app_state', DATASET_TOKEN_STATE_KEY))?.value;
-    const files: Array<{
-      file: SnapshotFile;
-      read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>;
-    }> = [];
-    const addSnapshotFile = (
-      path: string,
-      byteLength: number,
-      read: (file: SnapshotFile) => Blob | ArrayBufferView | Promise<Blob | ArrayBufferView>,
-    ): SnapshotFile => {
-      throwIfSnapshotAborted(signal);
-      const file = { path, byteLength };
-      files.push({ file, read });
-      return file;
-    };
-    const selectedStudies = new Set(studyIds);
-    const allStudies = await db.getAll('studies');
-    const studies = allStudies.filter((study) => selectedStudies.has(study.studyInstanceUid));
-    if (studies.length !== selectedStudies.size) throw new Error('One or more selected examinations no longer exist.');
+    const file = { path, byteLength };
+    files.push({ file, read });
+    return file;
+  };
+  const selectedStudies = new Set(studyIds);
+  const allStudies = await db.getAll('studies');
+  const studies = allStudies.filter((study) => selectedStudies.has(study.studyInstanceUid));
+  if (studies.length !== selectedStudies.size) throw new Error('One or more selected examinations no longer exist.');
 
-    const identityByStudy = getPatientIdentityKeys(allStudies);
-    const patientKeys = new Set(studies.map((study) => identityByStudy.get(study.studyInstanceUid)!));
-    if (patientKeys.size > 1) throw new Error('A backup cannot combine examinations from different patients.');
-    const selectedPatientKey = patientKeys.values().next().value as string | undefined;
-    const series = (await db.getAll('series')).filter((item) => selectedStudies.has(item.studyInstanceUid));
-    const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
-    const selectedSeriesByUid = new Map(series.map((item) => [item.seriesInstanceUid, item]));
+  const identityByStudy = getPatientIdentityKeys(allStudies);
+  const patientKeys = new Set(studies.map((study) => identityByStudy.get(study.studyInstanceUid)!));
+  if (patientKeys.size > 1) throw new Error('A backup cannot combine examinations from different patients.');
+  const selectedPatientKey = patientKeys.values().next().value as string | undefined;
+  const series = (await db.getAll('series')).filter((item) => selectedStudies.has(item.studyInstanceUid));
+  const selectedSeries = new Set(series.map((item) => item.seriesInstanceUid));
+  const selectedSeriesByUid = new Map(series.map((item) => [item.seriesInstanceUid, item]));
 
-    const instances: SnapshotInstance[] = [];
-    for (const item of series) {
-      throwIfSnapshotAborted(signal);
-      const rows = await db.getAllFromIndex('instances', 'by-series', item.seriesInstanceUid);
-      for (const row of rows) {
-        const { fileBlob, ...metadata } = row;
-        const path = `studies/${encodeURIComponent(row.studyInstanceUid)}/series/${encodeURIComponent(row.seriesInstanceUid)}/${encodeURIComponent(row.sopInstanceUid)}.dcm`;
-        const file = addSnapshotFile(path, fileBlob.size, () => fileBlob);
-        instances.push({ ...metadata, file });
-      }
-    }
-
-    const panelSettings = (await db.getAll('panel_settings')).flatMap((row) => {
-      if (row.source)
-        return selectedStudies.has(row.source.studyUid) && selectedSeries.has(row.source.seriesUid) ? [row] : [];
-      const settings = Object.fromEntries(
-        Object.entries(row.settings).filter(([date]) =>
-          studies.some((study) => {
-            const scopeMatches =
-              !row.comboId.includes('::') ||
-              getPatientIdentityAliases(study).some((key) => row.comboId.startsWith(`${key}::`));
-            const timestamp = formatStudyDate(study);
-            return (
-              scopeMatches &&
-              (date === timestamp ||
-                date === `${timestamp}#${study.studyInstanceUid}` ||
-                (!study.studyTime && date === timestamp.split('T')[0]))
-            );
-          }),
-        ),
-      );
-      return Object.keys(settings).length ? [{ ...row, settings }] : [];
-    });
-    const tumorSegmentations = (await db.getAll('tumor_segmentations')).filter((row) =>
-      selectedStudies.has(row.studyId),
-    );
-    const tumorGroundTruth = (await db.getAll('tumor_ground_truth')).filter((row) => selectedStudies.has(row.studyId));
-
-    const volumeSegmentations: SnapshotVolume[] = [];
-    for (const key of await db.getAllKeys('volume_segmentations')) {
-      throwIfSnapshotAborted(signal);
-      const stored = await db.get('volume_segmentations', key);
-      if (!stored) continue;
-      if (stored.studyUid && !selectedStudies.has(stored.studyUid)) continue;
-      if (!stored.studyUid && stored.patientKey && selectedPatientKey && stored.patientKey !== selectedPatientKey)
-        continue;
-      if (stored.seriesUids?.length && !stored.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
-      const path = `segmentations/${encodeURIComponent(stored.volumeKey)}.labels`;
-      // Sparse label masks can legitimately exceed archive expansion-ratio guards;
-      // complete archives use STORE for these and every other payload below.
-      const expectedRevision = 'labels' in stored ? 'legacy' : stored.revision;
-      addSnapshotFile(path, 'labels' in stored ? stored.labels.byteLength : stored.labelBytes, async (file) => {
-        const transaction = db.transaction(['volume_segmentations', 'volume_segmentation_chunks']);
-        const current = await transaction.objectStore('volume_segmentations').get(key);
-        if (!current || ('labels' in current ? 'legacy' : current.revision) !== expectedRevision)
-          throw new Error('A saved selection changed while preparing the backup. Retry export to include it.');
-        const row = await readStoredVolumeSegmentation(current, transaction.objectStore('volume_segmentation_chunks'));
-        await transaction.done;
-        const { labels, seeds: savedSeeds, ...metadata } = row;
-        if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
-          throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
-        const seeds = decodeSnapshotSeeds(savedSeeds, row.dims);
-        volumeSegmentations.push({
-          ...metadata,
-          file,
-          ...(seeds && {
-            seeds: { ...seeds, foreground: Array.from(seeds.foreground), background: Array.from(seeds.background) },
-          }),
-        });
-        return labels;
-      });
-    }
-
-    const derivedAlignmentFrames: SnapshotDerivedFrame[] = [];
-    for (const key of await db.getAllKeys('derived_alignment_frames')) {
-      throwIfSnapshotAborted(signal);
-      const row = await db.get('derived_alignment_frames', key);
-      if (!row) continue;
-      if (!selectedStudies.has(row.targetStudyUid)) continue;
-      if (selectedPatientKey && identityByStudy.get(row.targetStudyUid) !== selectedPatientKey) continue;
-      if (row.referenceStudyUid && !selectedStudies.has(row.referenceStudyUid)) continue;
-      if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
-      const { pixels, valid, ...metadata } = row;
-      const read = async (field: 'pixels' | 'valid') => {
-        const current = await db.get('derived_alignment_frames', key);
-        if (
-          !current ||
-          current.createdAt !== metadata.createdAt ||
-          current.datasetRevision !== metadata.datasetRevision
-        )
-          throw new Error('An aligned image changed while preparing the backup. Retry export to include it.');
-        const value = current[field];
-        if (!value) throw new Error('An aligned image is incomplete. Retry export.');
-        return value;
-      };
-      const path = `derived-frames/${encodeURIComponent(row.id)}.f32`;
-      const file = addSnapshotFile(path, pixels.byteLength, () => read('pixels'));
-      const validFile = valid
-        ? addSnapshotFile(`derived-frames/${encodeURIComponent(row.id)}.valid`, valid.byteLength, () => read('valid'))
-        : undefined;
-      derivedAlignmentFrames.push({ ...metadata, file, ...(validFile && { validFile }) });
-    }
-
-    const models: SnapshotModel[] = [];
-    for (const model of await getAllModelRecords()) {
-      const path = `models/${encodeURIComponent(model.key)}.onnx`;
-      const file = addSnapshotFile(path, model.blob.size, () => model.blob);
-      models.push({ key: model.key, savedAtMs: model.savedAtMs, file });
-    }
-
-    // Admit the complete payload before reading Blob contents, materializing
-    // chunked labels, hashing, or packaging any file. Descriptors are shared
-    // with the final manifest so these two phases cannot count different files.
-    const totalBytes = snapshotFileBytes(files.map(({ file }) => file));
-    let writtenBytes = 0;
-    let reportedProgress = -1;
-    for (let index = 0; index < files.length; index++) {
-      onProgress?.({ stage: 'collecting', current: index + 1, total: files.length });
-      throwIfSnapshotAborted(signal);
-      const { file, read } = files[index]!;
-      const value = await read(file);
-      const blob = ArrayBuffer.isView(value)
-        ? new Blob([new Uint8Array(value.buffer, value.byteOffset, value.byteLength) as Uint8Array<ArrayBuffer>])
-        : value;
-      throwIfSnapshotAborted(signal);
-      if (blob.size !== file.byteLength) throw new Error('A backup payload changed size. Retry export.');
-      file.sha256 = await zip.add(file.path, blob, (bytes) => {
-        writtenBytes += bytes;
-        const percentage = Math.round((writtenBytes / Math.max(1, totalBytes)) * 100);
-        if (percentage === reportedProgress) return;
-        reportedProgress = percentage;
-        onProgress?.({
-          stage: 'zipping',
-          current: percentage,
-          total: 100,
-        });
-      });
-      throwIfSnapshotAborted(signal);
-    }
-
-    const manifest: SnapshotManifest = {
-      format: 'miraviewer-complete-snapshot',
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      studyIds: studies.map((study) => study.studyInstanceUid),
-      records: {
-        studies,
-        series,
-        instances,
-        panelSettings,
-        tumorSegmentations,
-        tumorGroundTruth,
-        volumeSegmentations,
-        derivedAlignmentFrames,
-        appState: (await db.getAll('app_state')).filter((row) => {
-          if (row.key.startsWith('acquisition:')) return ownsAcquisitionChoice(row, selectedSeriesByUid);
-          if (row.key === SELECTED_PATIENT_STUDY_STATE_KEY) return selectedStudies.has(row.value as string);
-          if (row.key === SELECTED_PATIENT_STATE_KEY) return row.value === selectedPatientKey;
-          // A backup carries its content revision, not another live writer's token.
-          return row.key === DATASET_REVISION_STATE_KEY;
-        }),
-        models,
-        localStorage: captureOwnedLocalStorage(),
-      },
-    };
-    await zip.add('export.json', new Blob([JSON.stringify(manifest)]));
-
+  const instances: SnapshotInstance[] = [];
+  for (const item of series) {
     throwIfSnapshotAborted(signal);
-    if ((await db.get('app_state', DATASET_TOKEN_STATE_KEY))?.value !== datasetToken) throw new DatasetReplacedError();
-    onProgress?.({ stage: 'finalizing', current: 1, total: 1 });
-    const blob = await zip.finish(options.onCommitStart);
-    if (blob) await loadSafeArchive(blob, { signal, deferStorageCheck: true });
-    return blob;
-  } catch (error) {
-    await zip.abort().catch(() => {});
-    throw error;
+    const rows = await db.getAllFromIndex('instances', 'by-series', item.seriesInstanceUid);
+    for (const row of rows) {
+      const { fileBlob, ...metadata } = row;
+      const path = `studies/${encodeURIComponent(row.studyInstanceUid)}/series/${encodeURIComponent(row.seriesInstanceUid)}/${encodeURIComponent(row.sopInstanceUid)}.dcm`;
+      const file = addSnapshotFile(path, fileBlob.size, () => fileBlob);
+      instances.push({ ...metadata, file });
+    }
   }
+
+  const panelSettings = (await db.getAll('panel_settings')).flatMap((row) => {
+    if (row.source)
+      return selectedStudies.has(row.source.studyUid) && selectedSeries.has(row.source.seriesUid) ? [row] : [];
+    const settings = Object.fromEntries(
+      Object.entries(row.settings).filter(([date]) =>
+        studies.some((study) => {
+          const scopeMatches =
+            !row.comboId.includes('::') ||
+            getPatientIdentityAliases(study).some((key) => row.comboId.startsWith(`${key}::`));
+          const timestamp = formatStudyDate(study);
+          return (
+            scopeMatches &&
+            (date === timestamp ||
+              date === `${timestamp}#${study.studyInstanceUid}` ||
+              (!study.studyTime && date === timestamp.split('T')[0]))
+          );
+        }),
+      ),
+    );
+    return Object.keys(settings).length ? [{ ...row, settings }] : [];
+  });
+  const tumorSegmentations = (await db.getAll('tumor_segmentations')).filter((row) => selectedStudies.has(row.studyId));
+  const tumorGroundTruth = (await db.getAll('tumor_ground_truth')).filter((row) => selectedStudies.has(row.studyId));
+
+  const volumeSegmentations: SnapshotVolume[] = [];
+  for (const key of await db.getAllKeys('volume_segmentations')) {
+    throwIfSnapshotAborted(signal);
+    const stored = await db.get('volume_segmentations', key);
+    if (!stored) continue;
+    if (stored.studyUid && !selectedStudies.has(stored.studyUid)) continue;
+    if (!stored.studyUid && stored.patientKey && selectedPatientKey && stored.patientKey !== selectedPatientKey)
+      continue;
+    if (stored.seriesUids?.length && !stored.seriesUids.some((uid: string) => selectedSeries.has(uid))) continue;
+    const path = `segmentations/${encodeURIComponent(stored.volumeKey)}.labels`;
+    // Sparse label masks can legitimately exceed archive expansion-ratio guards;
+    // complete archives use STORE for these and every other payload below.
+    const expectedRevision = 'labels' in stored ? 'legacy' : stored.revision;
+    addSnapshotFile(path, 'labels' in stored ? stored.labels.byteLength : stored.labelBytes, async (file) => {
+      const transaction = db.transaction(['volume_segmentations', 'volume_segmentation_chunks']);
+      const current = await transaction.objectStore('volume_segmentations').get(key);
+      if (!current || ('labels' in current ? 'legacy' : current.revision) !== expectedRevision)
+        throw new Error('A saved selection changed while preparing the backup. Retry export to include it.');
+      const row = await readStoredVolumeSegmentation(current, transaction.objectStore('volume_segmentation_chunks'));
+      await transaction.done;
+      const { labels, seeds: savedSeeds, ...metadata } = row;
+      if (!isSelectionCoverageValid(row.clippedNativeVoxels) || !isSelectionContextValid(row.contextLimited))
+        throw new Error('A saved volume segmentation contains invalid viewing-region coverage.');
+      const seeds = decodeSnapshotSeeds(savedSeeds, row.dims);
+      volumeSegmentations.push({
+        ...metadata,
+        file,
+        ...(seeds && {
+          seeds: { ...seeds, foreground: Array.from(seeds.foreground), background: Array.from(seeds.background) },
+        }),
+      });
+      return labels;
+    });
+  }
+
+  const derivedAlignmentFrames: SnapshotDerivedFrame[] = [];
+  for (const key of await db.getAllKeys('derived_alignment_frames')) {
+    throwIfSnapshotAborted(signal);
+    const row = await db.get('derived_alignment_frames', key);
+    if (!row) continue;
+    if (!selectedStudies.has(row.targetStudyUid)) continue;
+    if (selectedPatientKey && identityByStudy.get(row.targetStudyUid) !== selectedPatientKey) continue;
+    if (row.referenceStudyUid && !selectedStudies.has(row.referenceStudyUid)) continue;
+    if (row.referenceSeriesUid && !selectedSeries.has(row.referenceSeriesUid)) continue;
+    const { pixels, valid, ...metadata } = row;
+    const read = async (field: 'pixels' | 'valid') => {
+      const current = await db.get('derived_alignment_frames', key);
+      if (!current || current.createdAt !== metadata.createdAt || current.datasetRevision !== metadata.datasetRevision)
+        throw new Error('An aligned image changed while preparing the backup. Retry export to include it.');
+      const value = current[field];
+      if (!value) throw new Error('An aligned image is incomplete. Retry export.');
+      return value;
+    };
+    const path = `derived-frames/${encodeURIComponent(row.id)}.f32`;
+    const file = addSnapshotFile(path, pixels.byteLength, () => read('pixels'));
+    const validFile = valid
+      ? addSnapshotFile(`derived-frames/${encodeURIComponent(row.id)}.valid`, valid.byteLength, () => read('valid'))
+      : undefined;
+    derivedAlignmentFrames.push({ ...metadata, file, ...(validFile && { validFile }) });
+  }
+
+  const models: SnapshotModel[] = [];
+  for (const model of await getAllModelRecords()) {
+    const path = `models/${encodeURIComponent(model.key)}.onnx`;
+    const file = addSnapshotFile(path, model.blob.size, () => model.blob);
+    models.push({ key: model.key, savedAtMs: model.savedAtMs, file });
+  }
+
+  // Admit the complete payload before reading Blob contents, materializing
+  // chunked labels, hashing, or packaging any file. Descriptors are shared
+  // with the final manifest so these two phases cannot count different files.
+  const totalBytes = snapshotFileBytes(files.map(({ file }) => file));
+  let writtenBytes = 0;
+  let reportedProgress = -1;
+  for (let index = 0; index < files.length; index++) {
+    onProgress?.({ stage: 'collecting', current: index + 1, total: files.length });
+    throwIfSnapshotAborted(signal);
+    const { file, read } = files[index]!;
+    const value = await read(file);
+    const blob = ArrayBuffer.isView(value)
+      ? new Blob([new Uint8Array(value.buffer, value.byteOffset, value.byteLength) as Uint8Array<ArrayBuffer>])
+      : value;
+    throwIfSnapshotAborted(signal);
+    if (blob.size !== file.byteLength) throw new Error('A backup payload changed size. Retry export.');
+    file.sha256 = await zip.add(file.path, blob, (bytes) => {
+      writtenBytes += bytes;
+      const percentage = Math.round((writtenBytes / Math.max(1, totalBytes)) * 100);
+      if (percentage === reportedProgress) return;
+      reportedProgress = percentage;
+      onProgress?.({
+        stage: 'zipping',
+        current: percentage,
+        total: 100,
+      });
+    });
+    throwIfSnapshotAborted(signal);
+  }
+
+  const manifest: SnapshotManifest = {
+    format: 'miraviewer-complete-snapshot',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    studyIds: studies.map((study) => study.studyInstanceUid),
+    records: {
+      studies,
+      series,
+      instances,
+      panelSettings,
+      tumorSegmentations,
+      tumorGroundTruth,
+      volumeSegmentations,
+      derivedAlignmentFrames,
+      appState: (await db.getAll('app_state')).filter((row) => {
+        if (row.key.startsWith('acquisition:')) return ownsAcquisitionChoice(row, selectedSeriesByUid);
+        if (row.key === SELECTED_PATIENT_STUDY_STATE_KEY) return selectedStudies.has(row.value as string);
+        if (row.key === SELECTED_PATIENT_STATE_KEY) return row.value === selectedPatientKey;
+        // A backup carries its content revision, not another live writer's token.
+        return row.key === DATASET_REVISION_STATE_KEY;
+      }),
+      models,
+      localStorage: captureOwnedLocalStorage(),
+    },
+  };
+  await zip.add('export.json', new Blob([JSON.stringify(manifest)]));
+
+  throwIfSnapshotAborted(signal);
+  if ((await db.get('app_state', DATASET_TOKEN_STATE_KEY))?.value !== datasetToken) throw new DatasetReplacedError();
+  onProgress?.({ stage: 'finalizing', current: 1, total: 1 });
+  const blob = await zip.finish(options.onCommitStart);
+  if (blob) await loadSafeArchive(blob, { signal, deferStorageCheck: true });
+  return blob;
 }
 
 export async function exportStudiesToZip(
@@ -421,7 +395,7 @@ export async function exportStudiesToZip(
   onProgress?: (progress: ExportProgress) => void,
   options: SnapshotWriteOptions = {},
 ): Promise<Blob> {
-  return (await buildSnapshotZip(studyIds, onProgress, options))!;
+  return (await buildSnapshotZip(new BackupZip(options.signal), studyIds, onProgress, options))!;
 }
 
 export async function exportStudiesToFile(
@@ -430,7 +404,17 @@ export async function exportStudiesToFile(
   onProgress?: (progress: ExportProgress) => void,
   options: SnapshotWriteOptions = {},
 ): Promise<void> {
-  await buildSnapshotZip(studyIds, onProgress, options, sink);
+  const zip = new BackupZip(options.signal, sink);
+  try {
+    await buildSnapshotZip(zip, studyIds, onProgress, options);
+  } catch (error) {
+    try {
+      await sink.abort();
+    } catch {
+      // Preserve the original export failure if the failed file cannot abort.
+    }
+    throw error;
+  }
 }
 
 export async function readSnapshotManifest(
@@ -474,16 +458,6 @@ export async function readSnapshotManifest(
     throw new Error('The backup manifest contains invalid derived alignment frames.');
   }
   return manifest as SnapshotManifest;
-}
-
-async function readVerifiedFile(zip: JSZip, descriptor: SnapshotFile, signal?: AbortSignal): Promise<Blob> {
-  throwIfSnapshotAborted(signal);
-  const entry = zip.file(descriptor.path);
-  if (!entry) throw new Error('The backup is incomplete: a referenced file is missing.');
-  const blob = await readArchiveEntry(entry, { signal, sha256: descriptor.sha256 });
-  if (blob.size !== descriptor.byteLength) throw new Error('A backup file has an invalid size.');
-  throwIfSnapshotAborted(signal);
-  return blob;
 }
 
 async function restoreStagedSnapshot(
@@ -559,7 +533,12 @@ async function restoreStagedSnapshot(
       manifest.records.models.length +
       (manifest.records.derivedAlignmentFrames ?? []).reduce((sum, frame) => sum + (frame.validFile ? 2 : 1), 0);
     const readFile = async (file: SnapshotFile) => {
-      const blob = await readVerifiedFile(zip, file, signal);
+      throwIfSnapshotAborted(signal);
+      const entry = zip.file(file.path);
+      if (!entry) throw new Error('The backup is incomplete: a referenced file is missing.');
+      const blob = await readArchiveEntry(entry, { signal, sha256: file.sha256 });
+      if (blob.size !== file.byteLength) throw new Error('A backup file has an invalid size.');
+      throwIfSnapshotAborted(signal);
       onProgress?.(++current, total);
       throwIfSnapshotAborted(signal);
       return blob;
@@ -700,12 +679,12 @@ async function restoreStagedSnapshot(
         validateOutputGridReference(frame.outputGrid, referenceInstance, reference?.frameOfReferenceUid);
       }
       derivedFrameIds.add(frame.id);
-      const bytes = await toArrayBuffer(await readFile(file));
+      const bytes = await (await readFile(file)).arrayBuffer();
       if (bytes.byteLength !== frame.rows * frame.columns * Float32Array.BYTES_PER_ELEMENT) {
         throw new Error('A saved derived alignment frame does not match its pixel geometry.');
       }
       const pixels = new Float32Array(bytes);
-      const valid = validFile ? new Uint8Array(await toArrayBuffer(await readFile(validFile))) : undefined;
+      const valid = validFile ? new Uint8Array(await (await readFile(validFile)).arrayBuffer()) : undefined;
       const derivedFrame = { ...frame, pixels, ...(valid && { valid }) };
       localApi.assertValidDerivedAlignmentFrameShape(derivedFrame);
       await stage([{ store: 'derived_alignment_frames', row: derivedFrame }]);

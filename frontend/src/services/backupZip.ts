@@ -133,9 +133,4 @@ export class BackupZip {
     }
     return new Blob(this.parts, { type: 'application/zip' });
   }
-
-  async abort(): Promise<void> {
-    this.parts.length = 0;
-    await this.sink?.abort();
-  }
 }

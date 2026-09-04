@@ -17,6 +17,7 @@ import {
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import type { BackupStagingRow, VolumeSegmentationRow } from '../src/db/schema';
 import { loadSafeArchive, MAX_ENTRY_BYTES } from '../src/services/archiveSafety';
+import { BackupZip } from '../src/services/backupZip';
 import {
   exportStudiesToZip,
   exportStudiesToFile,
@@ -587,7 +588,7 @@ describe('exportBackup', () => {
     Object.defineProperty(rows[0]!.fileBlob, 'size', { value: MAX_ENTRY_BYTES + 1 });
     const query = vi.spyOn(db, 'getAllFromIndex').mockResolvedValueOnce(rows);
     const bytes = vi.spyOn(NativeBlob.prototype, 'arrayBuffer');
-    const entries = vi.spyOn(JSZip.prototype, 'file');
+    const entries = vi.spyOn(BackupZip.prototype, 'add');
     const reads = vi.spyOn(IDBObjectStore.prototype, 'getAll');
     try {
       await expect(exportStudiesToZip(['study-1'])).rejects.toThrow(/512 MiB per-file restore limit/);
@@ -841,7 +842,7 @@ describe('exportBackup', () => {
     }
   });
 
-  it('aborts a direct file before collection but honors completion once file publication starts', async () => {
+  it('aborts a direct file on early failures but honors completion once file publication starts', async () => {
     const { archive, manifest } = await seedSnapshot({ model: true });
     await restoreSnapshot(archive.zip, manifest);
     const controller = new AbortController();
@@ -855,6 +856,14 @@ describe('exportBackup', () => {
       exportStudiesToFile(['study-1'], sink, undefined, { signal: controller.signal }),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(sink.write).not.toHaveBeenCalled();
+    expect(sink.close).not.toHaveBeenCalled();
+    expect(sink.abort).toHaveBeenCalledOnce();
+    sink.abort.mockClear();
+    sink.write.mockRejectedValueOnce(new Error('Synthetic file write failed'));
+    sink.abort.mockImplementationOnce(() => {
+      throw new Error('Synthetic abort failed');
+    });
+    await expect(exportStudiesToFile(['study-1'], sink)).rejects.toThrow('Synthetic file write failed');
     expect(sink.close).not.toHaveBeenCalled();
     expect(sink.abort).toHaveBeenCalledOnce();
     sink.abort.mockClear();
