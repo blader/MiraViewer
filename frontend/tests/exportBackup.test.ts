@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
+import { Blob as NativeBlob } from 'node:buffer';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
 import { initializeComparisonState } from '../src/db/comparisonState';
@@ -17,12 +18,24 @@ import type { VolumeSegmentationRow } from '../src/db/schema';
 import { loadSafeArchive } from '../src/services/archiveSafety';
 import {
   exportStudiesToZip,
+  assertSnapshotCapacity,
   getSnapshotRestoreBytes,
   MAX_SNAPSHOT_RESTORE_BYTES,
   readSnapshotManifest,
   restoreSnapshot,
 } from '../src/services/exportBackup';
-import { deleteModelCache, MODEL_CACHE_DB_NAME, putModelBlob } from '../src/utils/segmentation/onnx/modelCache';
+import {
+  deleteModelCache,
+  getModelBlob,
+  MODEL_CACHE_DB_NAME,
+  putModelBlob,
+} from '../src/utils/segmentation/onnx/modelCache';
+
+// The IndexedDB emulator uses Node's structured-clone algorithm. Use its Blob
+// implementation for both source and restored payloads; jsdom Blob loses bytes
+// at that boundary. Feed JSZip ArrayBuffers instead of jsdom's FileReader.
+beforeAll(() => vi.stubGlobal('Blob', NativeBlob));
+afterAll(() => vi.unstubAllGlobals());
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -33,7 +46,9 @@ async function resetDb() {
   });
 }
 
-async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSegmentationRow } = {}) {
+async function seedSnapshot(
+  options: { model?: boolean | Blob; segmentation?: VolumeSegmentationRow; chunked?: boolean } = {},
+) {
   const db = await getDB();
   await db.put('studies', {
     studyInstanceUid: 'study-1',
@@ -57,10 +72,19 @@ async function seedSnapshot(options: { model?: boolean; segmentation?: VolumeSeg
     instanceNumber: 1,
     rows: 256,
     columns: 256,
-    fileBlob: new Blob([new Uint8Array([1, 2, 3])]),
+    // fake-indexeddb uses Node structuredClone; jsdom Blob becomes an empty
+    // object there. Keep real bytes across the actual persistence boundary.
+    fileBlob: new NativeBlob([new Uint8Array([1, 2, 3])]),
   });
-  if (options.model) await putModelBlob('synthetic-model', new Blob([new Uint8Array([5, 6, 7])]));
-  if (options.segmentation) await db.put('volume_segmentations', options.segmentation);
+  if (options.model)
+    await putModelBlob(
+      'synthetic-model',
+      options.model === true ? new NativeBlob([new Uint8Array([5, 6, 7])]) : options.model,
+    );
+  if (options.segmentation) {
+    if (options.chunked) await saveVolumeSegmentation(options.segmentation);
+    else await db.put('volume_segmentations', options.segmentation);
+  }
 
   await initializeComparisonState(db);
   const blob = await exportStudiesToZip(['study-1']);
@@ -136,7 +160,7 @@ async function rewriteSnapshotManifest(
   manifest: NonNullable<Awaited<ReturnType<typeof readSnapshotManifest>>>,
 ) {
   // The validated lazy archive is read-only; edited wire fixtures need a new ZIP and CRC-verified read.
-  const zip = await JSZip.loadAsync(blob);
+  const zip = await JSZip.loadAsync(new Uint8Array(await blob.arrayBuffer()));
   zip.file('export.json', JSON.stringify(manifest));
   const archive = await loadSafeArchive(await zip.generateAsync({ type: 'blob', compression: 'STORE' }), {
     deferStorageCheck: true,
@@ -258,11 +282,11 @@ describe('exportBackup', () => {
       instanceNumber: 1,
       rows: 256,
       columns: 256,
-      fileBlob: new Blob([new Uint8Array([1, 2, 3])]),
+      fileBlob: new NativeBlob([new Uint8Array([1, 2, 3])]),
     });
 
     const blob = await exportStudiesToZip(['study-1']);
-    const zip = await JSZip.loadAsync(blob);
+    const zip = await JSZip.loadAsync(new Uint8Array(await blob.arrayBuffer()));
     const files = Object.keys(zip.files);
 
     expect(files).toContain('export.json');
@@ -270,6 +294,9 @@ describe('exportBackup', () => {
     expect(files.some((f) => f.includes('studies/study-1/series/series-1/'))).toBe(true);
     // DICOM file should exist
     expect(files.some((f) => f.endsWith('.dcm'))).toBe(true);
+    expect(Array.from(await zip.file(files.find((file) => file.endsWith('.dcm'))!)!.async('uint8array'))).toEqual([
+      1, 2, 3,
+    ]);
   });
 
   it('exports literal editing marks as ordered JSON arrays without changing duplicate marks or plane metadata', async () => {
@@ -283,6 +310,20 @@ describe('exportBackup', () => {
       lastStroke: { plane: 'axial', slice: 3 },
     });
     expect(structuredClone(saved)).toStrictEqual(before);
+  });
+
+  it('round trips chunked selections through the compatible backup format and removes replaced chunks on restore', async () => {
+    const saved = { ...selectionRow(), patientKey: 'P1' };
+    const { archive, manifest } = await seedSnapshot({ segmentation: saved, chunked: true, model: true });
+    expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('storage');
+    expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('revision');
+    await restoreSnapshot(archive.zip, manifest);
+    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    await saveVolumeSegmentation({ ...saved, labels: new Uint8Array(saved.labels.length).fill(1) });
+    expect(await (await getDB()).count('volume_segmentation_chunks')).toBeGreaterThan(0);
+    await restoreSnapshot(archive.zip, manifest);
+    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    expect(await (await getDB()).count('volume_segmentation_chunks')).toBe(0);
   });
 
   it.each(['axial', 'coronal', 'sagittal', 'absent'] as const)(
@@ -518,6 +559,76 @@ describe('exportBackup', () => {
     expect(await (await getDB()).count('instances')).toBe(0);
     expect((await indexedDB.databases()).some((database) => database.name === MODEL_CACHE_DB_NAME)).toBe(false);
   });
+
+  it('rejects aggregate export capacity before consuming file bytes, labels, hashes or ZIP entries', async () => {
+    const saved = selectionRow();
+    const { archive, manifest } = await seedSnapshot({ model: true, segmentation: saved });
+    await restoreSnapshot(archive.zip, manifest);
+    await saveVolumeSegmentation(saved);
+    const db = await getDB();
+    const original = (await db.get('instances', 'inst-1'))!;
+    // Virtual declared sizes exercise admission without allocating a GiB fixture.
+    const rows = [original, { ...original, sopInstanceUid: 'inst-2', fileBlob: new NativeBlob([Uint8Array.of(4)]) }];
+    for (const row of rows) Object.defineProperty(row.fileBlob, 'size', { value: MAX_SNAPSHOT_RESTORE_BYTES / 2 });
+    const query = vi.spyOn(db, 'getAllFromIndex').mockResolvedValueOnce(rows);
+    const bytes = vi.spyOn(NativeBlob.prototype, 'arrayBuffer');
+    const entries = vi.spyOn(JSZip.prototype, 'file');
+    const reads = vi.spyOn(IDBObjectStore.prototype, 'getAll');
+    try {
+      await expect(exportStudiesToZip(['study-1'])).rejects.toThrow(/512 MiB safe restore limit/);
+      expect(bytes).not.toHaveBeenCalled();
+      expect(entries).not.toHaveBeenCalled();
+      expect(reads.mock.contexts.filter((store) => store.name === 'volume_segmentation_chunks')).toHaveLength(0);
+      expect(await db.count('instances')).toBe(1);
+      expect(Array.from(new Uint8Array(await (await db.get('instances', 'inst-1'))!.fileBlob.arrayBuffer()))).toEqual([
+        1, 2, 3,
+      ]);
+    } finally {
+      query.mockRestore();
+      bytes.mockRestore();
+      entries.mockRestore();
+      reads.mockRestore();
+    }
+  });
+
+  it('uses an inclusive payload ceiling in both directions', () => {
+    expect(() => assertSnapshotCapacity(MAX_SNAPSHOT_RESTORE_BYTES)).not.toThrow();
+    expect(() => assertSnapshotCapacity(MAX_SNAPSHOT_RESTORE_BYTES + 1)).toThrow(/512 MiB/);
+    expect(() => assertSnapshotCapacity(Number.MAX_SAFE_INTEGER + 1)).toThrow(/invalid payload size/);
+  });
+
+  it('round trips a highly compressible below-cap model without weakening archive expansion guards', async () => {
+    const bytes = new Uint8Array(1024 * 1024);
+    const { archive, manifest } = await seedSnapshot({ model: new NativeBlob([bytes]) });
+    expect(getSnapshotRestoreBytes(manifest)).toBeLessThan(MAX_SNAPSHOT_RESTORE_BYTES);
+    await expect(restoreSnapshot(archive.zip, manifest)).resolves.toMatchObject({ ingested: 1 });
+    const restored = new Uint8Array(await (await getModelBlob('synthetic-model'))!.arrayBuffer());
+    expect(restored.byteLength).toBe(bytes.byteLength);
+    expect(restored.some((value) => value !== 0)).toBe(false);
+  });
+
+  it.each(['before reading', 'collecting', 'packaging'] as const)(
+    'cancels export %s without publishing a result',
+    async (phase) => {
+      const { archive, manifest } = await seedSnapshot({ model: true, segmentation: selectionRow() });
+      await restoreSnapshot(archive.zip, manifest);
+      const controller = new AbortController();
+      if (phase === 'before reading') controller.abort();
+      const progress = vi.fn((update: { stage: string; current: number }) => {
+        if (
+          (phase === 'collecting' && update.stage === 'collecting') ||
+          (phase === 'packaging' && update.stage === 'zipping' && update.current > 0)
+        )
+          controller.abort();
+      });
+      await expect(exportStudiesToZip(['study-1'], progress, { signal: controller.signal })).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      expect(controller.signal.aborted).toBe(true);
+      expect(progress.mock.calls.some(([update]) => update.stage === 'finalizing')).toBe(false);
+      expect(await (await getDB()).count('instances')).toBe(1);
+    },
+  );
 
   it('detects model-cache version conflicts before committing medical images or annotations', async () => {
     const { archive, manifest } = await seedSnapshot({ model: true });

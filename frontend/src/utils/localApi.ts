@@ -18,7 +18,6 @@ import type {
   NormalizedPoint,
   ViewerTransform,
   ViewportSize,
-  VolumeSegmentationRow,
 } from '../db/schema';
 import type { ComparisonData, SequenceCombo, SeriesRef } from '../types/api';
 import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
@@ -26,7 +25,12 @@ import { countSeriesImages } from '../db/comparisonState';
 import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
 import { dot } from './svr/vec3';
-import { isSelectionContextValid, isSelectionCoverageValid } from './segmentation/selectionEditing';
+export {
+  deleteVolumeSegmentation,
+  getVolumeSegmentation,
+  getVolumeSegmentationSnapshot,
+  saveVolumeSegmentation,
+} from '../db/volumeSegmentations';
 
 export type PatientSummary = NonNullable<ComparisonData['patients']>[number];
 export type ExaminationSummary = NonNullable<ComparisonData['examinations']>[string];
@@ -588,62 +592,6 @@ export async function saveTumorGroundTruth(input: SaveTumorGroundTruthInput): Pr
 export async function deleteTumorGroundTruth(seriesUid: string, sopInstanceUid: string): Promise<void> {
   const db = await getDB();
   await db.delete('tumor_ground_truth', tumorGroundTruthId(seriesUid, sopInstanceUid));
-}
-
-export async function saveVolumeSegmentation(record: VolumeSegmentationRow): Promise<void> {
-  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
-    throw new Error('Volume segmentation has invalid viewing-region coverage. The saved selection is unchanged.');
-  const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
-  if (record.labels.length !== expectedVoxels) {
-    throw new Error(`Volume segmentation does not match its geometry (${record.labels.length}/${expectedVoxels})`);
-  }
-  const db = await getDB();
-  // Enqueue the write before any asynchronous patient check. IndexedDB owns
-  // ordering across viewers, including navigation away and immediate return.
-  const transaction = db.transaction(['app_state', 'studies', 'volume_segmentations'], 'readwrite');
-  const write = Promise.all([
-    transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
-    transaction.objectStore('studies').getAll(),
-  ]).then(([selected, studies]) => {
-    const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
-    const sourcePatient = record.studyUid ? getPatientIdentityKeys(studies).get(record.studyUid) : undefined;
-    const owner = sourcePatient ?? record.patientKey;
-    if (owner && selectedPatient && owner !== selectedPatient)
-      throw new Error('Cannot save a volume segmentation for another patient');
-    return transaction
-      .objectStore('volume_segmentations')
-      .put(sourcePatient ? { ...record, patientKey: sourcePatient } : record);
-  });
-  await Promise.all([write, transaction.done]);
-}
-
-export async function getVolumeSegmentation(volumeKey: string): Promise<VolumeSegmentationRow | null> {
-  const db = await getDB();
-  const transaction = db.transaction(['app_state', 'studies', 'volume_segmentations']);
-  const [record, selected, studies] = await Promise.all([
-    transaction.objectStore('volume_segmentations').get(volumeKey),
-    transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
-    transaction.objectStore('studies').getAll(),
-    transaction.done,
-  ]);
-  if (!record) return null;
-  const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
-  const sourcePatient = record.studyUid ? getPatientIdentityKeys(studies).get(record.studyUid) : undefined;
-  const owner = sourcePatient ?? record.patientKey;
-  if (owner && selectedPatient && owner !== selectedPatient) return null;
-  if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
-    throw new Error('The saved selection has invalid viewing-region coverage and cannot be safely restored.');
-  const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
-  return record.labels.length === expectedVoxels
-    ? sourcePatient
-      ? { ...record, patientKey: sourcePatient }
-      : record
-    : null;
-}
-
-export async function deleteVolumeSegmentation(volumeKey: string): Promise<void> {
-  const db = await getDB();
-  await db.delete('volume_segmentations', volumeKey);
 }
 
 /** At most 160 MiB: 32 maximum-size 1024² float-and-support registered planes. */

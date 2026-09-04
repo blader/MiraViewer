@@ -212,7 +212,12 @@ export type SvrSelectionSeeds = {
 };
 
 export type SvrLabelVolume = {
-  /** Per-voxel label IDs, in the same indexing order as `SvrVolume.data`. */
+  /**
+   * Per-voxel IDs in `SvrVolume.data` order. View identity is the mask revision;
+   * only the editing owner may reuse its backing buffer. Synchronous displays
+   * consume the current view. Asynchronous readers borrow through imaging
+   * preparation (copy-on-next-edit); persistence captures patches on submission.
+   */
   data: Uint8Array;
   /** Must exactly match `SvrVolume.dims`. */
   dims: [number, number, number];

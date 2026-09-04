@@ -316,6 +316,7 @@ describe('Focused SVR tissue-selection workflow', () => {
     setAutoFill(false);
     paint(5, 6);
     const first = changed.mock.lastCall![0];
+    const firstValues = first!.data.slice();
     paint(6, 6);
     const current = changed.mock.lastCall![0];
     const writes = changed.mock.calls.length;
@@ -335,15 +336,34 @@ describe('Focused SVR tissue-selection workflow', () => {
       ]),
     );
     expect(prepareMemory).toEqual(expect.any(Function));
-    expect(prepareMemory()).toBe([...retainedBuffers].reduce((bytes, buffer) => bytes + buffer.byteLength, 0));
+    const historyBytes = [...retainedBuffers].reduce((bytes, buffer) => bytes + buffer.byteLength, 0);
+    expect(prepareMemory()).toBeGreaterThan(historyBytes); // Mounted slice rasters also have an admission allowance.
     expect(changed).toHaveBeenCalledTimes(writes);
     expect(current!.reviewState).toBe('draft');
     expect(source.data).toEqual(original);
     fireEvent.click(screen.getByRole('button', { name: 'Undo selection edit' }));
-    expect(changed.mock.lastCall![0]!.data).toEqual(first!.data);
+    expect(changed.mock.lastCall![0]!.data).toEqual(firstValues);
     fireEvent.click(screen.getByRole('button', { name: 'Redo selection edit' }));
     expect(changed.mock.lastCall![0]!.data).toEqual(current!.data);
     expect(changed.mock.lastCall![0]!.seeds).toEqual(current!.seeds);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(prepareMemory()).toBe(historyBytes); // Hidden panes release their raster allowance.
+  });
+
+  it('keeps the original-detail callback input stable if editing resumes before that callback prepares its work', () => {
+    const refineRegion = vi.fn();
+    const { changed } = setup(null, {}, { volume: nativeOverview(), refineRegion });
+    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    setAutoFill(false);
+    paint(5, 6);
+    fireEvent.click(screen.getByRole('button', { name: 'Use original detail' }));
+    const borrowed = refineRegion.mock.lastCall![0] as SvrLabelVolume;
+    const bytes = borrowed.data.slice();
+    const marks = borrowed.seeds!.foreground.slice();
+    paint(6, 6);
+    expect(borrowed.data).toEqual(bytes);
+    expect(borrowed.seeds!.foreground).toEqual(marks);
+    expect(changed.mock.lastCall![0]!.data).not.toEqual(bytes);
   });
 
   it('keeps an already-native editor free of the overview row and redundant detail actions', () => {

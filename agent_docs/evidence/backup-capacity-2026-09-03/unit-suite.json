@@ -1,0 +1,40 @@
+{
+  "startedAt": "2026-09-04T06:36:28.747Z",
+  "finishedAt": "2026-09-04T06:37:52.055Z",
+  "sourceBefore": {
+    "head": "a83816c6169b3f69e91bebf11b28c095c1a1293e",
+    "sourceSha256": "3d347c9baea2f29cc1d4054239d6d073cc948e41682a516da2ba8b5cd8632c66",
+    "applicationSourceSha256": "e6b7fc456f66f4ac3d1ae8eff4430144c047b37a0f41838f8cd00191a9ec5023",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "a83816c6169b3f69e91bebf11b28c095c1a1293e",
+    "sourceSha256": "3d347c9baea2f29cc1d4054239d6d073cc948e41682a516da2ba8b5cd8632c66",
+    "applicationSourceSha256": "e6b7fc456f66f4ac3d1ae8eff4430144c047b37a0f41838f8cd00191a9ec5023",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "command": [
+    "npm",
+    "run",
+    "test",
+    "--",
+    "--maxWorkers=2",
+    "--reporter=json",
+    "--outputFile=tmp/sparse-backup-final-unit-01.json"
+  ],
+  "node": "v22.22.0",
+  "privateOptIns": [],
+  "exitCode": 0,
+  "success": true,
+  "numTotalTests": 3245,
+  "numPassedTests": 3191,
+  "numFailedTests": 0,
+  "numPendingTests": 54,
+  "numTodoTests": 0,
+  "numTotalTestSuites": 415,
+  "numPassedTestSuites": 415,
+  "numFailedTestSuites": 0,
+  "files": 173,
+  "scope": "Complete default Vitest suite with two workers; no private fixture opt-ins. Not browser or anatomical admission."
+}

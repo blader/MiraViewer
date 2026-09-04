@@ -21,6 +21,8 @@ type Edit = { mask: SelectionPatch; before: LabelDescription; after: LabelDescri
 type History = {
   volume: SvrVolume;
   labels: SvrLabelVolume | null;
+  /** Writable only until an asynchronous reader borrows the current mask. */
+  ownedData: Uint8Array | null;
   undo: Edit[];
   redo: Edit[];
   completedProposal: Pick<SelectionStatus, 'boundaryCount' | 'contextLimited'> | null;
@@ -37,6 +39,7 @@ const IDLE_STATUS: SelectionStatus = { running: false };
 const initial = (volume: SvrVolume, labels: SvrLabelVolume | null): History => ({
   volume,
   labels,
+  ownedData: null,
   undo: [],
   redo: [],
   completedProposal: null,
@@ -171,7 +174,7 @@ export function useSvrSelection(
     (
       data: Uint8Array,
       after: LabelDescription,
-      candidates?: Uint32Array,
+      patch?: SelectionPatch,
       strokeEdit?: Edit,
       completedProposal: History['completedProposal'] = null,
     ) => {
@@ -179,7 +182,7 @@ export function useSvrSelection(
       if (prior.volume !== volume) return;
       const previous = prior.labels;
       const edit: Edit = {
-        mask: selectionPatch(previous?.data ?? new Uint8Array(volume.data.length), data, candidates),
+        mask: patch ?? selectionPatch(previous?.data ?? new Uint8Array(volume.data.length), data),
         before: description(previous),
         after,
       };
@@ -190,7 +193,17 @@ export function useSvrSelection(
       const undo = [...(coalesce ? prior.undo.slice(0, -1) : prior.undo), entry];
       let bytes = undo.reduce((sum, item) => sum + editBytes(item), 0);
       while (undo.length && (undo.length > 20 || bytes > 32 * 1024 * 1024)) bytes -= editBytes(undo.shift()!);
-      publish({ volume, labels: { data, dims: volume.dims, ...after }, undo, redo: [], completedProposal }, edit.mask);
+      publish(
+        {
+          volume,
+          labels: { data, dims: volume.dims, ...after },
+          ownedData: data.buffer === previous?.data.buffer ? prior.ownedData : data,
+          undo,
+          redo: [],
+          completedProposal,
+        },
+        edit.mask,
+      );
       return edit;
     },
     [publish, volume],
@@ -306,20 +319,36 @@ export function useSvrSelection(
         return;
       }
       cancel();
-      const previous = historyRef.current.labels;
+      const prior = historyRef.current;
+      const previous = prior.labels;
       const value = kind === 'include' ? 1 : 0;
       const relabel = previous?.meta.some((entry) => entry.id !== 1 || entry.name !== 'Selected tissue') ?? false;
       const changesMask = relabel || supported.some((index) => (previous?.data[index] ?? 0) !== value);
       // Retain completion only when the whole stroke agrees with the settled mask.
       // Unfinished work stays incomplete even when brush-down has canceled its request.
       const completedProposal = changesMask ? null : historyRef.current.completedProposal;
-      // Mask identity also owns completed display enhancement; marks alone must not replace it.
-      const next =
-        previous && !changesMask ? previous.data : (previous?.data.slice() ?? new Uint8Array(volume.data.length));
-      if (relabel) for (let index = 0; index < next.length; index++) if (next[index]) next[index] = 1;
+      let next: Uint8Array;
+      let patch: SelectionPatch;
+      if (relabel) {
+        // Normalizing an imported multiclass mask is a whole-mask operation.
+        next = previous!.data.slice();
+        for (let index = 0; index < next.length; index++) if (next[index]) next[index] = 1;
+        for (const index of supported) next[index] = value;
+        patch = selectionPatch(previous!.data, next);
+      } else {
+        const indices = Uint32Array.from(new Set(supported.filter((index) => (previous?.data[index] ?? 0) !== value)));
+        patch = {
+          indices,
+          before: Uint8Array.from(indices, (index) => previous?.data[index] ?? 0),
+          after: new Uint8Array(indices.length).fill(value),
+        };
+        const data = previous?.data ?? new Uint8Array(volume.data.length);
+        // First edit of hydrated/borrowed data copies once. Subsequent strokes
+        // and undo publish distinct views of our exclusive working buffer.
+        next = applySelectionPatch(data, patch, 'redo', prior.ownedData ?? (previous ? undefined : data));
+      }
       const nextMarks = marksFrom(previous, volume);
       for (const index of supported) {
-        if (changesMask) next[index] = value;
         nextMarks.set(index, kind === 'include' ? 1 : 2);
       }
       const foreground: number[] = [],
@@ -337,7 +366,7 @@ export function useSvrSelection(
             ...(plane ? { lastStroke: { ...plane } } : {}),
           },
         },
-        relabel ? undefined : supported,
+        patch,
         undefined,
         completedProposal,
       );
@@ -362,14 +391,21 @@ export function useSvrSelection(
       const restoring = direction === 'undo';
       const opposite = restoring ? 'redo' : 'undo';
       const patch = restoring ? { ...edit.mask, before: edit.mask.after, after: edit.mask.before } : edit.mask;
+      const data = applySelectionPatch(
+        current.labels?.data ?? new Uint8Array(volume.data.length),
+        edit.mask,
+        direction,
+        current.ownedData ?? undefined,
+      );
       publish(
         {
           ...current,
           completedProposal: null,
           [direction]: current[direction].slice(0, -1),
           [opposite]: [...current[opposite], edit],
+          ownedData: data.buffer === current.labels?.data.buffer ? current.ownedData : data,
           labels: {
-            data: applySelectionPatch(current.labels?.data ?? new Uint8Array(volume.data.length), edit.mask, direction),
+            data,
             dims: volume.dims,
             ...(restoring ? edit.before : edit.after),
           },
@@ -397,10 +433,20 @@ export function useSvrSelection(
   }
   const retainedBytes = retainedEditingBytes(state);
   const getRetainedBytes = useCallback(() => retainedEditingBytes(historyRef.current), []);
+  const borrowLabels = useCallback(() => {
+    const current = historyRef.current;
+    if (current.volume !== volume) return null;
+    historyRef.current = { ...current, ownedData: null };
+    return current.labels;
+  }, [volume]);
   const prepareHeavyOperation = useCallback(() => {
     cancel();
+    // Refinement/enhancement may read across awaits. Their existing preparation
+    // boundary borrows this revision: a later edit must copy before writing,
+    // even if cancellation re-enables editing before that reader has unwound.
+    borrowLabels();
     return retainedEditingBytes(historyRef.current);
-  }, [cancel]);
+  }, [borrowLabels, cancel]);
   return {
     marks,
     included,
@@ -410,6 +456,7 @@ export function useSvrSelection(
     status,
     retainedBytes,
     getRetainedBytes,
+    borrowLabels,
     prepareHeavyOperation,
     stroke,
     grow,

@@ -1,0 +1,225 @@
+{
+  "baseline": {
+    "receipt": "artifacts/performance/audit-sparse-editing-2026-09-03/attempt-01/baseline-results/sparse-editing-baseline-sp-5855a-h-edits-historical-baseline-performance/selection-editing-receipt.json",
+    "sha256": "7cba9c7a6b7124968669215fe868f44f564a642d4378944ce1ab01b184e1f931",
+    "build": {
+      "head": "e84e208264431164eeeb627c544fc38e62db1155",
+      "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+      "applicationSourceSha256": "2d16fc73a3ca1849e8069c515f6085de7f75a447f0a823c75e9621074b940799",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T05:43:42.521Z",
+      "fixture": "synthetic only"
+    },
+    "pointerInputs": 210,
+    "draftRasterAllocations": 205,
+    "commitRasterAllocations": 27,
+    "fullMaskSliceCalls": 7,
+    "persistedLabelBytes": 58720256,
+    "persistedMarkBytes": 57184,
+    "wholeMaskResets": 0,
+    "completedSaves": 7,
+    "failedSaves": 0,
+    "inputToCanvasSubmissionMs": {
+      "n": 210,
+      "mean": 7.827999988056365,
+      "p50": 7.309999942779541,
+      "p95": 8.204999923706055,
+      "max": 29.78499984741211
+    },
+    "inputToNextFrameMs": {
+      "n": 210,
+      "mean": 9.23847617875962,
+      "p50": 8.519999980926514,
+      "p95": 10.420000076293945,
+      "max": 41.299999952316284
+    },
+    "longTasksMs": {
+      "n": 0,
+      "mean": 0,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "perOperation": [
+      {
+        "operation": "Add",
+        "labelBytes": 8388608,
+        "markBytes": 4160,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 41,
+        "selectedCount": 1040
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 8388608,
+        "markBytes": 6240,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 41,
+        "selectedCount": 1560
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 8388608,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 41,
+        "selectedCount": 2080
+      },
+      {
+        "operation": "Remove",
+        "labelBytes": 8388608,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 41,
+        "selectedCount": 1432
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 8388608,
+        "markBytes": 10912,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 41,
+        "selectedCount": 2080
+      },
+      {
+        "operation": "Undo",
+        "labelBytes": 8388608,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 0,
+        "selectedCount": 1432
+      },
+      {
+        "operation": "Redo",
+        "labelBytes": 8388608,
+        "markBytes": 10912,
+        "fullMaskSliceCalls": 1,
+        "draftRasterAllocations": 0,
+        "selectedCount": 2080
+      }
+    ],
+    "peakObservedAggregateBrowserRssKiB": 2235328,
+    "memoryScope": "500-ms ps samples of this batch browser root and descendants; sum of process RSS, including shared pages. Not private/unique memory, WASM arena size, or a guaranteed instantaneous peak."
+  },
+  "candidate": {
+    "receipt": "artifacts/performance/audit-sparse-editing-2026-09-03/attempt-01/candidate-results/performance-sparse-brush-e-2ea9b-cale-or-copying-whole-masks-performance/selection-editing-receipt.json",
+    "sha256": "6432f7ed8a568e5a32988bd915294efa45a13072a03ffa0fd84d4fc5c21df948",
+    "build": {
+      "head": "e84e208264431164eeeb627c544fc38e62db1155",
+      "sourceSha256": "e719d61c4eb8357201da974c126053978bd8c3dd6135036d3f61a25822ce43f9",
+      "applicationSourceSha256": "fc6b134fe710e15cdeca27e33c01895a6a8b98d8da3c035ae730dd4bddf4f7ca",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T05:41:45.251Z",
+      "fixture": "synthetic only"
+    },
+    "pointerInputs": 210,
+    "draftRasterAllocations": 0,
+    "commitRasterAllocations": 21,
+    "fullMaskSliceCalls": 0,
+    "persistedLabelBytes": 36864,
+    "persistedMarkBytes": 57184,
+    "wholeMaskResets": 0,
+    "completedSaves": 7,
+    "failedSaves": 0,
+    "inputToCanvasSubmissionMs": {
+      "n": 207,
+      "mean": 0.38961353278966343,
+      "p50": 0.2349998950958252,
+      "p95": 0.27500009536743164,
+      "max": 6.914999961853027
+    },
+    "inputToNextFrameMs": {
+      "n": 207,
+      "mean": 8.503888891514949,
+      "p50": 8.480000019073486,
+      "p95": 9.440000057220459,
+      "max": 11.549999952316284
+    },
+    "longTasksMs": {
+      "n": 0,
+      "mean": 0,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "perOperation": [
+      {
+        "operation": "Add",
+        "labelBytes": 4096,
+        "markBytes": 4160,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 1040
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 4096,
+        "markBytes": 6240,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 1560
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 4096,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 2080
+      },
+      {
+        "operation": "Remove",
+        "labelBytes": 4096,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 1432
+      },
+      {
+        "operation": "Add",
+        "labelBytes": 8192,
+        "markBytes": 10912,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 2080
+      },
+      {
+        "operation": "Undo",
+        "labelBytes": 4096,
+        "markBytes": 8320,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 1432
+      },
+      {
+        "operation": "Redo",
+        "labelBytes": 8192,
+        "markBytes": 10912,
+        "fullMaskSliceCalls": 0,
+        "draftRasterAllocations": 0,
+        "selectedCount": 2080
+      }
+    ],
+    "peakObservedAggregateBrowserRssKiB": 2100528,
+    "memoryScope": "500-ms ps samples of this batch browser root and descendants; sum of process RSS, including shared pages. Not private/unique memory, WASM arena size, or a guaranteed instantaneous peak."
+  },
+  "browser": "152.0.7977.82",
+  "fixture": {
+    "imageSize": 256,
+    "slicesPerOrientation": 128,
+    "orientations": 1,
+    "pixelPaddingValue": null,
+    "studyUid": "1.2.826.0.1.3680043.10.543.20370904.1",
+    "studyDate": "20370904"
+  },
+  "maskBytes": 8388608,
+  "parity": "Exact fixture, mask hashes, hard marks, metadata, saved undo/redo states, reopened/restored states and final canvas pixel hash.",
+  "raster": {
+    "width": 702,
+    "height": 285,
+    "sha256": "7c09e5340731c36330885874d6ae51af16107bfa528e75c1e0604ca240f58bac"
+  },
+  "scope": "Normal built UI and IndexedDB with synthetic DICOM only. Raster allocations, whole-mask Uint8Array.slice calls, submitted label/mark bytes, durable commits and observed long tasks. Latencies end at canvas command submission or the following animation-frame callback, not measured physical screen presentation. No inference or anatomical claim."
+}

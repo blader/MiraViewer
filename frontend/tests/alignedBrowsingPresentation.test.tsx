@@ -529,7 +529,7 @@ describe('DicomViewer aligned browsing', () => {
     setDerivedAlignmentFrame(accepted);
     const acceptedFrame = getDerivedAlignmentFrame('target-series', 4)!;
     const { rerender } = render(viewer(context(), 4));
-    await waitFor(() => expect(screen.getByLabelText('Slice 5')).toBeInTheDocument());
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledOnce());
 
     const imageElement = vi.mocked(cornerstone.displayImage).mock.calls[0]![0] as HTMLElement;
     const presentation = imageElement.parentElement!;
@@ -555,7 +555,7 @@ describe('DicomViewer aligned browsing', () => {
     const completed = alignedResult(41, 6);
     completed.computedSettings = { ...completed.computedSettings, brightness: 92, contrast: 118, zoom: 1.03 };
     act(() => setDerivedAlignmentFrame(completed));
-    await waitFor(() => expect(screen.getByLabelText('Slice 7')).toBeInTheDocument());
+    await waitFor(() => expect(cornerstone.displayImage).toHaveBeenCalledTimes(2));
 
     expect(getImageIdForInstance).not.toHaveBeenCalled();
     expect(vi.mocked(cornerstone.loadImage).mock.calls.map(([imageId]) => imageId)).toEqual([

@@ -18,12 +18,16 @@ import {
   savePanelSettings,
   saveVolumeSegmentation,
   getVolumeSegmentation,
+  getVolumeSegmentationSnapshot,
+  deleteVolumeSegmentation,
   selectAcquisition,
   setSelectedPatientKey,
 } from '../src/utils/localApi';
 import { initializeComparisonState } from '../src/db/comparisonState';
 import { sourceSettingsKey } from '../src/db/comparisonIdentity';
 import type { VolumeSegmentationRow } from '../src/db/schema';
+import { SELECTION_CHUNK_BYTES } from '../src/db/volumeSegmentations';
+import { selectionPatch } from '../src/utils/segmentation/selectionEditing';
 
 async function resetDb() {
   await new Promise<void>((resolve) => {
@@ -174,6 +178,265 @@ describe('localApi', () => {
     expect(await getVolumeSegmentation('source-labels')).toBeNull();
   });
 
+  it('captures a sparse edit before yielding and writes only its touched label chunks', async () => {
+    const record: VolumeSegmentationRow = {
+      volumeKey: 'sparse',
+      dims: [128, 64, 64],
+      labels: new Uint8Array(128 * 64 * 64),
+      updatedAt: 1,
+    };
+    await saveVolumeSegmentation(record);
+    const snapshot = await getVolumeSegmentationSnapshot(record.volumeKey);
+    const labels = record.labels.slice();
+    const indices = Uint32Array.of(23, SELECTION_CHUNK_BYTES + 37);
+    for (const index of indices) labels[index] = 1;
+    const patch = selectionPatch(record.labels, labels, indices);
+    const foreground = indices.slice();
+    const put = vi.spyOn(IDBObjectStore.prototype, 'put');
+    const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll');
+    const saving = saveVolumeSegmentation(
+      { ...record, labels, seeds: { foreground, background: new Uint32Array() } },
+      {
+        expectedRevision: snapshot.revision,
+        revision: 'edit-1',
+        datasetToken: snapshot.datasetToken,
+        patch,
+      },
+    );
+    labels.fill(0);
+    foreground.fill(99);
+    patch.after.fill(0);
+    await saving;
+    const written = put.mock.calls.map(([value]) => value);
+    const chunkWrites = written.filter((value) => value.data instanceof Uint8Array);
+    expect(chunkWrites.map((value) => value.offset)).toEqual([0, SELECTION_CHUNK_BYTES]);
+    expect(chunkWrites.reduce((bytes, value) => bytes + value.data.byteLength, 0)).toBe(2 * SELECTION_CHUNK_BYTES);
+    expect(written.some((value) => 'labels' in value)).toBe(false);
+    expect(getAll.mock.contexts.some((store) => store.name === 'volume_segmentation_chunks')).toBe(false);
+    const reopened = await getVolumeSegmentation(record.volumeKey);
+    expect(reopened!.labels.reduce((sum, value) => sum + value, 0)).toBe(2);
+    expect(indices.map((index) => reopened!.labels[index]!)).toEqual(Uint32Array.of(1, 1));
+    expect(Array.from(reopened!.seeds!.foreground)).toEqual(Array.from(indices));
+  });
+
+  it('commits queued revisions before an immediate reopen, and stores review-only changes without reading label chunks', async () => {
+    const key = 'queued';
+    const snapshot = await getVolumeSegmentationSnapshot(key);
+    const blank = new Uint8Array(8192),
+      first = blank.slice(),
+      second = blank.slice();
+    first[3] = 1;
+    second.set(first);
+    second[5000] = 1;
+    const record = { volumeKey: key, dims: [128, 64, 1] as [number, number, number], labels: first, updatedAt: 1 };
+    const firstSave = saveVolumeSegmentation(record, {
+      expectedRevision: null,
+      revision: 'first',
+      datasetToken: snapshot.datasetToken,
+      patch: selectionPatch(blank, first, Uint32Array.of(3)),
+    });
+    const secondSave = saveVolumeSegmentation(
+      { ...record, labels: second, updatedAt: 2 },
+      {
+        expectedRevision: 'first',
+        revision: 'second',
+        datasetToken: snapshot.datasetToken,
+        patch: selectionPatch(first, second, Uint32Array.of(5000)),
+      },
+    );
+    const reopened = await getVolumeSegmentationSnapshot(key);
+    await Promise.all([firstSave, secondSave]);
+    expect(reopened.revision).toBe('second');
+    expect(reopened.record!.labels).toEqual(second);
+    const get = vi.spyOn(IDBObjectStore.prototype, 'get');
+    const put = vi.spyOn(IDBObjectStore.prototype, 'put');
+    await saveVolumeSegmentation(
+      { ...reopened.record!, reviewState: 'reviewed' },
+      {
+        expectedRevision: reopened.revision,
+        revision: 'review',
+        datasetToken: reopened.datasetToken,
+        patch: selectionPatch(second, second, new Uint32Array()),
+      },
+    );
+    expect(get.mock.contexts.some((store) => store.name === 'volume_segmentation_chunks')).toBe(false);
+    expect(put.mock.contexts.filter((store) => store.name === 'volume_segmentation_chunks')).toHaveLength(0);
+    expect((await getVolumeSegmentation(key))!.reviewState).toBe('reviewed');
+  });
+
+  it('captures a dense proposal as one checkpoint instead of copying its larger reversible patch', async () => {
+    const record: VolumeSegmentationRow = {
+      volumeKey: 'dense-proposal',
+      dims: [128, 64, 1],
+      labels: new Uint8Array(8192),
+      updatedAt: 1,
+    };
+    await saveVolumeSegmentation(record);
+    const snapshot = await getVolumeSegmentationSnapshot(record.volumeKey);
+    const after = new Uint8Array(record.labels.length).fill(1);
+    const patch = selectionPatch(record.labels, after);
+    const copyIndices = vi.spyOn(patch.indices, 'slice');
+    const saving = saveVolumeSegmentation(
+      { ...record, labels: after },
+      {
+        expectedRevision: snapshot.revision,
+        revision: 'dense',
+        datasetToken: snapshot.datasetToken,
+        patch,
+      },
+    );
+    after.fill(0);
+    await saving;
+    expect(copyIndices).not.toHaveBeenCalled();
+    expect((await getVolumeSegmentation(record.volumeKey))!.labels.every((value) => value === 1)).toBe(true);
+  });
+
+  it.each(['conflict', 'quota'] as const)(
+    'rolls back every chunk and metadata after a late %s failure, then allows an exact retry',
+    async (failure) => {
+      const record: VolumeSegmentationRow = {
+        volumeKey: 'atomic',
+        dims: [128, 64, 1],
+        labels: new Uint8Array(8192),
+        updatedAt: 1,
+      };
+      await saveVolumeSegmentation(record);
+      const snapshot = await getVolumeSegmentationSnapshot(record.volumeKey);
+      const after = record.labels.slice();
+      after[3] = after[5000] = 1;
+      const patch = selectionPatch(record.labels, after, Uint32Array.of(3, 5000));
+      if (failure === 'conflict') patch.before[1] = 1;
+      const originalPut = IDBObjectStore.prototype.put;
+      const put = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+        this: IDBObjectStore,
+        value,
+        key,
+      ) {
+        if (failure === 'quota' && this.name === 'volume_segmentation_chunks' && value.offset === 4096)
+          throw new DOMException('Synthetic quota exhaustion', 'QuotaExceededError');
+        return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+      });
+      await expect(
+        saveVolumeSegmentation(
+          { ...record, labels: after, reviewState: 'reviewed' },
+          {
+            expectedRevision: snapshot.revision,
+            revision: 'failed',
+            datasetToken: snapshot.datasetToken,
+            patch,
+          },
+        ),
+      ).rejects.toThrow(failure === 'quota' ? /quota/i : /changed/i);
+      put.mockRestore();
+      expect(await getVolumeSegmentationSnapshot(record.volumeKey)).toEqual(snapshot);
+      expect(await (await getDB()).count('volume_segmentation_chunks')).toBe(0);
+      patch.before[1] = 0;
+      await saveVolumeSegmentation(
+        { ...record, labels: after, reviewState: 'reviewed' },
+        {
+          expectedRevision: snapshot.revision,
+          revision: 'retry',
+          datasetToken: snapshot.datasetToken,
+          patch,
+        },
+      );
+      expect((await getVolumeSegmentation(record.volumeKey))!.labels).toEqual(after);
+      expect((await getVolumeSegmentation(record.volumeKey))!.reviewState).toBe('reviewed');
+    },
+  );
+
+  it('keeps legacy dense rows readable and migrates their complete contents on the first patch', async () => {
+    const record: VolumeSegmentationRow = {
+      volumeKey: 'legacy-labels',
+      dims: [128, 64, 1],
+      labels: new Uint8Array(8192),
+      updatedAt: 1,
+      seeds: { foreground: Uint32Array.of(7), background: Uint32Array.of(8) },
+    };
+    record.labels[7] = 2;
+    record.labels[8000] = 3;
+    // Open the actual earlier schema, not just a dense row in a new database.
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('MiraViewerDB', 7);
+      request.onupgradeneeded = () =>
+        request.result.createObjectStore('volume_segmentations', { keyPath: 'volumeKey' }).put(record);
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('The synthetic legacy database is still open.'));
+      request.onsuccess = () => {
+        request.result.close();
+        resolve();
+      };
+    });
+    const db = await getDB();
+    const snapshot = await getVolumeSegmentationSnapshot(record.volumeKey);
+    expect(snapshot.record).toEqual(structuredClone(record));
+    expect(await db.get('volume_segmentations', record.volumeKey)).toEqual(structuredClone(record));
+    const next = record.labels.slice();
+    next[16] = 1;
+    await saveVolumeSegmentation(
+      { ...record, labels: next },
+      {
+        expectedRevision: snapshot.revision,
+        revision: 'migrated',
+        datasetToken: snapshot.datasetToken,
+        patch: selectionPatch(record.labels, next, Uint32Array.of(16)),
+      },
+    );
+    expect(await getVolumeSegmentation(record.volumeKey)).toEqual({ ...structuredClone(record), labels: next });
+    expect(await db.get('volume_segmentations', record.volumeKey)).not.toHaveProperty('labels');
+    await deleteVolumeSegmentation(record.volumeKey);
+    expect(await db.count('volume_segmentation_chunks')).toBe(0);
+  });
+
+  it('rejects an incomplete chunk set instead of reopening missing saved tissue as background', async () => {
+    const record: VolumeSegmentationRow = {
+      volumeKey: 'missing-chunk',
+      dims: [128, 64, 1],
+      labels: new Uint8Array(8192).fill(1),
+      updatedAt: 1,
+    };
+    await saveVolumeSegmentation(record);
+    const db = await getDB();
+    await db.delete('volume_segmentation_chunks', [record.volumeKey, 4096]);
+    await expect(getVolumeSegmentation(record.volumeKey)).rejects.toThrow(/missing label chunks/i);
+    expect(await db.get('volume_segmentations', record.volumeKey)).toMatchObject({ chunkCount: 2 });
+  });
+
+  it('rejects writers from an older saved revision or replaced dataset without changing the newer saved work', async () => {
+    const record: VolumeSegmentationRow = {
+      volumeKey: 'fenced',
+      dims: [2, 1, 1],
+      labels: Uint8Array.of(1, 0),
+      updatedAt: 1,
+    };
+    await saveVolumeSegmentation(record);
+    const stale = await getVolumeSegmentationSnapshot(record.volumeKey);
+    await saveVolumeSegmentation({ ...record, labels: Uint8Array.of(1, 1), updatedAt: 2 });
+    const current = await getVolumeSegmentationSnapshot(record.volumeKey);
+    await expect(
+      saveVolumeSegmentation(record, {
+        expectedRevision: stale.revision,
+        revision: 'stale',
+        datasetToken: stale.datasetToken,
+      }),
+    ).rejects.toThrow(/changed/i);
+    await (await getDB()).put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'replacement' });
+    await expect(
+      saveVolumeSegmentation(record, {
+        expectedRevision: current.revision,
+        revision: 'stale-dataset',
+        datasetToken: current.datasetToken,
+      }),
+    ).rejects.toThrow(/replaced/i);
+    await expect(
+      deleteVolumeSegmentation(record.volumeKey, {
+        expectedRevision: current.revision,
+        datasetToken: current.datasetToken,
+      }),
+    ).rejects.toThrow(/replaced/i);
+    expect(await getVolumeSegmentation(record.volumeKey)).toEqual(current.record);
+  });
+
   it.each([
     [undefined, undefined],
     [0, false],
@@ -217,7 +480,10 @@ describe('localApi', () => {
     await saveVolumeSegmentation(original);
     const malformed = Object.assign({ ...original }, { [field]: value }) as VolumeSegmentationRow;
     await expect(saveVolumeSegmentation(malformed)).rejects.toThrow(/invalid viewing-region coverage/i);
-    expect(await getVolumeSegmentation(original.volumeKey)).toStrictEqual(structuredClone(original));
+    expect(await getVolumeSegmentation(original.volumeKey)).toStrictEqual({
+      ...structuredClone(original),
+      labels: original.labels,
+    });
     const db = await getDB();
     await db.put('volume_segmentations', malformed);
     await expect(getVolumeSegmentation(original.volumeKey)).rejects.toThrow(/invalid viewing-region coverage/i);

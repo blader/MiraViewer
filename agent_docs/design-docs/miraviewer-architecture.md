@@ -16,7 +16,7 @@ Code-map paths below are relative to `frontend/src/`.
 
 | Boundary                        | Main owners                                                                                                                                                                                 | Contract                                                                                                                                                                                                                                                                                                |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Browser database                | `db/schema.ts`, `db/db.ts`                                                                                                                                                                  | Studies, series, instances, panel settings, annotations, volume labels, derived frames and app state; schema version 7. Models use the separate `utils/segmentation/onnx/modelCache.ts` database.                                                                                                       |
+| Browser database                | `db/schema.ts`, `db/db.ts`, `db/volumeSegmentations.ts`                                                                                                                                     | Studies, series, instances, panel settings, annotations, volume-label heads/chunks, derived frames and app state; schema version 8. Models use the separate `utils/segmentation/onnx/modelCache.ts` database.                                                                                           |
 | Import                          | `components/UploadModal.tsx`, `services/dicomIngestion.ts`, `services/archiveSafety.ts`                                                                                                     | Review local files, folders or ZIPs; admit displayable images and UID ownership; bounded ingestion batches and cancellation retain committed images.                                                                                                                                                    |
 | Dataset/UI access               | `utils/localApi.ts`, `db/comparisonState.ts`, `db/comparisonIdentity.ts`, `db/panelSettings.ts`, `hooks/useComparisonData.ts`, `hooks/useComparisonFilters.ts`, `hooks/usePanelSettings.ts` | Read-only catalog/settings snapshots; explicit initialization and user writes own mutations. Verified source references bind settings to acquisitions. The ordering LRU is derived from storage and invalidated on mutation.                                                                            |
 | Comparison shell                | `components/ComparisonMatrix.tsx`, `components/comparison/`                                                                                                                                 | Grid, overlay and 3D entrypoints, source context, filters and slice navigation.                                                                                                                                                                                                                         |
@@ -51,6 +51,39 @@ Native assembly retains its 512 MiB policy. Learned and custom-model inference u
 `interactiveAdmission.ts` measures complete literal-mark snapshots once. The same admitted runtime allowance travels to the worker owner; compressed prompts do not create a second estimate. Successful EfficientTAM jobs may retain compiled sessions for 30 seconds, while each correction gets fresh history and a message channel. Failure resets job state. `operations.prepare` releases that idle runtime before reconstruction, refinement, enhancement, model loading or custom inference. Custom workers are never retained. Full-volume anatomical quality and arbitrary-model memory guarantees are not established by synthetic acceptance tests.
 
 ## Source identity, settings and navigation
+
+### Selection editing and persistence
+
+`useSvrSelection` owns one working mask and immutable undo patches. Each changing
+edit publishes a distinct typed-array view; ordinary edits reuse only the editor's
+exclusive backing buffer. Hydrated inputs are not mutated. An asynchronous reader
+borrows the current labels at the callback/preparation boundary, so the next edit
+copies before writing. Dense proposals, imported multiclass normalization and full
+snapshots remain explicit whole-mask operations. Hard marks retain their exact
+indices independently of the proposed mask.
+
+Editing panes cache calibrated grayscale by source, slice and window. A retained
+annotation raster composites marks and contours at native resolution before
+scaling. Animation-frame brush drafts paint only newly changed cells; crosshairs
+do not rebuild source pixels. Mounted raster memory is included in heavy-operation
+admission. Label metrics and GPU dirty regions consume the same sparse patch.
+
+The viewer submits each completed edit directly to `db/volumeSegmentations.ts`;
+there is no component debounce or autosave-on-hydration effect. Submission captures
+the metadata and changed bytes before yielding. One IndexedDB transaction checks
+the saved revision, dataset token and source owner, then commits the metadata head
+and touched 4 KiB chunks. Zero chunks are implicit. Dense checkpoints use the same
+format, and earlier dense rows migrate atomically on their first intentional edit.
+Reopen and compatible backup export materialize the complete mask only when needed.
+Missing chunks fail visibly rather than silently clearing tissue.
+
+Failed writes leave edits visible. A retryable failure can save the current full
+snapshot against its last acknowledged revision. A changed dataset or competing
+saved revision cannot be overwritten by Retry: the user can explicitly discard
+local edits and reload. The [sparse-editing evidence](../evidence/sparse-editing-2026-09-03/README.md)
+records synthetic saved-state and pixel parity, write volume and timing scope.
+
+### Acquisitions and panel settings
 
 A comparison column's date string is display metadata, not durable ownership.
 `getComparisonData` reads studies, acquisitions, index counts and app state in one
@@ -119,9 +152,11 @@ Development and Vite preview send cross-origin-isolation headers. The offline la
 
 Patient-scoped backups include only owned acquisition preferences and an owned selected-study anchor. Restore ignores foreign acquisition rows even in older backups. A live settings-writer token is never imported from a backup.
 
-Full-backup restore currently admits at most **512 MiB of declared payloads**, while export can create a larger archive. Export and restore still materialize substantial data with JSZip. Keep original images, check backup capacity and verify restoration before relying on a backup. Streaming export and staged large restore remain open work; the guide does not imply they have been implemented.
+Full-backup export and restore share a **512 MiB uncompressed-payload ceiling**, including scans, saved masks, derived frames and shared local models. Export checks descriptors before reading Blob contents, assembling chunked masks, hashing or packaging, and rejects over-limit selections without a download. Closing or cancelling export retires its controller and pauses its packaging stream. Keep original images and verify restoration before relying on a backup; DICOM reimport does not restore saved work.
 
-Legacy volume-key migration, legacy geometry enrichment, warm native rendering and sparse edit persistence remain active audit work. The source-owned settings and acquisition picker have their own linked regression and browser evidence. The implementation ledger is the status authority; old plans and old test totals are historical evidence.
+Complete backup members use STORE so sparse payloads remain compatible with the archive expansion guard; files may be larger than compressed ZIPs. Generated containers pass the reader's metadata preflight before download. Admitted export and restore still materialize substantial data. The medical-data transaction is atomic, but the separate model cache is not part of that transaction. Streaming export, durable verified staging and large/cross-database publication remain open work. The [capacity and cancellation report](../evidence/backup-capacity-2026-09-03/README.md) records the immediate guard and its limits.
+
+Legacy volume-key migration, legacy geometry enrichment and warm native rendering remain active audit work. Sparse edit persistence and the source-owned settings/acquisition picker have their own linked regression and browser evidence. The implementation ledger is the status authority; old plans and old test totals are historical evidence.
 
 ## Private fixtures
 

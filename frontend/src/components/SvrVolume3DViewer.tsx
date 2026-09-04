@@ -39,7 +39,9 @@ import {
   type NativePlaneBinding,
 } from '../utils/svr/glRaymarch';
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
-import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../utils/localApi';
+import { deleteVolumeSegmentation, getVolumeSegmentationSnapshot, saveVolumeSegmentation } from '../utils/localApi';
+import { DatasetReplacedError, newDatasetToken } from '../db/db';
+import { SavedSelectionChangedError } from '../db/volumeSegmentations';
 import { clamp } from '../utils/math';
 import {
   defaultVolumeWindow,
@@ -329,6 +331,29 @@ type RenderBuildState = {
 
 type VolumeVisualizationMode = 'anatomy' | 'overlay' | 'tumor';
 
+type LabelCounts = {
+  volume: SvrVolume;
+  data: Uint8Array;
+  counts: Map<number, number>;
+  axisCounts: Record<'x' | 'y' | 'z', Uint32Array>;
+  unsupportedBoundaryCount: number;
+  bounds: VoxelBounds | null;
+};
+
+function labelCountBounds(counts: LabelCounts['axisCounts']): VoxelBounds | null {
+  const min = { x: 0, y: 0, z: 0 },
+    max = { x: 0, y: 0, z: 0 };
+  for (const axis of ['x', 'y', 'z'] as const) {
+    const values = counts[axis];
+    min[axis] = values.findIndex((count) => count > 0);
+    if (min[axis] < 0) return null;
+    let last = values.length - 1;
+    while (!values[last]) last--;
+    max[axis] = last;
+  }
+  return { min, max };
+}
+
 function maskUnsupportedLabels(labels: SvrLabelVolume, observedSupport?: Uint8Array): SvrLabelVolume {
   if (!observedSupport || labels.data.length !== observedSupport.length) return labels;
 
@@ -443,15 +468,10 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     [volume],
   );
   const [hydrated, setHydrated] = useState<{ key: string; volume: SvrVolume } | null>(null);
-  const [storageError, setStorageError] = useState<{ key: string; phase: 'load' | 'save' } | null>(null);
-  const [storageRetry, setStorageRetry] = useState({ load: 0, save: 0 });
+  const [storageError, setStorageError] = useState<{ key: string; phase: 'load' | 'save' | 'conflict' } | null>(null);
+  const [storageRetry, setStorageRetry] = useState(0);
   const labelSourceRef = useRef<string | undefined>(undefined);
-  const labelCountsRef = useRef<{
-    data: Uint8Array;
-    counts: Map<number, number>;
-    unsupportedBoundaryCount: number;
-    bounds: VoxelBounds | null;
-  } | null>(null);
+  const labelCountsRef = useRef<LabelCounts | null>(null);
   const labels = useMemo(() => {
     // Persisted, ONNX, and grown labels are sanitized at their publication
     // boundary. Rechecking their full voxel buffer on each interactive grow
@@ -492,6 +512,93 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       ...(volume.reconstructionFingerprint ? { reconstruction: volume.reconstructionFingerprint } : {}),
     });
   }, [volume, volumeIdentity]);
+  const storageOwnerRef = useRef<{
+    volume: SvrVolume;
+    key: string;
+    datasetToken: string;
+    issuedRevision: string | null;
+    committedRevision: string | null;
+    data?: Uint8Array;
+    submission?: string;
+  } | null>(null);
+  useLayoutEffect(() => {
+    storageOwnerRef.current = null;
+    return () => {
+      storageOwnerRef.current = null;
+    };
+  }, [volume, volumeKey]);
+  const saveLabels = useCallback(
+    (next: SvrLabelVolume | null, patch?: SelectionPatch, previousData?: Uint8Array, retry = false) => {
+      const owner = storageOwnerRef.current;
+      if (
+        !volume ||
+        !volumeIdentity ||
+        !volumeKey ||
+        owner?.volume !== volume ||
+        owner.key !== volumeKey ||
+        labelsOverride
+      )
+        return;
+      const submission = newDatasetToken();
+      const edit =
+        patch ??
+        (next?.data && next.data === owner.data
+          ? { indices: new Uint32Array(), before: new Uint8Array(), after: new Uint8Array() }
+          : undefined);
+      const change = {
+        datasetToken: owner.datasetToken,
+        expectedRevision: retry ? owner.committedRevision : owner.issuedRevision,
+        revision: submission,
+        ...(!retry && edit && (patch ? previousData : next?.data) === owner.data ? { patch: edit } : {}),
+      };
+      // The durable API captures these bytes/patches synchronously, before an
+      // editing owner can reuse its buffer or this component can unmount.
+      const saving = next
+        ? saveVolumeSegmentation(
+            {
+              volumeKey,
+              patientKey: volumeIdentity.patientKey,
+              studyUid: volumeIdentity.studyUid,
+              seriesUids: volumeIdentity.seriesUids,
+              frameOfReferenceUid: volumeIdentity.frameOfReferenceUid,
+              dims: next.dims,
+              voxelSizeMm: volume.voxelSizeMm,
+              geometry: captureSelectionGeometry(volume),
+              labels: next.data,
+              classMetadata: next.meta,
+              reviewState: next.reviewState,
+              seeds: next.seeds,
+              ...(next.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: next.clippedNativeVoxels } : {}),
+              ...(next.contextLimited !== undefined ? { contextLimited: next.contextLimited } : {}),
+              modelKey: labelSourceRef.current,
+              datasetRevision: volumeIdentity.datasetRevision,
+              updatedAt: Date.now(),
+            },
+            change,
+          )
+        : deleteVolumeSegmentation(volumeKey, change);
+      owner.issuedRevision = next ? submission : null;
+      owner.data = next?.data;
+      owner.submission = submission;
+      void saving
+        .then(() => {
+          owner.committedRevision = next ? submission : null;
+          if (storageOwnerRef.current === owner && owner.submission === submission) setStorageError(null);
+        })
+        .catch((error: unknown) => {
+          console.error('[segmentation] Failed to save 3D labels', error);
+          if (storageOwnerRef.current === owner && owner.submission === submission)
+            setStorageError({
+              key: volumeKey,
+              phase:
+                error instanceof DatasetReplacedError || error instanceof SavedSelectionChangedError
+                  ? 'conflict'
+                  : 'save',
+            });
+        });
+    },
+    [labelsOverride, volume, volumeIdentity, volumeKey],
+  );
   const [savedMigration, setSavedMigration] = useState<{
     key: string;
     volume: SvrVolume;
@@ -515,9 +622,17 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       return;
     }
     let cancelled = false;
-    void getVolumeSegmentation(volumeKey)
-      .then(async (saved) => {
+    void getVolumeSegmentationSnapshot(volumeKey)
+      .then(async ({ record: saved, revision, datasetToken }) => {
         if (cancelled) return;
+        storageOwnerRef.current = {
+          volume,
+          key: volumeKey,
+          datasetToken,
+          issuedRevision: revision,
+          committedRevision: revision,
+          data: saved?.labels,
+        };
         if (saved) {
           if (
             saved.labels.length !== volume.data.length ||
@@ -545,7 +660,9 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           );
         } else if (initialSelection) {
           labelSourceRef.current = 'refined-selection-v1';
-          setGeneratedLabels(maskUnsupportedLabels(initialSelection, volume.observedSupport));
+          const labels = maskUnsupportedLabels(initialSelection, volume.observedSupport);
+          setGeneratedLabels(labels);
+          saveLabels(labels);
         } else if (volumeIdentity) {
           try {
             const info = await findTransferableSelection(volume, volumeIdentity, volumeKey);
@@ -575,57 +692,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     return () => {
       cancelled = true;
     };
-  }, [initialSelection, setGeneratedLabels, volume, volumeIdentity, volumeKey, storageRetry.load]);
-
-  useEffect(() => {
-    if (
-      !volume ||
-      !volumeIdentity ||
-      !volumeKey ||
-      hydrated?.key !== volumeKey ||
-      hydrated.volume !== volume ||
-      labelsOverride
-    )
-      return;
-
-    // Submit each completed edit immediately. IndexedDB serializes it with later
-    // reads/writes across mounts; component-local queues cannot protect a remount.
-    let current = true;
-    const record = generatedLabels
-      ? {
-          volumeKey,
-          patientKey: volumeIdentity.patientKey,
-          studyUid: volumeIdentity.studyUid,
-          seriesUids: volumeIdentity.seriesUids,
-          frameOfReferenceUid: volumeIdentity.frameOfReferenceUid,
-          dims: generatedLabels.dims,
-          voxelSizeMm: volume.voxelSizeMm,
-          geometry: captureSelectionGeometry(volume),
-          labels: generatedLabels.data,
-          classMetadata: generatedLabels.meta,
-          reviewState: generatedLabels.reviewState,
-          seeds: generatedLabels.seeds,
-          ...(generatedLabels.clippedNativeVoxels !== undefined
-            ? { clippedNativeVoxels: generatedLabels.clippedNativeVoxels }
-            : {}),
-          ...(generatedLabels.contextLimited !== undefined ? { contextLimited: generatedLabels.contextLimited } : {}),
-          modelKey: labelSourceRef.current,
-          datasetRevision: volumeIdentity.datasetRevision,
-          updatedAt: Date.now(),
-        }
-      : null;
-    void (record ? saveVolumeSegmentation(record) : deleteVolumeSegmentation(volumeKey))
-      .then(() => {
-        if (current) setStorageError(null);
-      })
-      .catch((error: unknown) => {
-        console.error('[segmentation] Failed to save 3D labels', error);
-        if (current) setStorageError({ key: volumeKey, phase: 'save' });
-      });
-    return () => {
-      current = false;
-    };
-  }, [generatedLabels, hydrated, labelsOverride, volume, volumeIdentity, volumeKey, storageRetry.save]);
+  }, [initialSelection, saveLabels, setGeneratedLabels, volume, volumeIdentity, volumeKey, storageRetry]);
 
   // The 256-entry label->RGBA palette depends only on the label *metadata*, which is a
   // stable object (BRATS_BASE_LABEL_META) across grow-preview ticks — only the voxel data
@@ -646,10 +713,49 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       if (labelsOverride) return;
       savedTransferRef.current?.abort();
       labelSourceRef.current = 'manual-seeded-v1';
-      labelDirtyRef.current = null;
+      saveLabels(next, patch, previousData);
+      const cached = labelCountsRef.current;
+      if (next && patch && volume && (!previousData || (cached?.volume === volume && cached.data === previousData))) {
+        const prior = previousData ? cached : null;
+        const counts = new Map(prior?.counts);
+        const axisCounts = {
+          x: prior?.axisCounts.x.slice() ?? new Uint32Array(volume.dims[0]),
+          y: prior?.axisCounts.y.slice() ?? new Uint32Array(volume.dims[1]),
+          z: prior?.axisCounts.z.slice() ?? new Uint32Array(volume.dims[2]),
+        };
+        let unsupportedBoundaryCount = prior?.unsupportedBoundaryCount ?? 0;
+        for (let offset = 0; offset < patch.indices.length; offset++) {
+          const index = patch.indices[offset]!;
+          if (volume.observedSupport && !volume.observedSupport[index]) continue;
+          const before = patch.before[offset]!,
+            after = patch.after[offset]!;
+          if (before) {
+            const remaining = (counts.get(before) ?? 0) - 1;
+            if (remaining) counts.set(before, remaining);
+            else counts.delete(before);
+          }
+          if (after) counts.set(after, (counts.get(after) ?? 0) + 1);
+          const delta = Number(after > 0) - Number(before > 0);
+          if (!delta) continue;
+          const point = voxelPoint(index, volume.dims);
+          for (const axis of ['x', 'y', 'z'] as const) axisCounts[axis][point[axis]]! += delta;
+          if (touchesUnsupportedAnatomy(index, volume.dims, volume.observedSupport)) unsupportedBoundaryCount += delta;
+        }
+        labelCountsRef.current = {
+          volume,
+          data: next.data,
+          counts,
+          axisCounts,
+          unsupportedBoundaryCount,
+          bounds: labelCountBounds(axisCounts),
+        };
+      }
+      const pending = labelDirtyRef.current;
+      if (!next || pending?.data !== next.data) labelDirtyRef.current = null;
       if (next && patch && previousData) {
-        const min = { x: Infinity, y: Infinity, z: Infinity };
-        const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+        const extending = pending?.data === previousData;
+        const min = extending ? { ...pending.min } : { x: Infinity, y: Infinity, z: Infinity };
+        const max = extending ? { ...pending.max } : { x: -Infinity, y: -Infinity, z: -Infinity };
         for (const index of patch.indices) {
           const point = voxelPoint(index, next.dims);
           for (const axis of ['x', 'y', 'z'] as const) {
@@ -657,11 +763,16 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
             max[axis] = Math.max(max[axis], point[axis]);
           }
         }
-        labelDirtyRef.current = { data: next.data, previousData, min, max };
+        labelDirtyRef.current = {
+          data: next.data,
+          previousData: extending ? pending.previousData : previousData,
+          min,
+          max,
+        };
       }
       setGeneratedLabels(next);
     },
-    [labelsOverride, setGeneratedLabels],
+    [labelsOverride, saveLabels, setGeneratedLabels, volume],
   );
 
   // ONNX model execution (offline; model cached in IndexedDB).
@@ -669,9 +780,11 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     (nextLabels: SvrLabelVolume) => {
       savedTransferRef.current?.abort();
       labelSourceRef.current = 'brats-tumor-v1';
-      setGeneratedLabels(maskUnsupportedLabels(nextLabels, volume?.observedSupport));
+      const labels = maskUnsupportedLabels(nextLabels, volume?.observedSupport);
+      saveLabels(labels);
+      setGeneratedLabels(labels);
     },
-    [setGeneratedLabels, volume],
+    [saveLabels, setGeneratedLabels, volume],
   );
   const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels, {
     blocked: busy,
@@ -931,13 +1044,17 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     if (!hasLabels) return null;
 
     const data = labels.data;
-    let cached = labelCountsRef.current?.data === data ? labelCountsRef.current : null;
+    let cached =
+      labelCountsRef.current?.volume === volume && labelCountsRef.current.data === data ? labelCountsRef.current : null;
 
     if (!cached) {
       const counts = new Map<number, number>();
       let unsupportedBoundaryCount = 0;
-      const min = { x: Infinity, y: Infinity, z: Infinity };
-      const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+      const axisCounts = {
+        x: new Uint32Array(volume.dims[0]),
+        y: new Uint32Array(volume.dims[1]),
+        z: new Uint32Array(volume.dims[2]),
+      };
       for (let i = 0; i < data.length; i++) {
         if (volume.observedSupport && !volume.observedSupport[i]) continue;
         const id = data[i] ?? 0;
@@ -945,12 +1062,11 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         counts.set(id, (counts.get(id) ?? 0) + 1);
         const point = voxelPoint(i, volume.dims);
         for (const axis of ['x', 'y', 'z'] as const) {
-          min[axis] = Math.min(min[axis], point[axis]);
-          max[axis] = Math.max(max[axis], point[axis]);
+          axisCounts[axis][point[axis]]!++;
         }
         if (touchesUnsupportedAnatomy(i, volume.dims, volume.observedSupport)) unsupportedBoundaryCount++;
       }
-      cached = { data, counts, unsupportedBoundaryCount, bounds: Number.isFinite(min.x) ? { min, max } : null };
+      cached = { volume, data, counts, axisCounts, unsupportedBoundaryCount, bounds: labelCountBounds(axisCounts) };
     }
 
     const { counts, unsupportedBoundaryCount } = cached;
@@ -2075,6 +2191,11 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   useEffect(() => {
     const st = glLabelStateRef.current;
     if (!st) return;
+    const pendingEdit = labelDirtyRef.current;
+    // A deferred effect may still hold an older view of the editor's backing
+    // buffer. Only the newest revision may read it or consume its dirty region.
+    if (labels && pendingEdit && pendingEdit.data !== labels.data && pendingEdit.data.buffer === labels.data.buffer)
+      return;
 
     const { gl, texLabels, texPalette, texDims } = st;
 
@@ -2374,10 +2495,11 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
               : 'Loading saved selection…',
     storageError: storageError?.key === volumeKey ? storageError.phase : null,
     retryStorage: () =>
-      setStorageRetry((current) => ({
-        ...current,
-        [storageError?.phase ?? 'load']: current[storageError?.phase ?? 'load'] + 1,
-      })),
+      storageError?.phase === 'conflict'
+        ? window.location.reload()
+        : storageError?.phase === 'save'
+          ? saveLabels(generatedLabels, undefined, undefined, true)
+          : setStorageRetry((current) => current + 1),
     onPointerDown,
     onPointerMove,
     onPointerUp,

@@ -1,7 +1,7 @@
 export type SyntheticSvrFixtureOptions = {
   imageSize?: number;
   slicesPerOrientation?: number;
-  orientations?: 2 | 3;
+  orientations?: 1 | 2 | 3;
   studyUid?: string;
   studyDate?: string;
   seriesNumberOffset?: number;

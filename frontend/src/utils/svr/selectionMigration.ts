@@ -1,5 +1,6 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY } from '../../db/db';
 import { getPatientIdentityKeys } from '../../db/patientIdentity';
+import { readStoredVolumeSegmentation } from '../../db/volumeSegmentations';
 import type { VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db/schema';
 import type { SvrLabelMeta, SvrLabelVolume, SvrVolume } from '../../types/svr';
 import { IDENTITY_DIRECTION } from './volumeGeometry';
@@ -261,7 +262,7 @@ function transferable(record: VolumeSegmentationRow, target: VolumeSegmentationG
   );
 }
 
-const STORES = ['volume_segmentations', 'app_state', 'studies', 'series'] as const;
+const STORES = ['volume_segmentations', 'volume_segmentation_chunks', 'app_state', 'studies', 'series'] as const;
 const changed = () =>
   new Error('The saved selection or MRI dataset changed. Reopen the reconstruction before transferring it.');
 const abort = (signal?: AbortSignal) => {
@@ -294,13 +295,13 @@ async function inspectSavedSelections(
   if (key) {
     const record = await store.get(key);
     if (!record) throw changed();
-    inspect(record);
+    inspect(await readStoredVolumeSegmentation(record, tx.objectStore('volume_segmentation_chunks')));
   } else {
     // Indexed iteration retains no label buffers between rows.
     let cursor = await store.index('by-study').openCursor(identity.studyUid);
     while (cursor) {
       abort(signal);
-      inspect(cursor.value);
+      inspect(await readStoredVolumeSegmentation(cursor.value, tx.objectStore('volume_segmentation_chunks')));
       cursor = await cursor.continue();
     }
   }

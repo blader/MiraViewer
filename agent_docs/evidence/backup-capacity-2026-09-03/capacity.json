@@ -1,0 +1,73 @@
+{
+  "build": {
+    "head": "8e69da81219a447a93751ea342e629561086aa41",
+    "sourceSha256": "be7fb717605cd21e811f819a56b21dae7a8739ac1e74d2b3bf8024a781c0c109",
+    "applicationSourceSha256": "c6fedef483d2105b00409f63a8839abbd28514d0d7bdfe41237536875b1f2f7b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T06:21:01.203Z",
+    "fixture": "synthetic only"
+  },
+  "browser": "152.0.7977.82",
+  "declaredModelBytes": 536870912,
+  "dicomBytes": 1054,
+  "work": {
+    "arrayBufferCalls": 0,
+    "streamCalls": 0,
+    "readBytes": 0
+  },
+  "downloadsAfterRejection": 0,
+  "completedDownloads": 1,
+  "restored": {
+    "images": 1,
+    "models": ["synthetic-capacity-a"],
+    "dicomSha256": "f5c755e52d09faf833d4c305bb29374942a8ff0aff3411e63b476906840f3dcf",
+    "modelBytes": 1048576,
+    "modelMatches": true
+  },
+  "errors": [],
+  "scope": "Normal production export UI. One imported synthetic DICOM and two composed native Blob cache records. No virtual size getters, private data, real model weights, inference, or claim of 512 MiB resident allocation. Oversized rejection precedes any large payload read; a 1 MiB sparse model then round-trips through export and fresh-context restore with exact source bytes.",
+  "run": {
+    "sourceBefore": {
+      "head": "8e69da81219a447a93751ea342e629561086aa41",
+      "sourceSha256": "be7fb717605cd21e811f819a56b21dae7a8739ac1e74d2b3bf8024a781c0c109",
+      "applicationSourceSha256": "c6fedef483d2105b00409f63a8839abbd28514d0d7bdfe41237536875b1f2f7b",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceAfter": {
+      "head": "8e69da81219a447a93751ea342e629561086aa41",
+      "sourceSha256": "be7fb717605cd21e811f819a56b21dae7a8739ac1e74d2b3bf8024a781c0c109",
+      "applicationSourceSha256": "c6fedef483d2105b00409f63a8839abbd28514d0d7bdfe41237536875b1f2f7b",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceUnchanged": true,
+    "startedAt": "2026-09-04T06:22:18.850Z",
+    "finishedAt": "2026-09-04T06:22:31.738Z",
+    "exitCode": 0,
+    "cleanup": "CLOSED",
+    "remainingOwnedPidCount": 0,
+    "port43134": "free"
+  },
+  "memory": {
+    "peakObservedAggregateBrowserRssKiB": 2151872,
+    "scope": "500-ms ps samples of this batch browser root and descendants; sum of process RSS, including shared pages. Not private/unique memory, WASM arena size, or a guaranteed instantaneous peak."
+  },
+  "images": [
+    {
+      "file": "backup-capacity-desktop.png",
+      "source": "artifacts/performance/audit-backup-capacity-2026-09-03/attempt-03/candidate-capacity-results/performance-backup-capacit-a36be-sparse-below-limit-payloads-capacity/backup-capacity-desktop.png",
+      "sha256": "3362747b78af200b7f125cecf75a1ddbbb10f93e55045be62128df70478901f4",
+      "status": "VALIDATED-CURRENT",
+      "verdict": "PASS",
+      "scope": "Static current export warning. Individually inspected at original detail; no motion or anatomical sign-off."
+    },
+    {
+      "file": "backup-capacity-mobile.png",
+      "source": "artifacts/performance/audit-backup-capacity-2026-09-03/attempt-03/candidate-capacity-results/performance-backup-capacit-a36be-sparse-below-limit-payloads-capacity/backup-capacity-mobile.png",
+      "sha256": "4908519f581e84c741f15f486387d363907cfb3462b82f4e9c92bbf909147f3a",
+      "status": "VALIDATED-CURRENT",
+      "verdict": "PASS",
+      "scope": "Static current export warning. Individually inspected at original detail; no motion or anatomical sign-off."
+    }
+  ]
+}

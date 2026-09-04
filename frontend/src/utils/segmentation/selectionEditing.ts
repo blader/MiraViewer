@@ -145,10 +145,18 @@ export function selectionPatch(before: Uint8Array, after: Uint8Array, candidates
   return patch;
 }
 
-export function applySelectionPatch(data: Uint8Array, patch: SelectionPatch, direction: 'undo' | 'redo'): Uint8Array {
+export function applySelectionPatch(
+  data: Uint8Array,
+  patch: SelectionPatch,
+  direction: 'undo' | 'redo',
+  ownedTarget?: Uint8Array,
+): Uint8Array {
   // Mark-only history changes do not replace the mask that owns display enhancement.
   if (!patch.indices.length) return data;
-  const next = data.slice();
+  // Only the editing owner may lend a writable target. Everyone else gets an
+  // immutable snapshot. A fresh view identifies the new mask revision without
+  // copying an exclusively owned backing buffer.
+  const next = ownedTarget ? ownedTarget.subarray() : data.slice();
   const values = direction === 'undo' ? patch.before : patch.after;
   for (let offset = 0; offset < patch.indices.length; offset++) next[patch.indices[offset]!] = values[offset]!;
   return next;

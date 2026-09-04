@@ -1,0 +1,96 @@
+{
+  "sourceBefore": {
+    "head": "8e69da81219a447a93751ea342e629561086aa41",
+    "sourceSha256": "be7fb717605cd21e811f819a56b21dae7a8739ac1e74d2b3bf8024a781c0c109",
+    "applicationSourceSha256": "c6fedef483d2105b00409f63a8839abbd28514d0d7bdfe41237536875b1f2f7b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "8e69da81219a447a93751ea342e629561086aa41",
+    "sourceSha256": "be7fb717605cd21e811f819a56b21dae7a8739ac1e74d2b3bf8024a781c0c109",
+    "applicationSourceSha256": "c6fedef483d2105b00409f63a8839abbd28514d0d7bdfe41237536875b1f2f7b",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "startedAt": "2026-09-04T06:24:59.098Z",
+  "finishedAt": "2026-09-04T06:25:46.887Z",
+  "exitCode": 0,
+  "cleanup": "CLOSED",
+  "remainingOwnedPidCount": 0,
+  "port43134": "free",
+  "tests": [
+    {
+      "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 13006,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 6200,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1612,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 2496,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 5029,
+          "errors": []
+        }
+      ]
+    },
+    {
+      "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+      "project": "workflow",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 5955,
+          "errors": []
+        }
+      ]
+    }
+  ],
+  "scope": "Six normal production browser workflows, synthetic inputs, isolated headed Chrome. No private patient data; functional and durable-state checks, not anatomical sign-off."
+}

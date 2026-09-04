@@ -1,9 +1,8 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
-import { attachReceipt, capture } from './evidence';
+import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
 import type { DicomInstance } from '../../src/db/schema';
-import type { VolumeSegmentationRow } from '../../src/db/schema';
 import { createSyntheticCustomModel } from '../helpers/customTumorModel';
 
 declare global {
@@ -108,37 +107,6 @@ async function importComparisonExaminations(
   await intake.getByRole('button', { name: 'Done', exact: true }).click();
   await goToSlice(page, 12);
   return files.length;
-}
-
-async function savedVolumeSelection(page: Page) {
-  return page.evaluate(async () => {
-    const read = <T>(request: IDBRequest<T>) =>
-      new Promise<T>((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-    const db = await read(indexedDB.open('MiraViewerDB'));
-    try {
-      const rows = (await read(
-        db.transaction('volume_segmentations').objectStore('volume_segmentations').getAll(),
-      )) as VolumeSegmentationRow[];
-      return await Promise.all(
-        rows.map(async (row) => ({
-          volumeKey: row.volumeKey,
-          dims: row.dims,
-          modelKey: row.modelKey,
-          reviewState: row.reviewState,
-          selectedCount: row.labels.reduce((count, label) => count + Number(label > 0), 0),
-          labelsSha256: Array.from(
-            new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(row.labels))),
-            (value) => value.toString(16).padStart(2, '0'),
-          ).join(''),
-        })),
-      );
-    } finally {
-      db.close();
-    }
-  });
 }
 
 test('normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged', async ({
