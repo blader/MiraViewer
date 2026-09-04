@@ -1,7 +1,7 @@
 import { DATASET_TOKEN_STATE_KEY, DatasetReplacedError, getDB, SELECTED_PATIENT_STATE_KEY } from './db';
 import { getPatientIdentityAliases, getPatientIdentityKeys } from './patientIdentity';
 import { formatStudyDate, getSeriesSequenceCombo, sourceSettingsKey } from './comparisonIdentity';
-import type { DicomStudy, PanelSettingsRow } from './schema';
+import type { DicomSeries, DicomStudy, PanelSettingsRow } from './schema';
 import type { PanelSettings, PanelSettingsPartial, SeriesRef } from '../types/api';
 
 export type LegacyPanelSettings = {
@@ -34,18 +34,104 @@ function legacyMatchesStudy(
   row: PanelSettingsRow,
   date: string,
   study: DicomStudy,
-  comboId: string,
+  comboId: string | undefined,
   singlePatient: boolean,
 ): boolean {
   if (row.source) return false;
-  const scoped = getPatientIdentityAliases(study).some((key) => row.comboId === `${key}::${comboId}`);
-  if (!scoped && !(singlePatient && row.comboId === comboId)) return false;
+  const aliases = getPatientIdentityAliases(study);
+  const scoped =
+    comboId === undefined
+      ? !row.comboId.includes('::') || aliases.some((key) => row.comboId.startsWith(`${key}::`))
+      : aliases.some((key) => row.comboId === `${key}::${comboId}`) || (singlePatient && row.comboId === comboId);
+  if (!scoped) return false;
   const timestamp = formatStudyDate(study);
   return (
     date === timestamp ||
     date === `${timestamp}#${study.studyInstanceUid}` ||
     (!study.studyTime && date === timestamp.split('T')[0])
   );
+}
+
+/** Hydration and subset export share the same legacy ownership decision. */
+function legacyCandidates(
+  rows: readonly PanelSettingsRow[],
+  studies: readonly DicomStudy[],
+  series: readonly DicomSeries[],
+  comboId: string,
+) {
+  const singlePatient = new Set(getPatientIdentityKeys(studies).values()).size <= 1;
+  const assigned = new Set(
+    rows.flatMap((row) => (row.source?.legacyOrigin ? [legacyId(row.source.legacyOrigin)] : [])),
+  );
+  const candidates = rows.flatMap((row) =>
+    row.source
+      ? []
+      : Object.entries(row.settings).flatMap(([dateIso, settings]) => {
+          const origin = { comboId: row.comboId, dateIso };
+          const id = legacyId(origin);
+          if (assigned.has(id)) return [];
+          const studyUids = studies
+            .filter((study) => legacyMatchesStudy(row, dateIso, study, comboId, singlePatient))
+            .map((study) => study.studyInstanceUid);
+          return studyUids.length
+            ? [{ entry: { id, origin, settings }, studyUids, assignmentRequired: row.assignmentRequired }]
+            : [];
+        }),
+  );
+  return candidates.map(({ entry, studyUids, assignmentRequired }) => {
+    const acquisitions = series.filter(
+      (source) => studyUids.includes(source.studyInstanceUid) && getSeriesSequenceCombo(source).id === comboId,
+    );
+    const uniqueLegacy = candidates.filter((candidate) => candidate.studyUids.includes(studyUids[0]!)).length === 1;
+    // Malformed ambiguity metadata cannot grant an automatic assignment.
+    const requiresAssignment =
+      assignmentRequired !== undefined &&
+      (!Array.isArray(assignmentRequired) ||
+        assignmentRequired.some((date) => typeof date !== 'string') ||
+        assignmentRequired.includes(entry.origin.dateIso));
+    return {
+      entry,
+      studyUids,
+      automaticSeriesUid:
+        !requiresAssignment && studyUids.length === 1 && acquisitions.length === 1 && uniqueLegacy
+          ? acquisitions[0]!.seriesInstanceUid
+          : undefined,
+    };
+  });
+}
+
+/** Preserve unresolved settings without embedding excluded study or patient identifiers in the backup. */
+export function panelSettingsForExport(
+  rows: readonly PanelSettingsRow[],
+  studies: readonly DicomStudy[],
+  series: readonly DicomSeries[],
+  selectedStudies: ReadonlySet<string>,
+): PanelSettingsRow[] {
+  const automatic = new Set(
+    [...new Set(series.map((source) => getSeriesSequenceCombo(source).id))].flatMap((comboId) =>
+      legacyCandidates(rows, studies, series, comboId).flatMap((candidate) =>
+        candidate.automaticSeriesUid ? [candidate.entry.id] : [],
+      ),
+    ),
+  );
+  const selectedSeries = new Set(
+    series.filter((source) => selectedStudies.has(source.studyInstanceUid)).map((source) => source.seriesInstanceUid),
+  );
+  const includedStudies = studies.filter((study) => selectedStudies.has(study.studyInstanceUid));
+  return rows.flatMap((row) => {
+    if (row.source)
+      return selectedStudies.has(row.source.studyUid) && selectedSeries.has(row.source.seriesUid) ? [row] : [];
+    const settings = Object.fromEntries(
+      Object.entries(row.settings).filter(([date]) =>
+        includedStudies.some((study) => legacyMatchesStudy(row, date, study, undefined, false)),
+      ),
+    );
+    if (!Object.keys(settings).length) return [];
+    const assignmentRequired = Object.keys(settings).filter(
+      (dateIso) => !automatic.has(legacyId({ comboId: row.comboId, dateIso })),
+    );
+    return [{ ...row, settings, assignmentRequired }];
+  });
 }
 
 /** Read-only compatibility API; source-aware UI uses the snapshot below. */
@@ -97,36 +183,14 @@ export async function getPanelSettingsSnapshot(
       }
     }
     const canonical = new Map(rows.filter((row) => row.source).map((row) => [row.source!.seriesUid, row]));
-    const assignedLegacy = new Set(
-      rows.flatMap((row) => (row.source?.legacyOrigin ? [legacyId(row.source.legacyOrigin)] : [])),
-    );
-    const candidates: { entry: LegacyPanelSettings; studyUids: string[] }[] = [];
-    for (const row of rows) {
-      if (row.source) continue;
-      for (const [dateIso, settings] of Object.entries(row.settings)) {
-        const origin = { comboId: row.comboId, dateIso };
-        const id = legacyId(origin);
-        if (assignedLegacy.has(id)) continue;
-        const matching = studies.filter((study) => legacyMatchesStudy(row, dateIso, study, comboId, singlePatient));
-        const studyUids = matching.map((study) => study.studyInstanceUid);
-        const eligibleDates = Object.entries(sources).flatMap(([date, source]) =>
-          studyUids.includes(source.study_id) ? [date] : [],
-        );
-        if (eligibleDates.length)
-          candidates.push({
-            entry: { id, origin, settings: settings as PanelSettingsPartial, eligibleDates },
-            studyUids,
-          });
-      }
-    }
-    for (const { entry, studyUids } of candidates) {
-      const date = entry.eligibleDates[0]!;
+    for (const { entry, studyUids, automaticSeriesUid } of legacyCandidates(rows, studies, series, comboId)) {
+      const eligibleDates = Object.entries(sources).flatMap(([date, source]) =>
+        studyUids.includes(source.study_id) ? [date] : [],
+      );
+      const date = eligibleDates[0];
+      if (!date) continue;
       const source = sources[date]!;
-      const acquisitionCount = series.filter(
-        (item) => item.studyInstanceUid === source.study_id && getSeriesSequenceCombo(item).id === comboId,
-      ).length;
-      const uniqueLegacy = candidates.filter((candidate) => candidate.studyUids.includes(source.study_id)).length === 1;
-      if (studyUids.length === 1 && acquisitionCount === 1 && uniqueLegacy && !canonical.has(source.series_uid)) {
+      if (automaticSeriesUid === source.series_uid && !canonical.has(source.series_uid)) {
         const migrated: PanelSettingsRow = {
           comboId: sourceSettingsKey(source.series_uid),
           source: { studyUid: source.study_id, seriesUid: source.series_uid, legacyOrigin: entry.origin },
@@ -135,7 +199,7 @@ export async function getPanelSettingsSnapshot(
         // Project an unambiguous legacy row without mutating a read. The first
         // intentional save materializes it under its verified acquisition key.
         canonical.set(source.series_uid, migrated);
-      } else result.legacySettings.push(entry);
+      } else result.legacySettings.push({ ...entry, eligibleDates });
     }
     for (const [date, source] of Object.entries(sources)) {
       const row = canonical.get(source.series_uid);

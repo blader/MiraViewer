@@ -1,5 +1,5 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY } from '../../db/db';
-import { getPatientIdentityKeys } from '../../db/patientIdentity';
+import { getPatientIdentityAliases, getPatientIdentityKeys } from '../../db/patientIdentity';
 import { readStoredVolumeSegmentation } from '../../db/volumeSegmentations';
 import type { VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db/schema';
 import type { SvrLabelMeta, SvrLabelVolume, SvrVolume } from '../../types/svr';
@@ -154,9 +154,14 @@ function completeIdentity(identity: SavedSelectionIdentity): identity is Require
   );
 }
 
-function matchesScope(key: KeyGeometry, identity: RequiredIdentity, includeRevision = true): boolean {
+function matchesScope(
+  key: KeyGeometry,
+  identity: RequiredIdentity,
+  includeRevision = true,
+  patientAliases: readonly string[] = [identity.patientKey],
+): boolean {
   return (
-    key.patient === identity.patientKey &&
+    patientAliases.includes(key.patient) &&
     key.study === identity.studyUid &&
     key.frame === identity.frameOfReferenceUid &&
     sameSet(key.series, identity.seriesUids) &&
@@ -219,12 +224,17 @@ function validLabels(record: VolumeSegmentationRow): boolean {
   );
 }
 
-function transferable(record: VolumeSegmentationRow, target: VolumeSegmentationGeometry, identity: RequiredIdentity) {
+function transferable(
+  record: VolumeSegmentationRow,
+  target: VolumeSegmentationGeometry,
+  identity: RequiredIdentity,
+  patientAliases: readonly string[],
+) {
   const key = parseKey(record.volumeKey);
   const geometry = record.geometry;
   if (
     !key ||
-    !matchesScope(key, identity) ||
+    !matchesScope(key, identity, true, patientAliases) ||
     !validGeometry(geometry) ||
     !validLabels(record) ||
     !finiteArray(record.dims, 3) ||
@@ -235,7 +245,7 @@ function transferable(record: VolumeSegmentationRow, target: VolumeSegmentationG
     !closeArray(key.direction, geometry.direction) ||
     key.reconstruction !== geometry.reconstructionFingerprint ||
     record.datasetRevision !== identity.datasetRevision ||
-    record.patientKey !== identity.patientKey ||
+    !patientAliases.includes(record.patientKey ?? '') ||
     record.studyUid !== identity.studyUid ||
     record.frameOfReferenceUid !== identity.frameOfReferenceUid ||
     !stringSet(record.seriesUids) ||
@@ -271,7 +281,7 @@ const abort = (signal?: AbortSignal) => {
 
 async function inspectSavedSelections(
   identity: RequiredIdentity,
-  inspect: (record: VolumeSegmentationRow) => void,
+  inspect: (record: VolumeSegmentationRow, patientAliases: readonly string[]) => void,
   signal?: AbortSignal,
   key?: string,
 ) {
@@ -291,17 +301,23 @@ async function inspectSavedSelections(
     series.some((source) => !source || source.studyInstanceUid !== identity.studyUid)
   )
     throw changed();
+  const patientAliases = getPatientIdentityAliases(
+    studies.find((study) => study.studyInstanceUid === identity.studyUid)!,
+  );
   const store = tx.objectStore('volume_segmentations');
   if (key) {
     const record = await store.get(key);
     if (!record) throw changed();
-    inspect(await readStoredVolumeSegmentation(record, tx.objectStore('volume_segmentation_chunks')));
+    inspect(await readStoredVolumeSegmentation(record, tx.objectStore('volume_segmentation_chunks')), patientAliases);
   } else {
     // Indexed iteration retains no label buffers between rows.
     let cursor = await store.index('by-study').openCursor(identity.studyUid);
     while (cursor) {
       abort(signal);
-      inspect(await readStoredVolumeSegmentation(cursor.value, tx.objectStore('volume_segmentation_chunks')));
+      inspect(
+        await readStoredVolumeSegmentation(cursor.value, tx.objectStore('volume_segmentation_chunks')),
+        patientAliases,
+      );
       cursor = await cursor.continue();
     }
   }
@@ -320,10 +336,10 @@ export async function findTransferableSelection(
   const target = matchesVolume(volume, identity, parseKey(currentVolumeKey))
     ? captureSelectionGeometry(volume)
     : undefined;
-  await inspectSavedSelections(identity, (record) => {
+  await inspectSavedSelections(identity, (record, patientAliases) => {
     if (
       record.volumeKey === currentVolumeKey ||
-      record.patientKey !== identity.patientKey ||
+      !patientAliases.includes(record.patientKey ?? '') ||
       record.studyUid !== identity.studyUid
     )
       return;
@@ -332,11 +348,11 @@ export async function findTransferableSelection(
       record.frameOfReferenceUid !== identity.frameOfReferenceUid ||
       !stringSet(record.seriesUids) ||
       !sameSet(record.seriesUids, identity.seriesUids) ||
-      (key && !matchesScope(key, identity, false))
+      (key && !matchesScope(key, identity, false, patientAliases))
     )
       return;
     result.retainedCount++;
-    if (target && transferable(record, target, identity)) {
+    if (target && transferable(record, target, identity, patientAliases)) {
       if (!result.candidate || record.updatedAt > result.candidate.record.updatedAt)
         result.candidate = {
           record: { volumeKey: record.volumeKey, updatedAt: record.updatedAt },
@@ -399,8 +415,9 @@ export async function transferSavedSelection(
   let saved: VolumeSegmentationRow | undefined;
   await inspectSavedSelections(
     identity,
-    (record) => {
-      if (record.updatedAt !== candidate.record.updatedAt || !transferable(record, target, identity)) throw changed();
+    (record, patientAliases) => {
+      if (record.updatedAt !== candidate.record.updatedAt || !transferable(record, target, identity, patientAliases))
+        throw changed();
       saved = record;
     },
     signal,
@@ -438,8 +455,8 @@ export async function transferSavedSelection(
   );
   await inspectSavedSelections(
     identity,
-    (current) => {
-      if (!sameSavedWork(current, record) || !transferable(current, target, identity)) throw changed();
+    (current, patientAliases) => {
+      if (!sameSavedWork(current, record) || !transferable(current, target, identity, patientAliases)) throw changed();
     },
     signal,
     record.volumeKey,

@@ -203,6 +203,59 @@ function selectionRow(): VolumeSegmentationRow {
 }
 
 describe('exportBackup', () => {
+  it.each([true, false])('preserves legacy assignment through selective export (ambiguous: %s)', async (ambiguous) => {
+    const { archive, manifest } = await seedSnapshot();
+    await restoreSnapshot(archive.zip, manifest);
+    const db = await getDB();
+    if (ambiguous) {
+      await db.put('studies', { ...manifest.records.studies[0]!, studyInstanceUid: 'same-time-study' });
+      await db.put('series', {
+        ...manifest.records.series[0]!,
+        studyInstanceUid: 'same-time-study',
+        seriesInstanceUid: 'same-time-series',
+      });
+      await db.put('instances', {
+        ...(await db.get('instances', 'inst-1'))!,
+        studyInstanceUid: 'same-time-study',
+        seriesInstanceUid: 'same-time-series',
+        sopInstanceUid: 'same-time-instance',
+      });
+    }
+    await initializeComparisonState(db);
+    let data = await getComparisonData();
+    const combo = data.sequences[0]!.id;
+    const settings = { ...DEFAULT_PANEL_SETTINGS, zoom: 2, panX: 0.2 };
+    const legacy = { comboId: `P1::${combo}`, settings: { '2024-01-01T00:00:00': settings } };
+    await db.put('panel_settings', legacy);
+    const before = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(before.legacySettings).toHaveLength(ambiguous ? 1 : 0);
+    expect(before.settings).toEqual(ambiguous ? {} : { [data.dates[0]!]: settings });
+    const backup = await exportStudiesToZip(['study-1']);
+    expect(await db.get('panel_settings', legacy.comboId)).toStrictEqual(legacy);
+    await deleteAllStoredMriData();
+    const subset = await loadSafeArchive(backup, { deferStorageCheck: true });
+    const subsetManifest = (await readSnapshotManifest(subset.zip))!;
+    expect(JSON.stringify(subsetManifest.records.panelSettings)).not.toContain('same-time-study');
+    await restoreSnapshot(subset.zip, subsetManifest);
+    // A second export no longer has the omitted candidate in its catalog.
+    // It must preserve the unresolved ownership learned by the first export.
+    const repeated = await loadSafeArchive(await exportStudiesToZip(['study-1']), { deferStorageCheck: true });
+    const repeatedManifest = (await readSnapshotManifest(repeated.zip))!;
+    await deleteAllStoredMriData();
+    await restoreSnapshot(repeated.zip, repeatedManifest);
+    data = await getComparisonData();
+    const after = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(after.settings).toEqual(ambiguous ? {} : { [data.dates[0]!]: settings });
+    expect(after.legacySettings).toHaveLength(ambiguous ? 1 : 0);
+    if (ambiguous) expect(after.legacySettings[0]!.settings).toEqual(settings);
+    await savePanelSettings(after.verifiedSources[data.dates[0]!]!, settings, after.legacySettings[0]?.origin);
+    expect(
+      (await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo])).settings[
+        data.dates[0]!
+      ],
+    ).toEqual(settings);
+  });
+
   it('round trips one conservatively isolated patient without stranding source settings or labels', async () => {
     const { archive, manifest } = await seedSnapshot();
     await restoreSnapshot(archive.zip, manifest);

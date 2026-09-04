@@ -278,6 +278,8 @@ export interface PanelSettingsRow {
   settings: Record<string, PanelSettings>;
   /** Canonical source ownership. Rows without this are retained legacy settings. */
   source?: { studyUid: string; seriesUid: string; legacyOrigin?: { comboId: string; dateIso: string } };
+  /** Unresolved legacy dates must not become unambiguous merely because a backup omits other candidates. */
+  assignmentRequired?: string[];
 }
 
 export interface AppStateRow {

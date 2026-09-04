@@ -100,7 +100,9 @@ Study/Series UID ownership, independent of date labels and patient-group keys.
 Readonly hydration projects unambiguous legacy rows in memory. The first intentional
 save materializes a canonical row and retains the original and its provenance.
 Ambiguous settings require an explicit assignment in the Examinations
-panel. Legacy volume-key migration is separate and remains an open audit item;
+panel. Hydration and export share that candidate policy; per-date unresolved-assignment
+metadata keeps a selective backup from turning missing candidates into a guessed owner.
+Legacy volume-key migration is separate and remains an open audit item;
 source-owned panel settings do not imply that every historical 3D key is migrated.
 
 The content `dataset_revision` changes on import. The saved-work `dataset_token`

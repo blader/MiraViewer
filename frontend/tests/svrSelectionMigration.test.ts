@@ -177,10 +177,55 @@ describe('saved selection discovery and explicit draft transfer', () => {
     );
   });
 
+  it.each([7, 8])(
+    'keeps source-owned saved grids visible after patient regrouping at revision %s',
+    async (revision) => {
+      const saved = record();
+      await put(saved);
+      const db = await getDB();
+      await db.put('studies', {
+        ...(await db.get('studies', 'study'))!,
+        studyInstanceUid: 'another-study',
+        patientName: 'Another synthetic patient',
+      });
+      const scope = { ...identity, patientKey: 'patient#study', datasetRevision: revision };
+      await db.put('app_state', { key: SELECTED_PATIENT_STATE_KEY, value: scope.patientKey });
+      await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: revision });
+      const target = targetVolume();
+      Object.assign(target.sourceProvenance!, { patientKey: scope.patientKey, datasetRevision: revision });
+      const found = await findTransferableSelection(target, scope, key(target, scope));
+      expect(found.retainedCount).toBe(1);
+      if (revision === saved.datasetRevision) {
+        expect(found.candidate?.record.volumeKey).toBe(saved.volumeKey);
+        const copied = await transferSavedSelection(found.candidate!, target, scope, key(target, scope));
+        expect(copied.seeds!.foreground).toContain(62);
+        expect(copied.seeds!.background).toEqual(Uint32Array.of(0));
+        expect(copied.reviewState).toBe('draft');
+      } else {
+        expect(found.candidate).toBeNull();
+        expect(found.unavailableCount).toBe(1);
+      }
+      expect(await db.get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    },
+  );
+
+  it('finds the original source-owned grid when a restored subset no longer needs split patient grouping', async () => {
+    const previousScope = { ...identity, patientKey: 'patient#study' };
+    const saved = { ...record(), patientKey: previousScope.patientKey, volumeKey: key(volume(), previousScope) };
+    await put(saved);
+    const target = targetVolume();
+    const found = await findTransferableSelection(target, identity, key(target));
+    expect(found.candidate?.record.volumeKey).toBe(saved.volumeKey);
+    const copied = await transferSavedSelection(found.candidate!, target, identity, key(target));
+    expect(copied.seeds!.foreground).toContain(62);
+    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+  });
+
   it('never offers other patients, examinations, frames, source sets, or dataset revisions', async () => {
     const source = volume();
     const scopes = [
       { ...identity, patientKey: 'other' },
+      { ...identity, patientKey: 'patient#another-study' },
       { ...identity, studyUid: 'other' },
       { ...identity, frameOfReferenceUid: 'other' },
       { ...identity, seriesUids: ['other'] },

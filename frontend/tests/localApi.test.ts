@@ -157,6 +157,24 @@ describe('localApi', () => {
     expect(assigned.legacySettings).toEqual([]);
   });
 
+  it('keeps malformed legacy assignment evidence recoverable without granting automatic source ownership', async () => {
+    await seedAcquisition('study-a', 'series-a');
+    const data = await getComparisonData();
+    const combo = data.sequences[0]!.id;
+    const date = data.dates[0]!;
+    const legacy = {
+      comboId: `${data.selected_patient_key}::${combo}`,
+      settings: { [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 2 } },
+      assignmentRequired: [false] as unknown as string[],
+    };
+    const db = await getDB();
+    await db.put('panel_settings', legacy);
+    const snapshot = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(snapshot.settings).toEqual({});
+    expect(snapshot.legacySettings[0]?.settings.zoom).toBe(2);
+    expect(await db.get('panel_settings', legacy.comboId)).toStrictEqual(legacy);
+  });
+
   it('retains the selected source and its labels when conservative patient grouping changes', async () => {
     await seedAcquisition('study-a', 'series-a', 1, 'Zulu');
     const original = await getComparisonData();
