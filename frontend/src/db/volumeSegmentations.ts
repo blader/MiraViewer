@@ -25,7 +25,6 @@ export class SavedSelectionChangedError extends Error {
     this.name = 'SavedSelectionChangedError';
   }
 }
-const changed = () => new SavedSelectionChangedError();
 type ChunkReader = Pick<
   IDBPObjectStore<MiraDB, ['volume_segmentation_chunks'], 'volume_segmentation_chunks', 'readonly'>,
   'getAll'
@@ -173,14 +172,14 @@ export async function saveVolumeSegmentation(
       tx.objectStore('volume_segmentations').get(volumeKey),
     ]);
     if (guard && token?.value !== guard.datasetToken) throw new DatasetReplacedError();
-    if (guard && revisionOf(previous) !== guard.expectedRevision) throw changed();
+    if (guard && revisionOf(previous) !== guard.expectedRevision) throw new SavedSelectionChangedError();
     const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
     const sourcePatient = metadata.studyUid ? getPatientIdentityKeys(studies).get(metadata.studyUid) : undefined;
-    if (metadata.studyUid && !sourcePatient) throw changed();
+    if (metadata.studyUid && !sourcePatient) throw new SavedSelectionChangedError();
     const owner = sourcePatient ?? metadata.patientKey;
     if (owner && selectedPatient && owner !== selectedPatient)
       throw new Error('Cannot save a volume segmentation for another patient');
-    if (previous && previous.studyUid !== metadata.studyUid) throw changed();
+    if (previous && previous.studyUid !== metadata.studyUid) throw new SavedSelectionChangedError();
     if (
       captured &&
       previous &&
@@ -188,7 +187,7 @@ export async function saveVolumeSegmentation(
         previous.dims.some((size, axis) => size !== metadata.dims[axis]) ||
         ('labels' in previous ? previous.labels.length !== count : previous.labelBytes !== count))
     )
-      throw changed();
+      throw new SavedSelectionChangedError();
     const chunks = tx.objectStore('volume_segmentation_chunks');
     let chunkCount = captured && previous && !('labels' in previous) ? previous.chunkCount : 0;
     if (!captured || (previous && 'labels' in previous)) {
@@ -218,10 +217,10 @@ export async function saveVolumeSegmentation(
       for (const [offset, offsets] of groups) {
         const existing = await chunks.get([volumeKey, offset]);
         const data = existing?.data ?? new Uint8Array(Math.min(SELECTION_CHUNK_BYTES, count - offset));
-        if (data.length !== Math.min(SELECTION_CHUNK_BYTES, count - offset)) throw changed();
+        if (data.length !== Math.min(SELECTION_CHUNK_BYTES, count - offset)) throw new SavedSelectionChangedError();
         for (const i of offsets) {
           const index = captured.indices[i]! - offset;
-          if (data[index] !== captured.before[i]) throw changed();
+          if (data[index] !== captured.before[i]) throw new SavedSelectionChangedError();
           data[index] = captured.after[i]!;
         }
         if (data.some(Boolean)) {
@@ -265,7 +264,7 @@ export async function deleteVolumeSegmentation(
       tx.objectStore('volume_segmentations').get(volumeKey),
     ]);
     if (token?.value !== guard.datasetToken) throw new DatasetReplacedError();
-    if (revisionOf(previous) !== guard.expectedRevision) throw changed();
+    if (revisionOf(previous) !== guard.expectedRevision) throw new SavedSelectionChangedError();
   }
   await Promise.all([
     tx.objectStore('volume_segmentations').delete(volumeKey),

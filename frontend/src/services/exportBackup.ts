@@ -30,9 +30,8 @@ import { getAllModelRecords, putModelBlobs } from '../utils/segmentation/onnx/mo
 import * as localApi from '../utils/localApi';
 import { validateOutputGridReference } from '../utils/outputPlaneGrid';
 import type { ProcessFilesResult } from './dicomIngestion';
-import { loadSafeArchive, readArchiveEntry } from './archiveSafety';
+import { loadSafeArchive, readArchiveEntry, type ArchiveReadOptions } from './archiveSafety';
 import { isSelectionContextValid, isSelectionCoverageValid } from '../utils/segmentation/selectionEditing';
-import type { ArchiveReadOptions } from './archiveSafety';
 import { formatBytes } from '../utils/format';
 
 export type ExportProgress = {
