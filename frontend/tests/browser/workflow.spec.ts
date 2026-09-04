@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
 import type { DicomInstance } from '../../src/db/schema';
@@ -266,7 +266,10 @@ async function metadataSnapshot(page: Page) {
 
 async function openSelectionAndVerifyPixels(page: Page) {
   await page.getByRole('button', { name: 'Select tissue', exact: true }).click();
-  const canvas = page.getByRole('application', { name: /^Axial reconstructed slice/ });
+  await expectGrayscalePixels(page.getByRole('application', { name: /^Axial reconstructed slice/ }));
+}
+
+async function expectGrayscalePixels(canvas: Locator) {
   await expect(canvas).toBeVisible();
   await expect
     .poll(() =>
@@ -315,10 +318,18 @@ test('upgrades a legacy database for physical viewing and preserves original byt
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const input = await openLegacySyntheticStudy(page);
+  await goToSlice(page, 12);
+  await expect.poll(async () => (await readSaved(page)).settings[0]?.settings[input.studyUid]?.progress).toBe(11 / 23);
   const original = await metadataSnapshot(page);
   const saved = await readSaved(page);
   const selections = await savedVolumeSelection(page);
   await page.getByRole('button', { name: '3D', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open 3D volume', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Show reconstruction sources and controls' }).click();
+  await page.locator('summary', { hasText: 'Focus region (optional)' }).click();
+  await expectGrayscalePixels(page.getByRole('img', { name: 'Acquired MRI slice preview' }));
+  await capture(page, info, 'legacy-metadata-focus');
+  await page.getByRole('button', { name: 'Hide reconstruction sources and controls' }).click();
   await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
   const upgraded = await metadataSnapshot(page);

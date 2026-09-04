@@ -4,7 +4,6 @@ import type { ComparisonData } from '../src/types/api';
 import type { SvrLabelVolume, SvrProgress, SvrResult, SvrVolume } from '../src/types/svr';
 import { DEFAULT_SVR_PARAMS } from '../src/types/svr';
 import { useSvrImaging } from '../src/components/svrImagingContext';
-import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 import type * as DerivedAlignmentFrames from '../src/utils/derivedAlignmentFrame';
 import type * as ReconstructionHooks from '../src/hooks/useSvrReconstruction';
 import type * as DecodedFrames from '../src/utils/decodedFrame';
@@ -43,7 +42,7 @@ const mocks = vi.hoisted(() => ({
   enabledElements: vi.fn(),
   retainedAlignmentBytes: vi.fn(),
   manifests: vi.fn(),
-  sortedSopUids: vi.fn(),
+  previewImage: vi.fn(),
   run: vi.fn(),
   cancel: vi.fn(),
   clear: vi.fn(),
@@ -66,9 +65,10 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+// This component suite owns preflight/UI transitions. Real Blob hydration and
+// revision guards are exercised in acquisitionProvenance.test.ts.
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.manifests,
-  getSortedSopInstanceUidsForSeries: mocks.sortedSopUids,
   getDatasetRevision: vi.fn(async () => 7),
   getSelectedPatientKey: vi.fn(async () => 'patient-a'),
 }));
@@ -76,6 +76,7 @@ vi.mock('../src/utils/localApi', () => ({
 vi.mock('../src/utils/decodedFrame', async (importOriginal) => ({
   ...(await importOriginal<typeof DecodedFrames>()),
   getDecodedFrameBySopInstanceUid: mocks.decodedFrame,
+  loadCornerstoneImage: mocks.previewImage,
 }));
 vi.mock('../src/utils/segmentation/interactiveAdmission', async (importOriginal) => ({
   ...(await importOriginal<typeof InteractiveAdmission>()),
@@ -83,12 +84,6 @@ vi.mock('../src/utils/segmentation/interactiveAdmission', async (importOriginal)
 }));
 vi.mock('../src/utils/segmentation/interactiveSelection', () => ({
   proposeInteractiveSelection: mocks.proposeSelection,
-}));
-
-vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
-  ...(await importOriginal<typeof AcquisitionProvenance>()),
-  // This component suite owns preflight/UI transitions. Real Blob hydration and
-  // revision guards are exercised in acquisitionProvenance.test.ts.
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({
@@ -386,7 +381,7 @@ beforeEach(() => {
     (imageId: string) => mocks.cachedImages.find((entry) => entry.imageId === imageId)?.imageLoadObject,
   );
   mocks.retainedAlignmentBytes.mockReturnValue(0);
-  mocks.sortedSopUids.mockResolvedValue([]);
+  mocks.previewImage.mockResolvedValue({ rows: 8, columns: 8, getPixelData: () => new Int16Array(64) });
   mocks.manifests.mockImplementation(async (seriesUid: string) => manifest(seriesUid));
   mocks.hook.status = 'idle';
   mocks.hook.isRunning = false;
@@ -1461,6 +1456,79 @@ describe('SVR reconstruction workspace', () => {
     await act(async () => finish(manifest('axial-patient-a')));
     expect(mocks.manifests).toHaveBeenCalledTimes(1);
   });
+
+  it('uses prepared source order for the first focus preview, keeps the box on catalog refresh, and retires it on patient change', async () => {
+    const comparison = data('preview-patient', 1);
+    const source = manifest('axial-preview-patient', 'preview-patient');
+    source.frames.forEach((frame, index) => {
+      frame.instanceNumber = 3 - index;
+    });
+    const ready = deferred<typeof source>();
+    mocks.manifests.mockReturnValueOnce(ready.promise);
+    const props = { data: comparison, fallbackRoiSeriesUid: source.seriesUid, fallbackRoiSliceIndex: 0 };
+    const view = render(<Svr3DView {...props} />);
+    openSources();
+    fireEvent.click(screen.getByText('Focus region (optional)'));
+    expect(mocks.previewImage).not.toHaveBeenCalled();
+    await act(async () => ready.resolve(source));
+    await waitFor(() =>
+      expect(mocks.previewImage).toHaveBeenLastCalledWith(`miradb:${source.frames[0]!.sopInstanceUid}`),
+    );
+    expect(screen.getByText('Slice 1 / 3')).toBeVisible();
+    const preview = screen.getByRole('application', { name: /^Focus-box source slice/ });
+    fireEvent.keyDown(preview, { key: 'ArrowRight' });
+    await waitFor(() =>
+      expect(mocks.previewImage).toHaveBeenLastCalledWith(`miradb:${source.frames[1]!.sopInstanceUid}`),
+    );
+    vi.spyOn(preview, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 100, height: 100 } as DOMRect);
+    Object.defineProperty(preview, 'setPointerCapture', { value: vi.fn(), configurable: true });
+    fireEvent.pointerDown(preview, { clientX: 20, clientY: 20, pointerId: 1 });
+    fireEvent.pointerUp(preview, { clientX: 70, clientY: 70, pointerId: 1 });
+    expect(screen.getByText('Box', { exact: true })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Load native region' })).toBeEnabled();
+    const refresh = deferred<typeof source>();
+    mocks.manifests.mockReturnValueOnce(refresh.promise);
+    view.rerender(<Svr3DView {...props} data={{ ...comparison, series_map: { ...comparison.series_map } }} />);
+    expect(screen.getByText('Box', { exact: true })).toBeVisible();
+    await act(async () => refresh.resolve({ ...source, frames: source.frames.map((frame) => ({ ...frame })) }));
+    expect(screen.getByText('Box', { exact: true })).toBeVisible();
+    fireEvent.keyDown(preview, { key: 'ArrowRight' });
+    expect(screen.queryByText('Box', { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Load native region' })).toBeEnabled();
+    const replacement = deferred<typeof source>();
+    mocks.manifests.mockReturnValueOnce(replacement.promise);
+    view.rerender(<Svr3DView data={data('preview-other', 1)} />);
+    expect(screen.queryByRole('button', { name: 'Load native region' })).not.toBeInTheDocument();
+    expect(screen.getByRole('application', { name: /^Focus-box source slice/ })).toHaveAttribute('tabindex', '-1');
+    await act(async () => replacement.resolve(manifest('axial-preview-other', 'preview-other')));
+    await waitFor(() => expect(mocks.previewImage).toHaveBeenLastCalledWith('miradb:axial-preview-other-frame-1'));
+  });
+
+  it.each(['read', 'geometry', 'coordinate frame'] as const)(
+    'keeps a valid individual source preview when another acquisition has a %s failure',
+    async (failure) => {
+      mocks.manifests.mockImplementation(async (seriesUid: string) => {
+        const source = manifest(seriesUid);
+        if (seriesUid.startsWith('axial')) {
+          if (failure === 'read') throw new Error('Synthetic source is unavailable.');
+          if (failure === 'geometry') {
+            source.geometryReliable = false;
+            source.frames[0]!.imagePositionPatient = 'invalid';
+          } else source.frameOfReferenceUid = 'different-frame';
+        }
+        return source;
+      });
+      render(<Svr3DView data={data('patient-a')} />);
+      openSources();
+      await screen.findByRole('alert');
+      expect(screen.getByRole('button', { name: 'Reconstruct volume' })).toBeDisabled();
+      expect(screen.queryByText('Verified source geometry')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('Focus region (optional)'));
+      fireEvent.change(screen.getByLabelText('Draw on'), { target: { value: 'coronal-patient-a' } });
+      await waitFor(() => expect(mocks.previewImage).toHaveBeenLastCalledWith('miradb:coronal-patient-a-frame-1'));
+      expect(screen.getByRole('application', { name: /^Focus-box source slice/ })).toHaveAttribute('tabindex', '0');
+    },
+  );
 
   it('never renders the previous patient volume after a patient switch', async () => {
     const first = data('patient-a');

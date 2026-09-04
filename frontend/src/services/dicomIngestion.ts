@@ -164,22 +164,14 @@ const TAGS = {
   ImageType: 'x00080008',
   SOPClassUID: 'x00080016',
   SOPInstanceUID: 'x00080018',
-  InstanceNumber: 'x00200013',
   FrameOfReferenceUID: 'x00200052',
   NumberOfFrames: 'x00280008',
 
   Rows: 'x00280010',
   Columns: 'x00280011',
-  PixelPaddingValue: 'x00280120',
-  PixelPaddingRangeLimit: 'x00280121',
-  SliceLocation: 'x00201041',
   ImagePositionPatient: 'x00200032',
   ImageOrientationPatient: 'x00200037',
   PixelSpacing: 'x00280030',
-  SliceThickness: 'x00180050',
-  SpacingBetweenSlices: 'x00180088',
-  WindowCenter: 'x00281050',
-  WindowWidth: 'x00281051',
 };
 
 // Common non-DICOM file extensions to skip
@@ -589,13 +581,7 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       if (ownership.status === 'error') results[index] = ownership;
       else {
         try {
-          const updated = mergeDicomInstanceMetadata(existing, candidate.instance);
-          if (
-            (Object.keys(updated) as (keyof DicomInstance)[]).every((field) =>
-              Object.is(updated[field], existing[field]),
-            )
-          )
-            results[index] = ownership;
+          if (mergeDicomInstanceMetadata(existing, candidate.instance) === existing) results[index] = ownership;
         } catch (error) {
           results[index] = databaseError(candidate.fileName, error);
         }
@@ -677,13 +663,7 @@ async function writePreparedBatch(candidates: PreparedDicom[], signal?: AbortSig
       if (mergedStudy.changed) changedStudies.add(studyUid);
       if (mergedSeries.changed) changedSeries.add(seriesUid);
       stagedInstances.set(instanceUid, instance);
-      const changed =
-        !existingInstance ||
-        mergedStudy.changed ||
-        mergedSeries.changed ||
-        (Object.keys(instance) as (keyof DicomInstance)[]).some(
-          (field) => !Object.is(instance[field], existingInstance[field]),
-        );
+      const changed = instance !== existingInstance || mergedStudy.changed || mergedSeries.changed;
       if (changed) accepted.push({ candidate, index, instance, isNew: !existingInstance });
       results[index] = existingInstance
         ? {

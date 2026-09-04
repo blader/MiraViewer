@@ -232,7 +232,9 @@ export function mergeDicomInstanceMetadata<T extends Omit<DicomInstance, 'fileBl
   const point = parseImagePositionPatient(result.imagePositionPatient);
   result.physicalSlicePosition = axes && point ? dot(axes.normalDir, point) : undefined;
   result.metadataVersion = DICOM_METADATA_VERSION;
-  return result;
+  return (Object.keys(result) as (keyof T)[]).every((field) => Object.is(result[field], existing[field]))
+    ? existing
+    : result;
 }
 
 export function needsDicomHeader(instance: Omit<DicomInstance, 'fileBlob'>): boolean {

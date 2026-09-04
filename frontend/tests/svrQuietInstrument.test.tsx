@@ -2,7 +2,6 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComparisonData } from '../src/types/api';
 import type { SvrResult } from '../src/types/svr';
-import type * as AcquisitionProvenance from '../src/utils/svr/acquisitionProvenance';
 
 const mocks = vi.hoisted(() => ({
   manifests: vi.fn(),
@@ -19,9 +18,10 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+// This presentation fixture has no stored DICOM Blobs. Keep real source
+// classification; metadata hydration/ownership has its own database tests.
 vi.mock('../src/utils/localApi', () => ({
   getSeriesFrameManifest: mocks.manifests,
-  getSortedSopInstanceUidsForSeries: vi.fn(async () => []),
   deleteVolumeSegmentation: vi.fn(async () => undefined),
   getVolumeSegmentationSnapshot: vi.fn(async () => ({
     record: null,
@@ -29,12 +29,6 @@ vi.mock('../src/utils/localApi', () => ({
     datasetToken: 'synthetic-dataset',
   })),
   saveVolumeSegmentation: vi.fn(async () => undefined),
-}));
-
-vi.mock('../src/utils/svr/acquisitionProvenance', async (importOriginal) => ({
-  ...(await importOriginal<typeof AcquisitionProvenance>()),
-  // This presentation fixture has no stored DICOM Blobs. Keep real source
-  // classification; metadata hydration/ownership has its own database tests.
 }));
 
 vi.mock('../src/hooks/useSvrReconstruction', () => ({

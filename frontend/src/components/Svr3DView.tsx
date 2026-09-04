@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import cornerstone from 'cornerstone-core';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { getDB } from '../db/db';
-import type { DicomInstance } from '../db/schema';
 import type { ComparisonData } from '../types/api';
 import type {
   SvrLabelVolume,
@@ -18,7 +16,7 @@ import { formatDate } from '../utils/format';
 import { decodeImageWithValidity, loadCornerstoneImage } from '../utils/decodedFrame';
 import { DEFAULT_SVR_PARAMS } from '../types/svr';
 import { useSvrReconstruction } from '../hooks/useSvrReconstruction';
-import { getSeriesFrameManifest, getSortedSopInstanceUidsForSeries, type SeriesFrameManifest } from '../utils/localApi';
+import { getSeriesFrameManifest, type SeriesFrameManifest } from '../utils/localApi';
 import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
 import { estimateSvrSourceMemory } from '../utils/svr/sourceMemory';
@@ -454,12 +452,8 @@ type SvrWorkspaceState = {
   identity: string | null;
   showAcquiredStack: boolean;
   roiSeriesUid: string | null;
-  roiSeriesSopUids: string[] | null;
-  roiSeriesSopUidsError: string | null;
   // Use -1 as a sentinel meaning "auto (middle slice)".
   roiSliceIndex: number;
-  roiSliceGeom: SliceGeometry | null;
-  roiSliceGeomError: string | null;
   // Keep a stable preview slice so we don't clear the canvas between fast slice changes.
   roiPreviewSliceStable: { sopInstanceUid: string; geom: SliceGeometry } | null;
   roiRect: RoiRect01 | null;
@@ -476,11 +470,7 @@ function initialSvrWorkspaceState(identity: string | null): SvrWorkspaceState {
     identity,
     showAcquiredStack: false,
     roiSeriesUid: null,
-    roiSeriesSopUids: null,
-    roiSeriesSopUidsError: null,
     roiSliceIndex: -1,
-    roiSliceGeom: null,
-    roiSliceGeomError: null,
     roiPreviewSliceStable: null,
     roiRect: null,
     roiWorld: null,
@@ -514,14 +504,7 @@ function useSvrWorkspaceState(identity: string | null) {
       [update],
     ),
     setRoiSeriesUid: useCallback((roiSeriesUid: string | null) => update({ roiSeriesUid }), [update]),
-    setRoiSeriesSopUids: useCallback((roiSeriesSopUids: string[] | null) => update({ roiSeriesSopUids }), [update]),
-    setRoiSeriesSopUidsError: useCallback(
-      (roiSeriesSopUidsError: string | null) => update({ roiSeriesSopUidsError }),
-      [update],
-    ),
     setRoiSliceIndex: useCallback((roiSliceIndex: number) => update({ roiSliceIndex }), [update]),
-    setRoiSliceGeom: useCallback((roiSliceGeom: SliceGeometry | null) => update({ roiSliceGeom }), [update]),
-    setRoiSliceGeomError: useCallback((roiSliceGeomError: string | null) => update({ roiSliceGeomError }), [update]),
     setRoiPreviewSliceStable: useCallback(
       (roiPreviewSliceStable: { sopInstanceUid: string; geom: SliceGeometry } | null) =>
         update({ roiPreviewSliceStable }),
@@ -878,16 +861,8 @@ function useSvrReconstructionWorkspace({
     setShowAcquiredStack,
     roiSeriesUid,
     setRoiSeriesUid,
-    roiSeriesSopUids,
-    setRoiSeriesSopUids,
-    roiSeriesSopUidsError,
-    setRoiSeriesSopUidsError,
     roiSliceIndex,
     setRoiSliceIndex,
-    roiSliceGeom,
-    setRoiSliceGeom,
-    roiSliceGeomError,
-    setRoiSliceGeomError,
     roiPreviewSliceStable,
     setRoiPreviewSliceStable,
     roiRect,
@@ -896,6 +871,7 @@ function useSvrReconstructionWorkspace({
     setRoiWorld,
   } = useSvrWorkspaceState(workspaceIdentity);
   const [sourceReadiness, setSourceReadiness] = useState<SvrSourceReadiness | null>(null);
+  const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
 
   useEffect(() => {
     if (!workspaceIdentity || selectedSeries.length === 0) {
@@ -905,22 +881,27 @@ function useSvrReconstructionWorkspace({
 
     let current = true;
     const controller = new AbortController();
-    setSourceReadiness(null);
+    const manifests: SeriesFrameManifest[] = [];
 
     // Legacy preparation reads at most four bounded headers at once. Keep that
     // operation-wide bound when several acquisitions contribute to this volume.
     void (async () => {
-      const manifests: SeriesFrameManifest[] = [];
+      let readError: Error | undefined;
       for (const series of selectedSeries) {
         if (controller.signal.aborted) break;
-        manifests.push(
-          await getSeriesFrameManifest(series.seriesUid, {
-            signal: controller.signal,
-            datasetRevision: volumeIdentity?.datasetRevision,
-            selectedPatientKey: volumeIdentity?.patientKey,
-          }),
-        );
+        try {
+          manifests.push(
+            await getSeriesFrameManifest(series.seriesUid, {
+              signal: controller.signal,
+              datasetRevision: volumeIdentity?.datasetRevision,
+              selectedPatientKey: volumeIdentity?.patientKey,
+            }),
+          );
+        } catch (reason) {
+          readError ??= reason instanceof Error ? reason : new Error('The acquisition could not be verified.');
+        }
       }
+      if (readError) throw readError;
       return manifests;
     })()
       .then((manifests) => {
@@ -970,7 +951,7 @@ function useSvrReconstructionWorkspace({
         if (!current) return;
         setSourceReadiness({
           identity: workspaceIdentity,
-          manifests: [],
+          manifests,
           independentOrientationCount: 0,
           acquisition: null,
           error: reason instanceof Error ? reason.message : 'The acquisition could not be verified.',
@@ -1006,6 +987,18 @@ function useSvrReconstructionWorkspace({
     return selectedSeries.find((s) => s.seriesUid === effectiveRoiSeriesUid) ?? null;
   }, [effectiveRoiSeriesUid, selectedSeries]);
 
+  const roiManifest = currentReadiness?.manifests.find(
+    (manifest) =>
+      manifest.seriesUid === effectiveRoiSeriesUid &&
+      manifest.studyUid === roiSeries?.studyId &&
+      (!volumeIdentity?.patientKey || manifest.patientKey === volumeIdentity.patientKey),
+  );
+  const roiSeriesSopUids = useMemo(
+    () => roiManifest?.frames.map((frame) => frame.sopInstanceUid) ?? null,
+    [roiManifest],
+  );
+  const roiSeriesSopUidsError = roiManifest ? null : currentReadiness?.error;
+
   const roiDragRef = useRef<{ x0: number; y0: number } | null>(null);
 
   // Keep fallback slice inputs in refs so ROI-series effects don't retrigger on every slice tick.
@@ -1027,9 +1020,6 @@ function useSvrReconstructionWorkspace({
   }, [clear, workspaceIdentity]);
 
   useEffect(() => {
-    setRoiSeriesSopUids(null);
-    setRoiSeriesSopUidsError(null);
-
     // Slice selection priority:
     // 1) The last slice the user viewed in the SVR ROI preview for this series.
     // 2) The last slice the user viewed in the grid/overlay views (if it matches this series).
@@ -1055,44 +1045,12 @@ function useSvrReconstructionWorkspace({
     }
 
     setRoiSliceIndex(nextSliceIndex);
-    setRoiSliceGeom(null);
-    setRoiSliceGeomError(null);
 
     setRoiRect(null);
     roiDragRef.current = null;
     setRoiWorld(null);
     setRoiPreviewSliceStable(null);
-
-    if (!effectiveRoiSeriesUid) return;
-
-    let alive = true;
-    const run = async () => {
-      try {
-        const uids = await getSortedSopInstanceUidsForSeries(effectiveRoiSeriesUid);
-        if (!alive) return;
-        setRoiSeriesSopUids(uids);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (!alive) return;
-        setRoiSeriesSopUidsError(msg);
-      }
-    };
-
-    void run();
-    return () => {
-      alive = false;
-    };
-  }, [
-    effectiveRoiSeriesUid,
-    setRoiPreviewSliceStable,
-    setRoiRect,
-    setRoiSeriesSopUids,
-    setRoiSeriesSopUidsError,
-    setRoiSliceGeom,
-    setRoiSliceGeomError,
-    setRoiSliceIndex,
-    setRoiWorld,
-  ]);
+  }, [effectiveRoiSeriesUid, setRoiPreviewSliceStable, setRoiRect, setRoiSliceIndex, setRoiWorld]);
 
   // Persist explicit slice selection (>=0) so leaving/re-entering SVR preserves ROI preview position.
   const roiSeriesCount = roiSeriesSopUids?.length ?? 0;
@@ -1121,41 +1079,20 @@ function useSvrReconstructionWorkspace({
   );
 
   const roiSopInstanceUid = roiSeriesSopUids ? (roiSeriesSopUids[effectiveRoiSliceIndex] ?? null) : null;
+  const roiFrame = roiManifest?.frames[effectiveRoiSliceIndex];
+  const { geom: roiSliceGeom, error: roiSliceGeomError } = useMemo(() => {
+    try {
+      return { geom: roiFrame ? getSliceGeometryFromInstance(roiFrame) : null, error: null };
+    } catch (reason) {
+      return { geom: null, error: reason instanceof Error ? reason.message : String(reason) };
+    }
+  }, [roiFrame]);
 
   useEffect(() => {
-    setRoiSliceGeom(null);
-    setRoiSliceGeomError(null);
-
     // The selection rectangle is tied to a specific slice; clear it when the slice changes.
     setRoiRect(null);
     roiDragRef.current = null;
-
-    if (!roiSopInstanceUid) return;
-
-    let alive = true;
-    const run = async () => {
-      try {
-        const db = await getDB();
-        const inst = (await db.get('instances', roiSopInstanceUid)) as DicomInstance | undefined;
-        if (!inst) {
-          throw new Error('Missing DICOM instance for ROI preview');
-        }
-
-        const geom = getSliceGeometryFromInstance(inst);
-        if (!alive) return;
-        setRoiSliceGeom(geom);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (!alive) return;
-        setRoiSliceGeomError(msg);
-      }
-    };
-
-    void run();
-    return () => {
-      alive = false;
-    };
-  }, [roiSopInstanceUid, setRoiRect, setRoiSliceGeom, setRoiSliceGeomError]);
+  }, [roiSopInstanceUid, setRoiRect]);
 
   useEffect(() => {
     if (!roiSopInstanceUid || !roiSliceGeom) return;
@@ -1170,26 +1107,26 @@ function useSvrReconstructionWorkspace({
     return Math.max(dx, dy, dz);
   }, [roiWorld]);
 
-  const currentReadiness = sourceReadiness?.identity === workspaceIdentity ? sourceReadiness : null;
   const nativeSource =
-    currentReadiness?.acquisition?.mode === 'independent-2d'
+    currentReadiness?.error || currentReadiness?.acquisition?.mode === 'independent-2d'
       ? null
       : (currentReadiness?.acquisition?.primaryOriginal3d ?? currentReadiness?.manifests[0] ?? null);
   const selectedPlaneCount = currentReadiness?.independentOrientationCount ?? selectedGroup?.planeCount ?? 0;
   const planning = useMemo(() => {
     try {
       return {
-        result: currentReadiness?.manifests.length
-          ? planReconstruction(
-              nativeSource
-                ? currentReadiness.manifests
-                : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
-              params,
-              roiWorld,
-              acceptedResult?.volume,
-              nativeSource,
-            )
-          : null,
+        result:
+          currentReadiness?.manifests.length && !currentReadiness.error
+            ? planReconstruction(
+                nativeSource
+                  ? currentReadiness.manifests
+                  : (currentReadiness.acquisition?.eligibleIndependentSources ?? currentReadiness.manifests),
+                params,
+                roiWorld,
+                acceptedResult?.volume,
+                nativeSource,
+              )
+            : null,
         error: null,
       };
     } catch (reason) {
@@ -1679,7 +1616,7 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
         </div>
       </div>
 
-      {currentReadiness?.manifests.length ? (
+      {currentReadiness?.manifests.length && !currentReadiness.error ? (
         <details className="svr-sampling-details border-t border-[var(--border-color)] pt-2 text-xs text-[var(--text-secondary)]">
           <summary>Source details</summary>
           <div className="mt-3 space-y-2.5 text-xs">
