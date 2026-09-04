@@ -849,7 +849,7 @@ export async function prepareDenseLongitudinalResliceInput(
   };
 }
 
-/** Replace a coarse-stack preview with native through-plane anatomy in a fresh worker. */
+/** Replace a coarse-stack preview with native through-plane anatomy in a bounded worker. */
 export function densifyLongitudinalRegistration(
   targetManifest: SeriesFrameManifest,
   selectedReference: LongitudinalReferencePlane,

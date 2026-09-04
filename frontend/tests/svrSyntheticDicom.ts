@@ -97,7 +97,6 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
           column += run;
         }
       }
-      if (encoded.length % 2) encoded.push(128);
       return encoded;
     });
     const frame = [
