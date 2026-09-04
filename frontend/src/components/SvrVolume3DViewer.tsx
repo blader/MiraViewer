@@ -39,9 +39,9 @@ import {
   type NativePlaneBinding,
 } from '../utils/svr/glRaymarch';
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
-import { deleteVolumeSegmentation, getVolumeSegmentationSnapshot, saveVolumeSegmentation } from '../utils/localApi';
+import { getVolumeSegmentationSnapshot, saveVolumeSegmentation } from '../utils/localApi';
 import { DatasetReplacedError, newDatasetToken } from '../db/db';
-import { SavedSelectionChangedError } from '../db/volumeSegmentations';
+import { SavedSelectionChangedError, type VolumeSegmentationSnapshot } from '../db/volumeSegmentations';
 import { clamp } from '../utils/math';
 import {
   defaultVolumeWindow,
@@ -64,7 +64,9 @@ import {
 import { volumeCamera } from '../utils/svr/volumeCamera';
 import {
   captureSelectionGeometry,
+  exactSelectionLookup,
   findTransferableSelection,
+  selectionVolumeKey,
   transferSavedSelection,
   type SavedSelectionMigration,
 } from '../utils/svr/selectionMigration';
@@ -497,27 +499,14 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     return { valid: true, count, total };
   }, [volume]);
 
-  const volumeKey = useMemo(() => {
-    if (!volume || !volumeIdentity?.studyUid || volumeIdentity.seriesUids.length === 0) return null;
-    return JSON.stringify({
-      patient: volumeIdentity.patientKey ?? null,
-      study: volumeIdentity.studyUid,
-      series: [...volumeIdentity.seriesUids].sort(),
-      frame: volumeIdentity.frameOfReferenceUid ?? null,
-      dims: volume.dims,
-      spacing: volume.voxelSizeMm,
-      origin: volume.originMm,
-      ...(volume.direction ? { direction: volume.direction } : {}),
-      revision: volumeIdentity.datasetRevision ?? null,
-      ...(volume.reconstructionFingerprint ? { reconstruction: volume.reconstructionFingerprint } : {}),
-    });
-  }, [volume, volumeIdentity]);
+  const volumeKey = useMemo(() => selectionVolumeKey(volume, volumeIdentity), [volume, volumeIdentity]);
   const storageOwnerRef = useRef<{
     volume: SvrVolume;
     key: string;
     datasetToken: string;
     issuedRevision: string | null;
     committedRevision: string | null;
+    legacySource?: VolumeSegmentationSnapshot['legacySource'];
     data?: Uint8Array;
     submission?: string;
   } | null>(null);
@@ -545,44 +534,45 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         (next?.data && next.data === owner.data
           ? { indices: new Uint32Array(), before: new Uint8Array(), after: new Uint8Array() }
           : undefined);
+      const expectedRevision = retry ? owner.committedRevision : owner.issuedRevision;
       const change = {
         datasetToken: owner.datasetToken,
-        expectedRevision: retry ? owner.committedRevision : owner.issuedRevision,
+        expectedRevision,
         revision: submission,
-        ...(!retry && edit && (patch ? previousData : next?.data) === owner.data ? { patch: edit } : {}),
+        ...(expectedRevision === null && owner.legacySource ? { legacySource: owner.legacySource } : {}),
+        ...(next && !retry && edit && (patch ? previousData : next.data) === owner.data ? { patch: edit } : {}),
       };
       // The durable API captures these bytes/patches synchronously, before an
       // editing owner can reuse its buffer or this component can unmount.
-      const saving = next
-        ? saveVolumeSegmentation(
-            {
-              volumeKey,
-              patientKey: volumeIdentity.patientKey,
-              studyUid: volumeIdentity.studyUid,
-              seriesUids: volumeIdentity.seriesUids,
-              frameOfReferenceUid: volumeIdentity.frameOfReferenceUid,
-              dims: next.dims,
-              voxelSizeMm: volume.voxelSizeMm,
-              geometry: captureSelectionGeometry(volume),
-              labels: next.data,
-              classMetadata: next.meta,
-              reviewState: next.reviewState,
-              seeds: next.seeds,
-              ...(next.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: next.clippedNativeVoxels } : {}),
-              ...(next.contextLimited !== undefined ? { contextLimited: next.contextLimited } : {}),
-              modelKey: labelSourceRef.current,
-              datasetRevision: volumeIdentity.datasetRevision,
-              updatedAt: Date.now(),
-            },
-            change,
-          )
-        : deleteVolumeSegmentation(volumeKey, change);
-      owner.issuedRevision = next ? submission : null;
+      const saving = saveVolumeSegmentation(
+        {
+          volumeKey,
+          patientKey: volumeIdentity.patientKey,
+          studyUid: volumeIdentity.studyUid,
+          seriesUids: volumeIdentity.seriesUids,
+          frameOfReferenceUid: volumeIdentity.frameOfReferenceUid,
+          dims: next?.dims ?? volume.dims,
+          voxelSizeMm: volume.voxelSizeMm,
+          geometry: captureSelectionGeometry(volume),
+          labels: next?.data ?? null,
+          classMetadata: next?.meta ?? BRATS_BASE_LABEL_META,
+          reviewState: next?.reviewState ?? 'draft',
+          seeds: next?.seeds,
+          ...(next?.clippedNativeVoxels !== undefined ? { clippedNativeVoxels: next.clippedNativeVoxels } : {}),
+          ...(next?.contextLimited !== undefined ? { contextLimited: next.contextLimited } : {}),
+          modelKey: next ? labelSourceRef.current : undefined,
+          datasetRevision: volumeIdentity.datasetRevision,
+          updatedAt: Date.now(),
+        },
+        change,
+      );
+      owner.issuedRevision = submission;
       owner.data = next?.data;
       owner.submission = submission;
       void saving
         .then(() => {
-          owner.committedRevision = next ? submission : null;
+          owner.committedRevision = submission;
+          owner.legacySource = undefined;
           if (storageOwnerRef.current === owner && owner.submission === submission) setStorageError(null);
         })
         .catch((error: unknown) => {
@@ -622,8 +612,11 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       return;
     }
     let cancelled = false;
-    void getVolumeSegmentationSnapshot(volumeKey)
-      .then(async ({ record: saved, revision, datasetToken }) => {
+    void getVolumeSegmentationSnapshot(
+      volumeKey,
+      volumeIdentity ? exactSelectionLookup(volume, volumeIdentity) : undefined,
+    )
+      .then(async ({ record: saved, revision, datasetToken, legacySource }) => {
         if (cancelled) return;
         storageOwnerRef.current = {
           volume,
@@ -631,6 +624,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
           datasetToken,
           issuedRevision: revision,
           committedRevision: revision,
+          legacySource,
           data: saved?.labels,
         };
         if (saved) {

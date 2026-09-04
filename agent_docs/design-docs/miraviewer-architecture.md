@@ -84,6 +84,23 @@ saved revision cannot be overwritten by Retry: the user can explicitly discard
 local edits and reload. The [sparse-editing evidence](../evidence/sparse-editing-2026-09-03/README.md)
 records synthetic saved-state and pixel parity, write volume and timing scope.
 
+Selection keys with complete accepted provenance address the Study/Series UIDs,
+frame of reference, exact physical grid and reconstruction fingerprint, not a
+patient-group label or global import revision. Native fingerprints likewise omit
+that operation epoch; current-source admission and cancellation still check it.
+This uses the existing immutable DICOM SOP-identity contract, not a new pixel hash
+or a claim of cryptographic image equivalence.
+
+A readonly snapshot can recover one uniquely verified exact-grid legacy selection.
+It checks the owning study, historical patient aliases, source SOPs, source kinds,
+registered transforms and geometry; an old native fingerprint is recomputed using
+its original dataset revision. Discovery does not rewrite labels. The first edit
+creates a canonical checkpoint while atomically checking the target revision,
+dataset token and original record's revision/timestamp. The original remains saved.
+An empty checkpoint makes Clear durable without allowing that original to reappear.
+Unknown or competing legacy grids are not automatically assigned; explicit
+cross-grid transfer remains a separate draft operation with its existing guards.
+
 ### Acquisitions and panel settings
 
 A comparison column's date string is display metadata, not durable ownership.
@@ -102,8 +119,8 @@ save materializes a canonical row and retains the original and its provenance.
 Ambiguous settings require an explicit assignment in the Examinations
 panel. Hydration and export share that candidate policy; per-date unresolved-assignment
 metadata keeps a selective backup from turning missing candidates into a guessed owner.
-Legacy volume-key migration is separate and remains an open audit item;
-source-owned panel settings do not imply that every historical 3D key is migrated.
+Volume-key recovery follows the exact-source rules above; source-owned panel
+settings do not imply that an unverifiable historical 3D grid is safe to migrate.
 
 The content `dataset_revision` changes on import. The saved-work `dataset_token`
 changes on restore and database recreation, not ordinary additive import. A settings

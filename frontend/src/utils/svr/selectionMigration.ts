@@ -1,11 +1,12 @@
 import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY } from '../../db/db';
 import { getPatientIdentityAliases, getPatientIdentityKeys } from '../../db/patientIdentity';
-import { readStoredVolumeSegmentation } from '../../db/volumeSegmentations';
+import { readStoredVolumeSegmentation, type VolumeSegmentationLookup } from '../../db/volumeSegmentations';
 import type { VolumeSegmentationGeometry, VolumeSegmentationRow } from '../../db/schema';
 import type { SvrLabelMeta, SvrLabelVolume, SvrVolume } from '../../types/svr';
 import { IDENTITY_DIRECTION } from './volumeGeometry';
 import { transferSelectionAnnotations } from './annotationTransfer';
 import { isSelectionContextValid, isSelectionCoverageValid } from '../segmentation/selectionEditing';
+import { nativeVolumeFingerprint } from './nativeVolume';
 
 export type SavedSelectionIdentity = {
   patientKey?: string;
@@ -29,11 +30,12 @@ export type SavedSelectionMigration = {
 
 type RequiredIdentity = Required<SavedSelectionIdentity>;
 type KeyGeometry = {
-  patient: string;
+  version?: 2;
+  patient?: string;
   study: string;
   series: string[];
   frame: string;
-  revision: number;
+  revision?: number;
   dims: [number, number, number];
   spacing: [number, number, number];
   origin: [number, number, number];
@@ -46,6 +48,8 @@ const finiteArray = (value: unknown, size: number): value is number[] =>
   Array.isArray(value) && value.length === size && value.every(Number.isFinite);
 const closeArray = (left: readonly number[], right: readonly number[]) =>
   left.length === right.length && left.every((value, index) => Math.abs(value - right[index]!) <= 1e-6);
+const sameArray = (left: readonly number[], right: readonly number[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
 const stringSet = (value: unknown): value is string[] =>
   Array.isArray(value) && value.length > 0 && value.every(nonempty) && new Set(value).size === value.length;
 const sameSet = (left: readonly string[], right: readonly string[]) => {
@@ -122,12 +126,13 @@ function parseKey(key: string): KeyGeometry | null {
     const direction = parsed?.direction ?? IDENTITY_DIRECTION;
     if (
       !parsed ||
-      !nonempty(parsed.patient) ||
+      (parsed.version !== undefined && parsed.version !== 2) ||
+      (parsed.version === 2
+        ? !nonempty(parsed.reconstruction)
+        : !nonempty(parsed.patient) || !Number.isSafeInteger(parsed.revision) || parsed.revision! < 0) ||
       !nonempty(parsed.study) ||
       !nonempty(parsed.frame) ||
       !stringSet(parsed.series) ||
-      !Number.isSafeInteger(parsed.revision) ||
-      parsed.revision < 0 ||
       !finiteArray(parsed.dims, 3) ||
       !parsed.dims.every((size) => Number.isSafeInteger(size) && size > 0) ||
       !Number.isSafeInteger(parsed.dims.reduce((product, size) => product * size, 1)) ||
@@ -161,11 +166,11 @@ function matchesScope(
   patientAliases: readonly string[] = [identity.patientKey],
 ): boolean {
   return (
-    patientAliases.includes(key.patient) &&
+    (key.version === 2 || patientAliases.includes(key.patient!)) &&
     key.study === identity.studyUid &&
     key.frame === identity.frameOfReferenceUid &&
     sameSet(key.series, identity.seriesUids) &&
-    (!includeRevision || key.revision === identity.datasetRevision)
+    (!includeRevision || key.version === 2 || key.revision === identity.datasetRevision)
   );
 }
 
@@ -188,6 +193,141 @@ function matchesVolume(volume: SvrVolume, identity: RequiredIdentity, key: KeyGe
     provenance.datasetRevision === identity.datasetRevision &&
     provenance.sources.every((source) => selectedSources.has(source.seriesUid)),
   );
+}
+
+/** Complete accepted source geometry owns durable identity; incomplete historical volumes keep their old key. */
+export function selectionVolumeKey(
+  volume: SvrVolume | null | undefined,
+  identity: SavedSelectionIdentity | null | undefined,
+): string | null {
+  if (!volume || !identity?.studyUid || !identity.seriesUids.length) return null;
+  const grid = {
+    study: identity.studyUid,
+    series: [...identity.seriesUids].sort(),
+    frame: identity.frameOfReferenceUid ?? null,
+    dims: volume.dims,
+    spacing: volume.voxelSizeMm,
+    origin: volume.originMm,
+    ...(volume.direction ? { direction: volume.direction } : {}),
+  };
+  const canonical = JSON.stringify({
+    version: 2,
+    ...grid,
+    direction: volume.direction ?? IDENTITY_DIRECTION,
+    reconstruction: volume.reconstructionFingerprint,
+  });
+  if (
+    completeIdentity(identity) &&
+    captureSelectionGeometry(volume) &&
+    matchesVolume(volume, identity, parseKey(canonical))
+  )
+    return canonical;
+  return JSON.stringify({
+    patient: identity.patientKey ?? null,
+    ...grid,
+    revision: identity.datasetRevision ?? null,
+    ...(volume.reconstructionFingerprint ? { reconstruction: volume.reconstructionFingerprint } : {}),
+  });
+}
+
+function sameRegisteredSources(
+  previous: VolumeSegmentationGeometry['sourceProvenance'],
+  current: VolumeSegmentationGeometry['sourceProvenance'],
+  coordinatesEqual = closeArray,
+): boolean {
+  return (
+    previous.mode === current.mode &&
+    previous.primarySeriesUid === current.primarySeriesUid &&
+    previous.sources.length === current.sources.length &&
+    previous.sources.every((source) => {
+      const match = current.sources.find((candidate) => candidate.seriesUid === source.seriesUid);
+      return Boolean(
+        match &&
+        source.kind === match.kind &&
+        sameSet(source.sopInstanceUids, match.sopInstanceUids) &&
+        coordinatesEqual(source.transform.rotation, match.transform.rotation) &&
+        coordinatesEqual(source.transform.translationMm, match.transform.translationMm),
+      );
+    })
+  );
+}
+
+/** Freeze source/grid metadata only. The storage snapshot verifies the live owner and epoch before projecting a row. */
+export function exactSelectionLookup(
+  volume: SvrVolume,
+  identity: SavedSelectionIdentity,
+): VolumeSegmentationLookup | undefined {
+  const currentKey = selectionVolumeKey(volume, identity);
+  const geometry = captureSelectionGeometry(volume);
+  if (!completeIdentity(identity) || !geometry || !currentKey || parseKey(currentKey)?.version !== 2) return undefined;
+  const scope = { ...identity, seriesUids: [...identity.seriesUids] };
+  const grid = { dims: [...volume.dims], spacing: [...volume.voxelSizeMm] };
+  const primary = volume.sourceProvenance!.sources.find(
+    (source) => source.seriesUid === geometry.sourceProvenance.primarySeriesUid,
+  )!;
+  const contributing = [...primary.contributingSopInstanceUids];
+  const nativeGrid = {
+    dims: [...volume.dims] as SvrVolume['dims'],
+    originMm: geometry.originMm,
+    direction: geometry.direction,
+    voxelSizeMm: [...volume.voxelSizeMm] as SvrVolume['voxelSizeMm'],
+  };
+  const primaryTransform = geometry.sourceProvenance.sources.find(
+    (source) => source.seriesUid === primary.seriesUid,
+  )!.transform;
+  return {
+    studyUid: scope.studyUid,
+    patientKey: scope.patientKey,
+    datasetRevision: scope.datasetRevision,
+    matches(record, patientAliases) {
+      const key = parseKey(record.volumeKey);
+      const previous = record.geometry;
+      if (
+        !key ||
+        !matchesScope(key, scope, false, patientAliases) ||
+        !patientAliases.includes(record.patientKey ?? '') ||
+        record.studyUid !== scope.studyUid ||
+        record.frameOfReferenceUid !== scope.frameOfReferenceUid ||
+        !stringSet(record.seriesUids) ||
+        !sameSet(record.seriesUids, scope.seriesUids) ||
+        !Number.isFinite(record.updatedAt) ||
+        !validGeometry(previous) ||
+        !finiteArray(record.dims, 3) ||
+        !finiteArray(record.voxelSizeMm, 3) ||
+        !sameArray(record.dims, grid.dims) ||
+        !sameArray(key.dims, grid.dims) ||
+        !sameArray(record.voxelSizeMm, grid.spacing) ||
+        !sameArray(key.spacing, grid.spacing) ||
+        !sameArray(previous.originMm, geometry.originMm) ||
+        !sameArray(key.origin, geometry.originMm) ||
+        !sameArray(previous.direction, geometry.direction) ||
+        !sameArray(key.direction, geometry.direction) ||
+        key.reconstruction !== previous.reconstructionFingerprint ||
+        (key.version !== 2 && key.revision !== record.datasetRevision) ||
+        !sameRegisteredSources(previous.sourceProvenance, geometry.sourceProvenance, sameArray) ||
+        ('labels' in record && !validLabels(record))
+      )
+        return false;
+      return (
+        previous.reconstructionFingerprint === geometry.reconstructionFingerprint ||
+        Boolean(
+          previous.reconstructionFingerprint.startsWith('native-v1-') &&
+          geometry.reconstructionFingerprint.startsWith('native-v2-') &&
+          geometry.sourceProvenance.mode !== 'independent-2d' &&
+          Number.isSafeInteger(record.datasetRevision) &&
+          record.datasetRevision! >= 0 &&
+          previous.reconstructionFingerprint ===
+            nativeVolumeFingerprint(
+              primary.seriesUid,
+              contributing,
+              nativeGrid,
+              primaryTransform,
+              record.datasetRevision,
+            ),
+        )
+      );
+    },
+  };
 }
 
 function validLabels(record: VolumeSegmentationRow): boolean {
@@ -253,23 +393,7 @@ function transferable(
     !Number.isFinite(record.updatedAt)
   )
     return false;
-  const previous = geometry.sourceProvenance,
-    current = target.sourceProvenance;
-  return (
-    previous.mode === current.mode &&
-    previous.primarySeriesUid === current.primarySeriesUid &&
-    previous.sources.length === current.sources.length &&
-    previous.sources.every((source) => {
-      const match = current.sources.find((candidate) => candidate.seriesUid === source.seriesUid);
-      return (
-        match &&
-        source.kind === match.kind &&
-        sameSet(source.sopInstanceUids, match.sopInstanceUids) &&
-        closeArray(source.transform.rotation, match.transform.rotation) &&
-        closeArray(source.transform.translationMm, match.transform.translationMm)
-      );
-    })
-  );
+  return sameRegisteredSources(geometry.sourceProvenance, target.sourceProvenance);
 }
 
 const STORES = ['volume_segmentations', 'volume_segmentation_chunks', 'app_state', 'studies', 'series'] as const;

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
-import type { DicomInstance } from '../../src/db/schema';
+import type { DicomInstance, StoredVolumeSegmentationRow, VolumeSegmentationChunk } from '../../src/db/schema';
 import { createSyntheticCustomModel } from '../helpers/customTumorModel';
 import { createHash } from 'node:crypto';
 import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
@@ -407,6 +407,235 @@ test('upgrades a legacy database for physical viewing and preserves original byt
     errors,
     scope:
       'Synthetic legacy metadata and saved-work preservation. Real source-stack admission, reopen, ZIP export and fresh-context restore; retained legacy labels are storage evidence, not automatic remapping to the newly opened grid or anatomical evidence.',
+  });
+});
+
+test('keeps exact source-bound selections through unrelated import, legacy recovery, editing and fresh-context restore', async ({
+  page,
+  browser,
+}, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await importComparisonExaminations(
+    page,
+    null,
+    [{ studyDate: '20370904', studyUid: '1.2.826.0.1.3680043.10.543.20370904.1' }],
+    true,
+  );
+  const openVolume = async (target: Page) => {
+    await target.getByRole('button', { name: '3D', exact: true }).click();
+    await target.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
+    await expect(target.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+  };
+  await openVolume(page);
+  await openSelectionAndVerifyPixels(page);
+  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
+  const mark = async (target: Page, kind: 'Add' | 'Remove', x: number) => {
+    await target.getByRole('button', { name: kind, exact: true }).click();
+    const canvas = target.getByRole('application', { name: /^Axial reconstructed slice/ });
+    const box = (await canvas.boundingBox())!;
+    await canvas.click({ position: { x: box.width * x, y: box.height * 0.5 } });
+  };
+  await mark(page, 'Add', 0.5);
+  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
+  await mark(page, 'Remove', 0.65);
+  await expect
+    .poll(async () => (await savedVolumeSelection(page))[0]?.seeds?.background.length ?? 0)
+    .toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.reviewState).toBe('reviewed');
+  const reviewed = (await savedVolumeSelection(page))[0]!;
+  const original = await metadataSnapshot(page);
+
+  // Downgrade only this isolated synthetic selection to the historical dense
+  // key/fingerprint format while the application is unmounted. This is fixture
+  // setup, not a production migration or a replacement for the actual reopen.
+  await page.route('**/legacy-selection-bootstrap', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic selection fixture</title>' }),
+  );
+  try {
+    await page.goto('/legacy-selection-bootstrap');
+  } finally {
+    await page.unroute('**/legacy-selection-bootstrap');
+  }
+  const legacyKey = await page.evaluate(async (currentKey) => {
+    const read = <T>(request: IDBRequest<T>) =>
+      new Promise<T>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const db = await read(indexedDB.open('MiraViewerDB'));
+    try {
+      const tx = db.transaction(['volume_segmentations', 'volume_segmentation_chunks'], 'readwrite');
+      const complete = new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
+      const heads = tx.objectStore('volume_segmentations');
+      const row = (await read(heads.get(currentKey))) as StoredVolumeSegmentationRow;
+      if ('labels' in row || !row.geometry) throw new Error('Expected a current, source-verified chunked selection.');
+      const { storage, revision, labelBytes, chunkCount, ...record } = row;
+      const chunks = tx.objectStore('volume_segmentation_chunks');
+      const range = IDBKeyRange.bound([currentKey, 0], [currentKey, Number.MAX_SAFE_INTEGER]);
+      const payloads = (await read(chunks.getAll(range))) as VolumeSegmentationChunk[];
+      if (storage !== 'chunks-v1' || !revision || payloads.length !== chunkCount)
+        throw new Error('Incomplete fixture selection.');
+      const labels = new Uint8Array(labelBytes);
+      for (const chunk of payloads) labels.set(chunk.data, chunk.offset);
+      const geometry = row.geometry;
+      const primary = geometry.sourceProvenance.sources.find(
+        (source) => source.seriesUid === geometry.sourceProvenance.primarySeriesUid,
+      )!;
+      const input = JSON.stringify([
+        record.datasetRevision,
+        primary.seriesUid,
+        primary.sopInstanceUids,
+        record.dims,
+        geometry.originMm,
+        geometry.direction,
+        record.voxelSizeMm,
+        primary.transform,
+      ]);
+      let hash = 2166136261;
+      for (let i = 0; i < input.length; i++) hash = Math.imul(hash ^ input.charCodeAt(i), 16777619);
+      const reconstruction = `native-v1-${(hash >>> 0).toString(16)}`;
+      const volumeKey = JSON.stringify({
+        patient: record.patientKey,
+        study: record.studyUid,
+        series: record.seriesUids,
+        frame: record.frameOfReferenceUid,
+        dims: record.dims,
+        spacing: record.voxelSizeMm,
+        origin: geometry.originMm,
+        direction: geometry.direction,
+        revision: record.datasetRevision,
+        reconstruction,
+      });
+      await read(
+        heads.put({
+          ...record,
+          volumeKey,
+          labels,
+          geometry: { ...geometry, reconstructionFingerprint: reconstruction },
+        }),
+      );
+      await read(heads.delete(currentKey));
+      await read(chunks.delete(range));
+      await complete;
+      return volumeKey;
+    } finally {
+      db.close();
+    }
+  }, reviewed.volumeKey);
+  const legacy = (await savedVolumeSelection(page))[0]!;
+  expect(legacy).toEqual({ ...reviewed, volumeKey: legacyKey });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Import additional scans' }).click();
+  const intake = page.getByRole('dialog', { name: 'Import scans' });
+  await intake.getByLabel('Select DICOM image files').setInputFiles(
+    await Promise.all(
+      createSyntheticSvrDicomFiles({
+        orientations: 1,
+        studyUid: '1.2.826.0.1.3680043.10.543.20360904.1',
+        studyDate: '20360904',
+        pixelPaddingValue: null,
+      }).map(async (file) => ({
+        name: file.name,
+        mimeType: file.type,
+        buffer: Buffer.from(await file.arrayBuffer()),
+      })),
+    ),
+  );
+  await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
+  await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
+  await intake.getByRole('button', { name: 'Done', exact: true }).click();
+  const imported = await metadataSnapshot(page);
+  expect(imported.revision).toBeGreaterThan(original.revision);
+  expect(imported.token).toBe(original.token);
+  await openVolume(page);
+  await expect(page.getByText(/Reviewed selection ·/)).toBeVisible();
+  await page.getByRole('button', { name: 'Edit selection', exact: true }).click();
+  await expectGrayscalePixels(page.getByRole('application', { name: /^Axial reconstructed slice/ }));
+  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
+  expect(await savedVolumeSelection(page)).toEqual([legacy]);
+  await capture(page, info, 'durable-grid-recovered-desktop');
+  await mark(page, 'Add', 0.4);
+  await expect.poll(async () => (await savedVolumeSelection(page)).length).toBe(2);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect
+    .poll(
+      async () => (await savedVolumeSelection(page)).find((row) => row.volumeKey === reviewed.volumeKey)?.reviewState,
+    )
+    .toBe('reviewed');
+  const edited = await savedVolumeSelection(page);
+  const canonical = edited.find((row) => row.volumeKey === reviewed.volumeKey)!;
+  expect(canonical.selectedCount).toBeGreaterThan(reviewed.selectedCount);
+  expect(canonical.seeds!.foreground).toEqual(expect.arrayContaining(reviewed.seeds!.foreground));
+  expect(canonical.seeds!.background).toEqual(reviewed.seeds!.background);
+  expect(edited.find((row) => row.volumeKey === legacyKey)).toEqual(legacy);
+  await page.getByRole('button', { name: 'Application menu' }).click();
+  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
+  const pending = page.waitForEvent('download');
+  await page.getByRole('dialog').getByRole('button', { name: 'Export', exact: true }).click();
+  const download = await pending;
+  const archive = info.outputPath('synthetic-durable-selection-backup.zip');
+  await download.saveAs(archive);
+  expect(await download.failure()).toBeNull();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  let restoredSnapshot: Awaited<ReturnType<typeof metadataSnapshot>>;
+  let cleared: Awaited<ReturnType<typeof savedVolumeSelection>>;
+  try {
+    const restored = await context.newPage();
+    restored.on('pageerror', (error) => errors.push(error.message));
+    await restored.goto(new URL('/', page.url()).href);
+    await restored.getByRole('button', { name: 'Import scans', exact: true }).click();
+    const restore = restored.getByRole('dialog', { name: 'Import scans' });
+    await restore.getByLabel('Select a complete backup or image archive').setInputFiles(archive);
+    await restore.getByRole('checkbox').check();
+    await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+    await expect(restore.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
+    await restore.getByRole('button', { name: 'Done', exact: true }).click();
+    restoredSnapshot = await metadataSnapshot(restored);
+    expect(restoredSnapshot.frames).toEqual(imported.frames);
+    expect(restoredSnapshot.token).not.toBe(imported.token);
+    expect(await savedVolumeSelection(restored)).toEqual(edited);
+    await openVolume(restored);
+    await expect(restored.getByText(/Reviewed selection ·/)).toBeVisible();
+    await restored.getByRole('button', { name: 'Edit selection', exact: true }).click();
+    await capture(restored, info, 'durable-grid-restored-desktop');
+    await restored.getByRole('button', { name: 'Clear selection' }).click();
+    await expect
+      .poll(
+        async () =>
+          (await savedVolumeSelection(restored)).find((row) => row.volumeKey === canonical.volumeKey)?.selectedCount,
+      )
+      .toBe(0);
+    cleared = await savedVolumeSelection(restored);
+    expect(cleared.find((row) => row.volumeKey === legacyKey)).toEqual(legacy);
+    expect(cleared.find((row) => row.volumeKey === canonical.volumeKey)?.seeds).toBeUndefined();
+    await restored.reload();
+    await openVolume(restored);
+    await expect(restored.getByRole('button', { name: 'Select tissue', exact: true })).toBeEnabled();
+    expect(await savedVolumeSelection(restored)).toEqual(cleared);
+    await openSelectionAndVerifyPixels(restored);
+    await capture(restored, info, 'durable-grid-cleared-reopened');
+  } finally {
+    await context.close();
+  }
+  expect(errors).toEqual([]);
+  await attachReceipt(info, 'durable-grid-receipt', {
+    build: await (await page.request.get('/browser-build.json')).json(),
+    browser: browser.version(),
+    original,
+    imported,
+    restored: restoredSnapshot!,
+    reviewed,
+    legacy,
+    edited,
+    cleared: cleared!,
+    errors,
+    scope:
+      'Normal production application and synthetic DICOM only. Exact reviewed labels and literal marks survive a historical native key, unrelated import, guarded editing and fresh-context ZIP restoration. Clear persists while the legacy original remains intact. No anatomical or performance claim.',
   });
 });
 
