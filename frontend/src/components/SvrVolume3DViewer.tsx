@@ -1,11 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, SlidersHorizontal, X } from 'lucide-react';
-import type { SvrLabelVolume, SvrVolume } from '../types/svr';
+import type { SvrLabelVolume, SvrRoiPlane, SvrVolume } from '../types/svr';
 import { SvrSegmentationEditor } from './SvrSegmentationEditor';
 import { SvrImagingContext, useSvrImaging } from './svrImagingContext';
-import { voxelPoint, type VoxelBounds, type VoxelPoint as Vec3i } from '../utils/segmentation/seededVolume';
-import type { SelectionPatch } from '../utils/segmentation/selectionEditing';
-import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
+import { voxelPoint, type VoxelBounds, type VoxelPoint as Vec3i } from '../utils/segmentation/voxelGeometry';
+import { SLICE_AXES, type SelectionPatch } from '../utils/segmentation/selectionEditing';
 import { BRATS_BASE_LABEL_META } from '../utils/segmentation/brats';
 import { buildRgbaPalette256, rgbCss } from '../utils/segmentation/labelPalette';
 import { segmentationVolumeMm3 } from '../utils/segmentation/physicalMeasurements';
@@ -42,11 +41,24 @@ import {
 import { useOnnxTumorSession } from '../hooks/useOnnxTumorSession';
 import { deleteVolumeSegmentation, getVolumeSegmentation, saveVolumeSegmentation } from '../utils/localApi';
 import { clamp } from '../utils/math';
-import { normalizedVolumeWindow, volumeSamplingLabel } from '../utils/svr/volumeDisplay';
+import {
+  defaultVolumeWindow,
+  hasNativeIntensityDomain,
+  normalizedVolumeWindow,
+  volumeDisplayRange,
+  volumeSamplingLabel,
+} from '../utils/svr/volumeDisplay';
 import { useSvrNativePlane } from '../hooks/useSvrNativePlane';
 import { useSvrEnhancement } from '../hooks/useSvrEnhancement';
 import { createEnhancedVolumeBinding, type EnhancedVolumeBinding } from '../utils/svr/enhancedVolumeBinding';
-import { nativeFrameCursor, nearestNativeFrame, projectNativePlaneMask } from '../utils/svr/nativePlane';
+import {
+  makeVolumePlaneData,
+  nativeFrameCursor,
+  nativeSourcePlane,
+  nearestNativeFrame,
+  projectNativePlaneMask,
+  projectVolumePlaneMask,
+} from '../utils/svr/nativePlane';
 import { volumeCamera } from '../utils/svr/volumeCamera';
 import {
   captureSelectionGeometry,
@@ -112,20 +124,19 @@ function v3ApplyMat3(m: Float32Array, v: Vec3): Vec3 {
 type DrawAxesOverlayParams = {
   axesCanvas: HTMLCanvasElement;
   axesCtx: CanvasRenderingContext2D;
-  canvas: HTMLCanvasElement;
   volume: SvrVolume;
   rotMat: Float32Array;
 };
 
 function drawAxesOverlay(params: DrawAxesOverlayParams): void {
-  const { axesCanvas, axesCtx, canvas, volume, rotMat } = params;
+  const { axesCanvas, axesCtx, volume, rotMat } = params;
 
   const w = axesCanvas.width;
   const h = axesCanvas.height;
   if (!(w > 0 && h > 0)) return;
 
   axesCtx.clearRect(0, 0, w, h);
-  const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
+  const dpr = axesCanvas.clientWidth > 0 ? w / axesCanvas.clientWidth : window.devicePixelRatio || 1;
   if (w < 132 * dpr || h < 112 * dpr) return;
 
   // Orientation is a corner instrument, not a ruler projected across anatomy.
@@ -136,7 +147,7 @@ function drawAxesOverlay(params: DrawAxesOverlayParams): void {
   axesCtx.lineCap = 'round';
   axesCtx.lineJoin = 'round';
   axesCtx.lineWidth = Math.max(1, dpr);
-  axesCtx.font = `${Math.max(12, Math.round(12 * dpr))}px SFMono-Regular, ui-monospace, monospace`;
+  axesCtx.font = `${12 * dpr}px SFMono-Regular, ui-monospace, monospace`;
   axesCtx.textBaseline = 'middle';
   const drawLabel = (text: string, x: number, y: number, color: string) => {
     // A narrow dark halo keeps the instrument readable over bright MRI tissue
@@ -380,7 +391,9 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     refineRegion,
     loadEnhancementSource,
     proposeSelection,
+    operations,
   } = useSvrImaging();
+  const enhancementRenderRef = useRef<ReturnType<typeof useSvrEnhancement> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const axesCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -660,58 +673,45 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     },
     [setGeneratedLabels, volume],
   );
-  const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels);
+  const onnx = useOnnxTumorSession(volume ?? null, onOnnxLabels, {
+    blocked: busy,
+    prepare: useCallback(() => operations.prepare('custom-model').retainedBytes, [operations]),
+  });
   const {
     status: onnxStatus,
     preflight: onnxPreflight,
     segRunning: onnxSegRunning,
     fileInputRef: onnxFileInputRef,
     uploadClick: onnxUploadClick,
-    handleSelectedFiles: onnxHandleSelectedFiles,
+    handleSelectedFiles: selectOnnxFiles,
     clearModel: onnxClearModel,
     runSegmentation: runOnnxSegmentation,
     cancelSegmentation: cancelOnnxSegmentation,
-    releaseIdleSession,
   } = onnx;
-
+  const onnxHandleSelectedFiles = useCallback(
+    (files: File[]) => {
+      operations.prepare('model-files');
+      selectOnnxFiles(files);
+    },
+    [operations, selectOnnxFiles],
+  );
   const enhancement = useSvrEnhancement({
     volume,
     labels,
     loadSource: loadEnhancementSource,
+    prepare: useCallback(() => operations.prepare('enhancement').retainedBytes, [operations]),
     blocked: Boolean(busy || onnxSegRunning || savedMigration?.running),
   });
-  const refineWithEnhancement = useCallback<NonNullable<typeof refineRegion>>(
-    (selection, prepareMemory = 0) =>
-      refineRegion?.(selection, () => {
-        const bytes = typeof prepareMemory === 'function' ? prepareMemory() : prepareMemory;
-        // Invalid caller estimates must reach the admission guard unchanged.
-        return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes + enhancement.retainedBytes : bytes;
-      }),
-    [refineRegion, enhancement.retainedBytes],
-  );
   const glEnhancementRef = useRef<EnhancedVolumeBinding | null>(null);
-  const enhancementDisplayRef = useRef(enhancement);
-  const proposeWithEnhancement = useMemo<SelectionProposer | undefined>(
+  const { running: enhancing, cancel: cancelEnhancement, retainedBytes: enhancementBytes } = enhancement;
+  useLayoutEffect(
     () =>
-      proposeSelection
-        ? async (request) => {
-            request.signal.throwIfAborted();
-            await releaseIdleSession();
-            request.signal.throwIfAborted();
-            const enhancementBytes = enhancementDisplayRef.current.retainedBytes;
-            const retainedBytes = request.retainedBytes + enhancementBytes;
-            if (
-              [request.retainedBytes, enhancementBytes, retainedBytes].some(
-                (bytes) => !Number.isSafeInteger(bytes) || bytes < 0,
-              )
-            )
-              throw new Error(
-                'Interactive selection requires a valid retained-memory estimate. Your marks are unchanged.',
-              );
-            return proposeSelection({ ...request, retainedBytes });
-          }
-        : undefined,
-    [proposeSelection, releaseIdleSession],
+      operations.register('viewer', (kind) => {
+        if (kind !== 'custom-model') cancelOnnxSegmentation();
+        if (kind !== 'enhancement' && enhancing) cancelEnhancement();
+        return { volume, labels, retainedBytes: enhancementBytes };
+      }),
+    [operations, volume, labels, cancelOnnxSegmentation, enhancing, cancelEnhancement, enhancementBytes],
   );
 
   // Viewer controls (composite-only)
@@ -726,7 +726,12 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   const [windowSetting, setWindowSetting] = useState<{ volume: SvrVolume; range: [number, number] } | null>(null);
   if (windowSetting && windowSetting.volume !== volume) setWindowSetting(null);
   const windowRange = useMemo<[number, number]>(
-    () => (windowSetting?.volume === volume && windowSetting ? windowSetting.range : (volume?.displayWindow ?? [0, 1])),
+    () =>
+      windowSetting?.volume === volume && windowSetting
+        ? windowSetting.range
+        : volume
+          ? defaultVolumeWindow(volume)
+          : [0, 1],
     [volume, windowSetting],
   );
   const setWindowRange = useCallback(
@@ -741,22 +746,25 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   );
   const [slicePosition, setSlicePosition] = useState<{ volume: SvrVolume; point: Vec3i } | null>(null);
   if (slicePosition && slicePosition.volume !== volume) setSlicePosition(null);
-  const cursor = useMemo(
-    () =>
-      slicePosition?.volume === volume && slicePosition
-        ? slicePosition.point
-        : {
-            x: Math.floor((volume?.dims[0] ?? 1) / 2),
-            y: Math.floor((volume?.dims[1] ?? 1) / 2),
-            z: Math.floor((volume?.dims[2] ?? 1) / 2),
-          },
-    [slicePosition, volume],
-  );
-  const setCursor = useCallback(
-    (point: Vec3i) => {
-      if (volume) setSlicePosition({ volume, point });
-    },
+  const initialCursor = useMemo(
+    () => ({
+      x: Math.floor((volume?.dims[0] ?? 1) / 2),
+      y: Math.floor((volume?.dims[1] ?? 1) / 2),
+      z: Math.floor((volume?.dims[2] ?? 1) / 2),
+    }),
     [volume],
+  );
+  const cursor = slicePosition?.volume === volume && slicePosition ? slicePosition.point : initialCursor;
+  const setCursor = useCallback(
+    (point: Vec3i | ((current: Vec3i) => Vec3i)) => {
+      if (volume)
+        setSlicePosition((current) => ({
+          volume,
+          point:
+            typeof point === 'function' ? point(current?.volume === volume ? current.point : initialCursor) : point,
+        }));
+    },
+    [volume, initialCursor],
   );
   // One anatomical cursor owns both overview-grid navigation and native-frame
   // browsing. Keep fractional coordinates so a fine source plane is not snapped
@@ -769,29 +777,64 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     }),
     [cursor, volume],
   );
-  const [nativeSourceUid, setNativeSourceUid] = useState<string | null>(null);
+  const [nativeChoice, setNativeChoice] = useState<{ seriesUid: string } | { plane: SvrRoiPlane } | null>(null);
   const nativeSources = volume?.sourceProvenance?.sources;
+  const nativeOrientations = useMemo(() => nativeSources?.map(nativeSourcePlane) ?? [], [nativeSources]);
+  const nativeSourceUid = nativeChoice && 'seriesUid' in nativeChoice ? nativeChoice.seriesUid : null;
+  const residentOrientation = nativeChoice && 'plane' in nativeChoice ? nativeChoice.plane : null;
   const selectedNativeSourceIndex = nativeSources?.findIndex((source) => source.seriesUid === nativeSourceUid) ?? -1;
-  const nativeSourceIndex =
-    selectedNativeSourceIndex >= 0
-      ? selectedNativeSourceIndex
-      : Math.max(
-          0,
-          nativeSources?.findIndex((source) => source.seriesUid === volume?.sourceProvenance?.primarySeriesUid) ?? 0,
-        );
-  const nativeSource = nativeSources?.[nativeSourceIndex];
-  const nativeFrameIndex = useMemo(
-    () => (volume && nativeSource ? nearestNativeFrame(volume, nativeSource, [cursor.x, cursor.y, cursor.z]) : 0),
-    [volume, nativeSource, cursor],
+  const primaryNativeSourceIndex = Math.max(
+    0,
+    nativeSources?.findIndex((source) => source.seriesUid === volume?.sourceProvenance?.primarySeriesUid) ?? 0,
   );
-  const [nativePlaneEnabled, setNativePlaneEnabled] = useState(true);
-  const nativeImage = useSvrNativePlane({
-    volume: nativePlaneEnabled ? (volume ?? null) : null,
+  const nativeSourceIndex = residentOrientation
+    ? nativeOrientations[primaryNativeSourceIndex] === residentOrientation
+      ? primaryNativeSourceIndex
+      : nativeOrientations.indexOf(residentOrientation)
+    : selectedNativeSourceIndex >= 0
+      ? selectedNativeSourceIndex
+      : primaryNativeSourceIndex;
+  const nativeSource = nativeSources?.[nativeSourceIndex];
+  const nativeOrientation = residentOrientation ?? nativeOrientations[nativeSourceIndex] ?? 'axial';
+  const nativeSliceAxis = SLICE_AXES[nativeOrientation].slice;
+  const nativeFrameCount =
+    nativeSource?.frames.length ?? volume?.dims[nativeSliceAxis === 'x' ? 0 : nativeSliceAxis === 'y' ? 1 : 2] ?? 1;
+  const nativeFrameIndex = useMemo(
+    () =>
+      volume && nativeSource
+        ? nearestNativeFrame(volume, nativeSource, [cursor.x, cursor.y, cursor.z])
+        : clamp(Math.round(cursor[nativeSliceAxis]), 0, nativeFrameCount - 1),
+    [volume, nativeSource, cursor, nativeSliceAxis, nativeFrameCount],
+  );
+  // An original-image section and the optional interpolated cutaway are
+  // mutually exclusive. Returning to MRI slices always restores the full model.
+  const [sectionMode, setSectionMode] = useState<'mri' | 'cutaway' | 'off'>('mri');
+  const nativePlaneEnabled = sectionMode === 'mri';
+  const cutaway = sectionMode === 'cutaway';
+  const setNativePlaneEnabled = useCallback((enabled: boolean) => setSectionMode(enabled ? 'mri' : 'off'), []);
+  const setCutaway = useCallback((enabled: boolean) => setSectionMode(enabled ? 'cutaway' : 'off'), []);
+  const acquiredImage = useSvrNativePlane({
+    volume: nativePlaneEnabled && nativeSource ? (volume ?? null) : null,
     sourceIndex: nativeSourceIndex,
     frameIndex: nativeFrameIndex,
   });
+  const residentImage = useMemo(() => {
+    try {
+      return {
+        plane:
+          volume && nativePlaneEnabled && !nativeSource
+            ? makeVolumePlaneData(volume, nativeOrientation, nativeFrameIndex)
+            : null,
+        loading: false,
+        error: null,
+      };
+    } catch (error) {
+      return { plane: null, loading: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }, [volume, nativePlaneEnabled, nativeSource, nativeOrientation, nativeFrameIndex]);
+  const nativeImage = nativeSource ? acquiredImage : residentImage;
   const [nativeContour, setNativeContour] = useState(true);
-  const [nativeCutaway, setNativeCutaway] = useState(true);
+  const [nativeExact, setNativeExact] = useState(true);
   const [nativeInterpolate, setNativeInterpolate] = useState(false);
   const [nativeWindowSetting, setNativeWindowSetting] = useState<{
     volume: SvrVolume;
@@ -799,60 +842,63 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     range: [number, number];
   } | null>(null);
   if (nativeWindowSetting && nativeWindowSetting.volume !== volume) setNativeWindowSetting(null);
-  const nativeWindowRange =
-    nativeWindowSetting?.volume === volume && nativeWindowSetting?.sourceIndex === nativeSourceIndex
+  const nativeSharesVolumeWindow = Boolean(
+    volume &&
+    (!nativeSource ||
+      (hasNativeIntensityDomain(volume) && nativeSource.seriesUid === volume.sourceProvenance?.primarySeriesUid)),
+  );
+  const nativeWindowRange = nativeSharesVolumeWindow
+    ? windowRange
+    : nativeWindowSetting?.volume === volume && nativeWindowSetting?.sourceIndex === nativeSourceIndex
       ? nativeWindowSetting.range
       : nativeImage.plane?.windowRange;
   const setNativeWindowRange = useCallback(
     (range: [number, number]) => {
-      if (volume) setNativeWindowSetting({ volume, sourceIndex: nativeSourceIndex, range });
+      if (nativeSharesVolumeWindow) setWindowRange(range);
+      else if (volume) setNativeWindowSetting({ volume, sourceIndex: nativeSourceIndex, range });
     },
-    [volume, nativeSourceIndex],
-  );
-  const setNativeFrameIndex = useCallback(
-    (index: number) => {
-      if (!volume || !nativeSource) return;
-      const frame = nativeSource.frames[clamp(Math.round(index), 0, nativeSource.frames.length - 1)];
-      if (!frame) return;
-      const point = nativeFrameCursor(volume, nativeSource, frame, [cursor.x, cursor.y, cursor.z]);
-      setCursor({ x: point[0], y: point[1], z: point[2] });
-    },
-    [volume, nativeSource, cursor, setCursor],
+    [volume, nativeSourceIndex, nativeSharesVolumeWindow, setWindowRange],
   );
   const setNativeSourceIndex = useCallback(
     (index: number) => {
       const source = nativeSources?.[index];
-      if (source) setNativeSourceUid(source.seriesUid);
+      if (source) setNativeChoice({ seriesUid: source.seriesUid });
     },
     [nativeSources],
   );
-  const nativeMask = useMemo(
-    () =>
-      volume && nativeImage.plane
-        ? projectNativePlaneMask(
-            volume,
-            labels?.data.length === volume.data.length &&
-              labels.dims.length === volume.dims.length &&
-              labels.dims.every((size, axis) => size === volume.dims[axis])
-              ? labels
-              : null,
-            nativeImage.plane.source,
-            nativeImage.plane.frame,
-          )
-        : null,
-    [volume, labels, nativeImage.plane],
+  const setNativeOrientation = useCallback(
+    (plane: SvrRoiPlane) => {
+      const sources = nativeSources?.filter((_source, index) => nativeOrientations[index] === plane);
+      const source =
+        sources?.find((candidate) => candidate.seriesUid === volume?.sourceProvenance?.primarySeriesUid) ??
+        sources?.[0];
+      setNativeChoice(source ? { seriesUid: source.seriesUid } : { plane });
+    },
+    [nativeSources, nativeOrientations, volume],
   );
+  const displayedFrameIndex = nativeSource ? (acquiredImage.plane?.frameIndex ?? -1) : nativeFrameIndex;
+  const nativeMask = useMemo(() => {
+    if (!volume || !nativeImage.plane) return null;
+    const matchingLabels =
+      labels?.data.length === volume.data.length &&
+      labels.dims.length === volume.dims.length &&
+      labels.dims.every((size, axis) => size === volume.dims[axis])
+        ? labels
+        : null;
+    return nativeSource && acquiredImage.plane
+      ? projectNativePlaneMask(volume, matchingLabels, acquiredImage.plane.source, acquiredImage.plane.frame)
+      : projectVolumePlaneMask(volume, matchingLabels, nativeOrientation, displayedFrameIndex);
+  }, [volume, labels, nativeImage.plane, nativeSource, acquiredImage.plane, nativeOrientation, displayedFrameIndex]);
   const glNativeRef = useRef<NativePlaneBinding | null>(null);
   const nativeDisplayRef = useRef({
     plane: nativeImage.plane,
     mask: nativeMask,
     enabled: nativePlaneEnabled,
+    exact: nativeExact,
     contour: nativeContour,
-    cutaway: nativeCutaway,
     windowRange: nativeWindowRange,
     interpolate: nativeInterpolate,
   });
-  const [cutaway, setCutaway] = useState(false);
   const clipZ = (cursor.z + 0.5) / Math.max(1, volume?.dims[2] ?? 1);
   const [cameraZoom, setCameraZoom] = useState<{
     anatomy: number;
@@ -985,7 +1031,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
   // frame ~180ms after the last interaction event.
   const requestRenderRef = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
-    enhancementDisplayRef.current = enhancement;
+    enhancementRenderRef.current = enhancement;
     requestRenderRef.current?.();
   }, [enhancement]);
   const interactingRef = useRef(false);
@@ -1005,6 +1051,30 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
 
     requestRenderRef.current?.();
   }, []);
+
+  const setNativeFrameIndex = useCallback(
+    (next: number | ((index: number) => number)) => {
+      if (!volume) return;
+      setCursor((current) => {
+        const currentIndex = nativeSource
+          ? nearestNativeFrame(volume, nativeSource, [current.x, current.y, current.z])
+          : Math.round(current[nativeSliceAxis]);
+        const index = clamp(
+          Math.round(typeof next === 'function' ? next(currentIndex) : next),
+          0,
+          nativeFrameCount - 1,
+        );
+        if (!Number.isFinite(index)) return current;
+        const frame = nativeSource?.frames[index];
+        if (!nativeSource) return { ...current, [nativeSliceAxis]: index };
+        if (!frame) return current;
+        const point = nativeFrameCursor(volume, nativeSource, frame, [current.x, current.y, current.z]);
+        return { x: point[0], y: point[1], z: point[2] };
+      });
+      markInteraction();
+    },
+    [volume, nativeSource, nativeSliceAxis, nativeFrameCount, setCursor, markInteraction],
+  );
 
   useEffect(() => {
     return () => {
@@ -1046,8 +1116,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       plane: nativeImage.plane,
       mask: nativeMask,
       enabled: nativePlaneEnabled,
+      exact: nativeExact,
       contour: nativeContour,
-      cutaway: nativeCutaway,
       windowRange: nativeWindowRange,
       interpolate: nativeInterpolate,
     };
@@ -1056,8 +1126,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     nativeImage.plane,
     nativeMask,
     nativePlaneEnabled,
+    nativeExact,
     nativeContour,
-    nativeCutaway,
     nativeWindowRange,
     nativeInterpolate,
   ]);
@@ -1379,9 +1449,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     const onWheel = (e: WheelEvent) => {
       if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
 
-      if (nativePlaneEnabled && nativeSource && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
-        setNativeFrameIndex(nativeFrameIndex + Math.sign(e.deltaY));
-        markInteraction();
+      if (nativePlaneEnabled && volume && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        setNativeFrameIndex((index) => index + Math.sign(e.deltaY));
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1420,7 +1489,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);
     };
-  }, [markInteraction, setZoom, nativePlaneEnabled, nativeSource, nativeFrameIndex, setNativeFrameIndex]);
+  }, [markInteraction, setZoom, nativePlaneEnabled, volume, setNativeFrameIndex]);
 
   useEffect(() => {
     if (contextLostRef.current) return;
@@ -1773,9 +1842,13 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         }
 
         if (axesCanvas) {
-          if (axesCanvas.width !== w || axesCanvas.height !== h) {
-            axesCanvas.width = w;
-            axesCanvas.height = h;
+          // Text stays at settled pixel density while the expensive volume
+          // framebuffer changes resolution during interaction.
+          const axesWidth = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+          const axesHeight = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+          if (axesCanvas.width !== axesWidth || axesCanvas.height !== axesHeight) {
+            axesCanvas.width = axesWidth;
+            axesCanvas.height = axesHeight;
           }
         }
 
@@ -1814,25 +1887,26 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         glNativeRef.current?.setPlane(native.enabled ? native.plane : null, native.enabled ? native.mask : null);
         glNativeRef.current?.bind({
           enabled: native.enabled && Boolean(native.plane),
+          exact: native.exact,
           selectionOnly: hasLabels && tumorOnly,
           contour: native.contour,
-          cutaway: native.cutaway,
           windowRange: native.windowRange,
           interpolate: native.interpolate,
         });
 
-        const enhanced = enhancementDisplayRef.current;
-        try {
-          glEnhancementRef.current?.upload(enhanced.result, enhanced.source);
-          glEnhancementRef.current?.apply({
-            enabled: enhanced.enabled && Boolean(enhanced.result),
-            strength: enhanced.strength,
-            smoothSurface: enhanced.enabled && enhanced.strength > 0,
-          });
-        } catch (error) {
-          glEnhancementRef.current?.apply({ enabled: false, strength: 0, smoothSurface: false });
-          if (enhanced.result) enhanced.failDisplay(enhanced.result, error);
-        }
+        const enhanced = enhancementRenderRef.current;
+        if (enhanced)
+          try {
+            glEnhancementRef.current?.upload(enhanced.result, enhanced.source);
+            glEnhancementRef.current?.apply({
+              enabled: enhanced.enabled && Boolean(enhanced.result),
+              strength: enhanced.strength,
+              smoothSurface: enhanced.enabled && enhanced.strength > 0,
+            });
+          } catch (error) {
+            glEnhancementRef.current?.apply({ enabled: false, strength: 0, smoothSurface: false });
+            if (enhanced.result) enhanced.failDisplay(enhanced.result, error);
+          }
 
         // Bind textures
         gl.activeTexture(gl.TEXTURE0);
@@ -1908,7 +1982,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
 
         // Keep truthful physical orientation and dimensions in the quiet corner.
         if (axesCanvas && axesCtx) {
-          drawAxesOverlay({ axesCanvas, axesCtx, canvas, volume, rotMat });
+          drawAxesOverlay({ axesCanvas, axesCtx, volume, rotMat });
         }
 
         // Reset bindings (avoid leaking WebGL state across frames).
@@ -2210,8 +2284,8 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
         markInteraction();
       } else if (key === '0') {
         resetView();
-      } else if ((key === '[' || key === ']') && nativeSource) {
-        setNativeFrameIndex(nativeFrameIndex + (key === '[' ? -1 : 1));
+      } else if ((key === '[' || key === ']') && nativePlaneEnabled && volume) {
+        setNativeFrameIndex((index) => index + (key === '[' ? -1 : 1));
       } else if (key === 'Escape') {
         if (!dragRef.current) return;
         dragRef.current = null;
@@ -2222,7 +2296,7 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
       event.preventDefault();
       event.stopPropagation();
     },
-    [markInteraction, resetView, setZoom, nativeSource, nativeFrameIndex, setNativeFrameIndex],
+    [markInteraction, resetView, setZoom, nativePlaneEnabled, volume, setNativeFrameIndex],
   );
 
   return {
@@ -2247,18 +2321,23 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     nativeSourceIndex,
     setNativeSourceIndex,
     nativeFrameIndex,
+    nativeFrameCount,
+    nativeOrientation,
+    nativePlaneClassification: nativeSource ? nativeOrientations[nativeSourceIndex] : nativeOrientation,
+    setNativeOrientation,
     setNativeFrameIndex,
     nativePlaneEnabled,
     setNativePlaneEnabled,
     nativeContour,
     setNativeContour,
-    nativeCutaway,
-    setNativeCutaway,
+    nativeExact,
+    setNativeExact,
     nativeInterpolate,
     setNativeInterpolate,
+    nativeSharesVolumeWindow,
     nativeWindowRange,
     setNativeWindowRange,
-    resetNativeWindow: () => setNativeWindowSetting(null),
+    resetNativeWindow: () => (nativeSharesVolumeWindow ? setWindowSetting(null) : setNativeWindowSetting(null)),
     faceNativePlane,
     fitSelection,
     gamma,
@@ -2272,8 +2351,9 @@ function useSvrVolumeViewerModel({ volumeIdentity }: SvrVolume3DViewerProps) {
     cancelSavedTransfer,
     observedSupportSummary,
     onSelectionChange,
-    refineRegion: refineRegion ? refineWithEnhancement : undefined,
-    proposeSelection: proposeWithEnhancement,
+    operations,
+    refineRegion,
+    proposeSelection,
     selectionReady:
       (!volumeKey || (hydrated?.key === volumeKey && hydrated.volume === volume)) &&
       !labelsOverride &&
@@ -2332,13 +2412,7 @@ function useViewerControls() {
   return controls;
 }
 
-function SvrEnhancementControls({
-  selectionRunning,
-  prepareEnhancement,
-}: {
-  selectionRunning: boolean;
-  prepareEnhancement: number | (() => number);
-}) {
+function SvrEnhancementControls({ selectionRunning }: { selectionRunning: boolean }) {
   const model = useViewerControls();
   const detail = model.enhancement;
   if (!model.hasTumorLabels && !detail.running && !detail.result && !detail.error && !detail.message) return null;
@@ -2375,7 +2449,7 @@ function SvrEnhancementControls({
                   : 'Mark a region to enhance its detail.'
             }
             onClick={async () => {
-              if (await detail.run(prepareEnhancement)) {
+              if (await detail.run()) {
                 model.setVisualizationMode('tumor');
                 model.fitSelection();
               }
@@ -2390,9 +2464,14 @@ function SvrEnhancementControls({
       ) : detail.result ? (
         <p className="svr-enhancement-provenance" role="status">
           {detail.enabled ? 'Inferred detail—not acquired' : 'Original source detail'}
+          {' · Saved selection unchanged'}
           {model.nativePlaneEnabled && model.nativeImage.plane
-            ? ' · MRI plane shows original pixels'
-            : ' · Saved selection unchanged'}
+            ? model.nativeSource
+              ? model.nativeExact
+                ? ' · MRI plane shows exact source pixels'
+                : ' · Original MRI plane blended with anatomy'
+              : ' · MRI plane shows unenhanced volume samples'
+            : ''}
         </p>
       ) : detail.message ? (
         <p role="status">{detail.message}</p>
@@ -2459,61 +2538,89 @@ function SvrEnhancementSettings() {
 /** Source controls live with the 3D scene; the editing views keep one linked cursor. */
 function SvrNativePlaneControls() {
   const model = useViewerControls();
-  const { nativeSources, nativeSource, nativeFrameIndex } = model;
-  if (!nativeSources?.length || !nativeSource) return null;
+  const { nativeSource, nativeFrameIndex, nativeFrameCount } = model;
+  if (!model.volume) return null;
+  const imageLabel = nativeSource ? 'Original MRI' : 'Volume reformat';
   return (
-    <div className="svr-native-controls" aria-label="Original MRI plane controls">
+    <div className="svr-native-controls" aria-label="MRI slice controls">
       <button
         type="button"
         aria-pressed={model.nativePlaneEnabled}
         onClick={() => model.setNativePlaneEnabled(!model.nativePlaneEnabled)}
-        title="Reveal original MRI texture on a cross-section of the 3D volume"
+        title="Browse an MRI cross-section while keeping the complete 3D model visible"
       >
         MRI slice
       </button>
       {model.nativePlaneEnabled ? (
-        <div className="svr-native-browse">
-          <button
-            type="button"
-            aria-label="Previous original MRI slice"
-            disabled={nativeFrameIndex === 0}
-            onClick={() => model.setNativeFrameIndex(nativeFrameIndex - 1)}
-          >
-            <ChevronLeft size={14} />
-          </button>
-          <input
-            type="range"
-            aria-label="Original MRI slice position"
-            min={0}
-            max={nativeSource.frames.length - 1}
-            step={1}
-            value={nativeFrameIndex}
-            onChange={(event) => model.setNativeFrameIndex(Number(event.currentTarget.value))}
-          />
-          <button
-            type="button"
-            aria-label="Next original MRI slice"
-            disabled={nativeFrameIndex >= nativeSource.frames.length - 1}
-            onClick={() => model.setNativeFrameIndex(nativeFrameIndex + 1)}
-          >
-            <ChevronRight size={14} />
-          </button>
-          <label>
-            <span className="sr-only">Original MRI slice</span>
+        <>
+          <div className="svr-native-orientation" role="group" aria-label="MRI slice plane">
+            {(['axial', 'coronal', 'sagittal'] as const).map((plane) => (
+              <button
+                key={plane}
+                type="button"
+                aria-pressed={model.nativePlaneClassification === plane}
+                onClick={() => model.setNativeOrientation(plane)}
+              >
+                {SLICE_AXES[plane].label}
+              </button>
+            ))}
+          </div>
+          {!nativeSource ? <span className="svr-native-source-note">Volume reformat</span> : null}
+          {nativeSource && !model.nativePlaneClassification ? (
+            <span className="svr-native-source-note">Oblique source</span>
+          ) : null}
+          <div className="svr-native-browse" aria-busy={model.nativeImage.loading}>
+            <button
+              type="button"
+              aria-label={`Previous ${nativeSource ? 'original MRI' : 'volume reformat'} slice`}
+              disabled={nativeFrameIndex === 0}
+              onClick={() => model.setNativeFrameIndex((index) => index - 1)}
+            >
+              <ChevronLeft size={14} />
+            </button>
             <input
-              type="number"
-              aria-label="Original MRI slice"
-              min={1}
-              max={nativeSource.frames.length}
-              value={nativeFrameIndex + 1}
-              onChange={(event) => {
-                if (Number.isFinite(event.currentTarget.valueAsNumber))
-                  model.setNativeFrameIndex(event.currentTarget.valueAsNumber - 1);
-              }}
+              type="range"
+              aria-label={`${imageLabel} slice position`}
+              min={0}
+              max={nativeFrameCount - 1}
+              step={1}
+              value={nativeFrameIndex}
+              onChange={(event) => model.setNativeFrameIndex(Number(event.currentTarget.value))}
             />
-            <span>/ {nativeSource.frames.length}</span>
-          </label>
-        </div>
+            <button
+              type="button"
+              aria-label={`Next ${nativeSource ? 'original MRI' : 'volume reformat'} slice`}
+              disabled={nativeFrameIndex >= nativeFrameCount - 1}
+              onClick={() => model.setNativeFrameIndex((index) => index + 1)}
+            >
+              <ChevronRight size={14} />
+            </button>
+            <label>
+              <span className="sr-only">{imageLabel} slice</span>
+              <input
+                type="number"
+                aria-label={`${imageLabel} slice`}
+                min={1}
+                max={nativeFrameCount}
+                value={nativeFrameIndex + 1}
+                onChange={(event) => {
+                  if (Number.isFinite(event.currentTarget.valueAsNumber))
+                    model.setNativeFrameIndex(event.currentTarget.valueAsNumber - 1);
+                }}
+              />
+              <span>/ {nativeFrameCount}</span>
+            </label>
+          </div>
+          {model.nativeImage.loading ? (
+            <span className="svr-native-source-note" role="status" aria-live="off">
+              {model.nativeImage.plane &&
+              'frameIndex' in model.nativeImage.plane &&
+              typeof model.nativeImage.plane.frameIndex === 'number'
+                ? `Showing ${model.nativeImage.plane.frameIndex + 1} · loading ${nativeFrameIndex + 1}…`
+                : `Loading ${nativeFrameIndex + 1}…`}
+            </span>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -2521,19 +2628,24 @@ function SvrNativePlaneControls() {
 
 function SvrNativePlaneSettings() {
   const model = useViewerControls();
-  const { nativeSources, nativeSource, nativeImage, nativeWindowRange } = model;
-  if (!nativeSources?.length || !nativeSource) return null;
-  const title =
-    nativeSource.kind === 'derived'
+  const { nativeSources, nativeSource, nativeImage, nativeWindowRange, nativeSharesVolumeWindow } = model;
+  if (!model.volume) return null;
+  const title = !nativeSource
+    ? 'Volume reformat'
+    : nativeSource.kind === 'derived'
       ? 'Scanner reformat'
       : nativeSource.kind === 'unknown'
         ? 'MRI source'
         : 'Original MRI';
   const width = nativeWindowRange ? nativeWindowRange[1] - nativeWindowRange[0] : 1;
   const level = nativeWindowRange ? (nativeWindowRange[0] + nativeWindowRange[1]) / 2 : 0;
+  const sourceWindowRange =
+    nativeSharesVolumeWindow && model.volume
+      ? volumeDisplayRange(model.volume)
+      : (nativeImage.plane?.windowRange ?? [0, 1]);
   const sourceWindowWidth = Math.max(
-    1,
-    (nativeImage.plane?.windowRange[1] ?? 1) - (nativeImage.plane?.windowRange[0] ?? 0),
+    nativeSharesVolumeWindow ? Number.EPSILON : 1,
+    sourceWindowRange[1]! - sourceWindowRange[0]!,
   );
   return (
     <details className="svr-inspector-section svr-native-settings">
@@ -2541,12 +2653,13 @@ function SvrNativePlaneSettings() {
       <div>
         <div className="svr-native-heading">
           <span className="svr-source-kind">{title}</span>
-          {nativeSources.length > 1 ? (
+          {nativeSources && (nativeSources.length > 1 || (!nativeSource && nativeSources.length)) ? (
             <select
               aria-label="MRI plane source"
               value={model.nativeSourceIndex}
               onChange={(event) => model.setNativeSourceIndex(Number(event.currentTarget.value))}
             >
+              {!nativeSource ? <option value={-1}>Current volume reformat</option> : null}
               {nativeSources.map((source, index) => (
                 <option key={source.seriesUid} value={index}>
                   {source.label}
@@ -2559,13 +2672,28 @@ function SvrNativePlaneSettings() {
               ))}
             </select>
           ) : (
-            <span>{nativeSource.label}</span>
+            <span>{nativeSource?.label ?? volumeSamplingLabel(model.volume)}</span>
           )}
         </div>
         {model.nativePlaneEnabled ? (
           <>
             <div className="svr-native-view-options">
               <div className="svr-native-display-settings">
+                <label>
+                  Plane display{' '}
+                  <select
+                    aria-label="MRI plane presentation"
+                    value={model.nativeExact ? 'exact' : 'blended'}
+                    onChange={(event) => {
+                      const exact = event.currentTarget.value === 'exact';
+                      model.setNativeExact(exact);
+                      if (exact) model.setNativeInterpolate(false);
+                    }}
+                  >
+                    <option value="exact">Exact source pixels</option>
+                    <option value="blended">Blend with anatomy</option>
+                  </select>
+                </label>
                 <label>
                   <input
                     type="checkbox"
@@ -2574,18 +2702,11 @@ function SvrNativePlaneSettings() {
                   />{' '}
                   Selection contour
                 </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={model.nativeCutaway}
-                    onChange={(event) => model.setNativeCutaway(event.currentTarget.checked)}
-                  />{' '}
-                  Cut at MRI plane
-                </label>
                 <label title="Display interpolation only; no additional MRI detail is acquired">
                   <input
                     type="checkbox"
                     checked={model.nativeInterpolate}
+                    disabled={model.nativeExact}
                     onChange={(event) => model.setNativeInterpolate(event.currentTarget.checked)}
                   />{' '}
                   Interpolate display
@@ -2595,9 +2716,11 @@ function SvrNativePlaneSettings() {
                   <input
                     type="range"
                     aria-label="Original MRI window width"
-                    min={1}
-                    max={sourceWindowWidth * 3}
-                    step={Math.max(0.1, sourceWindowWidth / 500)}
+                    min={nativeSharesVolumeWindow ? sourceWindowWidth * 0.005 : 1}
+                    max={sourceWindowWidth * (nativeSharesVolumeWindow ? 2 : 3)}
+                    step={
+                      nativeSharesVolumeWindow ? sourceWindowWidth * 0.0025 : Math.max(0.1, sourceWindowWidth / 500)
+                    }
                     value={width}
                     onChange={(event) => {
                       const next = Number(event.currentTarget.value);
@@ -2610,9 +2733,11 @@ function SvrNativePlaneSettings() {
                   <input
                     type="range"
                     aria-label="Original MRI window level"
-                    min={(nativeImage.plane?.windowRange[0] ?? 0) - sourceWindowWidth}
-                    max={(nativeImage.plane?.windowRange[1] ?? 1) + sourceWindowWidth}
-                    step={Math.max(0.1, sourceWindowWidth / 500)}
+                    min={sourceWindowRange[0]! - (nativeSharesVolumeWindow ? 0 : sourceWindowWidth)}
+                    max={sourceWindowRange[1]! + (nativeSharesVolumeWindow ? 0 : sourceWindowWidth)}
+                    step={
+                      nativeSharesVolumeWindow ? sourceWindowWidth * 0.0025 : Math.max(0.1, sourceWindowWidth / 500)
+                    }
                     value={level}
                     onChange={(event) => {
                       const next = Number(event.currentTarget.value);
@@ -2624,15 +2749,22 @@ function SvrNativePlaneSettings() {
                   Reset source contrast
                 </button>
                 <p>
-                  The MRI cross-section follows the volume or selection view. Source contrast is independent of 3D
-                  shading; original pixels stay unchanged.
+                  {model.nativeExact
+                    ? 'The opaque plane uses the source window exactly, without volume shading or tissue behind it. Nearer opaque anatomy can occlude it; the contour is an annotation overlay.'
+                    : 'The MRI cross-section is blended with anatomy on both sides. Display luminance is not the calibrated source window.'}{' '}
+                  {nativeSharesVolumeWindow
+                    ? 'Source contrast is shared by the slice views, MRI plane, and volume. 3D shading stays independent; original pixels stay unchanged.'
+                    : 'This source has independent contrast and does not change the reconstructed volume window; original pixels stay unchanged.'}{' '}
+                  {!nativeSource
+                    ? 'This reformat uses the current volume grid; it is not an additional acquisition.'
+                    : ''}
                 </p>
               </div>
               <span role="status" aria-live="off">
                 {nativeImage.loading
                   ? 'Loading original…'
                   : nativeImage.plane
-                    ? `${nativeImage.plane.frame.columns} × ${nativeImage.plane.frame.rows} · ${model.nativeInterpolate ? 'interpolated display' : 'source pixels'}`
+                    ? `${nativeImage.plane.image.cols} × ${nativeImage.plane.image.rows} · ${model.nativeInterpolate ? 'interpolated display' : nativeSource ? 'source pixels' : 'volume samples'}`
                     : ''}
               </span>
             </div>
@@ -2670,7 +2802,6 @@ function SvrOnnxModelControls({ selectionRunning }: { selectionRunning: boolean 
     onnxFileInputRef,
     onnxHandleSelectedFiles,
     onnxPreflight,
-    onnxSegRunning,
     onnxStatus,
     onnxUploadClick,
     runOnnxSegmentation,
@@ -2716,8 +2847,7 @@ function SvrOnnxModelControls({ selectionRunning }: { selectionRunning: boolean 
               !onnxStatus.verified ||
               onnxStatus.loading ||
               !model.selectionReady ||
-              selectionRunning ||
-              !!onnxPreflight?.blockedByDefault
+              selectionRunning
             }
             className="min-h-9 rounded-[4px] bg-[var(--bg-tertiary)] px-3 py-2 text-xs text-[var(--text-primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
           >
@@ -2750,14 +2880,8 @@ function SvrOnnxModelControls({ selectionRunning }: { selectionRunning: boolean 
         {onnxPreflight?.blockedByDefault ? (
           <div className="rounded-[4px] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--warning)]">
             Model inference would require approximately {formatMiB(onnxPreflight.estimatedPeakBytes)} of resident
-            memory, exceeding the shared {formatMiB(onnxPreflight.budgetBytes)} SVR budget. Reconstruct a smaller focus
-            region or use a lower resolution.
-          </div>
-        ) : null}
-
-        {!onnxStatus.error && !onnxStatus.loading && !onnxSegRunning && onnxStatus.message ? (
-          <div role="status" className="text-xs text-[var(--text-tertiary)]">
-            {onnxStatus.message}
+            memory, exceeding the estimated {formatMiB(onnxPreflight.budgetBytes)} custom-model budget. Retry after
+            freeing memory or use a smaller model or focus region. Native assembly keeps its separate 512 MiB limit.
           </div>
         ) : null}
       </div>
@@ -2893,7 +3017,7 @@ function SvrAppearanceControls() {
         <button type="button" onClick={model.fitSelection} disabled={!model.hasTumorLabels}>
           Fit selection
         </button>
-        {model.nativeSource ? (
+        {model.volume ? (
           <button
             type="button"
             onClick={model.faceNativePlane}
@@ -2936,8 +3060,9 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
       labels: model.labels,
       refineRegion: model.refineRegion,
       proposeSelection: model.proposeSelection,
+      operations: model.operations,
     }),
-    [volume, model.labels, model.refineRegion, model.proposeSelection],
+    [volume, model.labels, model.refineRegion, model.proposeSelection, model.operations],
   );
   const controlsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsRef = useRef<HTMLElement>(null);
@@ -2948,12 +3073,12 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
     setControlsCollapsed(true);
     controlsButtonRef.current?.focus({ preventScroll: true });
   };
-  const scene = (selectionRunning = false, prepareEnhancement: number | (() => number) = 0) => (
+  const scene = (selectionRunning = false) => (
     <div className="svr-scene">
       {volume ? (
         <div className="svr-scene-toolbar">
           <SvrNativePlaneControls />
-          <SvrEnhancementControls selectionRunning={selectionRunning} prepareEnhancement={prepareEnhancement} />
+          <SvrEnhancementControls selectionRunning={selectionRunning} />
           <button
             ref={controlsButtonRef}
             type="button"
@@ -2983,6 +3108,10 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
       ) : model.onnxStatus.error ? (
         <p role="alert" className="svr-scene-notice svr-native-error">
           {model.onnxStatus.error}
+        </p>
+      ) : model.onnxStatus.message ? (
+        <p role="status" className="svr-scene-notice">
+          {model.onnxStatus.message}
         </p>
       ) : null}
       <div className="svr-scene-body" data-settings-open={!controlsCollapsed}>
@@ -3039,7 +3168,7 @@ export function SvrVolume3DViewer(props: SvrVolume3DViewerProps) {
             </div>
           ) : (
             <div className="absolute bottom-1 left-4 bg-[var(--bg-primary)] px-2 py-1 text-xs text-[var(--text-secondary)]">
-              {model.nativePlaneEnabled && model.nativeSource
+              {model.nativePlaneEnabled && model.volume
                 ? 'Wheel / [ ]: MRI slices · Drag: rotate · +/−: zoom'
                 : 'Drag or use arrow keys to rotate · Wheel or +/− to zoom'}
             </div>

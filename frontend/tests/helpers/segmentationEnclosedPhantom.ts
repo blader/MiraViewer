@@ -1,4 +1,4 @@
-import type { SeededVolumeInput } from '../../src/utils/segmentation/seededVolume';
+import type { SeededVolumeInput } from './legacySeededVolume';
 
 /** Generic enclosed tissue: its gray interior deliberately shares the common exterior's signal. */
 export function segmentationEnclosedPhantom(brightBrushRadiusMm = 4) {

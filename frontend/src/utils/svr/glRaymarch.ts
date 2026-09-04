@@ -7,7 +7,7 @@
 
 import { clamp } from '../math';
 import { yieldToMain } from './svrUtils';
-import type { NativePlaneData } from './nativePlane';
+import type { MriPlaneData } from './nativePlane';
 
 export const SVR3D_CAMERA_Z = 1.6;
 export const SVR3D_FOCAL_Z = 1.2;
@@ -377,16 +377,17 @@ export function buildOccupancyMaxGridAsync(
 
 export type NativePlaneDisplay = {
   enabled: boolean;
+  /** Opaque calibrated source samples; nearer opaque anatomy may occlude them. */
+  exact?: boolean;
   selectionOnly?: boolean;
   contour?: boolean;
   windowRange?: readonly [number, number];
   invert?: boolean;
   interpolate?: boolean;
-  cutaway?: boolean;
 };
 
 export type NativePlaneBinding = {
-  setPlane: (plane: NativePlaneData | null, mask?: Uint8Array | null) => void;
+  setPlane: (plane: MriPlaneData | null, mask?: Uint8Array | null) => void;
   /** Call with this program active, on every draw (including when no native plane is visible). */
   bind: (display: NativePlaneDisplay) => void;
   dispose: () => void;
@@ -401,6 +402,7 @@ export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: We
       'Validity',
       'Mask',
       'Enabled',
+      'Exact',
       'MaskEnabled',
       'SelectionOnly',
       'Contour',
@@ -408,15 +410,15 @@ export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: We
       'WindowWidth',
       'Invert',
       'Interpolate',
-      'Cutaway',
       'Origin',
       'ColumnStep',
       'RowStep',
     ].map((name) => [name, gl.getUniformLocation(program, `u_native${name}`)]),
   );
-  let current: NativePlaneData | null = null;
+  let current: MriPlaneData | null = null;
   let currentMask: Uint8Array | null = null;
-  let uploadedImage: NativePlaneData['image'] | null = null;
+  let uploadedImage: MriPlaneData['image'] | null = null;
+  const allocated: Array<readonly [number, number]> = [];
   let disposed = false;
   const upload = (slot: number, width: number, height: number, data: Float32Array | Uint8Array) => {
     gl.activeTexture(gl.TEXTURE0 + 5 + slot);
@@ -427,19 +429,15 @@ export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: We
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      slot === 0 ? gl.R32F : gl.R8,
-      width,
-      height,
-      0,
-      gl.RED,
-      slot === 0 ? gl.FLOAT : gl.UNSIGNED_BYTE,
-      data,
-    );
+    const type = slot === 0 ? gl.FLOAT : gl.UNSIGNED_BYTE;
+    if (allocated[slot]?.[0] === width && allocated[slot]?.[1] === height) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, type, data);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, slot === 0 ? gl.R32F : gl.R8, width, height, 0, gl.RED, type, data);
+    }
     if (gl.getError() !== gl.NO_ERROR)
       throw new Error('The GPU could not preserve the original MRI plane at its native resolution.');
+    allocated[slot] = [width, height];
   };
   try {
     for (let slot = 0; slot < 3; slot++) {
@@ -470,18 +468,21 @@ export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: We
         const changedImage = uploadedImage !== image;
         if (changedImage) {
           upload(0, image.cols, image.rows, image.pixels);
-          upload(
-            1,
-            image.cols,
-            image.rows,
-            Uint8Array.from(image.validity, (value) => (value > 0 ? 255 : 0)),
-          );
+          const validity = new Uint8Array(length);
+          for (let index = 0; index < length; index++) validity[index] = image.validity[index]! > 0 ? 255 : 0;
+          upload(1, image.cols, image.rows, validity);
         }
         if (changedImage || currentMask !== mask)
           upload(2, mask ? image.cols : 1, mask ? image.rows : 1, mask ?? new Uint8Array(1));
         uploadedImage = image;
         currentMask = mask;
         current = plane;
+      } catch (error) {
+        // A later channel can fail after the image texture already changed.
+        // Never reuse old identities against a partly replaced texture set.
+        uploadedImage = null;
+        currentMask = null;
+        throw error;
       } finally {
         gl.activeTexture(gl.TEXTURE0);
       }
@@ -494,14 +495,14 @@ export function createNativePlaneBinding(gl: WebGL2RenderingContext, program: We
         gl.uniform1i(uniforms[['Image', 'Validity', 'Mask'][slot]!]!, 5 + slot);
       }
       gl.uniform1i(uniforms.Enabled!, display.enabled && current ? 1 : 0);
+      gl.uniform1i(uniforms.Exact!, display.exact ? 1 : 0);
       gl.uniform1i(uniforms.MaskEnabled!, currentMask ? 1 : 0);
       if (current) {
         const range = display.windowRange ?? current.windowRange;
         gl.uniform1i(uniforms.SelectionOnly!, display.selectionOnly ? 1 : 0);
         gl.uniform1i(uniforms.Contour!, display.contour === false ? 0 : 1);
         gl.uniform1i(uniforms.Invert!, (display.invert ?? current.invert) ? 1 : 0);
-        gl.uniform1i(uniforms.Interpolate!, display.interpolate ? 1 : 0);
-        gl.uniform1i(uniforms.Cutaway!, display.cutaway ? 1 : 0);
+        gl.uniform1i(uniforms.Interpolate!, display.interpolate && !display.exact ? 1 : 0);
         gl.uniform1f(uniforms.WindowLow!, range[0]);
         gl.uniform1f(uniforms.WindowWidth!, Math.max(0, range[1] - range[0]));
         gl.uniform3f(uniforms.Origin!, ...current.origin);
@@ -571,6 +572,7 @@ uniform sampler2D u_nativeImage;
 uniform sampler2D u_nativeValidity;
 uniform sampler2D u_nativeMask;
 uniform int u_nativeEnabled;
+uniform int u_nativeExact;
 uniform int u_nativeMaskEnabled;
 uniform int u_nativeSelectionOnly;
 uniform int u_nativeContour;
@@ -578,7 +580,6 @@ uniform float u_nativeWindowLow;
 uniform float u_nativeWindowWidth;
 uniform int u_nativeInvert;
 uniform int u_nativeInterpolate;
-uniform int u_nativeCutaway;
 uniform vec3 u_nativeOrigin;
 uniform vec3 u_nativeColumnStep;
 uniform vec3 u_nativeRowStep;
@@ -783,7 +784,7 @@ vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
     // Use the exact CPU-projected annotation, never a reduced GPU label grid.
     // A selected dark MRI pixel is still valid tissue, not transparent air.
     if (mask <= 0.0) return vec4(0.0);
-  } else if (windowed(texture(u_vol, tc).r) < saturate(u_thr) && !(u_labelsEnabled != 0 && mask > 0.0)) {
+  } else if (u_nativeExact == 0 && windowed(texture(u_vol, tc).r) < saturate(u_thr) && !(u_labelsEnabled != 0 && mask > 0.0)) {
     return vec4(0.0);
   }
   float value = texelFetch(u_nativeImage, pixel, 0).r;
@@ -812,7 +813,7 @@ vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
     if (nativeMaskAt(pixel + ivec2(0, -1)) != mask) boundaryDistance = min(boundaryDistance, edges.w);
     color = mix(color, vec3(0.404, 0.812, 0.757), 0.8 * (1.0 - smoothstep(0.75, 1.5, boundaryDistance)));
   }
-  return vec4(color, 1.0);
+  return vec4(color, u_nativeExact != 0 ? 1.0 : 0.7);
 }
 
 void main() {
@@ -860,28 +861,7 @@ void main() {
   }
   t0 = max(t0, 0.0);
   bool nativeHit = nativeSection.a > 0.0 && nativeT >= t0 && nativeT <= t1;
-  if (u_nativeEnabled != 0 && u_nativeCutaway != 0) {
-    vec3 normal = normalize(cross(u_nativeColumnStep, u_nativeRowStep));
-    vec3 center = (bmin + bmax) * 0.5;
-    float radius = dot((bmax - bmin) * 0.5, abs(normal));
-    // Browsing beyond a cropped object must not replace or erase that object.
-    if (abs(dot(center - u_nativeOrigin, normal)) <= radius) {
-      float slope = dot(rd, normal);
-      float distance = dot(ro - u_nativeOrigin, normal);
-      // Retain the same physical half-space when the camera orbits. The native
-      // facing view looks into it; from behind the retained volume stays in front.
-      if (abs(slope) < 1e-6) {
-        if (distance < 0.0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
-      } else {
-        float boundary = -distance / slope;
-        if (slope > 0.0) t0 = max(t0, boundary);
-        else t1 = min(t1, boundary);
-      }
-    }
-  }
-  if (nativeHit && nativeT <= t0 + 1e-6 && t0 <= t1 + 1e-6) { outColor = nativeSection; return; }
-  // Composite only the bounded cross-section, in the same depth order as tissue.
-  if (nativeHit) t1 = min(t1, nativeT);
+  bool exactSection = nativeHit && u_nativeExact != 0;
   if (t1 <= t0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
   // When looking into the cut, preserve its acquired grayscale exactly. Fog
@@ -912,6 +892,8 @@ void main() {
 
   vec3 accum = vec3(0.0);
   float aAccum = 0.0;
+  vec3 frontAccum = vec3(0.0);
+  float frontAlpha = 0.0;
   vec3 lesionAccum = vec3(0.0);
   float lesionAlpha = 0.0;
 
@@ -933,6 +915,8 @@ void main() {
 
   for (int i = 0; i < MAX_STEPS; i++) {
     if (i >= n) break;
+    // Keep the full-volume step pitch, but never sample behind an exact plane.
+    if (exactSection && t + float(i) * dt >= nativeT) break;
     vec3 pos = ro + rd * (t + float(i) * dt);
 
     // Map object-space box to texture coords [0,1]
@@ -1063,18 +1047,28 @@ void main() {
         }
       }
 
-      accum += (1.0 - aAccum) * sampleColor * aStep;
-      aAccum += (1.0 - aAccum) * aStep;
+      if (nativeHit && t + float(i) * dt < nativeT) {
+        frontAccum += (1.0 - frontAlpha) * sampleColor * aStep;
+        frontAlpha += (1.0 - frontAlpha) * aStep;
+      } else {
+        accum += (1.0 - aAccum) * sampleColor * aStep;
+        aAccum += (1.0 - aAccum) * aStep;
+      }
 
+      // Exact sections cannot reveal anatomy behind an opaque foreground. The
+      // blended mode still needs its far segment; label context remains explicit.
+      if (exactSection && frontAlpha > 0.98) break;
       if (aAccum > 0.98 && (u_labelsEnabled == 0 || u_tumorOnly != 0)) {
         break;
       }
     }
   }
 
-  if (!nativeHit && u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
-    vec3 visibleLesion = lesionAccum / max(lesionAlpha, 1e-6);
-    accum = mix(accum, visibleLesion, clamp(lesionAlpha * 1.15, 0.0, 0.58));
+  if (exactSection) {
+    // Do not add far tissue, translucent foreground fog or volume-label tint to
+    // calibrated plane luminance. Its optional contour is a separate overlay.
+    outColor = vec4(frontAlpha > 0.98 ? clamp(frontAccum, 0.0, 1.0) : nativeSection.rgb, 1.0);
+    return;
   }
 
   // The same plane remains visible through transparent tissue from the reverse
@@ -1084,7 +1078,19 @@ void main() {
     accum += (1.0 - aAccum) * section.rgb * section.a;
     aAccum += (1.0 - aAccum) * section.a;
   }
-  if (nativeHit) accum += (1.0 - aAccum) * nativeSection.rgb;
+  if (nativeHit) {
+    // Preserve depth order and the complete model. Bound foreground context
+    // only where the section has acquired support; the silhouette outside it
+    // keeps its ordinary volume appearance. No clipping or second render pass.
+    float contextAlpha = min(frontAlpha, 0.22);
+    vec3 context = frontAccum * (contextAlpha / max(frontAlpha, 1e-6));
+    accum = context + (1.0 - contextAlpha) *
+      (nativeSection.rgb * nativeSection.a + (1.0 - nativeSection.a) * accum);
+  }
+  if (u_labelsEnabled != 0 && u_tumorOnly == 0 && lesionAlpha > 0.0) {
+    vec3 visibleLesion = lesionAccum / max(lesionAlpha, 1e-6);
+    accum = mix(accum, visibleLesion, clamp(lesionAlpha * 1.15, 0.0, 0.58));
+  }
 
   outColor = vec4(clamp(accum, 0.0, 1.0), 1.0);
 }`;

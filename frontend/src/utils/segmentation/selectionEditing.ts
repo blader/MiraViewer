@@ -1,5 +1,5 @@
 import type { SvrLabelVolume, SvrRoiPlane, SvrSelectionPlane, SvrVolume } from '../../types/svr';
-import { voxelIndex, voxelPoint, type VoxelPoint } from './seededVolume';
+import { voxelIndex, voxelPoint, type VoxelPoint } from './voxelGeometry';
 
 export const SLICE_AXES = {
   axial: {

@@ -23,7 +23,7 @@ const along = ([a, b]: Segment, t: number): GoldenPoint => [a[0] + (b[0] - a[0])
 const ringSegments = (ring: GoldenPolygon): Segment[] =>
   ring.map((point, index) => [point, ring[(index + 1) % ring.length]!]);
 
-function distanceToSegment(point: GoldenPoint, [first, last]: Segment): number {
+export function distanceToSegment(point: GoldenPoint, [first, last]: Segment): number {
   const delta = subtract(last, first),
     offset = subtract(point, first);
   const squaredLength = delta[0] ** 2 + delta[1] ** 2;
@@ -31,7 +31,7 @@ function distanceToSegment(point: GoldenPoint, [first, last]: Segment): number {
   return Math.hypot(offset[0] - delta[0] * t, offset[1] - delta[1] * t);
 }
 
-function insideRing(point: GoldenPoint, ring: GoldenPolygon): boolean {
+export function insideRing(point: GoldenPoint, ring: GoldenPolygon): boolean {
   let inside = false;
   for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
     const a = ring[index]!,

@@ -1,5 +1,7 @@
+import { studyIdentityConflict } from '../db/patientIdentity';
 import dicomParser from 'dicom-parser';
 import { assertStorageHeadroom, DATASET_REVISION_STATE_KEY, getDB, notifyDatasetMutation } from '../db/db';
+import { initializeComparisonState } from '../db/comparisonState';
 import type { DicomStudy, DicomSeries, DicomInstance } from '../db/schema';
 import { extractDicomAcquisitionMetadata } from './dicomAcquisitionMetadata';
 import { parseSeriesDescription } from '../utils/dicomSeriesParsing';
@@ -575,25 +577,8 @@ function validateCanonicalParents(
 ): void {
   const study = next.study;
   const series = next.series;
-  if (
-    existingStudy?.patientId?.trim() &&
-    study.patientId.trim() &&
-    existingStudy.patientId.trim() !== study.patientId.trim()
-  ) {
-    throw new DicomAdmissionError('A study UID cannot contain more than one patient identity');
-  }
-  if (
-    existingStudy?.patientIdIssuer?.trim() &&
-    study.patientIdIssuer?.trim() &&
-    existingStudy.patientIdIssuer.trim() !== study.patientIdIssuer.trim()
-  ) {
-    throw new DicomAdmissionError('A study UID cannot contain more than one patient-identifier issuer');
-  }
-  const canonicalName = existingStudy?.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
-  const incomingName = study.patientName.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
-  if (canonicalName && incomingName && canonicalName !== incomingName) {
-    throw new DicomAdmissionError('A study UID cannot contain conflicting patient names');
-  }
+  const identityConflict = studyIdentityConflict(existingStudy, study);
+  if (identityConflict) throw new DicomAdmissionError(identityConflict);
   if (existingSeries && existingSeries.studyInstanceUid !== study.studyInstanceUid) {
     throw new DicomAdmissionError('A series UID cannot belong to a different examination');
   }
@@ -819,7 +804,9 @@ export async function processDicomFile(file: File): Promise<DicomIngestResult> {
   try {
     const prepared = await prepareDicomFile(file);
     if (prepared.status !== 'prepared') return prepared;
-    return (await writePreparedBatch([prepared]))[0];
+    const result = (await writePreparedBatch([prepared]))[0];
+    if (result.status === 'ingested') await initializeComparisonState(await getDB());
+    return result;
   } catch (error) {
     return databaseError(basename(file.name), error);
   }
@@ -960,6 +947,9 @@ export async function processFiles(
     iteratorCancelled = true;
   }
   if (iteratorCancelled || signal?.aborted) result.cancelled = true;
-  if (affectedSeries.size) result.affectedSeriesUids = [...affectedSeries];
+  if (affectedSeries.size) {
+    await initializeComparisonState(await getDB());
+    result.affectedSeriesUids = [...affectedSeries];
+  }
   return result;
 }

@@ -18,6 +18,8 @@ export interface SeriesRef {
   study_id: string;
   series_uid: string;
   instance_count: number;
+  series_description?: string;
+  series_number?: number;
   /** Stable identity of the patient that owns this series. */
   patient_key?: string;
   /** Explicit spatial frame; distinct longitudinal frames are not directly comparable. */
@@ -49,10 +51,14 @@ export interface ComparisonData {
   dates: string[]; // ISO date strings
   sequences: SequenceCombo[];
   series_map: Record<string, Record<string, SeriesRef>>; // comboId -> dateISO -> ref
+  /** All displayable acquisitions; series_map contains the persisted choice. */
+  series_candidates?: Record<string, Record<string, SeriesRef[]>>;
   /** Authoritative patient choices returned by the local database. */
   patients?: ComparisonPatient[];
   selected_patient_key?: string | null;
   dataset_revision?: number;
+  /** Saved-work ownership; rotates on restore/reset, not additive import. */
+  dataset_token?: string;
   /** Examination identity keyed by the visible comparison-column key. */
   examinations?: Record<string, ComparisonExamination>;
 }

@@ -3,6 +3,10 @@ export type SyntheticSvrFixtureOptions = {
   slicesPerOrientation?: number;
   orientations?: 2 | 3;
   studyUid?: string;
+  studyDate?: string;
+  seriesNumberOffset?: number;
+  /** Null makes zero-valued background acquired data instead of DICOM padding. */
+  pixelPaddingValue?: number | null;
 };
 
 type SyntheticOrientation = {
@@ -74,7 +78,8 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
 
   for (let orientationIndex = 0; orientationIndex < orientationCount; orientationIndex++) {
     const orientation = SYNTHETIC_ORIENTATIONS[orientationIndex]!;
-    const seriesUid = studyUid + '.' + (orientationIndex + 1);
+    const seriesNumber = (options.seriesNumberOffset ?? 0) + orientationIndex + 1;
+    const seriesUid = studyUid + '.' + seriesNumber;
 
     for (let slice = 0; slice < sliceCount; slice++) {
       const sopUid = seriesUid + '.' + (slice + 1);
@@ -107,7 +112,7 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
         ...element(0x0008, 0x0008, 'CS', text('ORIGINAL\\PRIMARY', 'CS')),
         ...element(0x0008, 0x0016, 'UI', text('1.2.840.10008.5.1.4.1.1.4', 'UI')),
         ...element(0x0008, 0x0018, 'UI', text(sopUid, 'UI')),
-        ...element(0x0008, 0x0020, 'DA', text('20350701', 'DA')),
+        ...element(0x0008, 0x0020, 'DA', text(options.studyDate ?? '20350701', 'DA')),
         ...element(0x0008, 0x0030, 'TM', text('120000', 'TM')),
         ...element(0x0008, 0x0060, 'CS', text('MR', 'CS')),
         ...element(0x0008, 0x1030, 'LO', text('SYNTHETIC SVR VALIDATION ONLY', 'LO')),
@@ -118,7 +123,7 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
         ...element(0x0018, 0x0088, 'DS', text('1', 'DS')),
         ...element(0x0020, 0x000d, 'UI', text(studyUid, 'UI')),
         ...element(0x0020, 0x000e, 'UI', text(seriesUid, 'UI')),
-        ...element(0x0020, 0x0011, 'IS', text(String(orientationIndex + 1), 'IS')),
+        ...element(0x0020, 0x0011, 'IS', text(String(seriesNumber), 'IS')),
         ...element(0x0020, 0x0013, 'IS', text(String(slice + 1), 'IS')),
         ...element(0x0020, 0x0032, 'DS', text(orientation.position(slice).join('\\'), 'DS')),
         ...element(0x0020, 0x0037, 'DS', text(orientation.orientation, 'DS')),
@@ -133,7 +138,9 @@ export function createSyntheticSvrDicomFiles(options: SyntheticSvrFixtureOptions
         ...element(0x0028, 0x0101, 'US', uint16(16)),
         ...element(0x0028, 0x0102, 'US', uint16(15)),
         ...element(0x0028, 0x0103, 'US', uint16(0)),
-        ...element(0x0028, 0x0120, 'US', uint16(0)),
+        ...(options.pixelPaddingValue === null
+          ? []
+          : element(0x0028, 0x0120, 'US', uint16(options.pixelPaddingValue ?? 0))),
         ...element(0x0028, 0x1050, 'DS', text('500', 'DS')),
         ...element(0x0028, 0x1051, 'DS', text('1000', 'DS')),
         ...element(0x0028, 0x1052, 'DS', text('0', 'DS')),

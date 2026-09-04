@@ -6,6 +6,7 @@ import {
 } from './alignmentScoringEngine';
 import type { GridSeedTransform } from './alignmentTransform';
 import type { PhaseCorrection } from './phaseCorrelation';
+import { selectFinalAffineProposal } from './structuralAffineSelection';
 
 type ScoringRequest =
   | { kind: 'initialize'; requestId: number; config: AlignmentScoringConfiguration }
@@ -18,7 +19,8 @@ type ScoringRequest =
       phase: PhaseCorrection;
       validity?: Float32Array;
     }
-  | { kind: 'final'; requestId: number; input: AlignmentFinalScoringInput };
+  | { kind: 'final'; requestId: number; input: AlignmentFinalScoringInput }
+  | { kind: 'final-only'; requestId: number; input: Parameters<typeof selectFinalAffineProposal>[0] };
 
 let engine: AlignmentScoringEngine | null = null;
 
@@ -28,6 +30,18 @@ self.onmessage = (event: MessageEvent<ScoringRequest>) => {
     if (request.kind === 'initialize') {
       engine = new AlignmentScoringEngine(request.config);
       self.postMessage({ kind: 'ready', requestId: request.requestId });
+      return;
+    }
+    if (request.kind === 'final-only') {
+      self.postMessage({ kind: 'started', requestId: request.requestId });
+      performance.mark('alignment-final-scoring:start');
+      const result = selectFinalAffineProposal(request.input);
+      performance.measure('alignment-final-scoring', 'alignment-final-scoring:start');
+      self.postMessage({
+        kind: 'final-result',
+        requestId: request.requestId,
+        result,
+      });
       return;
     }
     if (!engine) throw new Error('Alignment scoring worker has not initialized its reference image');

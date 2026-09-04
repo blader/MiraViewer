@@ -1,18 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Blob as NodeBlob } from 'node:buffer';
-import { getDB, resetDbForTests } from '../src/db/db';
+import {
+  DATASET_REVISION_STATE_KEY,
+  DATASET_TOKEN_STATE_KEY,
+  deleteAllStoredMriData,
+  getDB,
+  resetDbForTests,
+} from '../src/db/db';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { alignmentDisplayBaseline, DEFAULT_ALIGNMENT_ADJUSTMENT } from '../src/utils/alignmentAdjustment';
 import {
   getComparisonData,
   getImageIdForInstance,
-  getPanelSettings,
+  getPanelSettingsSnapshot,
   getSeriesFrameManifest,
   getStudies,
   savePanelSettings,
   saveVolumeSegmentation,
   getVolumeSegmentation,
+  selectAcquisition,
+  setSelectedPatientKey,
 } from '../src/utils/localApi';
+import { initializeComparisonState } from '../src/db/comparisonState';
+import { sourceSettingsKey } from '../src/db/comparisonIdentity';
 import type { VolumeSegmentationRow } from '../src/db/schema';
 
 async function resetDb() {
@@ -24,11 +34,144 @@ async function resetDb() {
   });
 }
 
+async function seedAcquisition(studyUid: string, seriesUid: string, count = 1, patientName = 'Synthetic Patient') {
+  const db = await getDB();
+  await db.put('studies', {
+    studyInstanceUid: studyUid,
+    studyDate: '20350101',
+    studyTime: '120000',
+    patientId: 'reused-id',
+    patientName,
+    studyDescription: 'Synthetic',
+    modality: 'MR',
+  });
+  await db.put('series', {
+    studyInstanceUid: studyUid,
+    seriesInstanceUid: seriesUid,
+    seriesDescription: 'Axial T2 SE',
+    seriesNumber: 1,
+    plane: 'Axial',
+    weight: 'T2',
+    sequenceType: 'SE',
+    modality: 'MR',
+  });
+  for (let i = 0; i < count; i++)
+    await db.put('instances', {
+      studyInstanceUid: studyUid,
+      seriesInstanceUid: seriesUid,
+      sopInstanceUid: `${seriesUid}.${i}`,
+      instanceNumber: i + 1,
+      rows: 2,
+      columns: 2,
+      fileBlob: new Blob([Uint8Array.of(i)]),
+    });
+  await initializeComparisonState(db);
+}
+
+async function selectedSettings(patient?: string) {
+  const data = await getComparisonData(patient);
+  const combo = data.sequences[0]!.id;
+  const date = data.dates[0]!;
+  const snapshot = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+  return { data, combo, date, snapshot, owner: snapshot.verifiedSources[date]! };
+}
+
 describe('localApi', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await resetDbForTests();
     await resetDb();
+  });
+
+  it('keeps acquisition choices and source-owned settings through a timestamp collision and a larger import', async () => {
+    await seedAcquisition('study-a', 'series-a', 2);
+    let data = await getComparisonData();
+    const combo = data.sequences[0]!.id;
+    const date = data.dates[0]!;
+    const { owner } = await selectedSettings();
+    await savePanelSettings(owner, { ...DEFAULT_PANEL_SETTINGS, zoom: 2 });
+    await seedAcquisition('study-b', 'series-b');
+    await seedAcquisition('study-a', 'larger-series', 4);
+    data = await getComparisonData();
+    const movedDate = Object.keys(data.examinations).find((key) => data.examinations[key]!.study_uid === 'study-a')!;
+    expect(movedDate).not.toBe(date);
+    expect(data.series_map[combo]![movedDate]!.series_uid).toBe('series-a');
+    expect(data.series_candidates![combo]![movedDate]).toHaveLength(2);
+    let settings = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(settings.settings[movedDate]?.zoom).toBe(2);
+    await selectAcquisition('study-a', combo, 'larger-series');
+    data = await getComparisonData();
+    settings = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(settings.settings[movedDate]).toBeUndefined();
+    await savePanelSettings(settings.verifiedSources[movedDate]!, { ...DEFAULT_PANEL_SETTINGS, zoom: 3 });
+    await selectAcquisition('study-a', combo, 'series-a');
+    data = await getComparisonData();
+    expect(
+      (await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo])).settings[movedDate]
+        ?.zoom,
+    ).toBe(2);
+    expect(
+      (await (await getDB()).get('panel_settings', sourceSettingsKey('larger-series')))?.settings['study-a']?.zoom,
+    ).toBe(3);
+  });
+
+  it('projects unambiguous legacy settings without writing on read, but asks for a source when ambiguous', async () => {
+    await seedAcquisition('study-a', 'series-a');
+    let data = await getComparisonData();
+    const combo = data.sequences[0]!.id;
+    const date = data.dates[0]!;
+    await (
+      await getDB()
+    ).put('panel_settings', {
+      comboId: `${data.selected_patient_key}::${combo}`,
+      settings: { [date]: { ...DEFAULT_PANEL_SETTINGS, zoom: 2 } },
+    });
+    const migrated = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(migrated.settings[date]?.zoom).toBe(2);
+    expect(migrated.legacySettings).toEqual([]);
+    const db = await getDB();
+    expect((await db.get('panel_settings', `${data.selected_patient_key}::${combo}`))?.settings[date]?.zoom).toBe(2);
+    expect(await db.get('panel_settings', sourceSettingsKey('series-a'))).toBeUndefined();
+    await savePanelSettings(migrated.verifiedSources[date]!, { ...DEFAULT_PANEL_SETTINGS, zoom: 3 });
+    expect((await db.get('panel_settings', sourceSettingsKey('series-a')))?.source?.legacyOrigin).toEqual({
+      comboId: `${data.selected_patient_key}::${combo}`,
+      dateIso: date,
+    });
+    await db.delete('panel_settings', sourceSettingsKey('series-a'));
+    await seedAcquisition('study-a', 'series-alternative', 2);
+    data = await getComparisonData();
+    const ambiguous = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(ambiguous.settings[date]).toBeUndefined();
+    expect(ambiguous.legacySettings).toHaveLength(1);
+    await savePanelSettings(
+      ambiguous.verifiedSources[date]!,
+      { ...DEFAULT_PANEL_SETTINGS, zoom: 2 },
+      ambiguous.legacySettings[0]!.origin,
+    );
+    const assigned = await getPanelSettingsSnapshot(combo, data.selected_patient_key, data.series_map[combo]);
+    expect(assigned.settings[date]?.zoom).toBe(2);
+    expect(assigned.legacySettings).toEqual([]);
+  });
+
+  it('retains the selected source and its labels when conservative patient grouping changes', async () => {
+    await seedAcquisition('study-a', 'series-a', 1, 'Zulu');
+    const original = await getComparisonData();
+    await saveVolumeSegmentation({
+      volumeKey: 'source-labels',
+      patientKey: original.selected_patient_key!,
+      studyUid: 'study-a',
+      seriesUids: ['series-a'],
+      dims: [2, 1, 1],
+      labels: Uint8Array.of(1, 0),
+      updatedAt: 1,
+    });
+    await seedAcquisition('study-b', 'series-b', 1, 'Alpha');
+    const changed = await getComparisonData();
+    expect(changed.selected_patient_key).toBe('reused-id#study-a');
+    expect(changed.patients).toHaveLength(2);
+    expect(Array.from((await getVolumeSegmentation('source-labels'))!.labels)).toEqual([1, 0]);
+    await setSelectedPatientKey('reused-id#study-b');
+    expect(await getVolumeSegmentation('source-labels')).toBeNull();
   });
 
   it.each([
@@ -179,23 +322,37 @@ describe('localApi', () => {
     expect(chosen?.instance_count).toBe(5);
   });
 
-  it('persists and loads panel settings', async () => {
-    await savePanelSettings('combo-1', '2024-01-01T00:00:00', {
-      offset: 1,
-      zoom: 1.5,
-      rotation: 0,
-      brightness: 100,
-      contrast: 110,
-      panX: 0,
-      panY: 0,
-      progress: 0.5,
-    });
-    const settings = await getPanelSettings('combo-1');
-    expect(settings['2024-01-01T00:00:00']?.zoom).toBe(1.5);
+  it('uses read-only catalog and settings snapshots, then only the token and one source row on save', async () => {
+    await seedAcquisition('study-a', 'series-a');
+    const transactions = vi.spyOn(IDBDatabase.prototype, 'transaction');
+    const { owner } = await selectedSettings();
+    expect(transactions.mock.calls.every(([, mode]) => !mode || mode === 'readonly')).toBe(true);
+    transactions.mockClear();
+    await savePanelSettings(owner, { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 });
+    expect(transactions.mock.calls).toHaveLength(1);
+    expect(transactions.mock.calls[0]!.slice(0, 2)).toEqual([['panel_settings', 'app_state'], 'readwrite']);
+    expect((await selectedSettings()).snapshot.settings[(await selectedSettings()).date]?.zoom).toBe(1.5);
   });
 
-  it('round-trips correction intent and unclipped baseline in patient-scoped storage, including explicit clearing', async () => {
-    const date = '2035-01-10T12:00:00';
+  it('fences settings writes against replacement/reset without rejecting additive content revisions', async () => {
+    await seedAcquisition('study-a', 'series-a');
+    const { owner, date } = await selectedSettings();
+    const db = await getDB();
+    await db.put('app_state', { key: DATASET_REVISION_STATE_KEY, value: 42 });
+    await savePanelSettings(owner, { ...DEFAULT_PANEL_SETTINGS, zoom: 2 });
+    expect((await selectedSettings()).snapshot.settings[date]?.zoom).toBe(2);
+    await db.put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'replacement' });
+    await expect(savePanelSettings(owner, DEFAULT_PANEL_SETTINGS)).rejects.toThrow(/replaced/);
+    expect((await selectedSettings()).snapshot.settings[date]?.zoom).toBe(2);
+    const replacement = (await selectedSettings()).owner;
+    await deleteAllStoredMriData();
+    await expect(savePanelSettings(replacement, DEFAULT_PANEL_SETTINGS)).rejects.toThrow(/replaced/);
+    expect(await (await getDB()).count('panel_settings')).toBe(0);
+  });
+
+  it('round-trips correction intent and unclipped baseline under its verified source, including explicit clearing', async () => {
+    await seedAcquisition('study-a', 'series-a');
+    const { owner, date, data, combo } = await selectedSettings();
     const baseline = { ...DEFAULT_PANEL_SETTINGS, brightness: 199, affine01: 0.02 };
     const settings = {
       ...baseline,
@@ -204,22 +361,16 @@ describe('localApi', () => {
       alignmentBaseline: alignmentDisplayBaseline(baseline),
       alignmentPaused: true,
     };
-    await savePanelSettings('shared-sequence', date, settings, 'patient-a');
-    expect((await getPanelSettings('shared-sequence', 'patient-a'))[date]).toEqual(settings);
-    expect(await getPanelSettings('shared-sequence', 'patient-b')).toEqual({});
-
-    await savePanelSettings(
-      'shared-sequence',
-      date,
-      {
-        ...baseline,
-        alignmentAdjustment: undefined,
-        alignmentBaseline: undefined,
-        alignmentPaused: false,
-      },
-      'patient-a',
-    );
-    const reset = (await getPanelSettings('shared-sequence', 'patient-a'))[date]!;
+    await savePanelSettings(owner, settings);
+    expect((await selectedSettings()).snapshot.settings[date]).toEqual(settings);
+    await expect(getPanelSettingsSnapshot(combo, 'another-patient', data.series_map[combo])).rejects.toThrow(/patient/);
+    await savePanelSettings(owner, {
+      ...baseline,
+      alignmentAdjustment: undefined,
+      alignmentBaseline: undefined,
+      alignmentPaused: false,
+    });
+    const reset = (await selectedSettings()).snapshot.settings[date]!;
     expect(reset.alignmentAdjustment).toBeUndefined();
     expect(reset.alignmentBaseline).toBeUndefined();
     expect(reset.alignmentPaused).toBe(false);

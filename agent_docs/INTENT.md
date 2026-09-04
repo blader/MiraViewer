@@ -1,4 +1,6 @@
-# Intent
+# Historical task: Align All click repair
+
+This is a completed task record, not the current project intent or validation status. See the [current architecture and validation guide](design-docs/miraviewer-architecture.md) and [audit implementation ledger](exec-plans/active/2026-09-02-full-codebase-audit-implementation.md). Server state and test totals below describe that earlier task.
 
 ## User's Goal
 Restore the broken “Align All” action in MiraViewer.

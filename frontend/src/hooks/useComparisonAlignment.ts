@@ -9,7 +9,7 @@ import type { usePanelSettings } from './usePanelSettings';
 
 type Options = Pick<
   Parameters<typeof useVisibleAlignment>[0],
-  'data' | 'sequenceId' | 'columns' | 'viewportSize' | 'outputMode' | 'enabled'
+  'data' | 'sequenceId' | 'columns' | 'presentedDates' | 'viewportSize' | 'outputMode' | 'enabled'
 > & {
   panel: ReturnType<typeof usePanelSettings>;
 };
@@ -105,7 +105,8 @@ export function useComparisonAlignment({ panel, data, sequenceId, columns, ...vi
         }
       : null,
     hasManualAdjustments: columns.some(
-      ({ date }, index) => index > 0 && !panelSettings.get(date)?.alignmentPaused && manuallyAdjustedDates?.has(date),
+      ({ date }) =>
+        date !== visible.referenceDate && !panelSettings.get(date)?.alignmentPaused && manuallyAdjustedDates?.has(date),
     ),
     realign,
     useAcquiredImage,

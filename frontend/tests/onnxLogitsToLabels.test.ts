@@ -2,6 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { logitsToLabels } from '../src/utils/segmentation/onnx/logitsToLabels';
 
 describe('logitsToLabels', () => {
+  it.each([NaN, Infinity, -Infinity])('rejects non-finite model evidence (%s)', (value) => {
+    expect(() =>
+      logitsToLabels({
+        logits: { data: Float32Array.of(0, value, 1, 2), dims: [1, 4, 1, 1, 1] },
+        labelMap: [0, 1, 2, 4],
+      }),
+    ).toThrow(/must all be finite/);
+  });
   it('converts [1,C,Z,Y,X] logits to uint8 labels using a label map', () => {
     // C=3, Z=1, Y=1, X=4
     const dims = [1, 3, 1, 1, 4] as const;

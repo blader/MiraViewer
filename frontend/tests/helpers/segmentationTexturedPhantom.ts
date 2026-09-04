@@ -1,4 +1,4 @@
-import type { SeededVolumeInput } from '../../src/utils/segmentation/seededVolume';
+import type { SeededVolumeInput } from './legacySeededVolume';
 
 type Point = [number, number, number];
 export type TissueAppearance = 'textured' | 'weak' | 'cystic' | 'dark';

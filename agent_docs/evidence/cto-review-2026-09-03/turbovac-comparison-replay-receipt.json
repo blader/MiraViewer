@@ -1,0 +1,39 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-results/workflow-replays-a-two-exa-0ad96-ls-or-restarting-sharp-work-workflow/comparison-replay-receipt.json",
+    "sha256": "76413384878c62f75a7239cc57cea6a9bcd733ba6525a65f10515ec35bba62e8"
+  },
+  "receipt": {
+    "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+    "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T04:18:34.439Z",
+    "fixture": "two synthetic examinations with acquired zero-valued background",
+    "browser": "152.0.7977.82",
+    "fixtureFiles": 144,
+    "before": {
+      "imageId": "miraderived:%5B%221.2.826.0.1.3680043.10.543.20350701.1.1%22%2C%22e1697c10-18a4-4ed7-abf3-725601c0e230%22%2C%22SVR-SYNTHETIC-ONLY%22%2C%22axial-t2-flair%22%2C144%2C%221.2.826.0.1.3680043.10.543.20360701.1.1%22%2C11%2C%221.2.826.0.1.3680043.10.543.20360701.1.1.12%22%2C%22%5B1%2C%5C%22native%5C%22%2C36%2C36%2C1%2C1%2C%5B0%2C0%2C11%5D%2C%5B1%2C0%2C0%5D%2C%5B0%2C1%2C0%5D%2C%5B0%2C0%2C1%5D%2C%5B36%2C36%5D%2C36%2C36%2C1%2C1%2C%5C%221.2.826.0.1.3680043.10.543.20360701.1.999%5C%22%2C%5C%221.2.826.0.1.3680043.10.543.20360701.1.1.12%5C%22%5D%22%2C0%5D:sharp:6b407c8d-2146-4e6a-b031-d2db5b4c0d60",
+      "rasterSha256": "4c0b96f6668f6ffb5f3042efafc8a082fc2ded5cd94b7ef5d893b75b63f58520",
+      "transform": "translate(0px, 0px) scale(1) rotate(0deg) matrix(1, 0, 0, 1, 0, 0)",
+      "workerStarts": 6
+    },
+    "after": {
+      "imageId": "miraderived:%5B%221.2.826.0.1.3680043.10.543.20350701.1.1%22%2C%22e1697c10-18a4-4ed7-abf3-725601c0e230%22%2C%22SVR-SYNTHETIC-ONLY%22%2C%22axial-t2-flair%22%2C144%2C%221.2.826.0.1.3680043.10.543.20360701.1.1%22%2C11%2C%221.2.826.0.1.3680043.10.543.20360701.1.1.12%22%2C%22%5B1%2C%5C%22native%5C%22%2C36%2C36%2C1%2C1%2C%5B0%2C0%2C11%5D%2C%5B1%2C0%2C0%5D%2C%5B0%2C1%2C0%5D%2C%5B0%2C0%2C1%5D%2C%5B36%2C36%5D%2C36%2C36%2C1%2C1%2C%5C%221.2.826.0.1.3680043.10.543.20360701.1.999%5C%22%2C%5C%221.2.826.0.1.3680043.10.543.20360701.1.1.12%5C%22%5D%22%2C0%5D:sharp:6b407c8d-2146-4e6a-b031-d2db5b4c0d60",
+      "rasterSha256": "4c0b96f6668f6ffb5f3042efafc8a082fc2ded5cd94b7ef5d893b75b63f58520",
+      "transform": "translate(23.4px, 11.7px) scale(1) rotate(0deg) matrix(1, 0, 0, 1, 0, 0)",
+      "workerStarts": 6
+    },
+    "completed": [
+      "real alignment",
+      "sharp display",
+      "reference pan",
+      "unchanged raster and worker count on replay"
+    ],
+    "skipped": [
+      "private anatomy",
+      "hardware pacing",
+      "sustained warm navigation and peak memory"
+    ]
+  }
+}

@@ -1,0 +1,200 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/inference-results/inference-custom-model-wor-1b801-w-graph-and-recover-locally-inference/custom-model-receipt.json",
+    "sha256": "a20efaed9e98ea4827edcfd8f8b07acf695f146f553c867afa4ae73e2082b2a1"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:30:36.062Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "runs": [
+      {
+        "cancel": false,
+        "calibration": false,
+        "size": 24,
+        "modelBytes": 391,
+        "estimatedPeakBytes": 268934684,
+        "working": {
+          "nvox": 13824,
+          "modelRuntimeBytes": 268437020,
+          "inputBytes": 55296,
+          "preprocessingBytes": 124416,
+          "logitsBytes": 221184,
+          "labelBytes": 27648,
+          "totalBytes": 268865564
+        },
+        "elapsedMs": 311.8250000476837,
+        "inferenceStartedAt": 414.6599998474121,
+        "cancelAt": null,
+        "cancelToReturnMs": null,
+        "animationCallbacks": 37,
+        "outputCount": 13824,
+        "mismatches": 0,
+        "error": null,
+        "sourceUnchanged": true,
+        "provider": "wasm",
+        "wasmThreads": 8
+      },
+      {
+        "cancel": true,
+        "calibration": false,
+        "size": 72,
+        "modelBytes": 11869,
+        "estimatedPeakBytes": 281919860,
+        "working": {
+          "nvox": 373248,
+          "modelRuntimeBytes": 268482932,
+          "inputBytes": 1492992,
+          "preprocessingBytes": 3359232,
+          "logitsBytes": 5971968,
+          "labelBytes": 746496,
+          "totalBytes": 280053620
+        },
+        "elapsedMs": 364.3399999141693,
+        "inferenceStartedAt": 3564.949999809265,
+        "cancelAt": 3665.75,
+        "cancelToReturnMs": 0.12999987602233887,
+        "animationCallbacks": 45,
+        "outputCount": 0,
+        "mismatches": 0,
+        "error": {
+          "name": "AbortError",
+          "message": "AbortError: Model suggestion canceled."
+        },
+        "sourceUnchanged": true,
+        "provider": "wasm",
+        "wasmThreads": 8
+      },
+      {
+        "cancel": false,
+        "calibration": false,
+        "size": 24,
+        "modelBytes": 391,
+        "estimatedPeakBytes": 268934684,
+        "working": {
+          "nvox": 13824,
+          "modelRuntimeBytes": 268437020,
+          "inputBytes": 55296,
+          "preprocessingBytes": 124416,
+          "logitsBytes": 221184,
+          "labelBytes": 27648,
+          "totalBytes": 268865564
+        },
+        "elapsedMs": 260.5699999332428,
+        "inferenceStartedAt": 6793.359999895096,
+        "cancelAt": null,
+        "cancelToReturnMs": null,
+        "animationCallbacks": 32,
+        "outputCount": 13824,
+        "mismatches": 0,
+        "error": null,
+        "sourceUnchanged": true,
+        "provider": "wasm",
+        "wasmThreads": 8
+      }
+    ],
+    "workers": [
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+        "closed": true
+      }
+    ],
+    "scope": "Synthetic pointwise label oracle and 48-layer convolution workload, actual vendored ORT/WASM and fresh workers, cancellation 100 ms after inference-start notification; no clinical accuracy claim or hard allocator-limit claim."
+  }
+}

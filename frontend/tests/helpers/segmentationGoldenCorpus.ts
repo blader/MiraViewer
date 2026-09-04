@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { SeededVolumeInput, SeededVolumeResult } from '../../src/utils/segmentation/seededVolume';
+import type { SeededVolumeInput, SeededVolumeResult } from './legacySeededVolume';
 import { pixelFingerprint } from './interSliceCorpus';
 import { nativeMaskTopology } from './segmentationNativeCorpus';
 import { requireAnatomicalReference, type SegmentationReferenceClassification } from './segmentationRegression';

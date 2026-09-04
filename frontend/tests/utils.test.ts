@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { clamp, clampInt, getSliceIndex, getProgressFromSlice, normalizeRotation } from '../src/utils/math';
 import { formatDate, formatRotation } from '../src/utils/format';
 import { formatSequenceLabel } from '../src/utils/clinicalData';
-import { base64ToBlob, blobToBase64Data } from '../src/utils/base64';
 
 describe('math utils', () => {
   it('clamps values', () => {
@@ -43,15 +42,8 @@ describe('format utils', () => {
 
 describe('clinicalData utils', () => {
   it('formats sequence label', () => {
-    expect(formatSequenceLabel({ id: 'a', plane: 'Axial', weight: 'T1', sequence: 'SE', label: '', date_count: 0 })).toBe('T1 SE');
-  });
-});
-
-describe('base64 utils', () => {
-  it('converts base64 to blob and back', async () => {
-    const base64 = btoa('hello');
-    const blob = base64ToBlob(base64, 'text/plain');
-    const out = await blobToBase64Data(blob);
-    expect(out).toBe(base64);
+    expect(
+      formatSequenceLabel({ id: 'a', plane: 'Axial', weight: 'T1', sequence: 'SE', label: '', date_count: 0 }),
+    ).toBe('T1 SE');
   });
 });

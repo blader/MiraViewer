@@ -1,13 +1,23 @@
 import { useState } from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GroundTruthPolygonOverlay } from '../src/components/GroundTruthPolygonOverlay';
 import { AccessibleDialog } from '../src/components/ui/AccessibleDialog';
-import { usePanelSettings } from '../src/hooks/usePanelSettings';
+import { useTestPanelSettings as usePanelSettings, verifiedSourcesForTest } from './helpers/panelSettings';
+import type { SeriesRef } from '../src/types/api';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
+import { saveTumorGroundTruth } from '../src/utils/localApi';
+import { deferred } from './helpers/deferred';
 
 vi.mock('../src/utils/localApi', () => ({
   getPanelSettings: vi.fn(async () => ({})),
+  getPanelSettingsSnapshot: vi.fn(
+    async (_combo: string, _patient: string | null, sources: Record<string, SeriesRef>) => ({
+      datasetToken: 'test-dataset',
+      settings: {},
+      verifiedSources: verifiedSourcesForTest(sources),
+    }),
+  ),
   savePanelSettings: vi.fn(async () => undefined),
   getSopInstanceUidForInstanceIndex: vi.fn(async () => 'synthetic-instance'),
   getTumorGroundTruthForInstance: vi.fn(async () => null),
@@ -81,7 +91,9 @@ function AnnotationWorkspace({
 function addDraftPoints() {
   const overlay = screen.getByTestId('annotation-host').firstElementChild as HTMLElement;
   fireEvent.pointerDown(overlay, { pointerId: 1, button: 0, isPrimary: true, clientX: 40, clientY: 60 });
+  fireEvent.click(overlay);
   fireEvent.pointerDown(overlay, { pointerId: 2, button: 0, isPrimary: true, clientX: 160, clientY: 180 });
+  fireEvent.click(overlay);
   return () => overlay.querySelectorAll('svg.pointer-events-none circle').length;
 }
 
@@ -105,6 +117,34 @@ afterEach(() => {
 });
 
 describe('clinical annotation keyboard ownership', () => {
+  it('shows only the committed outline after save while preserving draft undo', async () => {
+    const save = deferred<void>();
+    vi.mocked(saveTumorGroundTruth).mockReturnValueOnce(save.promise);
+    render(<AnnotationWorkspace onAnnotationClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByLabelText('Synthetic viewer zoom')).toHaveTextContent('1'));
+    const draftPointCount = addDraftPoints();
+    const overlay = screen.getByTestId('annotation-host').firstElementChild as HTMLElement;
+    fireEvent.pointerDown(overlay, { pointerId: 3, button: 0, isPrimary: true, clientX: 80, clientY: 240 });
+    fireEvent.click(overlay);
+    fireEvent.keyDown(document.body, { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(saveTumorGroundTruth).toHaveBeenCalledOnce());
+    expect(within(overlay).getByRole('status')).toHaveTextContent('Saving outline');
+    expect(draftPointCount()).toBe(3);
+
+    await act(async () => save.resolve());
+    expect(within(overlay).getByRole('status')).toHaveTextContent('Outline saved on this device.');
+    expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+    expect(draftPointCount()).toBe(0);
+    expect(overlay.querySelectorAll('svg.pointer-events-none path')).toHaveLength(1);
+
+    fireEvent.keyDown(document.body, { key: 'z', metaKey: true, bubbles: true, cancelable: true });
+    expect(draftPointCount()).toBe(2);
+    expect(overlay.querySelectorAll('svg.pointer-events-none path')).toHaveLength(1);
+    expect(saveTumorGroundTruth).toHaveBeenCalledOnce();
+    expect(within(overlay).getByRole('status')).toHaveTextContent('Click to add points');
+  });
+
   it('lets an active polygon draft own undo without also mutating viewer geometry', async () => {
     render(<AnnotationWorkspace onAnnotationClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByLabelText('Synthetic viewer zoom')).toHaveTextContent('1'));

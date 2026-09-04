@@ -3,10 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type {
-  segmentSeededVolume as ProductionSolver,
-  SeededVolumeInput,
-} from '../src/utils/segmentation/seededVolume';
+import type { segmentSeededVolume as DiagnosticSolver, SeededVolumeInput } from './helpers/legacySeededVolume';
 import { segmentationQuality } from './helpers/segmentationQuality';
 import { segmentationEnclosedPhantom } from './helpers/segmentationEnclosedPhantom';
 import { segmentationTexturedPhantom, type TissueAppearance } from './helpers/segmentationTexturedPhantom';
@@ -16,7 +13,7 @@ import { segmentationTexturedPhantom, type TissueAppearance } from './helpers/se
 // and MIRAVIEWER_SEGMENTATION_CANDIDATE_SHA=<sha256>; a bad pin or any failed gate fails the run.
 const candidatePath = process.env.MIRAVIEWER_SEGMENTATION_CANDIDATE_SOLVER_PATH;
 const candidateSha = process.env.MIRAVIEWER_SEGMENTATION_CANDIDATE_SHA;
-let segmentSeededVolume: typeof ProductionSolver;
+let segmentSeededVolume: typeof DiagnosticSolver;
 let resolvedCandidatePath: string | undefined;
 const candidateFingerprint = () => createHash('sha256').update(readFileSync(resolvedCandidatePath!)).digest('hex');
 

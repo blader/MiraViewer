@@ -6,6 +6,7 @@ import { OVERLAY_NAV_STORAGE_KEY } from '../utils/storageKeys';
 type PersistedOverlayNav = {
   viewMode?: 'grid' | 'overlay' | 'svr3d';
   overlayDate?: string;
+  overlayStudyUid?: string;
   playSpeed?: number;
 };
 
@@ -24,9 +25,10 @@ function readPersistedOverlayNav(): PersistedOverlayNav {
           ? 'svr3d'
           : undefined;
   const overlayDate = typeof obj.overlayDate === 'string' ? obj.overlayDate : undefined;
+  const overlayStudyUid = typeof obj.overlayStudyUid === 'string' ? obj.overlayStudyUid : undefined;
   const playSpeed = typeof obj.playSpeed === 'number' && Number.isFinite(obj.playSpeed) ? obj.playSpeed : undefined;
 
-  return { viewMode, overlayDate, playSpeed };
+  return { viewMode, overlayDate, overlayStudyUid, playSpeed };
 }
 
 function getUtcDateMs(date: string) {
@@ -53,8 +55,11 @@ export function useOverlayNavigation(
   }, []);
 
   const [viewMode, setViewModeState] = useState<'grid' | 'overlay' | 'svr3d'>(initialPersistedNav.viewMode ?? 'grid');
-  const [overlayDateNavigation, setOverlayDateNavigation] = useState<{ current: number; previous: number | null }>({
-    current: 0,
+  const [overlayDateNavigation, setOverlayDateNavigation] = useState<{
+    selected: string | null;
+    previous: string | null;
+  }>({
+    selected: initialPersistedNav.overlayStudyUid ?? initialPersistedNav.overlayDate ?? null,
     previous: null,
   });
   const [isPlaying, setIsPlaying] = useState(false);
@@ -96,53 +101,48 @@ export function useOverlayNavigation(
   }, [persist, playSpeed]);
 
   const maxOverlayIndex = Math.max(0, overlayColumns.length - 1);
+  const indexOfExamination = (identity: string | null) =>
+    overlayColumns.findIndex(
+      (column) => (column.ref?.study_id ?? column.date) === identity || column.date === identity,
+    );
+  const selectedIndex = indexOfExamination(overlayDateNavigation.selected);
+  const safeOverlayDateIndex = Math.max(0, selectedIndex);
 
   const setOverlayDateIndex = useCallback(
     (next: number | ((prev: number) => number)) => {
       setOverlayDateNavigation((previous) => {
-        const safePrev = Math.max(0, Math.min(maxOverlayIndex, previous.current));
+        const safePrev = Math.max(
+          0,
+          overlayColumns.findIndex(
+            (column) =>
+              (column.ref?.study_id ?? column.date) === previous.selected || column.date === previous.selected,
+          ),
+        );
         const resolved = typeof next === 'function' ? next(safePrev) : next;
         const clamped = Math.max(0, Math.min(maxOverlayIndex, resolved));
-        return clamped === safePrev ? previous : { current: clamped, previous: safePrev };
+        const column = overlayColumns[clamped];
+        if (!column) return previous;
+        const current = column.ref?.study_id ?? column.date;
+        return current === previous.selected ? previous : { selected: current, previous: previous.selected };
       });
     },
-    [maxOverlayIndex],
+    [maxOverlayIndex, overlayColumns],
   );
 
-  // Read-only, clamped indices (avoid setState in effects when columns shrink).
-  const safeOverlayDateIndex = Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.current));
-
-  // Hydrate the overlay date from storage (once) after we know which dates are available.
-  // If we do restore, skip the first persist pass so we don't overwrite the stored value
-  // with the default index (0) for a single render.
-  const hydratedOverlayDateRef = useRef(false);
-  const skipNextPersistOverlayDateRef = useRef(false);
-  useEffect(() => {
-    if (hydratedOverlayDateRef.current) return;
-
-    const stored = persistedRef.current.overlayDate;
-    if (!stored) {
-      hydratedOverlayDateRef.current = true;
-      return;
-    }
-
-    if (overlayColumns.length === 0) {
-      // Wait until we have dates to match against.
-      return;
-    }
-
-    hydratedOverlayDateRef.current = true;
-
-    const idx = overlayColumns.findIndex((c) => c.date === stored);
-    if (idx >= 0 && idx !== safeOverlayDateIndex) {
-      skipNextPersistOverlayDateRef.current = true;
-      setOverlayDateNavigation((previous) => ({ ...previous, current: idx }));
-    }
-  }, [overlayColumns, safeOverlayDateIndex]);
-  const safePreviousOverlayDateIndex =
-    overlayDateNavigation.previous === null
-      ? null
-      : Math.max(0, Math.min(maxOverlayIndex, overlayDateNavigation.previous));
+  // Bind the first available examination and upgrade date-only preferences once.
+  // This guarded state adjustment avoids an effect-render cycle and keeps IDs
+  // authoritative before children receive callbacks for the new list.
+  const selectedColumn = overlayColumns[safeOverlayDateIndex];
+  const selectedIdentity = selectedColumn?.ref?.study_id ?? selectedColumn?.date;
+  if (
+    selectedIdentity &&
+    (overlayDateNavigation.selected === null || selectedIndex >= 0) &&
+    selectedIdentity !== overlayDateNavigation.selected
+  ) {
+    setOverlayDateNavigation({ ...overlayDateNavigation, selected: selectedIdentity });
+  }
+  const previousIndex = indexOfExamination(overlayDateNavigation.previous);
+  const safePreviousOverlayDateIndex = previousIndex < 0 ? null : previousIndex;
 
   // Space-hold compare behavior:
   // - Prefer the actual navigation history (previousOverlayDateIndex)
@@ -185,15 +185,10 @@ export function useOverlayNavigation(
 
   // Persist the currently-selected date (not the displayed compare date).
   useEffect(() => {
-    if (skipNextPersistOverlayDateRef.current) {
-      skipNextPersistOverlayDateRef.current = false;
-      return;
-    }
-
-    const date = overlayColumns[safeOverlayDateIndex]?.date;
-    if (!date) return;
-    persist({ overlayDate: date });
-  }, [persist, overlayColumns, safeOverlayDateIndex]);
+    const column = overlayColumns[safeOverlayDateIndex];
+    if (!column || selectedIndex < 0) return;
+    persist({ overlayDate: column.date, overlayStudyUid: column.ref?.study_id });
+  }, [persist, overlayColumns, safeOverlayDateIndex, selectedIndex]);
 
   // Auto-play effect for overlay mode
   useEffect(() => {
@@ -208,48 +203,51 @@ export function useOverlayNavigation(
   useEffect(() => {
     if (interactionBlocked || viewMode !== 'overlay') return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if focus is on an input, select, or textarea
-      const target = e.target instanceof HTMLElement ? e.target : document.body;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      const target = e.target instanceof Element ? e.target : document.body;
+      const owner = target.closest(
+        'input, select, textarea, button, a[href], summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="tab"], [role="slider"], [role="checkbox"], [role="combobox"], [role="menuitem"]',
+      );
       if (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'SELECT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.isContentEditable ||
-        target.closest('[role="dialog"], [aria-modal="true"]')
-      ) {
+        (owner && !owner.matches('[data-overlay-navigation="date"]')) ||
+        target.closest('dialog, [role="dialog"], [aria-modal="true"]')
+      )
         return;
-      }
 
       // Number keys 1-9 to select date
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1;
         if (idx < overlayColumns.length) {
+          e.preventDefault();
           setOverlayDateIndex(idx);
           setIsPlaying(false);
         }
       }
       // Arrow keys for prev/next
       if (e.key === 'ArrowLeft') {
+        e.preventDefault();
         setOverlayDateIndex((prev) => Math.max(0, prev - 1));
         setIsPlaying(false);
       }
       if (e.key === 'ArrowRight') {
+        e.preventDefault();
         setOverlayDateIndex((prev) => Math.min(overlayColumns.length - 1, prev + 1));
         setIsPlaying(false);
       }
       // Space: hold to show comparison target (history previous; otherwise nearest adjacent date)
-      if (e.key === ' ' && !e.repeat) {
+      if (e.key === ' ') {
         e.preventDefault();
-        setIsPlaying(false);
-        setSpaceHeld(true);
-
-        // Prevent a focused date button from showing a weird focus/active outline while holding space.
-        target.blur();
+        if (!e.repeat) {
+          setIsPlaying(false);
+          setSpaceHeld(true);
+        }
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === ' ') {
+        if (spaceHeld && e.target instanceof Element && e.target.closest('[data-overlay-navigation="date"]'))
+          e.preventDefault();
         setSpaceHeld(false);
       }
     };
@@ -266,12 +264,13 @@ export function useOverlayNavigation(
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [interactionBlocked, viewMode, overlayColumns.length, setOverlayDateIndex]);
+  }, [interactionBlocked, viewMode, overlayColumns.length, setOverlayDateIndex, spaceHeld]);
 
   return {
     viewMode,
     setViewMode,
     overlayDateIndex: safeOverlayDateIndex,
+    selectionFallback: selectedIndex < 0 && overlayDateNavigation.selected !== null && overlayColumns.length > 0,
     setOverlayDateIndex,
     // Exposed so callers can pre-render/prefetch the compare target and avoid a visible jump
     // when the user holds Space.

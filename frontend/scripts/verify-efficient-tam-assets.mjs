@@ -43,7 +43,13 @@ export async function verifyAssetFiles(directory, records) {
       throw error;
     });
     if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Model asset must be a regular file: ${record.path}`);
-    if (info.size !== record.bytes) throw new Error(`Model asset byte count mismatch: ${record.path}`);
+    if (info.size !== record.bytes) {
+      if (info.size < 1024 && readFileSync(filename, 'utf8').startsWith('version https://git-lfs.github.com/spec/v1\n'))
+        throw new Error(
+          `Model asset is an unresolved Git LFS pointer: ${record.path}. Run git lfs install and git lfs pull before building; enable Git LFS in hosted Git settings.`,
+        );
+      throw new Error(`Model asset byte count mismatch: ${record.path}`);
+    }
     const hash = createHash('sha256');
     let readBytes = 0;
     // Do not retain a second full model copy while verifying a build directory.

@@ -10,6 +10,12 @@ const FEATURE_VALUES = SPATIAL_PIXELS * 256;
 const LOW_VALUES = 128 * 128;
 
 export type TrackingGraph = 'encoder' | 'decoder' | 'memoryAttention' | 'memoryEncoder';
+/** Completed operations only; excludes queueing, source reads and event-loop yields. */
+export type TrackingPhaseTiming = {
+  stage: 'runtime-load' | 'asset-load' | 'session-init' | 'graph-run';
+  asset?: TrackingGraph | 'memoryPosition' | 'temporalPositions';
+  elapsedMs: number;
+};
 export type TrackingSessions = Record<TrackingGraph, Pick<Ort.InferenceSession, 'run' | 'release'>>;
 export type TrackingFrameDecision = 'stop-direction' | void;
 export type TrackingDirectionEndpoints = { forward: number; reverse: number };
@@ -322,8 +328,6 @@ function snapshotSelection(options: TrackingSnapshotOptions): TrackingSnapshotOp
       throw new Error('The snapshot anchor must match its explicit source-plane prompts.');
     return copy;
   });
-  if (options.allowDirectionStop && markedFrames.some((frame) => frame.index !== anchorIndex))
-    throw new Error('Directional stopping requires a single marked source plane.');
   return {
     ...options,
     sourceRange: [sourceRange[0], sourceRange[1]],
@@ -339,11 +343,13 @@ export function createTrackingController({
   sessions,
   position,
   temporalPosition,
+  onTiming,
 }: {
   ort: Pick<typeof Ort, 'Tensor'>;
   sessions: TrackingSessions;
   position: Float32Array;
   temporalPosition: Float32Array;
+  onTiming?(timing: TrackingPhaseTiming): void;
 }): TrackingController {
   if (position.length !== MEMORY_VALUES || temporalPosition.length !== 7 * MEMORY_CHANNELS) {
     throw new Error('Tracking constants have the wrong pinned model shape.');
@@ -375,8 +381,10 @@ export function createTrackingController({
       progress(`before-${name}`);
       await new Promise((resolve) => setTimeout(resolve, 0)); // Real event-loop boundary for cancellation and progress.
       check();
+      const started = onTiming ? performance.now() : 0;
       const result = await sessions[name].run(feeds);
       for (const value of Object.values(result)) owned.add(value);
+      onTiming?.({ stage: 'graph-run', asset: name, elapsedMs: performance.now() - started });
       check();
       progress(`after-${name}`);
       check();
@@ -593,6 +601,7 @@ export function createTrackingController({
     let direction: 1 | -1 = 1;
     let index = anchorIndex;
     let completedFrames = 0;
+    const directionEndpoints = { forward: anchorIndex, reverse: anchorIndex };
     const releaseFrame = () => {
       for (const value of [...owned]) release(value);
     };
@@ -699,10 +708,18 @@ export function createTrackingController({
         decoded = corrected;
       }
       if (fused !== features) release(fused);
+      let decision: TrackingFrameDecision = undefined;
       if (stage === 'final') {
-        const decision = await onFrame({ ...decoded.output, index, direction, initial });
+        decision = await onFrame({ ...decoded.output, index, direction, initial });
         check();
-        if (decision !== undefined) throw new Error('Correction snapshots cannot stop a direction.');
+        if (decision !== undefined && decision !== 'stop-direction')
+          throw new Error('Tracking received an invalid frame decision.');
+        if (
+          decision === 'stop-direction' &&
+          (!options.allowDirectionStop ||
+            [...conditioning.keys()].some((markedIndex) => (index - markedIndex) * direction <= 0))
+        )
+          throw new Error('Directional stopping requires explicit permission beyond every conditioned source plane.');
         completedFrames++;
       }
       trimHistory(recent, index, direction);
@@ -724,6 +741,7 @@ export function createTrackingController({
       else recent.set(index, { index, memory, pointer });
       releaseFrame();
       progress('frame-complete');
+      return decision;
     }
 
     try {
@@ -752,6 +770,7 @@ export function createTrackingController({
         for (index = anchorIndex; (stop - index) * direction >= 0; index += direction) {
           check();
           const condition = conditioning.get(index);
+          let stopped = false;
           if (condition) {
             progress('conditioned-frame');
             check();
@@ -766,16 +785,19 @@ export function createTrackingController({
               selectedIou: condition.selectedIou,
             });
             check();
-            if (decision !== undefined) throw new Error('Correction snapshots cannot stop a direction.');
+            if (decision !== undefined)
+              throw new Error('Correction snapshots cannot stop on a conditioned source plane.');
             completedFrames++;
             trimHistory(recent, index, direction);
             progress('frame-complete');
-          } else await compute();
+          } else stopped = (await compute()) === 'stop-direction';
+          directionEndpoints[direction === 1 ? 'forward' : 'reverse'] = index;
+          if (stopped) break;
         }
         recent.clear();
         progress('direction-released');
       }
-      return { completedFrames };
+      return { completedFrames, ...(options.allowDirectionStop ? { directionEndpoints } : {}) };
     } finally {
       conditioning.clear();
       recent.clear();

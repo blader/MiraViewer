@@ -26,6 +26,11 @@ DCS-volume-copy-*/
 # Local test artifacts (downloaded DICOMs, zips, etc.)
 frontend/tmp/
 
+# Local handoffs, original benchmark receipts and generated synthetic fixtures.
+# Preserve these on disk. Only curated, path-scrubbed evidence is reviewed in agent_docs/evidence/.
+.baton/
+artifacts/
+
 # Vercel local project metadata
 .vercel/
 

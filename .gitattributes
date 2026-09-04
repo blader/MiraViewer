@@ -1,0 +1,2 @@
+# Pinned public model binaries stay available offline without entering normal Git history.
+frontend/public/models/**/*.onnx filter=lfs diff=lfs merge=lfs -text

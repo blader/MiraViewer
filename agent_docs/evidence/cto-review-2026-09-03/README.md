@@ -1,0 +1,61 @@
+# CTO-review verification — September 3, 2026
+
+This directory contains curated synthetic evidence for the [remediation ledger](../../exec-plans/active/2026-09-02-full-codebase-audit-implementation.md). No private MRI, private weights, saved marks, raw browser profiles or original process traces are included. Each receipt identifies its protected local original and SHA-256.
+
+## Post-reduction publication verification
+
+Current source fingerprint: `526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa`, code/test commit `34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8`. Subsequent publication edits contain documentation/evidence only. [PR #11](https://github.com/blader/MiraViewer/pull/11) owns the live CI and merge state.
+
+- [Current unit suite](turbovac-unit-suite.json): **3,169 passed, zero failed, 54 existing skips**. A preceding run's single five-second watchdog failure is preserved; the full-size source-admission fixture/assertions are unchanged, with a test-local 15-second watchdog. Focused replay and the complete repeat both passed.
+- [Current production workflow run](turbovac-workflow-run.json): **six passed**, unchanged source and `Cleanup: CLOSED`. The normal app was exercised in disposable headed Chrome profiles at `http://127.0.0.1:43134/`; this was not the acceptance-probe build.
+- [Persistence/recovery](turbovac-workflow-receipt.json): one measured pan wrote once to `app_state`/`panel_settings`, with zero source-catalog scans. Failed-read browsing/Retry, decoder retry, annotations, reload, backup restore and clear passed.
+- [Acquisition ownership](turbovac-source-ownership-receipt.json), [custom-model controls](turbovac-custom-model-workflow-receipt.json), [visible alignment](turbovac-visible-alignment-receipt.json) and [exact replay](turbovac-comparison-replay-receipt.json) preserve the individual observations and their limits.
+
+TypeScript, full lint with zero warnings, formatting, the isolated production build and copied pinned-model byte verification passed. Both recovery PNGs were byte-identical to the existing files linked below; their new custody hashes are in the current run receipt. Raster/aesthetic sign-off remains withheld for the image-preview limitation described below. No Storybook evidence is accepted. The seven earlier GPU/performance/inference tests below were not rerun during publication and retain their original fingerprint; they are not new current-head measurements.
+
+## Original CTO verification batch
+
+**Validated source fingerprint:** `dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4`. Base commit: `5f0efa433b6c8b6672add9a30184ec1140b2b5a3`. These are scoped working-tree checks, not remote CI or merge clearance.
+
+## Checks and useful measurements
+
+| Boundary                        | Evidence                                                                                                                     | Result                                                                                                                                                                                                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Complete unit suite             | [Unit summary](unit-suite.json)                                                                                              | 3,169 passed, zero failed, 54 skipped.                                                                                                                                                                                   |
+| Normal production workflow      | [Workflow receipt](workflow-receipt.json)                                                                                    | Import, image retry, browsing after failed settings read, Retry, pan, outline, reload, backup restore and clear. One measured pan: one `app_state`/`panel_settings` write transaction; zero study/series `getAll` calls. |
+| Source ownership                | [Acquisition receipt](source-ownership-receipt.json)                                                                         | Explicit acquisition switches and later display-date collisions preserve original source adjustments.                                                                                                                    |
+| Custom model in normal controls | [UI receipt](custom-model-workflow-receipt.json)                                                                             | Real draft, save/reopen parity, cancel and worker replacement.                                                                                                                                                           |
+| Presented alignment             | [Visible-pair receipt](visible-alignment-receipt.json), [replay receipt](comparison-replay-receipt.json)                     | Visible pair before background work; cold/warm navigation and exact replay without replacing accepted content.                                                                                                           |
+| GPU source plane                | [Pixel and frame receipt](gpu.json)                                                                                          | 37 checks pass on ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version). Median completed frames: off 13.98 ms, blended 13.19 ms, exact 10.30 ms.                                                       |
+| Coarse registration             | [Coarse receipt](coarse-estimate-receipt.json)                                                                               | Pose-only worker parity; no discarded image transfer.                                                                                                                                                                    |
+| Final scoring                   | [Scoring receipt](final-scoring-receipt.json)                                                                                | Worker/inline result parity, main-thread separation and cancellation during ranking.                                                                                                                                     |
+| Large derived-frame storage     | [Storage receipt](derived-storage-receipt.json)                                                                              | Key-only eviction and narrowed hydration; no unrelated 160 MiB payload clone.                                                                                                                                            |
+| Real inference lifecycle        | [Custom lifecycle](custom-model-receipt.json), [pinned model](inference-receipt.json)                                        | Real graphs, cancellation/recovery, retained-session correction parity and verified offline bytes.                                                                                                                       |
+| Custom-model allowance          | [Final calibration](custom-model-calibration-receipt.json), [previous reserve](custom-model-calibration-before-reserve.json) | 128³, 20,972,050 encoded bytes, 2,097,152 labels, zero mismatches; 480.47 ms through worker completion under tracing.                                                                                                    |
+| Hosted model checkout           | [Vercel readback](vercel-lfs.json)                                                                                           | Git LFS enabled and independently read back; no production redeployment.                                                                                                                                                 |
+
+All **13 browser tests** passed: six workflow, one GPU, three performance and three inference. The [workflow](workflow-run.json), [GPU](gpu-run.json), [performance](performance-run.json) and [inference](inference-run.json) run receipts confirm unchanged source fingerprints and closed owned resources.
+
+## Measurement limits
+
+GPU measurements use a 512×512 viewport, 128³ synthetic texture, 1,024 steps and three alternating orders. Timing includes synchronized center-pixel readback and its overhead, not only shader execution. It is a small renderer-specific sample, not a general UI speedup or percentile estimate. Earlier zero-length `gl.finish` samples were rejected and remain preserved in raw attempt 01.
+
+The custom-model graph uses a live, data-dependent 20 MiB Gather initializer. The final working allowance is 427,821,128 bytes, with a 256 MiB runtime floor. Its sampled worker-host renderer private footprint reached 372,248,576 bytes. The earlier 128 MiB floor was increased after a repeat run observed approximately 403 MiB of renderer growth against a 280 MiB working allowance. Neither observation isolates the worker from its page, captures a guaranteed instantaneous peak, nor bounds an arbitrary uploaded graph. Dump requests are made at 100 ms intervals but can complete much later; inspect actual timestamps. Termination events prove worker shutdown, not immediate OS memory reclamation.
+
+## UI evidence and inspection limitation
+
+The actual application was exercised with disposable headed Chrome profiles, never Storybook or a user's MRI origin. Browser tests independently verify recovery controls' viewport bounds, hit targets, normal input, source ownership and durable saved state.
+
+The model-side image-preview path displayed an apparent black patch absent from the saved central scan pixels. The final mobile PNG is byte-identical to attempt 02; its central 100×100 region has zero black pixels and channel values 76–144. See [the deterministic pixel check](mobile-pixel-inspection.json). Re-forwarding the original image did not reliably repair the preview.
+
+**Raster/aesthetic sign-off is withheld under the visual-validation gate.** Earlier visual PASS statements from this inspection path are not acceptance evidence. The code decisions stand on independent contracts, source inspection, exact GPU pixel oracles, DOM geometry/hit-testing and completed interaction/persistence checks. In particular, the recovery rail was re-accepted for visible, operable Retry and complete error text, not for an unverified aesthetic impression. No imaging algorithm or architecture was changed in response to the preview artifact.
+
+Preserved source captures: [desktop recovery](settings-read-retry.png), [mobile recovery](settings-read-retry-mobile.png). They are valid files, not a substitute for a reliable visual inspection. The [custody index](workflow-index.json) records originals, hashes and this limitation.
+
+## Reproduction and preservation
+
+From `frontend/`, hydrate the pinned Git LFS files, install locked dependencies, and run `npm run lint`, `npx tsc -b`, and `npm run test -- --maxWorkers=2`. Build with `npm run build:browser` before the repository's `test:browser`, `test:gpu`, `test:performance` and `test:inference` commands. Keep `PLAYWRIGHT_HTML_OPEN=never` and a terminal reporter for direct Playwright commands. The normal production route and acceptance-only probe build are distinct; probe results do not stand in for normal editor workflows.
+
+The recorded hardware batch used installed headed Chrome and strict port 43134. Repository defaults may use software-backed headless Chromium; check the renderer before interpreting its timings as hardware evidence.
+
+Raw attempts, logs, fixtures, traces, failed/rejected evidence and original authoring snapshots remain protected under ignored `artifacts/`. Six generated build directories were released after this audit's consumers closed; none was deleted. Their exact locations and preservation boundaries are recorded locally in `artifacts/performance/audit-cto-2026-09-03/released-builds.json`.

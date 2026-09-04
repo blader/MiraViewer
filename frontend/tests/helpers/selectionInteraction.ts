@@ -1,13 +1,15 @@
 import { fireEvent, screen } from '@testing-library/react';
 import { vi } from 'vitest';
-import type { SeededVolumeWorker } from '../../src/utils/segmentation/seededVolumeWorker';
+import type { SelectionProposer, SelectionProposalResult } from '../../src/utils/segmentation/selectionProposal';
 
-export const proposedRegion = (indices = [30, 31, 32]): Awaited<ReturnType<SeededVolumeWorker['run']>> => ({
-  indices: Uint32Array.from(indices),
-  bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 11, y: 11, z: 11 } },
-  boundaryCount: 0,
-  domainVoxels: 1728,
-});
+/** Explicit test capability; no second production solver or worker protocol. */
+export const testSelectionProposer = vi.fn<SelectionProposer>();
+
+export function proposedRegion(indices: Iterable<number> = [30, 31, 32], voxels = 12 ** 3): SelectionProposalResult {
+  const data = new Uint8Array(voxels);
+  for (const index of indices) data[index] = 1;
+  return { data, contextLimited: false, boundaryCount: 0 };
+}
 
 export function setAutoFill(enabled: boolean) {
   const checkbox = screen.getByRole('checkbox', { name: 'Auto-fill' }) as HTMLInputElement;

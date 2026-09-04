@@ -10,10 +10,13 @@ import {
   createPerceptualScoringScratch,
   normalizePerceptualSource,
   preparePerceptualReference,
+  preparePerceptualCoverage,
   scoreAlignedCandidate,
+  scoreAlignedCoverage,
   warpPerceptualCandidateWithValidity,
   type PerceptualComponents,
 } from './perceptualSliceSimilarity';
+import { MIND_DESCRIPTOR_FOOTPRINT_RADIUS } from './mindDescriptor';
 
 const MAX_RESIDUAL_DISPLACEMENT_FRACTION = 0.125;
 const FINAL_AFFINE_SCORE_EPSILON = 1e-6;
@@ -236,7 +239,9 @@ export function selectFinalAffineProposal(options: {
   if (scaleSizes.length === 0) scaleSizes.push(size);
   // MIND uses a fixed one-pixel patch plus one-pixel offset; constructing an entire unused
   // reference pyramid solely to rediscover its two-pixel footprint was unnecessary.
-  const maximumMindFootprintAtFullResolution = Math.max(...scaleSizes.map((scale) => (2 * size) / scale));
+  const maximumMindFootprintAtFullResolution = Math.max(
+    ...scaleSizes.map((scale) => (MIND_DESCRIPTOR_FOOTPRINT_RADIUS * size) / scale),
+  );
   const fixedScoringExclusionRect = fixedExclusionRect
     ? expandExclusionRect(fixedExclusionRect, MAX_RESIDUAL_DISPLACEMENT_FRACTION)
     : undefined;
@@ -261,7 +266,7 @@ export function selectFinalAffineProposal(options: {
     exclusionRect: sourceExclusionRect,
     validity: movingValidity,
   });
-  const preparedMovingSource = preparePerceptualReference(normalizedMoving, size, {
+  const preparedMovingSource = preparePerceptualCoverage(normalizedMoving, size, {
     scales: scaleSizes,
     exclusionRect: sourceExclusionRect,
     focusRect: sourceFocusRect,
@@ -303,13 +308,7 @@ export function selectFinalAffineProposal(options: {
       centeredWarp(fixedToMoving, size),
       referenceValidity,
     );
-    const sourceCoverage = scoreAlignedCandidate(
-      preparedMovingSource,
-      reverseWarp.pixels,
-      reverseWarp.validity,
-      size,
-      scoringScratch,
-    ).coverage;
+    const sourceCoverage = scoreAlignedCoverage(preparedMovingSource, reverseWarp.validity, size);
 
     return {
       ...proposal,

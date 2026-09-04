@@ -24,25 +24,25 @@ The following images are design illustrations, not screenshots of implemented so
 
 ### 1. Longitudinal comparison workspace
 
-![Synthetic concept art showing MiraViewer as a restrained dark clinical instrument with three large longitudinal MRI images, compact study rails, and a calibrated registration datum.](./assets/miraviewer-quiet-instrument/comparison-workspace.png)
+![Synthetic concept art showing MiraViewer as a restrained dark clinical instrument with three large longitudinal MRI images, compact study rails, and a calibrated registration datum.](assets/miraviewer-quiet-instrument/comparison-workspace.png)
 
 The reading-room concept makes three comparable examinations substantially more important than navigation chrome. Mode selection is text-led, selected context is persistent, study labels are quiet and chronological, and one physical slice navigator serves the entire comparison. Any visible registration mark must remain in image gutters or represent an explicitly enabled, real inspection crosshair; it must never permanently obscure diagnostic pixels.
 
 ### 2. Local-only acquisition folio
 
-![Synthetic concept art showing a quiet graphite DICOM import folio with local-only privacy disclosure, folder and file actions, a truthful acquisition manifest, and a thin progress datum.](./assets/miraviewer-quiet-instrument/acquisition-folio.png)
+![Synthetic concept art showing a quiet graphite DICOM import folio with local-only privacy disclosure, folder and file actions, a truthful acquisition manifest, and a thin progress datum.](assets/miraviewer-quiet-instrument/acquisition-folio.png)
 
 The intake surface communicates privacy and capability through typography, spacing, source choices, and operation facts instead of a giant upload illustration or generic dashed drop zone. A real operation owns the acquisition manifest, progress, cancellation, and terminal outcome. Backup replacement always keeps its separate explicit consent and safety limit.
 
 ### 3. Evidence-aware reconstruction lightbox
 
-![Synthetic concept art showing a monochrome three-dimensional MRI volume, axial/coronal/sagittal source inspection, compact evidence controls, and explicit amber unsupported-region disclosure.](./assets/miraviewer-quiet-instrument/reconstruction-lightbox.png)
+![Synthetic concept art showing a monochrome three-dimensional MRI volume, axial/coronal/sagittal source inspection, compact evidence controls, and explicit amber unsupported-region disclosure.](assets/miraviewer-quiet-instrument/reconstruction-lightbox.png)
 
 The reconstructed volume occupies the center. Acquired orientation evidence, physical inspection, and unsupported regions remain legible without surrounding the anatomy with three simultaneously expanded control panels. Unsupported material is not recolored into believable tissue; warning hatch and text describe real missing support.
 
 ### 4. Compact responsive reading room
 
-![Synthetic concept art showing the same refined MRI reading-room identity in a narrow portrait viewport, with persistent patient context, a large grayscale image, compact examination filmstrip, and accessible slice navigation.](./assets/miraviewer-quiet-instrument/compact-reading-room.png)
+![Synthetic concept art showing the same refined MRI reading-room identity in a narrow portrait viewport, with persistent patient context, a large grayscale image, compact examination filmstrip, and accessible slice navigation.](assets/miraviewer-quiet-instrument/compact-reading-room.png)
 
 The narrow layout keeps patient identity, image context, current study, and slice navigation available without horizontal overflow. Secondary rails become accessible drawers; touch targets remain physically usable without turning the interface into a consumer-social application.
 

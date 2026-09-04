@@ -22,6 +22,8 @@ import { useComparisonAlignment } from '../hooks/useComparisonAlignment';
 import { AlignedBrowsingContext } from '../hooks/useAlignedFrame';
 import { SharpSliceDisplayContext } from '../hooks/useSharpSliceDisplay';
 import { AutomaticAlignmentStatus } from './comparison/AutomaticAlignmentStatus';
+import { formatDate } from '../utils/format';
+import { selectAcquisition } from '../utils/localApi';
 const Svr3DView = lazy(() => import('./Svr3DView').then((module) => ({ default: module.Svr3DView })));
 
 type ComparisonStageProps = {
@@ -29,7 +31,10 @@ type ComparisonStageProps = {
   selectedSeqId: string | null;
   hasData: boolean;
   navigation: ReturnType<typeof useComparisonWorkspaceNavigation>;
-  panel: Pick<ReturnType<typeof usePanelSettings>, 'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting'>;
+  panel: Pick<
+    ReturnType<typeof usePanelSettings>,
+    'panelSettings' | 'progress' | 'setProgress' | 'updatePanelSetting' | 'settingsReady'
+  >;
   onUseAcquired: (date: string) => void;
   onOpenUpload: () => void;
   onOpenExaminations: () => void;
@@ -137,11 +142,12 @@ export function ComparisonMatrix() {
   } = useComparisonInstrumentUi();
 
   const panel = usePanelSettings(
-    selectedSeqId,
+    data ? selectedSeqId : null,
     enabledDatesKey,
     data?.selected_patient_key ?? null,
     interactionBlocked,
     selectedSeqId ? data?.series_map[selectedSeqId] : undefined,
+    data?.dataset_token,
   );
   const {
     panelSettings,
@@ -188,6 +194,12 @@ export function ComparisonMatrix() {
     data,
     sequenceId: selectedSeqId,
     columns: workspaceNavigation.columns,
+    presentedDates:
+      viewMode === 'overlay'
+        ? [workspaceNavigation.overlaySelectedDate, workspaceNavigation.overlayCompareDate].filter(
+            (date): date is string => !!date,
+          )
+        : undefined,
     panel,
     viewportSize: viewMode === 'overlay' ? workspaceNavigation.overlayViewerSize : workspaceNavigation.gridCellSize,
     outputMode: alignmentOutputMode,
@@ -218,7 +230,12 @@ export function ComparisonMatrix() {
   if (error) {
     return (
       <div className="instrument-shell instrument-loading" role="alert">
-        <div className="instrument-loading-inner">{error}</div>
+        <div className="instrument-loading-inner">
+          <p>{error}</p>
+          <button type="button" className="instrument-context-button" onClick={() => void reload()}>
+            Retry loading scans
+          </button>
+        </div>
       </div>
     );
   }
@@ -283,6 +300,7 @@ export function ComparisonMatrix() {
           selectPatient,
         }}
         navigation={{
+          selectionFallback: workspaceNavigation.selectionFallback,
           viewMode,
           setViewMode,
           overlayColumns,
@@ -304,6 +322,10 @@ export function ComparisonMatrix() {
         notices={{
           persistenceError,
           clearPersistenceError,
+          settingsReady: panel.settingsReady,
+          retrySettings: () => {
+            void reload().then(panel.retryLoad);
+          },
           alignmentError,
           alignmentResults: visibleResults,
           clearAlignmentState,
@@ -317,6 +339,14 @@ export function ComparisonMatrix() {
       />
 
       {/* Main area with sidebar */}
+      {(panel.legacySettings?.length ?? 0) > 0 && (
+        <div className="instrument-notice px-4 py-2" role="status">
+          <span>Some older image settings need an examination and acquisition.</span>
+          <button type="button" className="instrument-notice-button" onClick={() => setRightSidebarOpen(true)}>
+            Review saved settings
+          </button>
+        </div>
+      )}
       <StudyToolsWorkspace>
         <div className="comparison-workspace min-h-0 min-w-0 flex-1 flex overflow-hidden relative">
           {hasData && viewMode !== 'svr3d' && (sidebarOpen || rightSidebarOpen) ? (
@@ -355,7 +385,7 @@ export function ComparisonMatrix() {
                 selectedSeqId={selectedSeqId}
                 hasData={Boolean(hasData)}
                 navigation={workspaceNavigation}
-                panel={{ panelSettings, progress, setProgress, updatePanelSetting }}
+                panel={{ panelSettings, progress, setProgress, updatePanelSetting, settingsReady: panel.settingsReady }}
                 onUseAcquired={useAcquiredImage}
                 onOpenUpload={() => setActiveDialog('upload')}
                 onOpenExaminations={() => setRightSidebarOpen(true)}
@@ -373,6 +403,24 @@ export function ComparisonMatrix() {
               onSelectAllDates={selectAllDates}
               onSelectNoDates={selectNoDates}
               onToggleDate={toggleDate}
+              acquisitions={
+                selectedSeqId && data
+                  ? {
+                      candidates: data.series_candidates?.[selectedSeqId] ?? {},
+                      selected: data.series_map[selectedSeqId] ?? {},
+                      onSelect: async (date, uid) => {
+                        const study = data.series_map[selectedSeqId]?.[date]?.study_id;
+                        if (!study) return;
+                        abortAlignment();
+                        await selectAcquisition(study, selectedSeqId, uid);
+                        clearAlignmentState();
+                        await reload(undefined, { background: true });
+                      },
+                      legacy: panel.legacySettings ?? [],
+                      onAssignLegacy: panel.assignLegacySettings,
+                    }
+                  : undefined
+              }
             />
           ) : null}
         </div>
@@ -384,6 +432,15 @@ export function ComparisonMatrix() {
           interactionBlocked={interactionBlocked}
           selectedSeqId={selectedSeqId}
           playbackInstanceCount={playbackInstanceCount}
+          reference={
+            workspaceNavigation.navigationReference
+              ? {
+                  label: formatDate(workspaceNavigation.navigationReference.date),
+                  offset: workspaceNavigation.navigationReference.offset,
+                  reverseSliceOrder: workspaceNavigation.navigationReference.reverseSliceOrder,
+                }
+              : undefined
+          }
           progress={progress}
           progressRef={progressRef}
           setProgress={setProgress}

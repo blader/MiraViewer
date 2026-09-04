@@ -8,17 +8,23 @@ import type {
 
 const scope = globalThis as unknown as {
   onmessage: (event: MessageEvent<InteractiveTrackingWorkerRequest>) => void;
-  postMessage(message: InteractiveTrackingWorkerResponse, transfer?: Transferable[]): void;
 };
 let started = false;
 let sequence = 0;
-const abort = new AbortController();
+let abort = new AbortController();
+let channel: MessagePort | null = null;
+let model: TrackingController | undefined;
+let modelProvider: InteractiveTrackingJob['provider'] | undefined;
 let waiting: {
   requestId: number;
   reply: 'source' | 'consumed';
   resolve(value: Float32Array | TrackingFrameDecision): void;
   reject(error: Error): void;
 } | null = null;
+
+function post(message: InteractiveTrackingWorkerResponse, transfer: Transferable[] = []): void {
+  channel?.postMessage(message, transfer);
+}
 
 function exchange(
   message: Extract<InteractiveTrackingWorkerResponse, { type: 'read-frame' | 'frame' }>,
@@ -33,7 +39,7 @@ function exchange(
       reject,
     };
     try {
-      scope.postMessage(message, transfer);
+      post(message, transfer);
     } catch (error) {
       waiting = null;
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -42,9 +48,11 @@ function exchange(
 }
 
 async function run(job: InteractiveTrackingJob): Promise<void> {
-  let model: TrackingController | undefined;
   let completedFrames = 0;
   const directionEndpoints = { forward: job.anchorIndex, reverse: job.anchorIndex };
+  const conditioning = [job.anchorIndex, ...(job.markedFrames ?? []).map((frame) => frame.index)];
+  const hasCorrections = conditioning.some((index) => index !== job.anchorIndex);
+  let stage: 'prepare' | 'final' = hasCorrections ? 'prepare' : 'final';
   const readSource = async (index: number, direction: 1 | -1, stage?: 'prepare' | 'final') => {
     const pixels = await exchange({
       type: 'read-frame',
@@ -62,6 +70,7 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
     initial,
     nativeLogits,
   }: TrackingFrameOutput): Promise<TrackingFrameDecision> => {
+    if (stage !== 'final') throw new Error('Conditioning preparation cannot publish a final source plane.');
     // Controller outputs are borrowed. Only this tight copy crosses the boundary.
     const copy = nativeLogits.slice();
     const decision = await exchange(
@@ -69,8 +78,13 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
       [copy.buffer],
     );
     if (decision !== undefined && decision !== 'stop-direction') throw new Error('Invalid frame acknowledgement.');
-    if (decision === 'stop-direction' && (!job.allowDirectionStop || initial))
-      throw new Error('Directional stopping requires explicit permission on a non-anchor frame.');
+    if (
+      decision === 'stop-direction' &&
+      (!job.allowDirectionStop || initial || conditioning.some((markedIndex) => (index - markedIndex) * direction <= 0))
+    )
+      throw new Error(
+        'Directional stopping requires explicit permission on a non-anchor frame beyond every marked source plane.',
+      );
     completedFrames++;
     directionEndpoints[direction === 1 ? 'forward' : 'reverse'] = index;
     return decision;
@@ -78,19 +92,23 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
   try {
     if (job.allowDirectionStop !== undefined && job.allowDirectionStop !== true)
       throw new Error('Directional stopping requires explicit permission.');
-    if (job.allowDirectionStop && job.markedFrames?.some((frame) => frame.index !== job.anchorIndex))
-      throw new Error('Directional stopping requires a single marked source plane.');
-    scope.postMessage({ type: 'progress', progress: { phase: 'loading' } });
-    model = await createInteractiveTrackingModel({
-      provider: job.provider,
-      // Four-thread diagnostics passed the cropped fixture; normal full-volume adoption remains on hold.
-      wasmThreads: 1,
-      signal: abort.signal,
-      onProgress: (asset) => scope.postMessage({ type: 'progress', progress: { phase: 'loading', asset } }),
-    });
+    if (model && modelProvider !== job.provider)
+      throw new Error('A different tracking provider requires a fresh runtime.');
+    if (!model) {
+      post({ type: 'progress', progress: { phase: 'loading' } });
+      model = await createInteractiveTrackingModel({
+        provider: job.provider,
+        // Four-thread diagnostics passed the cropped fixture; normal full-volume adoption remains on hold.
+        wasmThreads: 1,
+        signal: abort.signal,
+        onProgress: (asset) => post({ type: 'progress', progress: { phase: 'loading', asset } }),
+        // The controller is reused, but progress always belongs to the current isolated job channel.
+        onTiming: (timing) => post({ type: 'progress', progress: { phase: 'timing', ...timing } }),
+      });
+      modelProvider = job.provider;
+    }
     abort.signal.throwIfAborted();
-    if (job.markedFrames?.some((frame) => frame.index !== job.anchorIndex)) {
-      let stage: 'prepare' | 'final' = 'prepare';
+    if (hasCorrections) {
       let direction: 1 | -1 = 1;
       await model.runSnapshot({
         ...job,
@@ -100,7 +118,7 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
         onProgress: ({ stage: nextStage, phase, ...progress }) => {
           stage = nextStage;
           direction = progress.direction;
-          scope.postMessage({
+          post({
             type: 'progress',
             progress: {
               ...progress,
@@ -123,7 +141,7 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
           readFrame: (index) => readSource(index, direction),
           onFrame: sendFrame,
           onProgress: ({ phase, ...progress }) =>
-            scope.postMessage({
+            post({
               type: 'progress',
               progress: {
                 ...progress,
@@ -136,11 +154,18 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
         });
       }
     }
-  } finally {
-    // A successful terminal reply means all model sessions have actually been released.
-    await model?.dispose();
+  } catch (error) {
+    try {
+      await model?.dispose();
+    } finally {
+      model = undefined;
+      modelProvider = undefined;
+    }
+    throw error;
   }
-  scope.postMessage({ type: 'done', completedFrames, ...(job.allowDirectionStop ? { directionEndpoints } : {}) });
+  // run()/runSnapshot() have released all per-job history and tensor ownership.
+  // Only the source-owned compiled model survives; a fresh channel fences every later job.
+  post({ type: 'done', completedFrames, ...(job.allowDirectionStop ? { directionEndpoints } : {}) });
 }
 
 function fail(error: Error): void {
@@ -148,18 +173,12 @@ function fail(error: Error): void {
   abort.abort();
   waiting?.reject(error);
   waiting = null;
-  scope.postMessage({ type: 'error', message: error.message });
+  post({ type: 'error', message: error.message });
 }
 
-scope.onmessage = ({ data }) => {
-  if (data.type === 'start') {
-    if (started) {
-      fail(new Error('A tracking worker belongs to exactly one job.'));
-      return;
-    }
-    started = true;
-    void run(data.job).catch((error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
-  } else if (waiting && data.requestId === waiting.requestId && data.type === waiting.reply) {
+function receive(data: InteractiveTrackingWorkerRequest): void {
+  if (abort.signal.aborted) return;
+  if (data.type !== 'start' && waiting && data.requestId === waiting.requestId && data.type === waiting.reply) {
     if (data.type === 'consumed' && data.stopDirection !== undefined && data.stopDirection !== true) {
       fail(new Error('Invalid directional stop acknowledgement.'));
       return;
@@ -168,4 +187,34 @@ scope.onmessage = ({ data }) => {
     waiting = null;
     pending.resolve(data.type === 'source' ? data.pixels : data.stopDirection ? 'stop-direction' : undefined);
   } else fail(new Error('Interactive selection received an out-of-order frame reply.'));
+}
+
+scope.onmessage = ({ data, ports }) => {
+  const port = ports[0];
+  if (data.type !== 'start' || !port) throw new Error('Interactive selection requires a dedicated job channel.');
+  if (started) {
+    fail(new Error('Only one interactive selection job can run at a time.'));
+    port.close();
+    return;
+  }
+  started = true;
+  sequence = 0;
+  abort = new AbortController();
+  channel = port;
+  port.onmessage = ({ data }: MessageEvent<InteractiveTrackingWorkerRequest>) => {
+    if (channel === port) receive(data);
+  };
+  port.onmessageerror = () => fail(new Error('Interactive selection received an unreadable frame reply.'));
+  void run(data.job)
+    .catch((error: unknown) => fail(error instanceof Error ? error : new Error(String(error))))
+    .finally(() => {
+      port.onmessage = null;
+      port.onmessageerror = null;
+      port.close();
+      if (channel === port) {
+        channel = null;
+        waiting = null;
+        started = false;
+      }
+    });
 };

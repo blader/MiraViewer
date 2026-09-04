@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SvrReconstructionSlice } from '../src/utils/svr/reconstructionCore';
 import type { RegisterLongitudinalOptions } from '../src/utils/svr/longitudinalRegistration';
 import type { LongitudinalWorkerResponse } from '../src/utils/svr/longitudinalRegistration.worker';
-import { runLongitudinalDenseReslice, runLongitudinalRegistration } from '../src/utils/svr/runLongitudinalRegistration';
+import {
+  runLongitudinalDenseReslice,
+  runLongitudinalRegistration,
+  runLongitudinalEstimate,
+} from '../src/utils/svr/runLongitudinalRegistration';
 
 class MockWorker {
   static instances: MockWorker[] = [];
@@ -34,6 +38,18 @@ function input(): RegisterLongitudinalOptions {
 }
 
 describe('svr/longitudinal registration worker ownership', () => {
+  it('requests pose evidence without an image and retains the same cancellation owner', async () => {
+    vi.stubGlobal('Worker', MockWorker);
+    const controller = new AbortController();
+    const pending = runLongitudinalEstimate(input(), controller.signal);
+    const worker = MockWorker.instances[0]!;
+    expect(worker.postMessage.mock.calls[0]![0]).toMatchObject({ type: 'estimate' });
+    expect(worker.postMessage.mock.calls[0]![1]).toHaveLength(1);
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false, reason: 'cancelled' });
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
   afterEach(() => {
     MockWorker.instances = [];
     vi.unstubAllGlobals();

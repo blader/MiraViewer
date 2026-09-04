@@ -1742,9 +1742,18 @@ export function resliceDenseLongitudinalPlane(
   }
 }
 
-export async function registerAndResliceLongitudinal(
+function registerLongitudinal(
   options: RegisterLongitudinalOptions,
-): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure> {
+  includeImage: true,
+): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationFailure>;
+function registerLongitudinal(
+  options: RegisterLongitudinalOptions,
+  includeImage: false,
+): Promise<LongitudinalRegistrationEstimate | LongitudinalRegistrationFailure>;
+async function registerLongitudinal(
+  options: RegisterLongitudinalOptions,
+  includeImage: boolean,
+): Promise<LongitudinalRegistrationResult | LongitudinalRegistrationEstimate | LongitudinalRegistrationFailure> {
   try {
     assertNotAborted(options.signal);
     if (options.outputGrid) validateOutputPlaneGrid(options.outputGrid);
@@ -2027,21 +2036,23 @@ export async function registerAndResliceLongitudinal(
       return failure('ambiguous', 'Independent forward and reverse rigid registrations are physically inconsistent');
     }
 
-    const resliced = resliceStackToReferencePlane({
-      targetSlices: options.targetSlices,
-      referenceSlice,
-      outputGrid: options.outputGrid,
-      targetToReference: optimized.rigid,
-      centerMm,
-      signal: options.signal,
-    });
-    if (resliced.coverage < minimumCoverage && !options.deferPresentationValidation) {
+    const resliced = includeImage
+      ? resliceStackToReferencePlane({
+          targetSlices: options.targetSlices,
+          referenceSlice,
+          outputGrid: options.outputGrid,
+          targetToReference: optimized.rigid,
+          centerMm,
+          signal: options.signal,
+        })
+      : null;
+    if (resliced && resliced.coverage < minimumCoverage && !options.deferPresentationValidation) {
       return failure('insufficient-coverage', 'The requested reference plane is outside the supported target volume');
     }
 
     return {
       ok: true,
-      ...resliced,
+      ...(resliced ?? {}),
       targetToReference: optimized.rigid,
       centerMm,
       score: finalScore.ncc,
@@ -2086,3 +2097,13 @@ export async function registerAndResliceLongitudinal(
 }
 
 export { applyRigidToPoint, failure as longitudinalRegistrationFailure };
+
+/** Fit identical physical evidence without allocating a discarded coarse image. */
+export function estimateLongitudinalRegistration(options: RegisterLongitudinalOptions) {
+  return registerLongitudinal(options, false);
+}
+
+/** Image-producing compatibility route for callers that actually consume the plane. */
+export function registerAndResliceLongitudinal(options: RegisterLongitudinalOptions) {
+  return registerLongitudinal(options, true);
+}

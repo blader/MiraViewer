@@ -1,0 +1,45 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/gpu-run.json",
+    "sha256": "50a429790947758238fd2ec9722577d151901cf7025a642214b7820500f54606"
+  },
+  "receipt": {
+    "sourceBefore": {
+      "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+      "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "project": "gpu",
+    "startedAt": "2026-09-04T03:31:03.433Z",
+    "fixture": "Synthetic DICOM/ONNX and actual application/worker/GPU paths for the CTO review. No private data.",
+    "harness": [
+      {
+        "path": "frontend/tmp/custom-model.config.ts",
+        "sha256": "72d1668bdcc1e56f56dfd994be22a60f4c809b9e76e89a18a92c15fc01a77a92"
+      },
+      {
+        "path": "frontend/tmp/run-cto-review.mjs",
+        "sha256": "e73ed6e34aa658f4e9b58b16b9a9a615db3912b149373fc999f1d67337172487"
+      }
+    ],
+    "command": [
+      "/opt/homebrew/Cellar/node@22/22.22.0/bin/node",
+      "node_modules/@playwright/test/cli.js",
+      "test",
+      "--config=tmp/custom-model.config.ts",
+      "--project=gpu"
+    ],
+    "exitSignal": null,
+    "exitCode": 0,
+    "sourceAfter": {
+      "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+      "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+    },
+    "sourceUnchanged": true,
+    "remainingOwnedPids": [],
+    "port43134": "free",
+    "cleanup": "CLOSED",
+    "finishedAt": "2026-09-04T03:31:12.549Z"
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { segmentSeededVolume, type SeededVolumeInput } from '../src/utils/segmentation/seededVolume';
+import { segmentSeededVolume, type SeededVolumeInput } from './helpers/legacySeededVolume';
 
 function input(size: number): SeededVolumeInput {
   return {

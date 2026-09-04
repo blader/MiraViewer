@@ -1,4 +1,5 @@
 import { webcrypto } from 'node:crypto';
+import cornerstone from 'cornerstone-core';
 import { Blob as NodeBlob } from 'node:buffer';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +53,16 @@ vi.mock('cornerstone-core', () => ({
 import { useOnnxTumorSession } from '../src/hooks/useOnnxTumorSession';
 import { runTumorSegmentationOnnx } from '../src/utils/segmentation/onnx/tumorSegmentation';
 import { deleteModelBlobs, putModelBlobs } from '../src/utils/segmentation/onnx/modelCache';
+import { executeCustomModel } from '../src/utils/segmentation/onnx/customModel.worker';
+import {
+  runCustomModelWorker,
+  CUSTOM_MODEL_INIT_TIMEOUT_MS,
+  CUSTOM_MODEL_RUN_TIMEOUT_MS,
+  customModelRuntimeBytes,
+  customModelBudgetBytes,
+  type CustomModelRequest,
+  type CustomModelResponse,
+} from '../src/utils/segmentation/onnx/customModelWorker';
 import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 
 const MODEL_KEY = 'brats-tumor-v1';
@@ -71,8 +82,11 @@ async function files(
   wrongHash = false,
   spatialFrame?: 'patient-lps' | 'source-grid',
   version = 0,
+  size = 7,
 ): Promise<[File, File]> {
-  const model = new File([new Uint8Array([4, 8, 15, 16, 23, 42, version])], `synthetic-${version}.onnx`);
+  const bytes = new Uint8Array(size);
+  bytes.set([4, 8, 15, 16, 23, 42, version]);
+  const model = new File([bytes], `synthetic-${version}.onnx`);
   const digest = await webcrypto.subtle.digest('SHA-256', await model.arrayBuffer());
   const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
   const manifest = new File(
@@ -107,110 +121,47 @@ function deferVerification(...models: Blob[]) {
   };
 }
 
+class WorkerHarness {
+  static instances: WorkerHarness[] = [];
+  onmessage: ((event: MessageEvent<CustomModelResponse>) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+  terminated = false;
+  request?: CustomModelRequest;
+  terminate = vi.fn(() => {
+    this.terminated = true;
+  });
+  constructor() {
+    WorkerHarness.instances.push(this);
+  }
+  postMessage(request: CustomModelRequest) {
+    this.request = request;
+    void executeCustomModel(request, (data) => {
+      if (!this.terminated) this.onmessage?.({ data } as MessageEvent<CustomModelResponse>);
+    });
+  }
+}
+
 beforeEach(() => {
   cache.clear();
   enabledImages.length = 0;
   vi.clearAllMocks();
   vi.stubGlobal('crypto', webcrypto);
+  WorkerHarness.instances = [];
+  vi.stubGlobal('Worker', WorkerHarness);
+  vi.mocked(runTumorSegmentationOnnx).mockImplementation(async ({ dims }) => ({
+    labels: new Uint8Array(dims[0] * dims[1] * dims[2]),
+    logitsDims: [1, 4, dims[2], dims[1], dims[0]],
+  }));
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe('useOnnxTumorSession verified model ownership', () => {
-  it('awaits idle runtime release once, preserves its verified cache, and refuses overlapping initialization', async () => {
-    const [model, manifest] = await files();
-    cache.set(MODEL_KEY, model);
-    cache.set(MANIFEST_KEY, manifest);
-    const release = deferred<void>();
-    const session = { release: vi.fn(() => release.promise) };
-    createSession.mockResolvedValueOnce(session);
-    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
-    await waitFor(() => expect(result.current.status.verified).toBe(true));
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
-    let first!: Promise<void>, second!: Promise<void>;
-    act(() => {
-      first = result.current.releaseIdleSession();
-      second = result.current.releaseIdleSession();
-    });
-    await waitFor(() => expect(session.release).toHaveBeenCalledOnce());
-    expect(result.current.status.sessionReady).toBe(false);
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.error).toMatch(/release its memory/i));
-    expect(createSession).toHaveBeenCalledOnce();
-    await act(async () => {
-      release.resolve();
-      await Promise.all([first, second]);
-    });
-    expect(cache.get(MODEL_KEY)).toBe(model);
-    expect(cache.get(MANIFEST_KEY)).toBe(manifest);
-    expect(deleteModelBlobs).not.toHaveBeenCalled();
-    expect(putModelBlobs).not.toHaveBeenCalled();
-    expect(result.current.status).toMatchObject({ cached: true, verified: true, loading: false, sessionReady: false });
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
-    expect(createSession).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([false, true])(
-    'does not hide an unfinished initializer when preparing another model (cleared=%s)',
-    async (cleared) => {
-      const [model, manifest] = await files();
-      cache.set(MODEL_KEY, model);
-      cache.set(MANIFEST_KEY, manifest);
-      const session = { release: vi.fn(async () => undefined) };
-      const initialized = deferred<typeof session>();
-      createSession.mockReturnValueOnce(initialized.promise);
-      const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
-      await waitFor(() => expect(result.current.status.verified).toBe(true));
-      act(() => result.current.initSession());
-      await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
-      if (cleared) {
-        act(() => result.current.clearModel());
-        await waitFor(() => expect(result.current.status.loading).toBe(false));
-      }
-      await expect(result.current.releaseIdleSession()).rejects.toThrow(/other model operation/i);
-      expect(session.release).not.toHaveBeenCalled();
-      await act(async () => initialized.resolve(session));
-      if (!cleared) await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
-      await act(async () => result.current.releaseIdleSession());
-      expect(session.release).toHaveBeenCalledOnce();
-      if (!cleared) expect(cache.get(MODEL_KEY)).toBe(model);
-    },
-  );
-
-  it('keeps a failed cleanup as an admission barrier without deleting the cached model', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const [model, manifest] = await files();
-    cache.set(MODEL_KEY, model);
-    cache.set(MANIFEST_KEY, manifest);
-    const session = {
-      release: vi.fn(async () => {
-        throw new Error('GPU release failed');
-      }),
-    };
-    createSession.mockResolvedValueOnce(session);
-    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
-    await waitFor(() => expect(result.current.status.verified).toBe(true));
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
-    await act(async () => {
-      await expect(result.current.releaseIdleSession()).rejects.toThrow('GPU release failed');
-    });
-    await expect(result.current.releaseIdleSession()).rejects.toThrow('GPU release failed');
-    expect(session.release).toHaveBeenCalledOnce();
-    expect(warn).toHaveBeenCalledOnce();
-    expect(result.current.status.error).toMatch(/could not release its memory/i);
-    expect(cache.get(MODEL_KEY)).toBe(model);
-    expect(deleteModelBlobs).not.toHaveBeenCalled();
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.error).toMatch(/release its memory/i));
-    expect(createSession).toHaveBeenCalledOnce();
-  });
-
   it('retains legacy cached models but blocks initialization and inference without a manifest', async () => {
     const [model] = await files();
     cache.set(MODEL_KEY, model);
@@ -224,7 +175,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     });
     expect(cache.get(MODEL_KEY)).toBe(model);
 
-    act(() => result.current.initSession());
+    act(() => result.current.runSegmentation());
     await waitFor(() => expect(result.current.status.error).toMatch(/unverified/i));
 
     act(() => result.current.runSegmentation());
@@ -238,7 +189,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
 
   it('rejects a mismatched upload without caching either invalid artifact', async () => {
     const selected = await files(true);
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
 
     act(() => result.current.handleSelectedFiles(selected));
 
@@ -251,14 +202,14 @@ describe('useOnnxTumorSession verified model ownership', () => {
     expect(cache.has(MANIFEST_KEY)).toBe(false);
     expect(putModelBlobs).not.toHaveBeenCalled();
 
-    act(() => result.current.initSession());
+    act(() => result.current.runSegmentation());
     await waitFor(() => expect(result.current.status.error).toMatch(/no cached/i));
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  it('caches and initializes only a cryptographically verified model and manifest pair', async () => {
+  it('caches and executes only a cryptographically verified model and manifest pair', async () => {
     const selected = await files();
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
 
     act(() => result.current.handleSelectedFiles(selected));
     await waitFor(() => {
@@ -275,9 +226,9 @@ describe('useOnnxTumorSession verified model ownership', () => {
       { signal: expect.any(AbortSignal) },
     );
 
-    act(() => result.current.initSession());
-    await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
-    expect(createSession).toHaveBeenCalledOnce();
+    act(() => result.current.runSegmentation());
+    await waitFor(() => expect(result.current.status.loading).toBe(false));
+    await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
   });
 
   it.each(['verification', 'storage', 'missing-manifest'] as const)(
@@ -287,7 +238,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
       const replacement = await files(failure === 'verification', undefined, 1);
       cache.set(MODEL_KEY, original[0]);
       cache.set(MANIFEST_KEY, original[1]);
-      const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+      const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
       await waitFor(() => expect(result.current.status.verified).toBe(true));
       if (failure === 'storage') vi.mocked(putModelBlobs).mockRejectedValueOnce(new Error('Storage quota exceeded'));
 
@@ -302,8 +253,8 @@ describe('useOnnxTumorSession verified model ownership', () => {
       });
       expect(cache.get(MODEL_KEY)).toBe(original[0]);
       expect(cache.get(MANIFEST_KEY)).toBe(original[1]);
-      act(() => result.current.initSession());
-      await waitFor(() => expect(result.current.status.sessionReady).toBe(true));
+      act(() => result.current.runSegmentation());
+      await waitFor(() => expect(result.current.status.loading).toBe(false));
       expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ model: original[0] }));
     },
   );
@@ -314,7 +265,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     cache.set(MODEL_KEY, original[0]);
     cache.set(MANIFEST_KEY, original[1]);
     const delayed = deferVerification(original[0]);
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
     await waitFor(() => expect(delayed.calls).toHaveBeenCalledWith(...original));
     act(() => result.current.handleSelectedFiles(replacement));
     await waitFor(() => expect(result.current.status.error).toMatch(/does not match/i));
@@ -337,7 +288,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     const first = await files(firstInvalid);
     const replacement = await files(false, undefined, 1);
     const delayed = deferVerification(first[0], replacement[0]);
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
     act(() => result.current.handleSelectedFiles(first));
     await waitFor(() => expect(delayed.calls).toHaveBeenCalledWith(...first));
     act(() => result.current.handleSelectedFiles(replacement));
@@ -365,7 +316,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     async (action) => {
       const selected = await files();
       const delayed = deferVerification(selected[0]);
-      const { result, unmount } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+      const { result, unmount } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
       act(() => result.current.handleSelectedFiles(selected));
       await waitFor(() => expect(delayed.calls).toHaveBeenCalledWith(...selected));
       if (action === 'clear') {
@@ -413,7 +364,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
         options?.signal?.throwIfAborted();
         for (const { key, blob } of models) cache.set(key, blob);
       });
-      const { result, unmount } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+      const { result, unmount } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
       act(() => result.current.handleSelectedFiles(selected));
       await waitFor(() => expect(putModelBlobs).toHaveBeenCalledOnce());
       if (action === 'clear') {
@@ -436,7 +387,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
       options?.signal?.throwIfAborted();
       for (const key of keys) cache.delete(key);
     });
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
     act(() => result.current.clearModel());
     act(() => result.current.handleSelectedFiles(selected));
     await waitFor(() => expect(result.current.status.cached && result.current.status.verified).toBe(true));
@@ -448,7 +399,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     expect(cache.get(MANIFEST_KEY)).toBe(selected[1]);
   });
 
-  it('does not let an obsolete session initialization reset a replacement upload', async () => {
+  it('does not let an obsolete worker initialization reset a replacement upload', async () => {
     const original = await files();
     const replacement = await files(false, undefined, 1);
     cache.set(MODEL_KEY, original[0]);
@@ -457,16 +408,15 @@ describe('useOnnxTumorSession verified model ownership', () => {
     const initialization = deferred<typeof session>();
     createSession.mockReturnValueOnce(initialization.promise);
     const delayed = deferVerification(replacement[0]);
-    const { result } = renderHook(() => useOnnxTumorSession(null, vi.fn()));
+    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, vi.fn()));
     await waitFor(() => expect(result.current.status.verified).toBe(true));
-    act(() => result.current.initSession());
+    act(() => result.current.runSegmentation());
     await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
     act(() => result.current.handleSelectedFiles(replacement));
     await waitFor(() => expect(delayed.calls).toHaveBeenCalledWith(...replacement));
     await act(async () => initialization.resolve(session));
-    expect(session.release).toHaveBeenCalledOnce();
+    expect(WorkerHarness.instances[0]!.terminate).toHaveBeenCalledOnce();
     expect(result.current.status.loading).toBe(true);
-    expect(result.current.status.sessionReady).toBe(false);
     expect(result.current.status.error).toBeUndefined();
     expect(result.current.status.message).toContain(replacement[0].name);
     await act(() => delayed.finish());
@@ -538,8 +488,10 @@ describe('useOnnxTumorSession verified model ownership', () => {
     expect(vi.mocked(runTumorSegmentationOnnx).mock.calls[0]![0].volume).toEqual(Float32Array.of(0, 0.5, 1, 0));
     expect(native.data).toEqual(original);
     expect(onLabels.mock.calls[0]![0].data).toEqual(Uint8Array.of(1, 2, 4, 0));
-    expect(result.current.status.message).toMatch(/source-aligned model suggestion.*review/i);
-    expect(result.current.preflight?.preprocessingBytes).toBe(native.data.byteLength);
+    expect(result.current.status.message).toMatch(/source-aligned suggestion.*review/i);
+    expect(result.current.preflight?.preprocessingBytes).toBe(
+      native.data.byteLength * 2 + native.observedSupport!.byteLength,
+    );
     expect(result.current.preflight?.readyResidentBytes).toBeGreaterThan(288 * 1024 * 1024);
   });
 
@@ -578,94 +530,210 @@ describe('useOnnxTumorSession verified model ownership', () => {
     expect(result.current.status.message).not.toMatch(/Segmentation complete/);
   });
 
-  it('never overlaps a canceled but still-running model operation with its replacement', async () => {
-    const selected = await files();
-    let finishFirstRun!: (result: { labels: Uint8Array; logitsDims: number[] }) => void;
-    vi.mocked(runTumorSegmentationOnnx).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishFirstRun = resolve;
-        }),
-    );
+  it.each(['cancel', 'source', 'blocked', 'clear', 'unmount'] as const)(
+    'terminates an active worker immediately on %s and rejects its late output',
+    async (action) => {
+      const selected = await files();
+      const inference = deferred<{ labels: Uint8Array; logitsDims: number[] }>();
+      vi.mocked(runTumorSegmentationOnnx).mockReturnValueOnce(inference.promise);
+      const onLabels = vi.fn();
+      const { result, rerender, unmount } = renderHook(
+        ({ volume, blocked }) => useOnnxTumorSession(volume, onLabels, { blocked }),
+        {
+          initialProps: { volume: syntheticVolume, blocked: false },
+        },
+      );
+      act(() => result.current.handleSelectedFiles(selected));
+      await waitFor(() => expect(result.current.status.verified).toBe(true));
+      act(() => result.current.runSegmentation());
+      await waitFor(() => expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce());
+      const worker = WorkerHarness.instances[0]!;
+      if (action === 'cancel') act(() => result.current.cancelSegmentation());
+      else if (action === 'source')
+        rerender({ volume: { ...syntheticVolume, data: Float32Array.of(0.2) }, blocked: false });
+      else if (action === 'blocked') rerender({ volume: syntheticVolume, blocked: true });
+      else if (action === 'clear') act(() => result.current.clearModel());
+      else unmount();
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      if (action !== 'unmount') expect(result.current.segRunning).toBe(false);
+      await act(async () => inference.resolve({ labels: Uint8Array.of(1), logitsDims: [1, 4, 1, 1, 1] }));
+      expect(onLabels).not.toHaveBeenCalled();
+      if (action === 'cancel') {
+        act(() => result.current.runSegmentation());
+        await waitFor(() => expect(onLabels).toHaveBeenCalledOnce());
+        expect(WorkerHarness.instances).toHaveLength(2);
+        expect(WorkerHarness.instances[1]!.terminate).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it('admits a 128-cubed native volume and 20 MiB model with an on-demand device-derived budget', async () => {
+    vi.stubGlobal('navigator', { deviceMemory: 8 });
+    const native: SvrVolume = {
+      ...syntheticVolume,
+      dims: [128, 128, 128],
+      data: new Float32Array(128 ** 3),
+      nativeVoxelSizeMm: [1, 1, 1],
+      boundsMm: { min: [0, 0, 0], max: [128, 128, 128] },
+    };
+    const selected = await files(false, 'source-grid', 0, 20 * 1024 * 1024);
+    cache.set(MODEL_KEY, selected[0]);
+    cache.set(MANIFEST_KEY, selected[1]);
+    const measured = vi.spyOn(cornerstone.imageCache, 'getCacheInfo');
     const onLabels = vi.fn();
-    const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, onLabels));
-
-    act(() => result.current.handleSelectedFiles(selected));
+    const { result, rerender } = renderHook(() => useOnnxTumorSession(native, onLabels));
     await waitFor(() => expect(result.current.status.verified).toBe(true));
-
-    act(() => result.current.runSegmentation());
-    await waitFor(() => expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce());
-
-    act(() => result.current.cancelSegmentation());
-    expect(result.current.segRunning).toBe(true);
-    expect(result.current.status.message).toMatch(/waiting.*release its memory/i);
-    await expect(result.current.releaseIdleSession()).rejects.toThrow(/other model operation/i);
-
-    act(() => result.current.runSegmentation());
-    expect(runTumorSegmentationOnnx).toHaveBeenCalledOnce();
-
-    await act(async () => {
-      finishFirstRun({ labels: new Uint8Array([1]), logitsDims: [1, 4, 1, 1, 1] });
-    });
-    await waitFor(() => expect(result.current.segRunning).toBe(false));
-    expect(onLabels).not.toHaveBeenCalled();
-
-    vi.mocked(runTumorSegmentationOnnx).mockResolvedValueOnce({
-      labels: new Uint8Array([2]),
-      logitsDims: [1, 4, 1, 1, 1],
-    });
+    rerender();
+    expect(result.current.preflight).toBeNull();
+    expect(measured).not.toHaveBeenCalled();
     act(() => result.current.runSegmentation());
     await waitFor(() => expect(onLabels).toHaveBeenCalledOnce());
-    expect(runTumorSegmentationOnnx).toHaveBeenCalledTimes(2);
+    expect(result.current.preflight).toMatchObject({ blockedByDefault: false, budgetBytes: 2048 * 1024 * 1024 });
+    expect(result.current.preflight!.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(WorkerHarness.instances).toHaveLength(1);
+    expect(WorkerHarness.instances[0]!.terminate).toHaveBeenCalledOnce();
   });
 
-  it('counts old and replacement labels when model tensors otherwise appear to fit', async () => {
-    // 257³ at the former 31 bytes/voxel was falsely admitted at 501.84 MiB;
-    // the overlapping replacement label raises the real peak to 518.02 MiB.
-    const borderlineVolume = { ...syntheticVolume, dims: [257, 257, 257] as [number, number, number] };
-    const { result } = renderHook(() => useOnnxTumorSession(borderlineVolume, vi.fn()));
-
-    expect(result.current.preflight?.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
-    expect(result.current.preflight?.blockedByDefault).toBe(true);
-    await act(async () => undefined);
-  });
-
-  it('blocks inference when total ready-volume and tensor residency exceeds the shared SVR budget', async () => {
+  it('blocks an oversized volume against the device envelope before constructing a worker', async () => {
+    vi.stubGlobal('navigator', { deviceMemory: 2 });
     // A 260³ volume has only ~268 MiB of four-class logits, so the obsolete
     // logits-only 384 MiB limit admitted it despite exceeding 512 MiB overall.
-    const largeVolume = { ...syntheticVolume, dims: [260, 260, 260] as [number, number, number] };
+    const largeVolume = {
+      ...syntheticVolume,
+      dims: [260, 260, 260] as [number, number, number],
+      data: new Float32Array(260 ** 3),
+    };
+    const selected = await files();
+    cache.set(MODEL_KEY, selected[0]);
+    cache.set(MANIFEST_KEY, selected[1]);
     const onLabels = vi.fn();
     const { result } = renderHook(() => useOnnxTumorSession(largeVolume, onLabels));
 
-    expect(result.current.preflight?.logitsBytes).toBeLessThan(384 * 1024 * 1024);
-    expect(result.current.preflight?.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
-    expect(result.current.preflight?.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
-    expect(result.current.preflight?.blockedByDefault).toBe(true);
-
-    act(() => result.current.setAllowUnsafeFullRes(true));
+    expect(result.current.preflight).toBeNull();
+    await waitFor(() => expect(result.current.status.verified).toBe(true));
     act(() => result.current.runSegmentation());
-    await waitFor(() =>
-      expect(result.current.status.error).toMatch(/memory budget.*smaller focus|memory budget.*lower resolution/i),
-    );
+    await waitFor(() => expect(result.current.status.error).toMatch(/memory budget/));
+    expect(result.current.preflight?.logitsBytes).toBeLessThan(384 * 1024 * 1024);
+    expect(result.current.preflight?.estimatedPeakBytes).toBeGreaterThan(512 * 1024 * 1024);
+    expect(result.current.preflight?.budgetBytes).toBe(512 * 1024 * 1024);
+    expect(result.current.preflight?.blockedByDefault).toBe(true);
     expect(createSession).not.toHaveBeenCalled();
     expect(onLabels).not.toHaveBeenCalled();
   });
 
-  it('remeasures uncached displayed DICOM ownership when inference starts without replacing the accepted volume', async () => {
+  it('measures newly displayed DICOM ownership on demand without replacing the accepted volume', async () => {
+    vi.stubGlobal('navigator', { deviceMemory: 2 });
+    const selected = await files();
+    cache.set(MODEL_KEY, selected[0]);
+    cache.set(MANIFEST_KEY, selected[1]);
     const onLabels = vi.fn();
     const { result } = renderHook(() => useOnnxTumorSession(syntheticVolume, onLabels));
     await act(async () => undefined);
-    expect(result.current.preflight?.blockedByDefault).toBe(false);
+    expect(result.current.preflight).toBeNull();
     const data = new Uint8Array(256 * 1024 * 1024);
     const pixels = new Uint8Array(data.buffer, 0, 4);
     enabledImages.push({ image: { getPixelData: () => pixels, data: { byteArray: data } } });
     act(() => result.current.runSegmentation());
-    expect(result.current.status.error).toMatch(/memory budget/);
+    await waitFor(() => expect(result.current.status.error).toMatch(/memory budget/));
     expect(createSession).not.toHaveBeenCalled();
     expect(onLabels).not.toHaveBeenCalled();
     expect(enabledImages[0]!.image.getPixelData()).toBe(pixels);
     expect(enabledImages[0]!.image.data!.byteArray).toBe(data);
     expect(syntheticVolume.data).toEqual(Float32Array.of(0.5));
+  });
+});
+
+describe('custom-model worker lifetime', () => {
+  it.each(['initialization', 'execution'] as const)(
+    'bounds %s and terminates before returning the timeout',
+    async (phase) => {
+      const [model, manifest] = await files();
+      vi.useFakeTimers();
+      vi.spyOn(WorkerHarness.prototype, 'postMessage').mockImplementation(function (request) {
+        this.request = request;
+      });
+      const running = runCustomModelWorker(
+        { model, manifest, volume: syntheticVolume },
+        {
+          signal: new AbortController().signal,
+          estimatedPeakBytes: customModelRuntimeBytes(model.size) + 1024,
+        },
+      );
+      const rejected = expect(running).rejects.toThrow(
+        phase === 'initialization' ? /initialization exceeded/ : /execution exceeded/,
+      );
+      const worker = WorkerHarness.instances[0]!;
+      if (phase === 'execution')
+        worker.onmessage!({ data: { type: 'running', mode: 'wasm' } } as MessageEvent<CustomModelResponse>);
+      await vi.advanceTimersByTimeAsync(
+        phase === 'execution' ? CUSTOM_MODEL_RUN_TIMEOUT_MS : CUSTOM_MODEL_INIT_TIMEOUT_MS,
+      );
+      await rejected;
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      expect(worker.onmessage).toBeNull();
+      expect(worker.onerror).toBeNull();
+      expect(worker.onmessageerror).toBeNull();
+    },
+  );
+
+  it('replaces a failed provider only after terminating its whole worker', async () => {
+    const [model, manifest] = await files();
+    createSession.mockImplementationOnce(async () => {
+      throw new Error('WebGPU initialization failed');
+    });
+    createSession.mockImplementationOnce(async () => {
+      expect(WorkerHarness.instances[0]!.terminated).toBe(true);
+      return { release: vi.fn(async () => undefined) };
+    });
+    const output = await runCustomModelWorker(
+      { model, manifest, volume: syntheticVolume },
+      {
+        signal: new AbortController().signal,
+        estimatedPeakBytes: customModelRuntimeBytes(model.size) + 1024,
+      },
+    );
+    expect(output.mode).toBe('wasm');
+    expect(WorkerHarness.instances.map((worker) => worker.request!.mode)).toEqual(['webgpu-preferred', 'wasm']);
+    for (const worker of WorkerHarness.instances) expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['error', 'messageerror', 'bad-response', 'post-failure'] as const)(
+    'retires malformed/failed transport (%s)',
+    async (failure) => {
+      const [model, manifest] = await files();
+      vi.spyOn(WorkerHarness.prototype, 'postMessage').mockImplementation(function () {
+        if (failure === 'post-failure') throw new Error('Could not clone input');
+      });
+      const operation = runCustomModelWorker(
+        { model, manifest, volume: syntheticVolume },
+        {
+          signal: new AbortController().signal,
+          estimatedPeakBytes: customModelRuntimeBytes(model.size) + 1024,
+        },
+      );
+      const rejected = expect(operation).rejects.toThrow();
+      const worker = WorkerHarness.instances[0]!;
+      if (failure === 'error') worker.onerror!({ message: 'Worker crashed' } as ErrorEvent);
+      else if (failure === 'messageerror') worker.onmessageerror!();
+      else if (failure === 'bad-response')
+        worker.onmessage!({ data: { type: 'unknown' } } as unknown as MessageEvent<CustomModelResponse>);
+      await rejected;
+      expect(worker.terminate).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('refuses an over-budget compiled-model allowance before cloning any source or creating a worker', async () => {
+    const [model, manifest] = await files();
+    await expect(
+      runCustomModelWorker(
+        { model, manifest, volume: syntheticVolume },
+        {
+          signal: new AbortController().signal,
+          estimatedPeakBytes: customModelBudgetBytes() + 1,
+        },
+      ),
+    ).rejects.toThrow(/memory budget/);
+    expect(WorkerHarness.instances).toHaveLength(0);
   });
 });
 

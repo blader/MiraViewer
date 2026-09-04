@@ -291,7 +291,7 @@ describe('legacy acquisition metadata hydration', () => {
     const seeded = await legacyNativeSeries();
     const [hydrated] = await hydrateSvrAcquisitionMetadata([seeded.manifest], {
       datasetRevision: seeded.revision,
-      selectedPatientKey: null,
+      selectedPatientKey: seeded.manifest.patientKey,
     });
     expect(classifySvrAcquisitions([hydrated!]).mode).toBe('native-3d');
     expect(seeded.manifest.frames.every((frame) => !frame.acquisitionMetadata)).toBe(true);

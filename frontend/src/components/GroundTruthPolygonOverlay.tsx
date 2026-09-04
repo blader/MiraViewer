@@ -238,8 +238,32 @@ function useGroundTruthPolygonEditor({
     setDraftViewTransform({ ...viewerTransform });
   }, [viewerTransform]);
 
+  const draftRecord = useMemo(() => {
+    const viewTransform = draftViewTransform ?? viewerTransform;
+    const viewportSize =
+      containerSize.w > 0 && containerSize.h > 0
+        ? { w: Math.round(containerSize.w), h: Math.round(containerSize.h) }
+        : undefined;
+    const polygon = { points: draftPoints };
+    const canonical = imageSize && viewportSize;
+    return {
+      polygon: canonical ? viewerPolygonToImagePolygon(polygon, viewportSize, imageSize, viewTransform) : polygon,
+      coordinateSpace: canonical ? ('image-normalized' as const) : ('viewer-normalized' as const),
+      imageSize,
+      viewTransform,
+      viewportSize,
+    };
+  }, [containerSize.h, containerSize.w, draftPoints, draftViewTransform, imageSize, viewerTransform]);
+  const draftSaved =
+    isClosed &&
+    savedPolygon?.points.length === draftRecord.polygon.points.length &&
+    savedPolygon.points.every((point, index) => {
+      const draft = draftRecord.polygon.points[index]!;
+      return point.x === draft.x && point.y === draft.y;
+    });
+
   const onSave = useCallback(async () => {
-    if (!enabled) return;
+    if (!enabled || busy || draftSaved) return;
     if (!isClosed || draftPoints.length < 3) {
       setError('Close the polygon (click the first point) before saving');
       return;
@@ -252,33 +276,19 @@ function useGroundTruthPolygonEditor({
     try {
       const sop = await getSopInstanceUidForInstanceIndex(seriesUid, effectiveInstanceIndex);
 
-      const view = draftViewTransform ?? { ...viewerTransform };
-
-      const viewportSize =
-        containerSize.w > 0 && containerSize.h > 0
-          ? { w: Math.round(containerSize.w), h: Math.round(containerSize.h) }
-          : undefined;
-      const polygon = { points: draftPoints };
-      const canCanonicalize = imageSize && viewportSize;
-      const saved = canCanonicalize ? viewerPolygonToImagePolygon(polygon, viewportSize, imageSize, view) : polygon;
-
       await saveTumorGroundTruth({
         comboId,
         dateIso,
         studyId,
         seriesUid,
         sopInstanceUid: sop,
-        polygon: saved,
-        coordinateSpace: canCanonicalize ? 'image-normalized' : 'viewer-normalized',
-        imageSize,
-        viewTransform: view,
-        viewportSize,
+        ...draftRecord,
       });
 
       if (generation !== sliceGenerationRef.current) return;
-      setSavedPolygon(saved);
-      setSavedImageSize(canCanonicalize ? imageSize : null);
-      setSavedViewTransform(view);
+      setSavedPolygon(draftRecord.polygon);
+      setSavedImageSize(draftRecord.coordinateSpace === 'image-normalized' ? (imageSize ?? null) : null);
+      setSavedViewTransform(draftRecord.viewTransform);
     } catch (err) {
       if (generation !== sliceGenerationRef.current) return;
       console.error(err);
@@ -288,18 +298,17 @@ function useGroundTruthPolygonEditor({
     }
   }, [
     comboId,
-    containerSize.h,
-    containerSize.w,
+    busy,
     dateIso,
     draftPoints,
-    draftViewTransform,
+    draftRecord,
+    draftSaved,
     effectiveInstanceIndex,
     enabled,
     imageSize,
     isClosed,
     seriesUid,
     studyId,
-    viewerTransform,
   ]);
 
   const onDelete = useCallback(async () => {
@@ -413,13 +422,13 @@ function useGroundTruthPolygonEditor({
   }, [draftPoints, draftViewTransform, viewSize, viewerTransform]);
 
   const draftPath = useMemo(() => {
-    if (!isClosed || draftPointsDisplay.length < 3) return '';
+    if (!isClosed || draftSaved || draftPointsDisplay.length < 3) return '';
     return polygonToSvgPath({ points: draftPointsDisplay });
-  }, [draftPointsDisplay, isClosed]);
+  }, [draftPointsDisplay, draftSaved, isClosed]);
 
   const canUndo = draftPoints.length > 0 && !busy;
   const canClear = (draftPoints.length > 0 || isClosed) && !busy;
-  const canSave = isClosed && draftPoints.length >= 3 && !busy;
+  const canSave = isClosed && draftPoints.length >= 3 && !busy && !draftSaved;
 
   return {
     containerRef,
@@ -433,6 +442,7 @@ function useGroundTruthPolygonEditor({
     error,
     isClosed,
     draftPointsDisplay,
+    draftSaved,
     savedPolygon,
     savedPath,
     draftPath,
@@ -456,6 +466,7 @@ function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
     error,
     isClosed,
     draftPointsDisplay,
+    draftSaved,
     savedPolygon,
     savedPath,
     draftPath,
@@ -570,19 +581,19 @@ function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
         >
           {error}
         </div>
-      ) : !isClosed ? (
-        <div
-          className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
-          data-gt-ui="true"
-        >
-          Click to add points. Click the first point (or press Enter) to close.
-        </div>
       ) : (
         <div
+          role="status"
           className="absolute bottom-2 left-2 right-2 z-20 rounded-[4px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
           data-gt-ui="true"
         >
-          Polygon closed. Save to persist.
+          {busy
+            ? 'Saving outline…'
+            : draftSaved || (savedPolygon && draftPointsDisplay.length === 0)
+              ? 'Outline saved on this device.'
+              : isClosed
+                ? 'Polygon closed. Save to persist.'
+                : 'Click to add points. Click the first point (or press Enter) to close.'}
         </div>
       )}
 
@@ -628,7 +639,7 @@ function GroundTruthPolygonEditor(props: GroundTruthPolygonOverlayProps) {
       ) : null}
 
       {/* Vertex handles */}
-      {draftPointsDisplay.length > 0 ? (
+      {!draftSaved && draftPointsDisplay.length > 0 ? (
         <svg className="absolute inset-0 pointer-events-none" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden>
           {draftPointsDisplay.map((p, idx) => (
             <circle

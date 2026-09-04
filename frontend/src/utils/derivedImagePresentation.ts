@@ -1,6 +1,32 @@
 import type { DerivedAlignmentFramePresentation } from '../db/schema';
+import type { DerivedAlignmentFrame } from './derivedAlignmentFrame';
 import { applyAlignmentDisplayTone, validAlignmentDisplayTone } from './alignmentDisplayTone';
 import { loadCornerstoneImage } from './decodedFrame';
+
+/** Exact replays retain this payload, including calibration, while replacing request metadata. */
+export function getDerivedAlignmentContent(
+  frame: DerivedAlignmentFramePresentation & Pick<DerivedAlignmentFrame, 'acceptedResult'>,
+): DerivedAlignmentFramePresentation {
+  return frame.acceptedResult?.derivedFrame ?? frame;
+}
+
+export function sameDerivedAlignmentContent(
+  first: DerivedAlignmentFrame | null,
+  second: DerivedAlignmentFrame | null,
+): boolean {
+  if (first === second) return true;
+  return Boolean(
+    first &&
+    second &&
+    first.imageId === second.imageId &&
+    first.seriesUid === second.seriesUid &&
+    first.instanceIndex === second.instanceIndex &&
+    first.patientKey === second.patientKey &&
+    first.sequenceId === second.sequenceId &&
+    first.datasetRevision === second.datasetRevision &&
+    getDerivedAlignmentContent(first) === getDerivedAlignmentContent(second),
+  );
+}
 
 export type DerivedImagePresentation = {
   imageId: string;
@@ -92,7 +118,7 @@ export async function createDerivedImagePresentation(
   return {
     ...source,
     imageId,
-    derivedSource: new WeakRef(frame),
+    derivedSource: new WeakRef(getDerivedAlignmentContent(frame)),
     rows: frame.rows,
     columns: frame.columns,
     height: frame.rows,

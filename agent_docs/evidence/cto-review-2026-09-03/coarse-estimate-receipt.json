@@ -1,0 +1,294 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/performance-results/performance-coarse-pose-on-dbb09-returning-a-discarded-image-performance/coarse-estimate-receipt.json",
+    "sha256": "8cd859b1a99048fda40de001e44cd17ddefb4619849b5581f7bb44d2c6db3160"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:30:36.062Z",
+    "fixture": "Same asymmetric physical phantom as the mathematical oracle; real fresh module workers; 512-square output lattice.",
+    "browser": "152.0.7977.82",
+    "measurements": [
+      {
+        "output": "image",
+        "elapsedMs": 87.67999982833862,
+        "outputBytes": 1310720,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      },
+      {
+        "output": "estimate",
+        "elapsedMs": 64.04999995231628,
+        "outputBytes": 0,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      },
+      {
+        "output": "estimate",
+        "elapsedMs": 45.02500009536743,
+        "outputBytes": 0,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      },
+      {
+        "output": "image",
+        "elapsedMs": 84.28500008583069,
+        "outputBytes": 1310720,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      },
+      {
+        "output": "estimate",
+        "elapsedMs": 49.084999799728394,
+        "outputBytes": 0,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      },
+      {
+        "output": "image",
+        "elapsedMs": 83.07999992370605,
+        "outputBytes": 1310720,
+        "evidence": {
+          "ok": true,
+          "targetToReference": {
+            "rx": -0.0038014480621539884,
+            "ry": 0.3141592653589793,
+            "rz": 0,
+            "tx": -31.621865432604082,
+            "ty": 20,
+            "tz": -0.2400553317031111
+          },
+          "centerMm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          },
+          "score": 0.9980179661402276,
+          "diagnostics": {
+            "rawScore": 0.9980179661402276,
+            "retainedSampleFraction": 1,
+            "reverseRetainedSampleFraction": 1,
+            "sampledTargetCount": 1900,
+            "effectiveSampleCount": 1900,
+            "evaluatedCandidates": 198,
+            "optimizedHypothesisCount": 2,
+            "optimizedAlternativeCount": 1,
+            "referenceVoxelSizeMm": 1,
+            "angleDifferenceDeg": 18.00000000000001,
+            "scoreMargin": 0.1140787220407048,
+            "minimumDistinguishableScoreMargin": 0.0001,
+            "inverseScoreGap": 0.000122000714543824,
+            "inverseConsistencyErrorMm": 0.6399720779359513,
+            "referenceIntensityVariance": 0.056230117088601796,
+            "targetIntensityVariance": 0.05628614394161125
+          },
+          "provenance": {
+            "referenceFrameOfReferenceUid": "synthetic-reference",
+            "targetFrameOfReferenceUid": "synthetic-target",
+            "frameRelationship": "different",
+            "referenceSliceIndex": 9
+          }
+        }
+      }
+    ],
+    "scope": "Coarse complete-call timing and transferred output. Not full alignment latency or anatomical validation."
+  }
+}

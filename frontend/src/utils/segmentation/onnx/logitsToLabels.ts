@@ -81,7 +81,8 @@ export function logitsToLabels(params: {
     let best = -Infinity;
 
     for (let ci = 0; ci < c; ci++) {
-      const v = data[ci * spatial + p] ?? -Infinity;
+      const v = data[ci * spatial + p]!;
+      if (!Number.isFinite(v)) throw new Error('logitsToLabels: model logits must all be finite');
       if (v > best) {
         best = v;
         bestC = ci;

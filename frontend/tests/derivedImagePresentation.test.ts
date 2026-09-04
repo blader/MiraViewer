@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFramePresentation } from '../src/db/schema';
+import type { AlignmentResult } from '../src/types/api';
+import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 
 const load = vi.hoisted(() => vi.fn());
@@ -42,7 +44,20 @@ describe('derived image presentation', () => {
     const pixels = Float32Array.from([20, 12, Number.NaN, 200, 100, 80]);
     const valid = Uint8Array.from([1, 0, 1, 1, 1, 0]);
     const replacementBefore = pixels.slice();
-    const image = await createDerivedImagePresentation(frame, 'sharp:synthetic', {
+    const packet = {
+      ...frame,
+      acceptedResult: {
+        date: 'synthetic-date',
+        seriesUid: 'synthetic-series',
+        bestSliceIndex: 0,
+        nmiScore: 1,
+        computedSettings: DEFAULT_PANEL_SETTINGS,
+        slicesChecked: 1,
+        outcome: 'aligned',
+        derivedFrame: frame,
+      } satisfies AlignmentResult,
+    };
+    const image = await createDerivedImagePresentation(packet, 'sharp:synthetic', {
       pixels,
       valid,
       rows: 2,

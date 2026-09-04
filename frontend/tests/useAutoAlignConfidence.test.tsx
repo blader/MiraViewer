@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlignmentReference, ExclusionMask } from '../src/types/api';
+import type * as AlignmentScoring from '../src/utils/alignmentScoringRunner';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
 
 const mocks = vi.hoisted(() => ({
@@ -33,7 +34,8 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({
   },
 }));
 
-vi.mock('../src/utils/alignmentScoringRunner', () => ({
+vi.mock('../src/utils/alignmentScoringRunner', async (importOriginal) => ({
+  ...(await importOriginal<typeof AlignmentScoring>()),
   createAlignmentScoringRunner: async () => ({
     scoreCoarse: async (pixels: Float32Array) => score(pixels[0] ?? 0),
     scoreFine: async (pixels: Float32Array) => score(pixels[0] ?? 0),

@@ -622,7 +622,10 @@ describe('verified derived alignment frame cache', () => {
 
     await hydrateDerivedAlignmentFrames('verified-patient', 7, 'verified-sequence', new Set(['target-series']));
 
-    expect(storage.load).toHaveBeenCalledWith('verified-patient', 7);
+    expect(storage.load).toHaveBeenCalledWith('verified-patient', 7, {
+      sequenceId: 'verified-sequence',
+      seriesUids: new Set(['target-series']),
+    });
     expect(getDerivedAlignmentFrame('target-series', 12)).toMatchObject({
       imageId: 'miraderived:verified-run:target-series:12',
       nativeSliceSpacingMm: 1,

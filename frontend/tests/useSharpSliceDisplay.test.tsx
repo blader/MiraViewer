@@ -2,11 +2,15 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DerivedAlignmentFrame } from '../src/utils/derivedAlignmentFrame';
 import type { DerivedImagePresentation } from '../src/utils/derivedImagePresentation';
+import type * as DerivedImages from '../src/utils/derivedImagePresentation';
 import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), present: vi.fn() }));
 vi.mock('../src/utils/sharpSliceDisplay', () => ({ requestSharpSliceDisplay: mocks.request }));
-vi.mock('../src/utils/derivedImagePresentation', () => ({ createDerivedImagePresentation: mocks.present }));
+vi.mock('../src/utils/derivedImagePresentation', async (importOriginal) => ({
+  ...(await importOriginal<typeof DerivedImages>()),
+  createDerivedImagePresentation: mocks.present,
+}));
 
 import { useSharpSliceDisplay } from '../src/hooks/useSharpSliceDisplay';
 

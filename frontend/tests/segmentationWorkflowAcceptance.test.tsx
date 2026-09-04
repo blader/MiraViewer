@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useSvrSelection } from '../src/hooks/useSvrSelection';
 import type { SvrLabelVolume, SvrVolume } from '../src/types/svr';
 import type { SeriesFrameManifest } from '../src/utils/localApi';
-import { segmentSeededVolume, voxelIndex, voxelPoint } from '../src/utils/segmentation/seededVolume';
-import { SeededVolumeWorker } from '../src/utils/segmentation/seededVolumeWorker';
+import { segmentSeededVolume, voxelIndex, voxelPoint } from './helpers/legacySeededVolume';
+import type { SelectionProposer } from '../src/utils/segmentation/selectionProposal';
 import { physicalBrushIndices, SLICE_AXES } from '../src/utils/segmentation/selectionEditing';
 import { classifySvrAcquisitions } from '../src/utils/svr/acquisitionProvenance';
 import { assembleNativeVolume, planNativeVolume, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
@@ -95,15 +95,40 @@ function nativeWorkflow() {
 }
 
 function selectionWorkflow(volume: SvrVolume, automatic = true) {
-  const run = vi.spyOn(SeededVolumeWorker.prototype, 'run').mockImplementation((input, options) =>
-    // Exercise the real solver; worker transfer/lifetime have separate tests.
-    segmentSeededVolume(input, { ...options, yieldFn: () => Promise.resolve() }),
-  );
+  // A deterministic diagnostic proposal exercises grid/editing ownership here.
+  // This is not acceptance evidence for the learned model or its worker.
+  const run = vi.fn<SelectionProposer>(async ({ volume: source, seeds, signal, onProgress }) => {
+    const result = await segmentSeededVolume(
+      {
+        volume: source.data,
+        observedSupport: source.observedSupport,
+        dims: source.dims,
+        voxelSizeMm: source.voxelSizeMm,
+        ...seeds,
+      },
+      { signal, onProgress: (processed, total) => onProgress(processed / total), yieldFn: () => Promise.resolve() },
+    );
+    const data = new Uint8Array(source.data.length);
+    for (const index of result.indices) data[index] = 1;
+    return {
+      data,
+      boundaryCount: result.boundaryCount,
+      contextLimited: (['x', 'y', 'z'] as const).some(
+        (axis, i) => result.bounds.min[axis] > 0 || result.bounds.max[axis] < source.dims[i]! - 1,
+      ),
+    };
+  });
   const hook = renderHook(
     ({ automatic }) => {
       const [source, setSource] = useState(volume);
       const [labels, setLabels] = useState<SvrLabelVolume | null>(null);
-      return { source, setSource, labels, setLabels, selection: useSvrSelection(source, labels, setLabels, automatic) };
+      return {
+        source,
+        setSource,
+        labels,
+        setLabels,
+        selection: useSvrSelection(source, labels, setLabels, automatic, run),
+      };
     },
     { initialProps: { automatic } },
   );
@@ -195,11 +220,9 @@ describe('native Add → Auto-fill workflow invariants, not an anatomy accuracy 
       await act(async () => vi.advanceTimersByTimeAsync(350));
       expect(run).toHaveBeenCalledOnce();
       const input = run.mock.calls[0]![0];
-      expect(input.volume).toBe(volume.data);
-      expect(input.observedSupport).toBe(volume.observedSupport);
-      expect(input.dims).toEqual(volume.dims);
-      expect(input.voxelSizeMm).toEqual(volume.voxelSizeMm);
-      expect(input.bounds).toBeUndefined();
+      expect(input.volume).toBe(volume);
+      expect(input.volume.data).toBe(volume.data);
+      expect(input.volume.observedSupport).toBe(volume.observedSupport);
       expect(result.current.labels!.dims).toEqual(volume.dims);
       expect(result.current.labels!.data).toHaveLength(volume.data.length);
       expect(result.current.labels!.reviewState).toBe('draft');
@@ -272,9 +295,8 @@ describe('native Add → Auto-fill workflow invariants, not an anatomy accuracy 
     expect(run).not.toHaveBeenCalled();
     await act(async () => result.current.selection.grow());
     expect(run).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]![0].volume).toBe(detail.data);
-    expect(run.mock.calls[0]![0].observedSupport).toBe(detail.observedSupport);
-    expect(run.mock.calls[0]![0].dims).toEqual(detail.dims);
+    expect(run.mock.calls[0]![0].volume).toBe(detail);
+    expect(run.mock.calls[0]![0].volume.observedSupport).toBe(detail.observedSupport);
     expect(result.current.labels!.reviewState).toBe('draft');
     expect(draft.seeds!.foreground.every((index) => result.current.labels!.data[index] === 1)).toBe(true);
     expect(draft.seeds!.background.every((index) => result.current.labels!.data[index] === 0)).toBe(true);

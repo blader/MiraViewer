@@ -1,0 +1,26 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-keeps-saved-sourc-3009a--and-a-later-date-collision-workflow/source-ownership-receipt.json",
+    "sha256": "4c184ef41bc7348c5a2f5096eeb2cb73b152590a5e0ae5e649feb27f5d3aa3ea"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T03:30:27.978Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "source": {
+      "studyUid": "1.2.826.0.1.3680043.10.543.20350701.1",
+      "seriesUid": "1.2.826.0.1.3680043.10.543.20350701.1.1"
+    },
+    "sourceAdjustmentPreserved": true,
+    "candidateCounts": [
+      16,
+      20
+    ],
+    "dateCollision": true,
+    "privateDataUsed": false
+  }
+}

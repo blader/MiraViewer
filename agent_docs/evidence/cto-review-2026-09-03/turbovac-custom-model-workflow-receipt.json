@@ -1,0 +1,52 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-04/workflow-results/workflow-normal-custom-mod-f6298-orkers-and-reopen-unchanged-workflow/custom-model-workflow-receipt.json",
+    "sha256": "a4d9a9a428098f1c9cf5cf8c85f6328e0e83d8f8bd555e069ab0c64be8f79e3d"
+  },
+  "receipt": {
+    "head": "34a67c42d5be6c6e6ddbc2de6387ab8af77f48b8",
+    "sourceSha256": "526789ca62d20cd3870ea065558d589c8f16ec199897e54d6da1e582bcaeb4fa",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T04:18:34.439Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "draft": [
+      {
+        "volumeKey": "{\"patient\":\"SVR-SYNTHETIC-ONLY\",\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"revision\":24,\"reconstruction\":\"native-v1-f4a1ad0c\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "brats-tumor-v1",
+        "reviewState": "draft",
+        "selectedCount": 31104,
+        "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+      }
+    ],
+    "reopened": [
+      {
+        "volumeKey": "{\"patient\":\"SVR-SYNTHETIC-ONLY\",\"study\":\"1.2.826.0.1.3680043.10.543.20370101.1\",\"series\":[\"1.2.826.0.1.3680043.10.543.20370101.1.1\"],\"frame\":\"1.2.826.0.1.3680043.10.543.20370101.1.999\",\"dims\":[36,36,24],\"spacing\":[1,1,1],\"origin\":[0,0,0],\"direction\":[1,0,0,0,1,0,0,0,1],\"revision\":24,\"reconstruction\":\"native-v1-f4a1ad0c\"}",
+        "dims": [36, 36, 24],
+        "modelKey": "brats-tumor-v1",
+        "reviewState": "draft",
+        "selectedCount": 31104,
+        "labelsSha256": "abb8fcdd03fe36aa7838be7123aa89d7ba43872fac0d1c260500d3c1c14c431c"
+      }
+    ],
+    "cancelToReadyMs": 2880.493625000001,
+    "workers": [
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      },
+      {
+        "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+        "closed": true
+      }
+    ],
+    "errors": [],
+    "scope": "Normal production UI, synthetic native DICOM and real synthetic ONNX graphs. Draft persistence, explicit cancel, ordinary reconstruction replacement, worker retirement and reload. No anatomical accuracy claim."
+  }
+}

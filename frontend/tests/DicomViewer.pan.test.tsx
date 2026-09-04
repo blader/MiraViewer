@@ -38,7 +38,7 @@ function renderViewer(overrides: Partial<ViewerProps> = {}) {
     ...overrides,
   };
   const view = render(<DicomViewer {...props} />);
-  const viewport = screen.getByRole('button', { name: 'Pan MRI slice 2' });
+  const viewport = screen.getByRole('group', { name: 'Pan MRI slice 2' });
   const image = screen.getByRole('img', { name: 'Slice 2' });
   fireEvent.load(image);
 
@@ -294,12 +294,24 @@ describe('DicomViewer drag to pan', () => {
 
       expect(setPointerCapture).not.toHaveBeenCalled();
       expect(onPanChange).not.toHaveBeenCalled();
-      expect(viewport).toHaveAttribute('aria-disabled', 'true');
       expect(viewport).toHaveAttribute('tabindex', '-1');
       expect(viewport).not.toHaveClass('touch-none');
       expect(image.parentElement).toHaveStyle({ transform: `translate(50px, -50px) ${identityTransform}` });
     },
   );
+
+  it('lets a nested recovery control own Enter instead of resetting the pan', () => {
+    const { image, onPanChange } = renderViewer();
+    fireEvent.error(image);
+    const retry = screen.getByRole('button', { name: 'Retry image' });
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    fireEvent(retry, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(onPanChange).not.toHaveBeenCalled();
+    expect(retry.closest('[aria-disabled="true"]')).toBeNull();
+    fireEvent.click(retry);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 
   it('releases pointer capture without saving when the viewer unmounts', () => {
     const { viewport, onPanChange, releasePointerCapture, unmount } = renderViewer();

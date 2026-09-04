@@ -10,11 +10,12 @@ MiraViewer (Offline) — Quick Start
    Closing it will stop MiraViewer.
 
 Notes
-- No server is required (MiraViewer runs entirely in your browser).
+- The launcher starts a local HTTP server for the app. All image processing happens in your browser; scans are not sent to an imaging backend.
 - Your scans are stored locally in your browser on this computer (IndexedDB).
 - MiraViewer always uses http://127.0.0.1:43125/ so saved scans remain available after every restart.
 - If port 43125 is occupied, close its other application; do not run MiraViewer on a different port.
-- Use the in-app Download button to export a backup ZIP.
+- Open Application menu > Export backup (ZIP) to create a backup.
+- Current full-backup restore is limited to 512 MiB of declared payloads. Export can create a larger archive, so keep the original images and verify restoration before relying on a backup.
 
 Troubleshooting
 - If the window closes immediately or nothing happens, you likely need Python 3 installed.

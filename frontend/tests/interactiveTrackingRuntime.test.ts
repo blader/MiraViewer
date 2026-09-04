@@ -31,15 +31,30 @@ const messages: InteractiveTrackingWorkerResponse[] = [];
 const transferred: Transferable[][] = [];
 const borrowed: Float32Array[] = [];
 let autoConsume = true;
+let autoSource = true;
 let stopAt: { forward: number; reverse: number } | undefined;
 const dispose = vi.fn<TrackingController['dispose']>();
 const runModel = vi.fn<TrackingController['run']>();
 const runSnapshot = vi.fn<TrackingController['runSnapshot']>();
 const post = vi.fn<(message: InteractiveTrackingWorkerResponse, transfer?: Transferable[]) => void>();
+let currentPort: MessagePort;
+let replyingPort: MessagePort;
 
-function send(data: InteractiveTrackingWorkerRequest) {
+function send(data: InteractiveTrackingWorkerRequest, port = currentPort) {
   const scope = globalThis as unknown as { onmessage(event: MessageEvent<InteractiveTrackingWorkerRequest>): void };
-  scope.onmessage({ data } as MessageEvent<InteractiveTrackingWorkerRequest>);
+  if (data.type === 'start') {
+    const next = {
+      onmessage: null,
+      onmessageerror: null,
+      close: vi.fn(),
+      postMessage(message: InteractiveTrackingWorkerResponse, transfer?: Transferable[]) {
+        replyingPort = next as unknown as MessagePort;
+        post(message, transfer);
+      },
+    };
+    currentPort = next as unknown as MessagePort;
+    scope.onmessage({ data, ports: [currentPort] } as MessageEvent<InteractiveTrackingWorkerRequest>);
+  } else port.onmessage?.call(port, { data } as MessageEvent<InteractiveTrackingWorkerRequest>);
 }
 
 beforeEach(async () => {
@@ -48,6 +63,7 @@ beforeEach(async () => {
   transferred.length = 0;
   borrowed.length = 0;
   autoConsume = true;
+  autoSource = true;
   stopAt = undefined;
   dispose.mockReset().mockResolvedValue();
   runSnapshot.mockReset();
@@ -92,23 +108,27 @@ beforeEach(async () => {
     return { run: runModel, runSnapshot, dispose };
   });
   post.mockReset().mockImplementation((message, transfer = []) => {
+    const port = replyingPort;
     const received = structuredClone(message, { transfer });
     if (received.type === 'frame') received.frame.nativeLogits = new Float32Array(received.frame.nativeLogits.buffer);
     messages.push(received);
     transferred.push(transfer);
-    if (received.type === 'read-frame')
+    if (received.type === 'read-frame' && autoSource)
       queueMicrotask(() =>
-        send({ type: 'source', requestId: received.requestId, pixels: Float32Array.of(0, 1, 2, 3) }),
+        send({ type: 'source', requestId: received.requestId, pixels: Float32Array.of(0, 1, 2, 3) }, port),
       );
     if (received.type === 'frame' && autoConsume)
       queueMicrotask(() =>
-        send({
-          type: 'consumed',
-          requestId: received.requestId,
-          ...(stopAt?.[received.frame.direction === 1 ? 'forward' : 'reverse'] === received.frame.index
-            ? { stopDirection: true as const }
-            : {}),
-        }),
+        send(
+          {
+            type: 'consumed',
+            requestId: received.requestId,
+            ...(stopAt?.[received.frame.direction === 1 ? 'forward' : 'reverse'] === received.frame.index
+              ? { stopDirection: true as const }
+              : {}),
+          },
+          port,
+        ),
       );
   });
   vi.stubGlobal('postMessage', post);
@@ -169,16 +189,21 @@ describe('production interactive tracking worker runtime', () => {
       expect(
         messages.filter((message) => message.type === 'progress').map((message) => message.progress.phase),
       ).toContain('frames');
-      expect(dispose).toHaveBeenCalledOnce();
+      expect(dispose).not.toHaveBeenCalled();
     },
   );
 
-  it('honors acknowledged prefixes with fresh directions and reports actual endpoints only after release', async () => {
+  it('honors acknowledged prefixes and reports endpoints only after the final direction completes', async () => {
     stopAt = { forward: 4, reverse: 2 };
     const released = deferred<void>();
-    dispose.mockReturnValue(released.promise);
+    const execute = runModel.getMockImplementation()!;
+    runModel.mockImplementation(async (options) => {
+      const result = await execute(options);
+      if (options.direction === -1) await released.promise;
+      return result;
+    });
     send({ type: 'start', job: { ...job, frameCount: 7, anchorIndex: 3, allowDirectionStop: true } });
-    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === 'frame')).toHaveLength(4));
     expect(
       messages.filter((message) => message.type === 'frame').map(({ frame }) => [frame.index, frame.direction]),
     ).toEqual([
@@ -216,30 +241,232 @@ describe('production interactive tracking worker runtime', () => {
         directionEndpoints: { forward: 2, reverse: 0 },
       }),
     );
-    expect(dispose).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
   });
 
-  it.each([0, 1] as const)(
-    'rejects stop permission with an off-anchor label%s before initializing a model',
-    async (label) => {
-      send({
-        type: 'start',
-        job: { ...job, allowDirectionStop: true, markedFrames: [{ index: 2, points: [[0, 0]], labels: [label] }] },
+  describe('multi-plane final prefixes', () => {
+    const snapshot: InteractiveTrackingJob = {
+      ...job,
+      frameCount: 9,
+      anchorIndex: 4,
+      allowDirectionStop: true,
+      markedFrames: [
+        { index: 6, points: [[0.5, 1.25]], labels: [0] },
+        { index: 2, points: [[0.25, 1.5]], labels: [1] },
+      ],
+    };
+    const expectedFrames = [
+      [4, 1],
+      [5, 1],
+      [6, 1],
+      [7, 1],
+      [4, -1],
+      [3, -1],
+      [2, -1],
+      [1, -1],
+    ];
+    beforeEach(() => {
+      stopAt = { forward: 7, reverse: 1 };
+      runSnapshot.mockImplementation(async (options) => {
+        const conditioning = new Set([options.anchorIndex, ...options.markedFrames!.map((frame) => frame.index)]);
+        const progress = (stage: 'prepare' | 'final', index: number, direction: 1 | -1) =>
+          options.onProgress?.({
+            stage,
+            phase: 'before-source-frame',
+            index,
+            direction,
+            conditioningFrames: conditioning.size,
+            spatialMemories: conditioning.size,
+            pointers: conditioning.size,
+            retainedStateBytes: 395312,
+            liveTensorBackingBytes: 0,
+          });
+        for (const [index, direction] of [
+          [4, 1],
+          [5, 1],
+          [6, 1],
+          [3, -1],
+          [2, -1],
+        ] as const) {
+          progress('prepare', index, direction);
+          expect(await options.readFrame(index, options.signal)).toEqual(Float32Array.of(0, 1, 2, 3));
+          expect(messages.some((message) => message.type === 'frame')).toBe(false);
+        }
+        let completedFrames = 0;
+        const directionEndpoints = { forward: options.anchorIndex, reverse: options.anchorIndex };
+        for (const direction of [1, -1] as const) {
+          const limit = direction === 1 ? options.frameCount - 1 : 0;
+          for (let index = options.anchorIndex; (limit - index) * direction >= 0; index += direction) {
+            options.signal?.throwIfAborted();
+            progress('final', index, direction);
+            if (!conditioning.has(index))
+              expect(await options.readFrame(index, options.signal)).toEqual(Float32Array.of(0, 1, 2, 3));
+            const native = Float32Array.of(-index - 0.5, 0.25, 0.5, index + 0.75);
+            borrowed.push(native);
+            const decision = await options.onFrame({
+              index,
+              direction,
+              initial: index === options.anchorIndex,
+              nativeLogits: native,
+              lowLogits: new Float32Array(128 * 128),
+              pointer: new Float32Array(256),
+              objectScore: Float32Array.of(1),
+              selectedIou: Float32Array.of(0.5),
+            });
+            expect(native).toEqual(Float32Array.of(-index - 0.5, 0.25, 0.5, index + 0.75));
+            completedFrames++;
+            directionEndpoints[direction === 1 ? 'forward' : 'reverse'] = index;
+            if (decision === 'stop-direction') break;
+          }
+        }
+        return { completedFrames, directionEndpoints };
       });
+    });
+
+    it.each([0, 1] as const)(
+      'prepares off-anchor label%s unchanged and reports endpoints only after snapshot completion',
+      async (label) => {
+        const markedFrames = snapshot.markedFrames!.map((frame) => ({ ...frame, labels: [label] }));
+        const released = deferred<void>();
+        const execute = runSnapshot.getMockImplementation()!;
+        runSnapshot.mockImplementation(async (options) => {
+          const result = await execute(options);
+          await released.promise;
+          return result;
+        });
+        send({ type: 'start', job: { ...snapshot, markedFrames } });
+        await vi.waitFor(() => expect(messages.filter((message) => message.type === 'frame')).toHaveLength(8));
+        expect(runSnapshot).toHaveBeenCalledOnce();
+        expect(runSnapshot.mock.calls[0][0]).toMatchObject({
+          markedFrames,
+          sourceRange: job.sourceRange,
+          allowDirectionStop: true,
+        });
+        expect(runModel).not.toHaveBeenCalled();
+        expect(
+          messages
+            .filter((message) => message.type === 'read-frame')
+            .map(({ index, direction, stage }) => [index, direction, stage]),
+        ).toEqual([
+          [4, 1, 'prepare'],
+          [5, 1, 'prepare'],
+          [6, 1, 'prepare'],
+          [3, -1, 'prepare'],
+          [2, -1, 'prepare'],
+          [5, 1, 'final'],
+          [7, 1, 'final'],
+          [3, -1, 'final'],
+          [1, -1, 'final'],
+        ]);
+        const frames = messages.filter((message) => message.type === 'frame');
+        expect(frames.map(({ frame }) => [frame.index, frame.direction])).toEqual(expectedFrames);
+        for (const [index, message] of frames.entries()) {
+          expect(message.frame.nativeLogits).toEqual(borrowed[index]);
+          expect(message.frame.nativeLogits.buffer).not.toBe(borrowed[index].buffer);
+        }
+        expect(messages.some((message) => message.type === 'done')).toBe(false);
+        released.resolve();
+        await vi.waitFor(() =>
+          expect(messages.at(-1)).toEqual({
+            type: 'done',
+            completedFrames: 8,
+            directionEndpoints: { forward: 7, reverse: 1 },
+          }),
+        );
+      },
+    );
+
+    it.each([
+      { direction: 1, stop: 5 },
+      { direction: 1, stop: 6 },
+      { direction: -1, stop: 3 },
+      { direction: -1, stop: 2 },
+    ])(
+      'rejects a final stop ACK at $stop in direction $direction before or on the literal fence',
+      async ({ direction, stop }) => {
+        stopAt = direction === 1 ? { forward: stop, reverse: 1 } : { forward: 7, reverse: stop };
+        send({ type: 'start', job: snapshot });
+        await vi.waitFor(() =>
+          expect(messages.at(-1)).toMatchObject({
+            type: 'error',
+            message: expect.stringMatching(/beyond every marked source plane/),
+          }),
+        );
+        const frames = messages.filter((message) => message.type === 'frame');
+        expect(frames.at(-1)?.frame).toMatchObject({ index: stop, direction });
+        expect(frames.map(({ frame }) => [frame.index, frame.direction])).toEqual(
+          expectedFrames.slice(
+            0,
+            expectedFrames.findIndex(([index, currentDirection]) => index === stop && currentDirection === direction) +
+              1,
+          ),
+        );
+        expect(dispose).toHaveBeenCalledOnce();
+        expect(messages.some((message) => message.type === 'done')).toBe(false);
+      },
+    );
+
+    it('rejects a provisional output before publishing or awaiting an ACK', async () => {
+      runSnapshot.mockImplementation(async (options) => {
+        await options.onFrame({
+          index: 4,
+          direction: 1,
+          initial: true,
+          nativeLogits: new Float32Array(4),
+          lowLogits: new Float32Array(128 * 128),
+          pointer: new Float32Array(256),
+          objectScore: Float32Array.of(1),
+          selectedIou: Float32Array.of(0.5),
+        });
+        return { completedFrames: 1 };
+      });
+      send({ type: 'start', job: snapshot });
       await vi.waitFor(() =>
         expect(messages.at(-1)).toMatchObject({
           type: 'error',
-          message: expect.stringMatching(/single marked source plane/),
+          message: expect.stringMatching(/preparation cannot publish/),
         }),
       );
-      expect(createModel).not.toHaveBeenCalled();
-      expect(
-        messages.some(
-          (message) => message.type === 'frame' || message.type === 'read-frame' || message.type === 'done',
-        ),
-      ).toBe(false);
-    },
-  );
+      expect(messages.some((message) => message.type === 'frame' || message.type === 'done')).toBe(false);
+      expect(dispose).toHaveBeenCalledOnce();
+    });
+
+    it.each(['preparation', 'final-stop'] as const)(
+      'aborts an out-of-order ACK during %s and rejects late replies after release',
+      async (stage) => {
+        autoSource = stage !== 'preparation';
+        autoConsume = false;
+        send({ type: 'start', job: snapshot });
+        let requestId = 0;
+        if (stage === 'preparation') {
+          await vi.waitFor(() => expect(messages.some((message) => message.type === 'read-frame')).toBe(true));
+          requestId = messages.find((message) => message.type === 'read-frame')!.requestId;
+        } else {
+          for (let count = 1; count <= 4; count++) {
+            await vi.waitFor(() => expect(messages.filter((message) => message.type === 'frame')).toHaveLength(count));
+            const frame = messages.filter((message) => message.type === 'frame').at(-1)!;
+            expect([frame.frame.index, frame.frame.direction]).toEqual(expectedFrames[count - 1]);
+            requestId = frame.requestId;
+            if (count < 4) send({ type: 'consumed', requestId });
+          }
+        }
+        send({ type: 'consumed', requestId: requestId + 1, stopDirection: true });
+        await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+        expect(runSnapshot.mock.calls[0][0].signal?.aborted).toBe(true);
+        expect(messages.filter((message) => message.type === 'error')).toHaveLength(1);
+        expect(messages.some((message) => message.type === 'done')).toBe(false);
+        const messageCount = messages.length;
+        send(
+          stage === 'preparation'
+            ? { type: 'source', requestId, pixels: Float32Array.of(0, 1, 2, 3) }
+            : { type: 'consumed', requestId, stopDirection: true },
+        );
+        await Promise.resolve();
+        expect(messages).toHaveLength(messageCount);
+        expect(messages.filter((message) => message.type === 'frame')).toHaveLength(stage === 'preparation' ? 0 : 4);
+      },
+    );
+  });
 
   it('rejects false stop permission before model initialization', async () => {
     send({ type: 'start', job: { ...job, allowDirectionStop: false as never } });
@@ -291,22 +518,44 @@ describe('production interactive tracking worker runtime', () => {
     expect(borrowed[0][0]).toBe(-1.5);
   });
 
-  it('does not announce completion before every session has been released', async () => {
-    const released = deferred<void>();
-    dispose.mockReturnValue(released.promise);
+  it('reuses initialized sessions but replaces the job channel, prompts, and exchange sequence', async () => {
     send({ type: 'start', job });
-    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
-    expect(messages.some((message) => message.type === 'done')).toBe(false);
-    released.resolve();
+    const firstPort = currentPort;
+    const oldReply = firstPort.onmessage!;
     await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: 'done', completedFrames: 4 }));
+    const boundary = messages.length;
+    const nextJob = { ...job, points: [[1, 1]] as [number, number][], labels: [1] as (0 | 1)[] };
+    send({ type: 'start', job: nextJob });
+    oldReply.call(firstPort, { data: { type: 'consumed', requestId: 999 } } as MessageEvent);
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === 'done')).toHaveLength(2));
+    expect(currentPort).not.toBe(firstPort);
+    expect(firstPort.close).toHaveBeenCalledOnce();
+    expect(createModel).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(runModel.mock.calls.map(([options]) => options.points)).toEqual([
+      job.points,
+      job.points,
+      nextJob.points,
+      nextJob.points,
+    ]);
+    expect(messages.slice(boundary).filter((message) => message.type === 'read-frame')[0]).toMatchObject({
+      requestId: 1,
+      index: job.anchorIndex,
+      direction: 1,
+    });
+    expect(messages.some((message) => message.type === 'error')).toBe(false);
   });
 
   it('surfaces model creation failure without starting a source stream', async () => {
-    createModel.mockRejectedValue(new Error('Runtime unavailable'));
+    createModel.mockRejectedValueOnce(new Error('Runtime unavailable'));
     send({ type: 'start', job });
     await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: 'error', message: 'Runtime unavailable' }));
     expect(runModel).not.toHaveBeenCalled();
     expect(messages.some((message) => message.type === 'read-frame')).toBe(false);
+    await vi.waitFor(() => expect(currentPort.close).toHaveBeenCalledOnce());
+    send({ type: 'start', job });
+    await vi.waitFor(() => expect(messages.at(-1)).toMatchObject({ type: 'done' }));
+    expect(createModel).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a second start and disposes a model that finishes initialization after the failure', async () => {
@@ -314,7 +563,10 @@ describe('production interactive tracking worker runtime', () => {
     createModel.mockReturnValue(created.promise);
     send({ type: 'start', job });
     send({ type: 'start', job });
-    expect(messages.at(-1)).toMatchObject({ type: 'error', message: expect.stringMatching(/exactly one job/) });
+    expect(messages.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringMatching(/one interactive selection job/),
+    });
     expect(createModel.mock.calls[0][0].signal.aborted).toBe(true);
     created.resolve({ run: runModel, runSnapshot, dispose });
     await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
@@ -405,7 +657,7 @@ describe('production interactive tracking worker runtime', () => {
     const phases = messages.filter((message) => message.type === 'progress').map((message) => message.progress.phase);
     expect(phases).toContain('preparing');
     expect(phases).toContain('frames');
-    expect(dispose).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
   });
 
   it('releases the snapshot model after preparation fails and publishes no provisional masks', async () => {

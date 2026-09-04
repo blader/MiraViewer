@@ -64,7 +64,7 @@ describe('useSvrReconstruction', () => {
     const { result } = renderHook(() => useSvrReconstruction());
 
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a|study-a|revision-2');
+      await result.current.run(selectedSeries, { identity: 'patient-a|study-a|revision-2' });
     });
 
     expect(result.current.status).toBe('ready');
@@ -92,7 +92,10 @@ describe('useSvrReconstruction', () => {
       seeds: { foreground: Uint32Array.of(0), background: new Uint32Array() },
     };
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a', { volume: previous.volume, labels });
+      await result.current.run(selectedSeries, {
+        identity: 'patient-a',
+        selectionToRefine: { volume: previous.volume, labels },
+      });
     });
     const accepted = states.filter((state) => state.status === 'ready');
     expect(accepted.length).toBeGreaterThan(0);
@@ -109,12 +112,15 @@ describe('useSvrReconstruction', () => {
     mocks.reconstructVolumeMultiPlane.mockResolvedValueOnce(previous).mockResolvedValueOnce(volume(0.8));
     const { result } = renderHook(() => useSvrReconstruction());
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a');
+      await result.current.run(selectedSeries, { identity: 'patient-a' });
     });
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a', {
-        volume: previous.volume,
-        labels: { data: Uint8Array.of(1, 1), dims: [2, 1, 1], meta: [] },
+      await result.current.run(selectedSeries, {
+        identity: 'patient-a',
+        selectionToRefine: {
+          volume: previous.volume,
+          labels: { data: Uint8Array.of(1, 1), dims: [2, 1, 1], meta: [] },
+        },
       });
     });
     expect(result.current.status).toBe('failed');
@@ -161,11 +167,11 @@ describe('useSvrReconstruction', () => {
     const { result } = renderHook(() => useSvrReconstruction());
 
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a');
+      await result.current.run(selectedSeries, { identity: 'patient-a' });
     });
 
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a');
+      await result.current.run(selectedSeries, { identity: 'patient-a' });
     });
 
     expect(result.current.status).toBe('failed');
@@ -207,6 +213,46 @@ describe('useSvrReconstruction', () => {
     expect(mocks.reconstructVolumeMultiPlane.mock.calls[3]![0].retainedBytes).toBe(0);
   });
 
+  it.each([false, true])(
+    'counts the live ordinary-viewer snapshot, keeping the previous image on failure=%s',
+    async (failure) => {
+      const previous = volume(1);
+      const oldLabels: SvrLabelVolume = { data: Uint8Array.of(1), dims: [1, 1, 1], meta: [] };
+      const edited = { ...oldLabels, data: Uint8Array.of(2) };
+      previous.initialSelection = oldLabels;
+      const enhancementBytes = 1024 * 1024;
+      const historyBytes = 1024;
+      mocks.retainedAlignmentBytes.mockReturnValue(512);
+      mocks.reconstructVolumeMultiPlane
+        .mockResolvedValueOnce(previous)
+        .mockImplementationOnce(async ({ retainedBytes }) => {
+          expect(retainedBytes).toBe(
+            retainedSvrVolumeBytes(previous.volume) + 1 + enhancementBytes + historyBytes + 512,
+          );
+          if (failure) throw new Error('Resident memory budget exceeded');
+          return volume(2);
+        });
+      const prepare = vi.fn(() => ({
+        volume: previous.volume,
+        labels: edited,
+        retainedBytes: enhancementBytes + historyBytes,
+      }));
+      const { result } = renderHook(() => useSvrReconstruction());
+      await act(async () => {
+        await result.current.run(selectedSeries);
+      });
+      await act(async () => {
+        await result.current.run(selectedSeries, { identity: 'patient', prepare: prepare });
+      });
+      expect(prepare).toHaveBeenCalledOnce();
+      if (failure) expect(result.current.result).toBe(previous);
+      else expect(result.current.result!.volume.data[0]).toBe(2);
+      expect(result.current.status).toBe(failure ? 'failed' : 'ready');
+      expect(edited.data[0]).toBe(2);
+      expect(oldLabels.data[0]).toBe(1);
+    },
+  );
+
   it('counts a shared accepted refinement source once and passes its accepted source poses unchanged', async () => {
     const previous = volume(1);
     previous.volume.sourceProvenance = {
@@ -226,9 +272,9 @@ describe('useSvrReconstruction', () => {
       await result.current.run(selectedSeries);
     });
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient', {
-        volume: previous.volume,
-        labels: { data: Uint8Array.of(1), dims: [1, 1, 1], meta: [] },
+      await result.current.run(selectedSeries, {
+        identity: 'patient',
+        selectionToRefine: { volume: previous.volume, labels: { data: Uint8Array.of(1), dims: [1, 1, 1], meta: [] } },
       });
     });
     expect(mocks.reconstructVolumeMultiPlane.mock.calls[1]![0]).toMatchObject({
@@ -265,15 +311,18 @@ describe('useSvrReconstruction', () => {
       const { result } = renderHook(() => useSvrReconstruction());
       await act(async () => {
         await result.current.run(selectedSeries);
-        await result.current.run(selectedSeries, undefined, 'patient', {
-          volume: previous.volume,
-          labels,
-          retainedBytes: prepare,
+        await result.current.run(selectedSeries, {
+          identity: 'patient',
+          selectionToRefine: { volume: previous.volume, labels },
+          prepare: () => {
+            const bytes = prepare;
+            return { volume: null, labels: null, retainedBytes: typeof bytes === 'function' ? bytes() : bytes };
+          },
         });
       });
       const extraMaskBytes = ownership === 'distinct-buffer' ? 1 : ownership === 'larger-shared-backing' ? 7 : 0;
       expect(prepare).toHaveBeenCalledOnce();
-      expect(mocks.retainedAlignmentBytes).toHaveBeenCalledOnce();
+      expect(mocks.retainedAlignmentBytes).toHaveBeenCalledTimes(2);
       expect(mocks.reconstructVolumeMultiPlane.mock.calls[1]![0].retainedBytes).toBe(
         retainedSvrVolumeBytes(previous.volume) + history.buffer.byteLength + 64 + extraMaskBytes,
       );
@@ -309,15 +358,18 @@ describe('useSvrReconstruction', () => {
       const { result } = renderHook(() => useSvrReconstruction());
       await act(async () => {
         await result.current.run(selectedSeries);
-        await result.current.run(selectedSeries, undefined, 'patient', {
-          volume: previous.volume,
-          labels,
-          retainedBytes: prepare,
+        await result.current.run(selectedSeries, {
+          identity: 'patient',
+          selectionToRefine: { volume: previous.volume, labels },
+          prepare: () => {
+            const bytes = prepare;
+            return { volume: null, labels: null, retainedBytes: typeof bytes === 'function' ? bytes() : bytes };
+          },
         });
       });
       expect(prepare).toHaveBeenCalledOnce();
       expect(mocks.reconstructVolumeMultiPlane).toHaveBeenCalledOnce();
-      expect(mocks.retainedAlignmentBytes).not.toHaveBeenCalled();
+      expect(mocks.retainedAlignmentBytes).toHaveBeenCalledOnce();
       expect(result.current.status).toBe('failed');
       expect(result.current.isRunning).toBe(false);
       expect(result.current.error).toMatch(reason === 'pending' ? /boundary suggestion/ : /valid retained-memory/);
@@ -342,12 +394,12 @@ describe('useSvrReconstruction', () => {
     let firstRun: ReturnType<typeof result.current.run>;
 
     await act(async () => {
-      firstRun = result.current.run(selectedSeries, undefined, 'patient-a');
+      firstRun = result.current.run(selectedSeries, { identity: 'patient-a' });
       await Promise.resolve();
     });
 
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-b');
+      await result.current.run(selectedSeries, { identity: 'patient-b' });
     });
 
     await act(async () => {
@@ -370,12 +422,12 @@ describe('useSvrReconstruction', () => {
     const { result } = renderHook(() => useSvrReconstruction());
 
     await act(async () => {
-      await result.current.run(selectedSeries, undefined, 'patient-a');
+      await result.current.run(selectedSeries, { identity: 'patient-a' });
     });
 
     let pending: ReturnType<typeof result.current.run>;
     await act(async () => {
-      pending = result.current.run(selectedSeries, undefined, 'patient-a');
+      pending = result.current.run(selectedSeries, { identity: 'patient-a' });
       await Promise.resolve();
     });
 

@@ -1,0 +1,464 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/gpu-results/gpu-production-shader-matc-a6f89-dent-synthetic-pixel-oracle-gpu/gpu-receipt.json",
+    "sha256": "4e266663965f1be064fe39357ff6f224d740fb4e1268928cb4da98198bc3d336"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "browser-test",
+    "builtAt": "2026-09-04T03:30:36.062Z",
+    "fixture": "synthetic only",
+    "browserName": "chromium",
+    "browserVersion": "152.0.7977.82",
+    "evidence": "Independent pixel oracle and settled drawArrays-through-synchronized-readPixels timings on the named renderer; not whole-UI latency.",
+    "passed": true,
+    "checks": [
+      {
+        "name": "Control volume is visible",
+        "passed": true,
+        "detail": {
+          "center": 123
+        }
+      },
+      {
+        "name": "A missing MRI plane leaves the complete model unchanged",
+        "passed": true,
+        "detail": {
+          "samePixels": true
+        }
+      },
+      {
+        "name": "Full source field cannot draw outside the reconstructed object",
+        "passed": true,
+        "detail": {
+          "outsideVolume": 0
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,1] invert=false front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            0,
+            0,
+            0
+          ],
+          "expected": 0
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,1] invert=false back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            0,
+            0,
+            0
+          ],
+          "expected": 0
+        }
+      },
+      {
+        "name": "Exact plane 1 window [0,1] invert=false front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            255,
+            255,
+            255
+          ],
+          "expected": 255
+        }
+      },
+      {
+        "name": "Exact plane 1 window [0,1] invert=false back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            255,
+            255,
+            255
+          ],
+          "expected": 255
+        }
+      },
+      {
+        "name": "Exact plane 0.3 window [0,1] invert=false front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            77,
+            77,
+            77
+          ],
+          "expected": 77
+        }
+      },
+      {
+        "name": "Exact plane 0.3 window [0,1] invert=false back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            77,
+            77,
+            77
+          ],
+          "expected": 77
+        }
+      },
+      {
+        "name": "Exact plane -2 window [-4,0] invert=false front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            128,
+            128,
+            128
+          ],
+          "expected": 128
+        }
+      },
+      {
+        "name": "Exact plane -2 window [-4,0] invert=false back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            128,
+            128,
+            128
+          ],
+          "expected": 128
+        }
+      },
+      {
+        "name": "Exact plane 0.25 window [0,1] invert=true front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            191,
+            191,
+            191
+          ],
+          "expected": 191
+        }
+      },
+      {
+        "name": "Exact plane 0.25 window [0,1] invert=true back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            191,
+            191,
+            191
+          ],
+          "expected": 191
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,0] invert=false front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            0,
+            0,
+            0
+          ],
+          "expected": 0
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,0] invert=false back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            0,
+            0,
+            0
+          ],
+          "expected": 0
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,0] invert=true front",
+        "passed": true,
+        "detail": {
+          "actual": [
+            255,
+            255,
+            255
+          ],
+          "expected": 255
+        }
+      },
+      {
+        "name": "Exact plane 0 window [0,0] invert=true back",
+        "passed": true,
+        "detail": {
+          "actual": [
+            255,
+            255,
+            255
+          ],
+          "expected": 255
+        }
+      },
+      {
+        "name": "Far tissue remains visible through the fixed MRI section from the front",
+        "passed": true,
+        "detail": {
+          "wholeModel": 117,
+          "withoutFarTissue": 76,
+          "sourceGray": 0.24
+        }
+      },
+      {
+        "name": "Foreground model context remains visible from the front",
+        "passed": true,
+        "detail": {
+          "wholeModel": 117,
+          "withoutNearTissue": 94,
+          "sourceGray": 0.24
+        }
+      },
+      {
+        "name": "Far tissue remains visible through the fixed MRI section from the back",
+        "passed": true,
+        "detail": {
+          "wholeModel": 117,
+          "withoutFarTissue": 76,
+          "sourceGray": 0.24
+        }
+      },
+      {
+        "name": "Foreground model context remains visible from the back",
+        "passed": true,
+        "detail": {
+          "wholeModel": 117,
+          "withoutNearTissue": 94,
+          "sourceGray": 0.24
+        }
+      },
+      {
+        "name": "A source plane outside the volume neither replaces nor erases it",
+        "passed": true,
+        "detail": {
+          "control": 123,
+          "outsidePlane": 123
+        }
+      },
+      {
+        "name": "Invalid native pixels do not obscure valid reconstructed tissue",
+        "passed": true,
+        "detail": {
+          "control": 123,
+          "invalidPlane": 123
+        }
+      },
+      {
+        "name": "Unsupported reconstruction cells cannot acquire an MRI section",
+        "passed": true,
+        "detail": 0
+      },
+      {
+        "name": "Valid background follows volume visibility instead of forming a rectangular sheet",
+        "passed": true,
+        "detail": 0
+      },
+      {
+        "name": "Off-mask MRI pixels neither clip nor fade the full model",
+        "passed": true,
+        "detail": {
+          "samePixels": true
+        }
+      },
+      {
+        "name": "Global selection-only also masks the native image",
+        "passed": true,
+        "detail": 0
+      },
+      {
+        "name": "Selected zero-valued MRI samples remain visible and source-windowed",
+        "passed": true,
+        "detail": {
+          "expected": 89.25,
+          "actual": 89
+        }
+      },
+      {
+        "name": "Source window and inversion apply exactly once",
+        "passed": true,
+        "detail": {
+          "expected": 133.875,
+          "actual": 134
+        }
+      },
+      {
+        "name": "Rendering never changes original MRI samples",
+        "passed": true,
+        "detail": {
+          "unchanged": true
+        }
+      },
+      {
+        "name": "Negative source samples preserve their signed display window",
+        "passed": true,
+        "detail": {
+          "expected": 89.25,
+          "actual": 89
+        }
+      },
+      {
+        "name": "Width-one threshold treats signed zero as background before inversion",
+        "passed": true,
+        "detail": {
+          "zero": 0,
+          "inverted": 178,
+          "expectedInverted": 178.5
+        }
+      },
+      {
+        "name": "Selection focus bounds constrain the section as well as the volume",
+        "passed": true,
+        "detail": 0
+      },
+      {
+        "name": "An existing axial clip cannot be overpainted by an excluded native plane",
+        "passed": true,
+        "detail": {
+          "native": 0,
+          "control": 0
+        }
+      },
+      {
+        "name": "Oblique partial MRI selection matches exact CPU geometry from the front without a sheet",
+        "passed": true,
+        "detail": {
+          "selected": 366,
+          "offMask": 912,
+          "outside": 2818,
+          "mismatched": 0,
+          "maxError": 0.09999999999999432,
+          "cpuGrid": 32,
+          "gpuGrid": 16,
+          "sourcePitch": [
+            0.05,
+            0.025
+          ]
+        }
+      },
+      {
+        "name": "Oblique partial MRI selection matches exact CPU geometry from the back without a sheet",
+        "passed": true,
+        "detail": {
+          "selected": 366,
+          "offMask": 912,
+          "outside": 2818,
+          "mismatched": 0,
+          "maxError": 0.09999999999999432,
+          "cpuGrid": 32,
+          "gpuGrid": 16,
+          "sourcePitch": [
+            0.05,
+            0.025
+          ]
+        }
+      },
+      {
+        "name": "Settled frame timing finishes without GPU errors",
+        "passed": true,
+        "detail": {
+          "viewport": [
+            512,
+            512
+          ],
+          "volume": [
+            128,
+            128,
+            128
+          ],
+          "steps": 1024,
+          "method": "drawArrays through synchronized center-pixel readPixels",
+          "settledFrames": [
+            {
+              "mode": "off",
+              "elapsedMs": 17.234999895095825
+            },
+            {
+              "mode": "blended",
+              "elapsedMs": 13.194999933242798
+            },
+            {
+              "mode": "exact",
+              "elapsedMs": 10.235000133514404
+            },
+            {
+              "mode": "exact",
+              "elapsedMs": 10.299999952316284
+            },
+            {
+              "mode": "blended",
+              "elapsedMs": 14.075000047683716
+            },
+            {
+              "mode": "off",
+              "elapsedMs": 13.205000162124634
+            },
+            {
+              "mode": "blended",
+              "elapsedMs": 13.130000114440918
+            },
+            {
+              "mode": "off",
+              "elapsedMs": 13.980000019073486
+            },
+            {
+              "mode": "exact",
+              "elapsedMs": 10.339999914169312
+            }
+          ]
+        }
+      }
+    ],
+    "settledFrames": [
+      {
+        "mode": "off",
+        "elapsedMs": 17.234999895095825
+      },
+      {
+        "mode": "blended",
+        "elapsedMs": 13.194999933242798
+      },
+      {
+        "mode": "exact",
+        "elapsedMs": 10.235000133514404
+      },
+      {
+        "mode": "exact",
+        "elapsedMs": 10.299999952316284
+      },
+      {
+        "mode": "blended",
+        "elapsedMs": 14.075000047683716
+      },
+      {
+        "mode": "off",
+        "elapsedMs": 13.205000162124634
+      },
+      {
+        "mode": "blended",
+        "elapsedMs": 13.130000114440918
+      },
+      {
+        "mode": "off",
+        "elapsedMs": 13.980000019073486
+      },
+      {
+        "mode": "exact",
+        "elapsedMs": 10.339999914169312
+      }
+    ],
+    "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)"
+  }
+}

@@ -186,7 +186,10 @@ export async function hydrateDerivedAlignmentFrames(
   activeSeriesUids: ReadonlySet<string>,
 ): Promise<void> {
   const generation = ++hydrationGeneration;
-  const persisted = await loadDerivedAlignmentFrames(patientKey, datasetRevision);
+  const persisted = await loadDerivedAlignmentFrames(patientKey, datasetRevision, {
+    sequenceId,
+    seriesUids: activeSeriesUids,
+  });
   if (generation !== hydrationGeneration) return;
   for (const row of persisted) {
     if (row.sequenceId !== sequenceId || !activeSeriesUids.has(row.targetSeriesUid)) continue;

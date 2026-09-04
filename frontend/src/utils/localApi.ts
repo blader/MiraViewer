@@ -1,9 +1,15 @@
-import { DATASET_REVISION_STATE_KEY, getDB, SELECTED_PATIENT_STATE_KEY, subscribeDatasetMutations } from '../db/db';
+import {
+  DATASET_REVISION_STATE_KEY,
+  DATASET_TOKEN_STATE_KEY,
+  getDB,
+  SELECTED_PATIENT_STATE_KEY,
+  SELECTED_PATIENT_STUDY_STATE_KEY,
+  subscribeDatasetMutations,
+} from '../db/db';
 import { getPatientIdentityKeys } from '../db/patientIdentity';
 import type {
   DicomInstance,
   DicomSeries,
-  DicomStudy,
   DerivedAlignmentFrameRow,
   TumorSegmentationRow,
   TumorGroundTruthRow,
@@ -14,8 +20,9 @@ import type {
   ViewportSize,
   VolumeSegmentationRow,
 } from '../db/schema';
-import type { ComparisonData, SequenceCombo, SeriesRef, PanelSettingsPartial, PanelSettings } from '../types/api';
-import { parseSeriesDescription } from './dicomSeriesParsing';
+import type { ComparisonData, SequenceCombo, SeriesRef } from '../types/api';
+import { acquisitionChoiceKey, formatStudyDate, getSeriesSequenceCombo } from '../db/comparisonIdentity';
+import { countSeriesImages } from '../db/comparisonState';
 import { MAX_OUTPUT_GRID_PIXELS, validateOutputGridReference, validateOutputPlaneGrid } from './outputPlaneGrid';
 import { getSliceGeometryFromInstance } from './svr/dicomGeometry';
 import { dot } from './svr/vec3';
@@ -28,6 +35,7 @@ export type PatientScopedComparisonData = ComparisonData & {
   patients: PatientSummary[];
   selected_patient_key: string | null;
   dataset_revision: number;
+  dataset_token: string;
   examinations: Record<string, ExaminationSummary>;
 };
 
@@ -39,20 +47,21 @@ export async function getSelectedPatientKey(): Promise<string | null> {
 
 export async function setSelectedPatientKey(patientKey: string): Promise<void> {
   const db = await getDB();
-  await db.put('app_state', { key: SELECTED_PATIENT_STATE_KEY, value: patientKey });
+  const tx = db.transaction(['studies', 'app_state'], 'readwrite');
+  const studies = await tx.objectStore('studies').getAll();
+  const identities = getPatientIdentityKeys(studies);
+  const study = studies.find((candidate) => identities.get(candidate.studyInstanceUid) === patientKey);
+  await tx.objectStore('app_state').put({ key: SELECTED_PATIENT_STATE_KEY, value: patientKey });
+  if (study)
+    await tx.objectStore('app_state').put({ key: SELECTED_PATIENT_STUDY_STATE_KEY, value: study.studyInstanceUid });
+  else await tx.objectStore('app_state').delete(SELECTED_PATIENT_STUDY_STATE_KEY);
+  await tx.done;
 }
 
 export async function getDatasetRevision(): Promise<number> {
   const db = await getDB();
   const row = await db.get('app_state', DATASET_REVISION_STATE_KEY);
   return typeof row?.value === 'number' ? row.value : 0;
-}
-
-function formatStudyDate(study: DicomStudy): string {
-  const date = study.studyDate;
-  if (date.length !== 8) return date || `unknown#${study.studyInstanceUid}`;
-  const hhmmss = (study.studyTime ?? '').replace(/\D/g, '').slice(0, 6).padEnd(6, '0');
-  return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${hhmmss.slice(0, 2) || '00'}:${hhmmss.slice(2, 4) || '00'}:${hhmmss.slice(4, 6) || '00'}`;
 }
 
 function parsePixelSpacing(raw?: string): [number, number] | undefined {
@@ -65,46 +74,13 @@ function parsePixelSpacing(raw?: string): [number, number] | undefined {
   return Number.isFinite(row) && Number.isFinite(column) && row > 0 && column > 0 ? [row, column] : undefined;
 }
 
-function buildSeriesClassificationText(series: {
-  seriesDescription: string;
-  protocolName?: string;
-  sequenceName?: string;
-}): string {
-  // Many datasets put the most informative string in ProtocolName or SequenceName.
-  // Joining these aggressively reduces "Unknown" buckets without forcing defaults.
-  return [series.seriesDescription, series.protocolName, series.sequenceName].filter(Boolean).join(' | ');
-}
-
-// Helper to generate a stable ID for the combo
-function slugifyCombo(plane?: string, weight?: string, sequence?: string): string {
-  const parts = [plane, weight, sequence].filter(Boolean);
-  const slug = parts.join('-').toLowerCase().replace(/\s+/g, '-');
-  return slug || 'unknown';
-}
-
-function labelCombo(plane?: string, weight?: string, sequence?: string): string {
-  return [plane, weight, sequence].filter(Boolean).join(' ') || 'Unknown';
-}
-
 export async function getImageCounts(series: readonly DicomSeries[]): Promise<Record<string, number>> {
-  const instanceCounts: Record<string, number> = {};
-  if (series.length === 0) return instanceCounts;
-
+  if (!series.length) return {};
   const db = await getDB();
-  const transaction = db.transaction('instances', 'readonly');
-  const index = transaction.store.index('by-series');
-  const maxPendingCounts = 64;
-
-  for (let offset = 0; offset < series.length; offset += maxPendingCounts) {
-    const group = series.slice(offset, offset + maxPendingCounts);
-    const counts = await Promise.all(group.map((item) => index.count(item.seriesInstanceUid)));
-    for (let position = 0; position < group.length; position++) {
-      instanceCounts[group[position]!.seriesInstanceUid] = counts[position]!;
-    }
-  }
-
-  await transaction.done;
-  return instanceCounts;
+  const tx = db.transaction('instances');
+  const counts = await countSeriesImages(series, (uid) => tx.store.index('by-series').count(uid));
+  await tx.done;
+  return counts;
 }
 
 export async function getStudies() {
@@ -136,7 +112,7 @@ export async function getStudies() {
       const seriesList = series.flatMap((s) => {
         const instanceCount = instanceCountsBySeries[s.seriesInstanceUid] || 0;
         if (instanceCount === 0) return [];
-        const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
+        const parsed = getSeriesSequenceCombo(s);
         return [
           {
             series_uid: s.seriesInstanceUid,
@@ -145,7 +121,7 @@ export async function getStudies() {
             modality: s.modality,
             plane: s.plane || parsed.plane,
             weight: s.weight || parsed.weight,
-            sequence_type: s.sequenceType || parsed.sequenceType,
+            sequence_type: parsed.sequence,
             instance_count: instanceCount,
           },
         ];
@@ -169,189 +145,140 @@ export async function getStudies() {
 
 export async function getComparisonData(requestedPatientKey?: string | null): Promise<PatientScopedComparisonData> {
   const db = await getDB();
-  const [allSeries, allStudies, storedPatientKey] = await Promise.all([
-    db.getAll('series'),
-    db.getAll('studies'),
-    getSelectedPatientKey(),
+  // Catalog, chosen acquisitions and its ownership token come from one snapshot.
+  // Only metadata and index counts are read; this never materializes MRI blobs.
+  const tx = db.transaction(['studies', 'series', 'instances', 'app_state'], 'readonly');
+  const state = tx.objectStore('app_state');
+  const [allSeries, allStudies, savedState] = await Promise.all([
+    tx.objectStore('series').getAll(),
+    tx.objectStore('studies').getAll(),
+    state.getAll(),
   ]);
-  const patientIdentityKeys = getPatientIdentityKeys(allStudies);
-
+  const values = new Map(savedState.map((row) => [row.key, row.value]));
+  const identities = getPatientIdentityKeys(allStudies);
   const patientMap = new Map<string, PatientSummary>();
   for (const study of allStudies) {
-    const key = patientIdentityKeys.get(study.studyInstanceUid)!;
+    const key = identities.get(study.studyInstanceUid)!;
     const existing = patientMap.get(key);
-    if (existing) existing.study_count += 1;
-    else
-      patientMap.set(key, {
-        key,
-        patient_id: study.patientId,
-        patient_name: study.patientName,
-        study_count: 1,
-      });
+    if (existing) existing.study_count++;
+    else patientMap.set(key, { key, patient_id: study.patientId, patient_name: study.patientName, study_count: 1 });
   }
-  const patients = Array.from(patientMap.values()).sort((a, b) =>
+  const patients = [...patientMap.values()].sort((a, b) =>
     (a.patient_name || a.patient_id || a.key).localeCompare(b.patient_name || b.patient_id || b.key),
   );
-  const candidatePatientKey = requestedPatientKey ?? storedPatientKey;
+  const storedPatient = values.get(SELECTED_PATIENT_STATE_KEY);
+  const anchor = values.get(SELECTED_PATIENT_STUDY_STATE_KEY);
+  const candidate =
+    requestedPatientKey ?? (typeof anchor === 'string' ? identities.get(anchor) : undefined) ?? storedPatient;
   const selectedPatientKey =
-    candidatePatientKey && patientMap.has(candidatePatientKey) ? candidatePatientKey : (patients[0]?.key ?? null);
-  if (selectedPatientKey && selectedPatientKey !== storedPatientKey) {
-    await setSelectedPatientKey(selectedPatientKey);
-  }
-
-  const selectedStudies = allStudies.filter(
-    (study) => patientIdentityKeys.get(study.studyInstanceUid) === selectedPatientKey,
-  );
+    typeof candidate === 'string' && patientMap.has(candidate) ? candidate : (patients[0]?.key ?? null);
+  const selectedStudies = allStudies.filter((study) => identities.get(study.studyInstanceUid) === selectedPatientKey);
   const studyByUid = new Map(selectedStudies.map((study) => [study.studyInstanceUid, study]));
-  const studyDateCounts = new Map<string, number>();
+  const dateCounts = new Map<string, number>();
   for (const study of selectedStudies) {
     const date = formatStudyDate(study);
-    studyDateCounts.set(date, (studyDateCounts.get(date) ?? 0) + 1);
+    dateCounts.set(date, (dateCounts.get(date) ?? 0) + 1);
   }
   const examinationByStudy = new Map<string, string>();
   const examinations: Record<string, ExaminationSummary> = {};
   for (const study of selectedStudies) {
-    let examinationKey = formatStudyDate(study);
-    if ((studyDateCounts.get(examinationKey) ?? 0) > 1) {
-      examinationKey += `#${study.studyInstanceUid}`;
-    }
-    examinationByStudy.set(study.studyInstanceUid, examinationKey);
-    examinations[examinationKey] = {
+    const date = formatStudyDate(study);
+    const key = (dateCounts.get(date) ?? 0) > 1 ? `${date}#${study.studyInstanceUid}` : date;
+    examinationByStudy.set(study.studyInstanceUid, key);
+    examinations[key] = {
       study_uid: study.studyInstanceUid,
-      date_iso: formatStudyDate(study),
+      date_iso: date,
       acquisition_time: study.studyTime,
       patient_key: selectedPatientKey!,
     };
   }
   const selectedSeries = allSeries.filter((series) => studyByUid.has(series.studyInstanceUid));
-
-  // Instance counts without loading instance Blob payloads.
-  const instanceCounts = await getImageCounts(selectedSeries);
-
-  const planes = new Set<string>();
-  const dates = new Set<string>();
+  const counts = await countSeriesImages(selectedSeries, (uid) =>
+    tx.objectStore('instances').index('by-series').count(uid),
+  );
   const sequences: Record<string, SequenceCombo> = {};
   const seriesMap: Record<string, Record<string, SeriesRef>> = {};
-
-  for (const s of selectedSeries) {
-    const instanceCount = instanceCounts[s.seriesInstanceUid] || 0;
-    if (instanceCount === 0) continue;
-
-    const parsed = parseSeriesDescription(buildSeriesClassificationText(s));
-    const plane = s.plane || parsed.plane || null;
-    const weight = s.weight || parsed.weight || null;
-    const sequenceType = s.sequenceType || parsed.sequenceType || null;
-
-    if (plane) planes.add(plane);
-
-    const dateIso = examinationByStudy.get(s.studyInstanceUid);
-    if (!dateIso) continue;
-    dates.add(dateIso);
-
-    const comboId = slugifyCombo(plane ?? undefined, weight ?? undefined, sequenceType ?? undefined);
-
-    if (!sequences[comboId]) {
-      sequences[comboId] = {
-        id: comboId,
-        plane,
-        weight,
-        sequence: sequenceType,
-        label: labelCombo(plane ?? undefined, weight ?? undefined, sequenceType ?? undefined),
-        date_count: 0,
-      };
-      seriesMap[comboId] = {};
-    }
-
-    const prev = seriesMap[comboId][dateIso];
-
-    if (!prev) sequences[comboId].date_count++;
-
-    // If multiple series map to the same (plane, weight, sequenceType) combo for a given date,
-    // prefer the one with the most instances.
-    //
-    // Why:
-    // - In real-world DICOM exports it's common to have "extra" image series (e.g. screenshots,
-    //   localizers, reformats) that would otherwise get picked arbitrarily based on ingestion order.
-    // - Auto-alignment relies on having a full through-plane stack; choosing a tiny series can make
-    //   alignment look "broken" even though the real series exists.
-    if (!prev || instanceCount > prev.instance_count) {
-      seriesMap[comboId][dateIso] = {
-        study_id: s.studyInstanceUid,
-        study_uid: s.studyInstanceUid,
-        series_uid: s.seriesInstanceUid,
-        instance_count: instanceCount,
-        patient_key: selectedPatientKey ?? undefined,
-        frame_of_reference_uid: s.frameOfReferenceUid,
-        acquisition_time: s.acquisitionTime,
-        rows: s.rows,
-        columns: s.columns,
-        pixel_spacing: parsePixelSpacing(s.pixelSpacing),
-      };
+  const candidates: Record<string, Record<string, SeriesRef[]>> = {};
+  const planes = new Set<string>();
+  const dates = new Set<string>();
+  for (const series of selectedSeries) {
+    const instanceCount = counts[series.seriesInstanceUid] ?? 0;
+    if (!instanceCount) continue;
+    const combo = getSeriesSequenceCombo(series);
+    const date = examinationByStudy.get(series.studyInstanceUid)!;
+    if (combo.plane) planes.add(combo.plane);
+    dates.add(date);
+    sequences[combo.id] ??= combo;
+    candidates[combo.id] ??= {};
+    (candidates[combo.id][date] ??= []).push({
+      study_id: series.studyInstanceUid,
+      study_uid: series.studyInstanceUid,
+      series_uid: series.seriesInstanceUid,
+      instance_count: instanceCount,
+      series_description: series.seriesDescription,
+      series_number: series.seriesNumber,
+      patient_key: selectedPatientKey ?? undefined,
+      frame_of_reference_uid: series.frameOfReferenceUid,
+      acquisition_time: series.acquisitionTime,
+      rows: series.rows,
+      columns: series.columns,
+      pixel_spacing: parsePixelSpacing(series.pixelSpacing),
+    });
+  }
+  for (const [comboId, byDate] of Object.entries(candidates)) {
+    seriesMap[comboId] = {};
+    for (const [date, choices] of Object.entries(byDate)) {
+      choices.sort((a, b) => b.instance_count - a.instance_count || a.series_uid.localeCompare(b.series_uid));
+      const key = acquisitionChoiceKey(choices[0]!.study_id, comboId);
+      const chosen = choices.find((ref) => ref.series_uid === values.get(key)) ?? choices[0]!;
+      seriesMap[comboId][date] = chosen;
+      sequences[comboId]!.date_count++;
     }
   }
-
+  await tx.done;
   return {
-    planes: Array.from(planes).sort(),
-    dates: Array.from(dates).sort(),
+    planes: [...planes].sort(),
+    dates: [...dates].sort(),
     sequences: Object.values(sequences).sort((a, b) => (a.plane || '').localeCompare(b.plane || '')),
     series_map: seriesMap,
+    series_candidates: candidates,
     patients,
     selected_patient_key: selectedPatientKey,
-    dataset_revision: await getDatasetRevision(),
+    dataset_revision:
+      typeof values.get(DATASET_REVISION_STATE_KEY) === 'number'
+        ? (values.get(DATASET_REVISION_STATE_KEY) as number)
+        : 0,
+    dataset_token: values.get(DATASET_TOKEN_STATE_KEY) as string,
     examinations,
   };
 }
 
-export async function getPanelSettings(
-  comboId: string,
-  requestedPatientKey?: string | null,
-): Promise<Record<string, PanelSettingsPartial>> {
+export async function selectAcquisition(studyUid: string, comboId: string, seriesUid: string): Promise<void> {
   const db = await getDB();
-  const patientKey = requestedPatientKey === undefined ? await getSelectedPatientKey() : requestedPatientKey;
-  const scopedComboId = patientKey ? `${patientKey}::${comboId}` : comboId;
-  let row = await db.get('panel_settings', scopedComboId);
-  if (!row && patientKey) {
-    const studies = await db.getAll('studies');
-    const distinctPatients = new Set(getPatientIdentityKeys(studies).values());
-    if (distinctPatients.size <= 1) row = await db.get('panel_settings', comboId);
+  const tx = db.transaction(['studies', 'series', 'instances', 'app_state'], 'readwrite');
+  const [series, studies, selected] = await Promise.all([
+    tx.objectStore('series').get(seriesUid),
+    tx.objectStore('studies').getAll(),
+    tx.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
+  ]);
+  const owner = getPatientIdentityKeys(studies).get(studyUid);
+  if (
+    !series ||
+    series.studyInstanceUid !== studyUid ||
+    getSeriesSequenceCombo(series).id !== comboId ||
+    !owner ||
+    owner !== selected?.value ||
+    !(await tx.objectStore('instances').index('by-series').count(seriesUid))
+  ) {
+    await tx.done;
+    throw new Error('This acquisition is no longer available for the selected patient. Reload the examinations.');
   }
-  if (!row) return {};
-
-  // Convert stored settings to a partial shape (callers treat missing fields as defaults).
-  const result: Record<string, PanelSettingsPartial> = {};
-  for (const [date, settings] of Object.entries(row.settings)) {
-    // idb's inferred types for Object.entries can degrade to `unknown` under strict settings.
-    // The stored value is a subset of PanelSettings (numbers), which is safe to treat as partial.
-    result[date] = settings as PanelSettingsPartial;
-  }
-  return result;
-}
-
-export async function savePanelSettings(
-  comboId: string,
-  dateIso: string,
-  settings: PanelSettings,
-  requestedPatientKey?: string | null,
-): Promise<void> {
-  const db = await getDB();
-  const patientKey = requestedPatientKey === undefined ? await getSelectedPatientKey() : requestedPatientKey;
-  const scopedComboId = patientKey ? `${patientKey}::${comboId}` : comboId;
-  const tx = db.transaction('panel_settings', 'readwrite');
-  const store = tx.objectStore('panel_settings');
-
-  let row = await store.get(scopedComboId);
-  if (!row) {
-    row = { comboId: scopedComboId, settings: {} };
-  }
-
-  row.settings[dateIso] = {
-    ...row.settings[dateIso],
-    ...settings,
-  };
-
-  await store.put(row);
+  await tx.objectStore('app_state').put({ key: acquisitionChoiceKey(studyUid, comboId), value: seriesUid });
   await tx.done;
 }
+
+export { getPanelSettings, getPanelSettingsSnapshot, savePanelSettings } from '../db/panelSettings';
+export type { PanelSettingsSnapshot, LegacyPanelSettings } from '../db/panelSettings';
 
 /**
  * Resolve the Cornerstone imageId for a given series + instance index.
@@ -673,34 +600,45 @@ export async function saveVolumeSegmentation(record: VolumeSegmentationRow): Pro
   const db = await getDB();
   // Enqueue the write before any asynchronous patient check. IndexedDB owns
   // ordering across viewers, including navigation away and immediate return.
-  const transaction = db.transaction(['app_state', 'volume_segmentations'], 'readwrite');
-  const write = transaction
-    .objectStore('app_state')
-    .get(SELECTED_PATIENT_STATE_KEY)
-    .then((selected) => {
-      const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
-      if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient)
-        throw new Error('Cannot save a volume segmentation for another patient');
-      return transaction.objectStore('volume_segmentations').put(record);
-    });
+  const transaction = db.transaction(['app_state', 'studies', 'volume_segmentations'], 'readwrite');
+  const write = Promise.all([
+    transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
+    transaction.objectStore('studies').getAll(),
+  ]).then(([selected, studies]) => {
+    const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
+    const sourcePatient = record.studyUid ? getPatientIdentityKeys(studies).get(record.studyUid) : undefined;
+    const owner = sourcePatient ?? record.patientKey;
+    if (owner && selectedPatient && owner !== selectedPatient)
+      throw new Error('Cannot save a volume segmentation for another patient');
+    return transaction
+      .objectStore('volume_segmentations')
+      .put(sourcePatient ? { ...record, patientKey: sourcePatient } : record);
+  });
   await Promise.all([write, transaction.done]);
 }
 
 export async function getVolumeSegmentation(volumeKey: string): Promise<VolumeSegmentationRow | null> {
   const db = await getDB();
-  const transaction = db.transaction(['app_state', 'volume_segmentations']);
-  const [record, selected] = await Promise.all([
+  const transaction = db.transaction(['app_state', 'studies', 'volume_segmentations']);
+  const [record, selected, studies] = await Promise.all([
     transaction.objectStore('volume_segmentations').get(volumeKey),
     transaction.objectStore('app_state').get(SELECTED_PATIENT_STATE_KEY),
+    transaction.objectStore('studies').getAll(),
     transaction.done,
   ]);
   if (!record) return null;
   const selectedPatient = typeof selected?.value === 'string' ? selected.value : null;
-  if (record.patientKey && selectedPatient && record.patientKey !== selectedPatient) return null;
+  const sourcePatient = record.studyUid ? getPatientIdentityKeys(studies).get(record.studyUid) : undefined;
+  const owner = sourcePatient ?? record.patientKey;
+  if (owner && selectedPatient && owner !== selectedPatient) return null;
   if (!isSelectionCoverageValid(record.clippedNativeVoxels) || !isSelectionContextValid(record.contextLimited))
     throw new Error('The saved selection has invalid viewing-region coverage and cannot be safely restored.');
   const expectedVoxels = record.dims[0] * record.dims[1] * record.dims[2];
-  return record.labels.length === expectedVoxels ? record : null;
+  return record.labels.length === expectedVoxels
+    ? sourcePatient
+      ? { ...record, patientKey: sourcePatient }
+      : record
+    : null;
 }
 
 export async function deleteVolumeSegmentation(volumeKey: string): Promise<void> {
@@ -920,9 +858,9 @@ export async function saveDerivedAlignmentFrame(frame: DerivedAlignmentFrameRow)
   }
   const store = tx.objectStore('derived_alignment_frames');
   await store.put(normalized);
-  const entries = await store.index('by-created-at').getAll();
+  const keys = await store.index('by-created-at').getAllKeys();
   await Promise.all(
-    entries.slice(0, Math.max(0, entries.length - MAX_DERIVED_ALIGNMENT_FRAMES)).map((stale) => store.delete(stale.id)),
+    keys.slice(0, Math.max(0, keys.length - MAX_DERIVED_ALIGNMENT_FRAMES)).map((key) => store.delete(key)),
   );
   await tx.done;
 }
@@ -930,6 +868,7 @@ export async function saveDerivedAlignmentFrame(frame: DerivedAlignmentFrameRow)
 export async function loadDerivedAlignmentFrames(
   patientKey: string,
   datasetRevision?: number,
+  source?: { sequenceId: string; seriesUids: ReadonlySet<string> },
 ): Promise<DerivedAlignmentFrameRow[]> {
   const [db, currentRevision, selectedPatient] = await Promise.all([
     getDB(),
@@ -938,7 +877,26 @@ export async function loadDerivedAlignmentFrames(
   ]);
   if (datasetRevision !== undefined && datasetRevision !== currentRevision) return [];
   if (selectedPatient && selectedPatient !== patientKey) return [];
-  const candidates = await db.getAllFromIndex('derived_alignment_frames', 'by-patient', patientKey);
+  // Select provenance before materializing pixels. Array keys sort after scalar
+  // keys, so this upper bound covers every sequence/series at this revision.
+  const candidates = source
+    ? (
+        await Promise.all(
+          [...source.seriesUids].map((seriesUid) =>
+            db.getAllFromIndex('derived_alignment_frames', 'by-patient-revision-source', [
+              patientKey,
+              currentRevision,
+              source.sequenceId,
+              seriesUid,
+            ]),
+          ),
+        )
+      ).flat()
+    : await db.getAllFromIndex(
+        'derived_alignment_frames',
+        'by-patient-revision-source',
+        IDBKeyRange.bound([patientKey, currentRevision], [patientKey, currentRevision, []]),
+      );
   let patientIdentityKeys: ReadonlyMap<string, string> | undefined;
   const frames: DerivedAlignmentFrameRow[] = [];
   for (const candidate of candidates) {
@@ -967,11 +925,17 @@ export async function clearPersistedDerivedAlignmentFrames(
   }
   const tx = db.transaction('derived_alignment_frames', 'readwrite');
   const store = tx.objectStore('derived_alignment_frames');
-  const deletions: Promise<void>[] = [];
-  for (const frame of await store.index('by-patient').getAll(patientKey)) {
-    if (targetSeriesUid && frame.targetSeriesUid !== targetSeriesUid) continue;
-    deletions.push(store.delete(frame.id));
+  if (targetSeriesUid) {
+    let cursor = await store
+      .index('by-patient-revision-source')
+      .openKeyCursor(IDBKeyRange.bound([patientKey], [patientKey, []]));
+    while (cursor) {
+      if (Array.isArray(cursor.key) && cursor.key[3] === targetSeriesUid) await store.delete(cursor.primaryKey);
+      cursor = await cursor.continue();
+    }
+  } else {
+    const keys = await store.index('by-patient').getAllKeys(patientKey);
+    await Promise.all(keys.map((key) => store.delete(key)));
   }
-  await Promise.all(deletions);
   await tx.done;
 }

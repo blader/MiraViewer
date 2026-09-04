@@ -13,7 +13,7 @@ import {
   deleteVolumeSegmentation,
   getComparisonData,
   getDatasetRevision,
-  getPanelSettings,
+  getPanelSettingsSnapshot,
   getSeriesFrameManifest,
   getSortedSopInstanceUidsForSeries,
   getTumorGroundTruthForInstance,
@@ -374,49 +374,29 @@ describe('durable MRI storage and import contracts', () => {
     expect(Object.values(second.examinations)[0]?.study_uid).toBe('1.2.12');
   });
 
-  it('scopes persisted viewer settings to their selected patient', async () => {
-    await importPatientStudy('patient-a', '1.2.13');
-    await importPatientStudy('patient-b', '1.2.14');
+  it('keeps an in-flight settings write bound to the verified acquisition after patient selection changes', async () => {
+    await importPatientStudy('patient-a', '1.2.15');
+    await importPatientStudy('patient-b', '1.2.16');
     await setSelectedPatientKey('patient-a');
-    await savePanelSettings('axial-t2-flair', 'synthetic-date', {
+    const first = await getComparisonData();
+    const combo = first.sequences[0]!.id;
+    const date = first.dates[0]!;
+    const snapshot = await getPanelSettingsSnapshot(combo, first.selected_patient_key, first.series_map[combo]);
+    const pending = savePanelSettings(snapshot.verifiedSources[date]!, {
       ...DEFAULT_PANEL_SETTINGS,
-      offset: 1,
       zoom: 2,
-      progress: 0.5,
+      brightness: 145,
     });
     await setSelectedPatientKey('patient-b');
-    expect(await getPanelSettings('axial-t2-flair')).toEqual({});
-    await setSelectedPatientKey('patient-a');
-    expect((await getPanelSettings('axial-t2-flair'))['synthetic-date']?.zoom).toBe(2);
-  });
-
-  it('keeps an in-flight viewer-settings write bound to its original patient after durable selection changes', async () => {
-    await importPatientStudy('synthetic-patient-a', '1.2.15');
-    await importPatientStudy('synthetic-patient-b', '1.2.16');
-
-    await setSelectedPatientKey('synthetic-patient-a');
-    const pendingFirstPatientWrite = savePanelSettings(
-      'shared-synthetic-sequence',
-      '2035-01-10T12:00:00',
-      { ...DEFAULT_PANEL_SETTINGS, zoom: 2, brightness: 145 },
-      'synthetic-patient-a',
-    );
-    await setSelectedPatientKey('synthetic-patient-b');
-    await pendingFirstPatientWrite;
-
-    expect(await getPanelSettings('shared-synthetic-sequence', 'synthetic-patient-b')).toEqual({});
-    expect((await getPanelSettings('shared-synthetic-sequence', 'synthetic-patient-a'))['2035-01-10T12:00:00']).toEqual(
-      expect.objectContaining({ zoom: 2, brightness: 145 }),
-    );
-
-    await savePanelSettings(
-      'explicitly-unscoped-sequence',
-      '2035-01-10T12:00:00',
-      { ...DEFAULT_PANEL_SETTINGS, zoom: 1.5 },
-      null,
-    );
-    expect((await getPanelSettings('explicitly-unscoped-sequence', null))['2035-01-10T12:00:00']?.zoom).toBe(1.5);
-    expect(await getPanelSettings('explicitly-unscoped-sequence', 'synthetic-patient-b')).toEqual({});
+    await pending;
+    const second = await getComparisonData();
+    expect(
+      (await getPanelSettingsSnapshot(combo, second.selected_patient_key, second.series_map[combo])).settings,
+    ).toEqual({});
+    expect(
+      (await getPanelSettingsSnapshot(combo, first.selected_patient_key, first.series_map[combo])).settings[date],
+    ).toMatchObject({ zoom: 2, brightness: 145 });
+    expect((await (await getDB()).getAll('panel_settings')).every((row) => row.source)).toBe(true);
   });
 
   it('does not merge separate examinations with missing patient identities', async () => {
@@ -527,9 +507,11 @@ describe('durable MRI storage and import contracts', () => {
   it('retains bounded registered frames across a database connection restart', async () => {
     await processDicomFile(makeImplicitDicom());
     await getComparisonData();
+    const readValues = vi.spyOn(IDBIndex.prototype, 'getAll');
     for (let index = 0; index < MAX_DERIVED_ALIGNMENT_FRAMES + 3; index++) {
       await saveDerivedAlignmentFrame(makeDerivedFrame({ id: `derived-${index}`, createdAt: index }));
     }
+    expect(readValues.mock.contexts.filter((index) => index.name === 'by-created-at')).toEqual([]);
 
     await resetDbForTests();
     const restored = await loadDerivedAlignmentFrames('synthetic-patient', 1);
@@ -542,6 +524,44 @@ describe('durable MRI storage and import contracts', () => {
     expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toHaveLength(MAX_DERIVED_ALIGNMENT_FRAMES);
     await clearPersistedDerivedAlignmentFrames('synthetic-patient');
     expect(await loadDerivedAlignmentFrames('synthetic-patient', 1)).toEqual([]);
+  });
+
+  it('loads only the active revision, sequence, and series before validating derived pixels', async () => {
+    await processDicomFile(makeImplicitDicom());
+    await getComparisonData();
+    const db = await getDB();
+    const selected = makeDerivedFrame();
+    await saveDerivedAlignmentFrame(selected);
+    for (const frame of [
+      makeDerivedFrame({ id: 'old-revision', datasetRevision: 0 }),
+      makeDerivedFrame({ id: 'other-sequence', sequenceId: 'coronal-t1' }),
+      makeDerivedFrame({ id: 'other-series', targetSeriesUid: 'unselected-series' }),
+      makeDerivedFrame({ id: 'other-patient', patientKey: 'unselected-patient' }),
+      makeDerivedFrame({ id: 'malformed-current', pixels: new Float32Array(3) }),
+    ])
+      await db.put('derived_alignment_frames', frame);
+    const readValues = vi.spyOn(IDBIndex.prototype, 'getAll');
+
+    const restored = await loadDerivedAlignmentFrames('synthetic-patient', 1, {
+      sequenceId: selected.sequenceId,
+      seriesUids: new Set([selected.targetSeriesUid]),
+    });
+    expect(restored.map((frame) => frame.id)).toEqual([selected.id]);
+    expect(Array.from(restored[0]!.pixels)).toEqual(Array.from(selected.pixels));
+    const readIds = readValues.mock.results.flatMap((result, index) =>
+      readValues.mock.contexts[index]!.objectStore.name === 'derived_alignment_frames'
+        ? (result.value.result as DerivedAlignmentFrameRow[]).map((row) => row.id)
+        : [],
+    );
+    expect(readIds.sort()).toEqual(['derived-1', 'malformed-current']);
+    readValues.mockClear();
+    expect(
+      await loadDerivedAlignmentFrames('synthetic-patient', 1, {
+        sequenceId: selected.sequenceId,
+        seriesUids: new Set(),
+      }),
+    ).toEqual([]);
+    expect(readValues).not.toHaveBeenCalled();
   });
 
   it('removes only obsolete registered planes for the replaced examination', async () => {
@@ -778,8 +798,10 @@ describe('durable MRI storage and import contracts', () => {
   });
 
   it('recovers after a failed database open once the external version conflict disappears', async () => {
+    const version = (await getDB()).version;
+    await resetDbForTests();
     const newer = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('MiraViewerDB', 7);
+      const request = indexedDB.open('MiraViewerDB', version + 1);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

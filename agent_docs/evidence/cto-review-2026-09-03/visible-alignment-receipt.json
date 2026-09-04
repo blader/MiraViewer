@@ -1,0 +1,127 @@
+{
+  "original": {
+    "path": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-settles-the-displ-e1e49-on-cold-and-warm-navigation-workflow/visible-alignment-receipt.json",
+    "sha256": "b5ae2cb9eb2e67ee1cdf2cdd3a373976bbcaa767af956b01926b6b9a0970bf33"
+  },
+  "receipt": {
+    "head": "5f0efa433b6c8b6672add9a30184ec1140b2b5a3",
+    "sourceSha256": "dfb91f63584e58614c723e3e660d7b4c88c46d03857e67a02b6fde97b65217c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T03:30:27.978Z",
+    "fixture": "synthetic only",
+    "browser": "152.0.7977.82",
+    "visibleStudies": [
+      "1.2.826.0.1.3680043.10.543.20350101.1",
+      "1.2.826.0.1.3680043.10.543.20350201.1"
+    ],
+    "measurements": [
+      {
+        "mode": "cold",
+        "visibleAcceptedMs": 1956.2650001049042,
+        "requests": [
+          {
+            "type": "estimate",
+            "study": "1.2.826.0.1.3680043.10.543.20350201.1",
+            "started": 1906.085000038147,
+            "finished": 1997.9900000095367,
+            "ok": true,
+            "outputBytes": 0
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350201.1",
+            "started": 1999.7699999809265,
+            "finished": 2250.3099999427795,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350201.1",
+            "started": 2250.7200000286102,
+            "finished": 2257.7999999523163,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "estimate",
+            "study": "1.2.826.0.1.3680043.10.543.20350101.1",
+            "started": 2304.4349999427795,
+            "finished": 2389.7699999809265,
+            "ok": true,
+            "outputBytes": 0
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350101.1",
+            "started": 2390.829999923706,
+            "finished": 2648.4100000858307,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350101.1",
+            "started": 2648.7599999904633,
+            "finished": 2656.6050000190735,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "estimate",
+            "study": "1.2.826.0.1.3680043.10.543.20350401.1",
+            "started": 2693.3550000190735,
+            "finished": 2780.4500000476837,
+            "ok": true,
+            "outputBytes": 0
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350401.1",
+            "started": 2781.1449999809265,
+            "finished": 3037.164999961853,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350401.1",
+            "started": 3037.494999885559,
+            "finished": 3045.6399998664856,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "estimate",
+            "study": "1.2.826.0.1.3680043.10.543.20350301.1",
+            "started": 3080.5049998760223
+          }
+        ]
+      },
+      {
+        "mode": "warm",
+        "visibleAcceptedMs": 160.32499980926514,
+        "requests": [
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350201.1",
+            "started": 3921.335000038147,
+            "finished": 3928.6549999713898,
+            "ok": true,
+            "outputBytes": 6480
+          },
+          {
+            "type": "reslice",
+            "study": "1.2.826.0.1.3680043.10.543.20350101.1",
+            "started": 3929.0599999427795,
+            "finished": 3937.444999933243,
+            "ok": true,
+            "outputBytes": 6480
+          }
+        ]
+      }
+    ],
+    "scope": "Five synthetic exams, real workers and actual visible image; two animation frames after accepted visible output. Not a clinical or percentile benchmark."
+  }
+}

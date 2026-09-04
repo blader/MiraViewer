@@ -137,14 +137,15 @@ describe('UploadModal', () => {
     expect(screen.getByRole('region', { name: 'Selected acquisition' })).toHaveTextContent('IM0001');
     fireEvent.click(screen.getByRole('button', { name: 'Import scans' }));
 
-    await waitFor(() => expect(processFiles).toHaveBeenCalled());
+    // Completion includes the refresh callback and its subsequent React commit,
+    // not just entry into the ingestion service.
+    expect(await screen.findByText('Import complete')).toBeInTheDocument();
     expect(processFiles).toHaveBeenCalledWith(
       [file],
       expect.any(Function),
       expect.objectContaining({ signal: expect.any(AbortSignal), total: 1 }),
     );
     expect(onUploadComplete).toHaveBeenCalled();
-    expect(screen.getByText('Import complete')).toBeInTheDocument();
     expect(screen.getByText('1 image saved to this device.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /drop local dicom files or an acquisition folder/i })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Choose files' })).toBeNull();

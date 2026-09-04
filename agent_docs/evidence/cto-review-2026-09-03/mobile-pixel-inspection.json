@@ -1,0 +1,32 @@
+{
+  "artifact": "artifacts/performance/audit-cto-2026-09-03/attempt-03/workflow-results/workflow-imports-navigates-277aa-a-complete-synthetic-backup-workflow/settings-read-retry-mobile.png",
+  "imageMode": "RGB",
+  "dimensions": [
+    390,
+    844
+  ],
+  "centralScanBox": [
+    145,
+    425,
+    245,
+    525
+  ],
+  "pixels": 10000,
+  "blackPixels": 0,
+  "channelExtrema": [
+    [
+      76,
+      144
+    ],
+    [
+      76,
+      144
+    ],
+    [
+      76,
+      144
+    ]
+  ],
+  "byteIdenticalToPreviouslyCapturedAttempt02": true,
+  "conclusion": "No black patch in this central source region; apparent preview corruption is not a product-pixel defect."
+}

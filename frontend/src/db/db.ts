@@ -1,11 +1,32 @@
 import { openDB } from 'idb';
 import type { IDBPDatabase } from 'idb';
 import type { MiraDB } from './schema';
+import { initializeComparisonState } from './comparisonState';
 
 export const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 export const SELECTED_PATIENT_STATE_KEY = 'selected_patient_key';
+export const SELECTED_PATIENT_STUDY_STATE_KEY = 'selected_patient_study_uid';
 export const DATASET_REVISION_STATE_KEY = 'dataset_revision';
+// Unlike the content revision, this changes only when saved work is replaced.
+// A writer must retain the token from its read, never fetch a new one to retry a write.
+export const DATASET_TOKEN_STATE_KEY = 'dataset_token';
+
+export class DatasetReplacedError extends Error {
+  constructor() {
+    super('Saved scans were replaced. Reload viewer settings before making changes.');
+    this.name = 'DatasetReplacedError';
+  }
+}
+
+export function newDatasetToken(): string {
+  // This is an identity, not a credential. Keep local HTTP/offline hosts usable
+  // when secure-context UUID APIs are unavailable.
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}:${Math.random().toString(36).slice(2)}`
+  );
+}
 
 export type StorageHealth = {
   checked: boolean;
@@ -162,6 +183,14 @@ export function getDB() {
           if (!derivedStore.indexNames.contains('by-created-at')) {
             derivedStore.createIndex('by-created-at', 'createdAt');
           }
+          if (!derivedStore.indexNames.contains('by-patient-revision-source')) {
+            derivedStore.createIndex('by-patient-revision-source', [
+              'patientKey',
+              'datasetRevision',
+              'sequenceId',
+              'targetSeriesUid',
+            ]);
+          }
         }
       },
       blocking(_currentVersion, _blockedVersion, event) {
@@ -172,10 +201,20 @@ export function getDB() {
       terminated() {
         dbPromise = null;
       },
-    }).catch((error: unknown) => {
-      dbPromise = null;
-      throw error;
-    });
+    })
+      .then(async (db) => {
+        const tx = db.transaction('app_state', 'readwrite');
+        if (typeof (await tx.store.get(DATASET_TOKEN_STATE_KEY))?.value !== 'string') {
+          await tx.store.put({ key: DATASET_TOKEN_STATE_KEY, value: newDatasetToken() });
+        }
+        await tx.done;
+        await initializeComparisonState(db);
+        return db;
+      })
+      .catch((error: unknown) => {
+        dbPromise = null;
+        throw error;
+      });
   }
   return dbPromise;
 }

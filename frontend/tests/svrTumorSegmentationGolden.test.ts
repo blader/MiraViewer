@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { segmentSeededVolume, voxelIndex } from '../src/utils/segmentation/seededVolume';
+import { segmentSeededVolume, voxelIndex } from './helpers/legacySeededVolume';
 import { normalizeSvrIntensities } from '../src/utils/svr/intensityNormalization';
 import { reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
 import { segmentationQuality as quality } from './helpers/segmentationQuality';

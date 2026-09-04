@@ -5,6 +5,7 @@ import { reconstructVolumeMultiPlane } from '../utils/svr/reconstructVolume';
 import { resampleSelectionForRefinement } from '../utils/svr/refineRegion';
 import { retainedSvrVolumeBytes } from '../utils/svr/nativeVolume';
 import { retainedDerivedAlignmentBytes } from '../utils/derivedAlignmentFrame';
+import type { SvrRetainedViewerSnapshot } from '../components/svrImagingContext';
 
 export type UseSvrReconstructionState = {
   status: 'idle' | 'running' | 'canceling' | 'ready' | 'canceled' | 'failed';
@@ -71,10 +72,14 @@ export function useSvrReconstruction() {
   const run = useCallback(
     async (
       selectedSeries: SvrSelectedSeries[],
-      params?: Partial<SvrParams>,
-      identity?: string,
-      selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume; retainedBytes?: number | (() => number) },
+      options: {
+        params?: Partial<SvrParams>;
+        identity?: string;
+        selectionToRefine?: { volume: SvrVolume; labels: SvrLabelVolume };
+        prepare?: () => SvrRetainedViewerSnapshot;
+      } = {},
     ): Promise<SvrRunOutcome> => {
+      const { params, identity, selectionToRefine, prepare } = options;
       abortRef.current?.abort();
 
       const controller = new AbortController();
@@ -104,12 +109,10 @@ export function useSvrReconstruction() {
       try {
         // Release reproducible idle-worker storage before counting live editing
         // buffers. Rejection leaves the accepted volume and its edits in place.
-        const additionalRetainedBytes =
-          typeof selectionToRefine?.retainedBytes === 'function'
-            ? selectionToRefine.retainedBytes()
-            : (selectionToRefine?.retainedBytes ?? 0);
+        const viewer = prepare?.();
+        const additionalRetainedBytes = viewer?.retainedBytes ?? 0;
         if (!Number.isSafeInteger(additionalRetainedBytes) || additionalRetainedBytes < 0)
-          throw new Error('Refinement requires a valid retained-memory estimate. Original data is unchanged.');
+          throw new Error('Reconstruction requires a valid retained-memory estimate. Original data is unchanged.');
         const accepted = acceptedResultRef.current;
         // The retained volume reserves one live CPU mask. A previously transferred
         // mask can survive independently after editing replaces its backing buffer.
@@ -117,6 +120,7 @@ export function useSvrReconstruction() {
         for (const [volume, mask] of [
           [accepted?.volume, accepted?.initialSelection?.data],
           [selectionToRefine?.volume, selectionToRefine?.labels.data],
+          [viewer?.volume, viewer?.labels?.data],
         ] as const) {
           if (!volume) continue;
           const buffers = retainedMasks.get(volume) ?? new Set<ArrayBufferLike>();
@@ -134,7 +138,7 @@ export function useSvrReconstruction() {
                 retainedSvrVolumeBytes(volume) +
                 Math.max(0, [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0) - volume.data.length),
               additionalRetainedBytes,
-            ) + (selectionToRefine ? retainedDerivedAlignmentBytes() : 0),
+            ) + retainedDerivedAlignmentBytes(),
           signal: controller.signal,
           onProgress: (p) => {
             if (runIdRef.current !== runId || controller.signal.aborted) return;

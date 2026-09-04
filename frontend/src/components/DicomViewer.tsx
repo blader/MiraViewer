@@ -1,14 +1,4 @@
-import {
-  forwardRef,
-  useEffect,
-  useRef,
-  useState,
-  useLayoutEffect,
-  useCallback,
-  useContext,
-  useImperativeHandle,
-  useSyncExternalStore,
-} from 'react';
+import { useEffect, useRef, useState, useLayoutEffect, useCallback, useContext, useSyncExternalStore } from 'react';
 import { getImageIdForInstance } from '../utils/localApi';
 import cornerstone from 'cornerstone-core';
 import { getEffectiveInstanceIndex } from '../utils/math';
@@ -19,38 +9,18 @@ import {
   subscribeToDebugAlignmentKey,
 } from '../utils/debugAlignment';
 import { getAlignmentSliceScore } from '../utils/alignmentSliceScoreStore';
-import { getDecodedFrame as loadDecodedFrame, loadCornerstoneImage, type DecodedFrame } from '../utils/decodedFrame';
+import { loadCornerstoneImage } from '../utils/decodedFrame';
+import { IMAGE_ID_LOOKUP_TIMEOUT_MS, IMAGE_LOAD_TIMEOUT_MS, waitForBoundedOperation } from '../utils/imageLoadDeadline';
 import type { DerivedAlignmentFrame } from '../utils/derivedAlignmentFrame';
 import { useAlignedFrame } from '../hooks/useAlignedFrame';
 import { SharpSliceDisplayContext, useSharpSliceDisplay } from '../hooks/useSharpSliceDisplay';
 import type { SharpSliceDisplay } from '../hooks/useSharpSliceDisplay';
-import { createDerivedImagePresentation } from '../utils/derivedImagePresentation';
+import {
+  createDerivedImagePresentation,
+  getDerivedAlignmentContent,
+  sameDerivedAlignmentContent,
+} from '../utils/derivedImagePresentation';
 import type { DerivedImagePresentation } from '../utils/derivedImagePresentation';
-
-export type DicomViewerCaptureOptions = {
-  /** Max dimension (in CSS pixels) used for the capture output. Defaults to 512 for speed. */
-  maxSize?: number;
-};
-
-export type DicomViewerHandle = {
-  /**
-   * Capture exactly what's visible inside the viewer viewport (including zoom/rotation/pan + brightness/contrast).
-   * The returned image is cropped to the viewport.
-   */
-  captureVisiblePng: (options?: DicomViewerCaptureOptions) => Promise<Blob>;
-
-  /** The content key (studyId:seriesUid:effectiveInstanceIndex) currently displayed by the viewer, if known. */
-  getDisplayedContentKey: () => string | null;
-
-  /**
-   * Wait until the viewer is actually displaying the expected content key.
-   * This is useful because Cornerstone keeps the previous image visible while the next slice loads.
-   */
-  waitForDisplayedContentKey: (expectedKey: string, timeoutMs?: number) => Promise<void>;
-
-  /** Exact full-precision decoded DICOM frame; segmentation must never use a display screenshot. */
-  getDecodedFrame: () => Promise<DecodedFrame & { viewportSize: { w: number; h: number } }>;
-};
 
 function parseDicomViewerContentKey(contentKey: string): { seriesUid: string; instanceIndex: number } | null {
   // Content key format: `${studyId}:${seriesUid}:${effectiveInstanceIndex}`
@@ -79,12 +49,14 @@ function useViewportPan({
   panY,
   onPanChange,
   interactionBlocked,
+  contentPending,
 }: {
   contentKey: string;
   panX: number;
   panY: number;
   onPanChange?: (panX: number, panY: number) => void;
   interactionBlocked: boolean;
+  contentPending: boolean;
 }) {
   const [drag, setDrag] = useState<{
     origin: {
@@ -105,7 +77,10 @@ function useViewportPan({
   const origin = drag?.origin;
 
   // A gesture belongs to one image and one starting transform, not the next slice or tool.
-  if (origin && (!canPan || origin.contentKey !== contentKey || origin.panX !== panX || origin.panY !== panY)) {
+  if (
+    origin &&
+    (!canPan || contentPending || origin.contentKey !== contentKey || origin.panX !== panX || origin.panY !== panY)
+  ) {
     setDrag(null);
   }
 
@@ -122,7 +97,7 @@ function useViewportPan({
   }, [origin]);
 
   const moveOrFinish = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!origin || !canPan || event.pointerId !== origin.pointerId) return;
+    if (!origin || !canPan || contentPending || event.pointerId !== origin.pointerId) return;
     const nextX = origin.panX + (event.clientX - origin.clientX) / origin.width;
     const nextY = origin.panY + (event.clientY - origin.clientY) / origin.height;
     if (event.type === 'pointerup') {
@@ -150,7 +125,8 @@ function useViewportPan({
     isPanning: !!drag,
     handlers: {
       onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => {
-        if (!canPan || origin || event.defaultPrevented || !event.isPrimary || event.button !== 0) return;
+        if (!canPan || contentPending || origin || event.defaultPrevented || !event.isPrimary || event.button !== 0)
+          return;
         const element = event.currentTarget;
         const { width, height } = element.getBoundingClientRect();
         if (width <= 0 || height <= 0) return;
@@ -178,16 +154,17 @@ function useViewportPan({
       onPointerCancel: cancelPointer,
       onLostPointerCapture: cancelPointer,
       onDoubleClick: (event: React.MouseEvent<HTMLDivElement>) => {
-        if (!canPan) return;
+        if (!canPan || contentPending) return;
         event.stopPropagation();
         resetPan();
       },
       onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Escape' && drag) {
           event.preventDefault();
           event.stopPropagation();
           setDrag(null);
-        } else if (canPan && event.key === 'Enter') {
+        } else if (canPan && !contentPending && event.key === 'Enter') {
           event.preventDefault();
           resetPan();
         }
@@ -231,7 +208,6 @@ interface ImageContentProps {
   imageFilter: string;
   imageTransform: string;
   alt: string;
-  imgRef: React.RefObject<HTMLImageElement | null>;
 }
 
 type DicomImageSource = {
@@ -241,8 +217,14 @@ type DicomImageSource = {
   presentationKey: string;
 };
 
-function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: ImageContentProps) {
+function ImageContent({ imageUrl, imageFilter, imageTransform, alt }: ImageContentProps) {
   const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (status !== 'loading') return;
+    const timeout = window.setTimeout(() => setStatus('error'), IMAGE_LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [attempt, status]);
 
   const handleLoad = useCallback(() => {
     setStatus('loaded');
@@ -255,11 +237,19 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
   return (
     <>
       {status === 'loading' && <DelayedSpinnerOverlay delayMs={150} />}
-      {status === 'error' && <ErrorOverlay message="Failed to load image" />}
+      {status === 'error' && (
+        <ErrorOverlay
+          message="Unable to load this image."
+          onRetry={() => {
+            setStatus('loading');
+            setAttempt((value) => value + 1);
+          }}
+        />
+      )}
 
       <div className="w-full h-full flex items-center justify-center" style={{ transform: imageTransform }}>
         <img
-          ref={imgRef}
+          key={attempt}
           src={imageUrl}
           alt={alt}
           className="w-full h-full object-contain select-none"
@@ -270,237 +260,6 @@ function ImageContent({ imageUrl, imageFilter, imageTransform, alt, imgRef }: Im
         />
       </div>
     </>
-  );
-}
-
-type DicomViewerHandleOptions = {
-  ref: React.ForwardedRef<DicomViewerHandle>;
-  containerRef: React.RefObject<HTMLDivElement | null>;
-  imgRef: React.RefObject<HTMLImageElement | null>;
-  displayedContentKeyRef: React.RefObject<string | null>;
-  derivedFrame: DerivedAlignmentFrame | null;
-  seriesUid: string;
-  effectiveInstanceIndex: number;
-  affine00: number;
-  affine01: number;
-  affine10: number;
-  affine11: number;
-  brightness: number;
-  contrast: number;
-  panX: number;
-  panY: number;
-  rotation: number;
-  zoom: number;
-};
-
-function useDicomViewerHandle({
-  ref,
-  containerRef,
-  imgRef,
-  displayedContentKeyRef,
-  derivedFrame,
-  seriesUid,
-  effectiveInstanceIndex,
-  affine00,
-  affine01,
-  affine10,
-  affine11,
-  brightness,
-  contrast,
-  panX,
-  panY,
-  rotation,
-  zoom,
-}: DicomViewerHandleOptions) {
-  const waitForImageLoad = useCallback(async (): Promise<HTMLImageElement> => {
-    const img = imgRef.current;
-    if (!img) {
-      throw new Error('Image element not available');
-    }
-
-    if (img.complete && img.naturalWidth > 0) {
-      return img;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const onLoad = () => {
-        img.removeEventListener('load', onLoad);
-        img.removeEventListener('error', onError);
-        resolve();
-      };
-      const onError = () => {
-        img.removeEventListener('load', onLoad);
-        img.removeEventListener('error', onError);
-        reject(new Error('Failed to load image'));
-      };
-      img.addEventListener('load', onLoad);
-      img.addEventListener('error', onError);
-    });
-
-    return img;
-  }, [imgRef]);
-
-  const getDisplayedContentKey = useCallback((): string | null => {
-    return displayedContentKeyRef.current;
-  }, [displayedContentKeyRef]);
-
-  const getDecodedFrame = useCallback(async () => {
-    if (derivedFrame) {
-      throw new Error('Segmentation is unavailable on a derived alignment plane; return to a native acquired slice');
-    }
-    const frame = await loadDecodedFrame(seriesUid, effectiveInstanceIndex);
-    const element = containerRef.current;
-    const rect = element?.getBoundingClientRect();
-    return {
-      ...frame,
-      viewportSize: {
-        w: element?.clientWidth || rect?.width || 0,
-        h: element?.clientHeight || rect?.height || 0,
-      },
-    };
-  }, [containerRef, derivedFrame, effectiveInstanceIndex, seriesUid]);
-
-  const waitForDisplayedContentKey = useCallback(
-    async (expectedKey: string, timeoutMs = 2500): Promise<void> => {
-      const t0 = performance.now();
-
-      // Fast path.
-      if (displayedContentKeyRef.current === expectedKey) return;
-
-      while (performance.now() - t0 < timeoutMs) {
-        if (displayedContentKeyRef.current === expectedKey) return;
-        // Yield so we don't block the UI thread.
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
-      }
-
-      throw new Error(`Timed out waiting for displayed content: ${expectedKey}`);
-    },
-    [displayedContentKeyRef],
-  );
-
-  const captureVisiblePng = useCallback(
-    async (options?: DicomViewerCaptureOptions): Promise<Blob> => {
-      const container = containerRef.current;
-      if (!container) {
-        throw new Error('Viewer not mounted');
-      }
-
-      const cssWidth = container.clientWidth;
-      const cssHeight = container.clientHeight;
-      if (cssWidth <= 0 || cssHeight <= 0) {
-        throw new Error('Viewer has zero size');
-      }
-
-      // Determine our render source:
-      // - If ImageContent is used, we capture from the <img>
-      // - If CornerstoneImage is used, we capture from its internal <canvas>
-      const img = imgRef.current;
-      const cornerstoneCanvas = container.querySelector('canvas') as HTMLCanvasElement | null;
-
-      const maxSize = options?.maxSize ?? 512;
-      const maxCssDim = Math.max(cssWidth, cssHeight);
-      const deviceScale = window.devicePixelRatio || 1;
-      const renderScale = Math.min(deviceScale, maxSize / maxCssDim);
-
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(cssWidth * renderScale));
-      canvas.height = Math.max(1, Math.round(cssHeight * renderScale));
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        throw new Error('Failed to create canvas context');
-      }
-
-      // Draw in CSS pixel units; scale up to device pixels.
-      ctx.scale(renderScale, renderScale);
-
-      // Background (matches viewer)
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-      // Match the CSS transform applied in the DOM.
-      //
-      // Note: Canvas 2D uses post-multiplication for transforms, so the last call is applied first.
-      // The order below mirrors:
-      //   transform: translate(pan) scale(zoom) rotate(rotation) matrix(affine)
-      const panXPx = panX * cssWidth;
-      const panYPx = panY * cssHeight;
-
-      ctx.save();
-      ctx.translate(cssWidth / 2, cssHeight / 2);
-      ctx.translate(panXPx, panYPx);
-      ctx.scale(zoom, zoom);
-      ctx.rotate((rotation * Math.PI) / 180);
-
-      // JSDOM's mocked canvas context (used in tests) may not implement ctx.transform.
-      // We only need this when the affine residual is non-identity.
-      const isIdentityAffine = affine00 === 1 && affine01 === 0 && affine10 === 0 && affine11 === 1;
-      if (!isIdentityAffine && typeof ctx.transform === 'function') {
-        ctx.transform(affine00, affine10, affine01, affine11, 0, 0);
-      }
-
-      ctx.translate(-cssWidth / 2, -cssHeight / 2);
-
-      // Apply brightness/contrast like CSS filters.
-      ctx.filter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
-
-      if (img) {
-        const loadedImg = await waitForImageLoad();
-
-        // Draw the image with object-contain semantics inside the viewport.
-        const iw = loadedImg.naturalWidth;
-        const ih = loadedImg.naturalHeight;
-        const scale = Math.min(cssWidth / iw, cssHeight / ih);
-        const dw = iw * scale;
-        const dh = ih * scale;
-        const dx = (cssWidth - dw) / 2;
-        const dy = (cssHeight - dh) / 2;
-
-        ctx.drawImage(loadedImg, dx, dy, dw, dh);
-      } else if (cornerstoneCanvas) {
-        // Cornerstone renders directly into a canvas sized to the viewport.
-        // We draw it 1:1 into our capture canvas.
-        ctx.drawImage(cornerstoneCanvas, 0, 0, cssWidth, cssHeight);
-      } else {
-        ctx.restore();
-        throw new Error('No render source available for capture');
-      }
-
-      ctx.restore();
-
-      return new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob((blob) => {
-          if (blob) resolve(blob);
-          else reject(new Error('Failed to encode capture'));
-        }, 'image/png');
-      });
-    },
-    [
-      affine00,
-      affine01,
-      affine10,
-      affine11,
-      brightness,
-      containerRef,
-      contrast,
-      imgRef,
-      panX,
-      panY,
-      rotation,
-      waitForImageLoad,
-      zoom,
-    ],
-  );
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      captureVisiblePng,
-      getDecodedFrame,
-      getDisplayedContentKey,
-      waitForDisplayedContentKey,
-    }),
-    [captureVisiblePng, getDecodedFrame, getDisplayedContentKey, waitForDisplayedContentKey],
   );
 }
 
@@ -566,25 +325,21 @@ function DicomAlignmentDiagnostics({ sliceScore }: { sliceScore: ReturnType<type
   );
 }
 
-export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(function DicomViewer(
-  {
-    studyId,
-    seriesUid,
-    instanceIndex,
-    instanceCount,
-    onInstanceChange,
-    interactionBlocked = false,
-    reverseSliceOrder = false,
-    imageUrlOverride,
-    onPanChange,
-    onZoomChange,
-    children,
-    ...requestedPresentation
-  }: DicomViewerProps,
-  ref,
-) {
+export function DicomViewer({
+  studyId,
+  seriesUid,
+  instanceIndex,
+  instanceCount,
+  onInstanceChange,
+  interactionBlocked = false,
+  reverseSliceOrder = false,
+  imageUrlOverride,
+  onPanChange,
+  onZoomChange,
+  children,
+  ...requestedPresentation
+}: DicomViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
   const effectiveInstanceIndex = getEffectiveInstanceIndex(instanceIndex, instanceCount, reverseSliceOrder);
   const {
     frame: derivedFrame,
@@ -605,6 +360,23 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     affine11 = 1,
   } = acceptedSettings ?? requestedPresentation;
 
+  const [imageSource, setImageSource] = useState<DicomImageSource | null>(null);
+  const contentKey = `${studyId}:${seriesUid}:${derivedFrame?.instanceIndex ?? effectiveInstanceIndex}`;
+  const presentationKey = derivedFrame?.imageId ?? `${studyId}:${seriesUid}:${effectiveInstanceIndex}:native`;
+  // This is the renderer's accepted content, not the requested slice number.
+  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
+  const imagePending = !imageUrlOverride && displayedContentKey !== contentKey;
+  const [lookupAttempt, setLookupAttempt] = useState(0);
+  const [lookupFailure, setLookupFailure] = useState<{
+    contentKey: string;
+    presentationKey: string;
+    message: string;
+  } | null>(null);
+  const lookupError =
+    lookupFailure?.contentKey === contentKey && lookupFailure.presentationKey === presentationKey
+      ? lookupFailure.message
+      : null;
+
   // Mouse wheel behavior:
   // - Plain wheel events advance slices, matching the center-pane global wheel behavior.
   // - Cmd+wheel zooms the hovered image when zoom control is available.
@@ -617,7 +389,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
       if (e.metaKey) {
         e.preventDefault();
-        if (!onZoomChange || alignmentPending) return;
+        if (!onZoomChange || alignmentPending || imagePending) return;
 
         const speed = (() => {
           // deltaMode: 0=pixels, 1=lines, 2=pages
@@ -654,14 +426,24 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
-  }, [alignmentPending, instanceCount, instanceIndex, interactionBlocked, onInstanceChange, onZoomChange, zoom]);
+  }, [
+    alignmentPending,
+    imagePending,
+    instanceCount,
+    instanceIndex,
+    interactionBlocked,
+    onInstanceChange,
+    onZoomChange,
+    zoom,
+  ]);
 
   const viewportPan = useViewportPan({
     contentKey: `${studyId}:${seriesUid}:${effectiveInstanceIndex}:${imageUrlOverride ?? derivedFrame?.imageId ?? ''}`,
     panX,
     panY,
-    onPanChange: alignmentPending ? undefined : onPanChange,
+    onPanChange,
     interactionBlocked,
+    contentPending: alignmentPending || imagePending,
   });
   const sharpPreference = useContext(SharpSliceDisplayContext);
   const suspendImageSwap = sharpPreference.suspended || interactionBlocked || alignmentPending || viewportPan.isPanning;
@@ -669,19 +451,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
     enabled: sharpPreference.enabled,
     suspended: suspendImageSwap,
   });
-
-  // Resolve imageId for Cornerstone (miradb:<sopInstanceUid>)
-  const [imageSource, setImageSource] = useState<DicomImageSource | null>(null);
-  const contentKey = `${studyId}:${seriesUid}:${derivedFrame?.instanceIndex ?? effectiveInstanceIndex}`;
-  const presentationKey = derivedFrame?.imageId ?? `${studyId}:${seriesUid}:${effectiveInstanceIndex}:native`;
-
-  // Track what slice is actually displayed in the viewer.
-  // CornerstoneImage intentionally keeps the previous image visible while the next slice loads.
-  const [displayedContentKey, setDisplayedContentKey] = useState<string | null>(null);
-  const displayedContentKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    displayedContentKeyRef.current = displayedContentKey;
-  }, [displayedContentKey]);
 
   const debugSliceScores = isDebugAlignmentEnabled();
 
@@ -705,28 +474,41 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
 
   useEffect(() => {
     if (imageUrlOverride) return;
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
     (async () => {
       try {
-        const id = derivedFrame?.imageId ?? (await getImageIdForInstance(seriesUid, effectiveInstanceIndex));
-        if (!cancelled)
+        const id =
+          derivedFrame?.imageId ??
+          (await waitForBoundedOperation(getImageIdForInstance(seriesUid, effectiveInstanceIndex), {
+            signal,
+            timeoutMs: IMAGE_ID_LOOKUP_TIMEOUT_MS,
+            label: 'Image lookup',
+          }));
+        if (!signal.aborted) {
           setImageSource((previous) =>
             previous?.imageId === id &&
-            previous.derivedFrame === derivedFrame &&
+            sameDerivedAlignmentContent(previous.derivedFrame, derivedFrame) &&
             previous.contentKey === contentKey &&
             previous.presentationKey === presentationKey
               ? previous
               : { imageId: id, derivedFrame, contentKey, presentationKey },
           );
+          setLookupFailure(null);
+        }
       } catch (e) {
-        console.error(e);
-        if (!cancelled) setImageSource(null);
+        if (!signal.aborted) {
+          setLookupFailure({
+            contentKey,
+            presentationKey,
+            message: e instanceof Error ? e.message : 'Image lookup failed.',
+          });
+          controller.abort();
+        }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [contentKey, derivedFrame, effectiveInstanceIndex, imageUrlOverride, presentationKey, seriesUid]);
+    return () => controller.abort();
+  }, [contentKey, derivedFrame, effectiveInstanceIndex, imageUrlOverride, lookupAttempt, presentationKey, seriesUid]);
 
   // CSS filter for brightness/contrast adjustments
   const imageFilter = `brightness(${brightness / 100}) contrast(${contrast / 100})`;
@@ -762,26 +544,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
   // and finally pan translation in display space.
   const imageTransform = `translate(${panXPx}px, ${panYPx}px) scale(${zoom}) rotate(${rotation}deg) matrix(${affine00}, ${affine10}, ${affine01}, ${affine11}, 0, 0)`;
 
-  useDicomViewerHandle({
-    ref,
-    containerRef,
-    imgRef,
-    displayedContentKeyRef,
-    derivedFrame,
-    seriesUid,
-    effectiveInstanceIndex,
-    affine00,
-    affine01,
-    affine10,
-    affine11,
-    brightness,
-    contrast,
-    panX: viewportPan.panX,
-    panY: viewportPan.panY,
-    rotation,
-    zoom,
-  });
-
   return (
     <div className="relative h-full overflow-hidden bg-black">
       {/* Viewport */}
@@ -789,12 +551,11 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
         ref={containerRef}
         className={`h-full overflow-hidden relative select-none ${viewportPan.canPan ? 'touch-none' : ''}`}
         style={{ cursor: viewportPan.canPan ? (viewportPan.isPanning ? 'grabbing' : 'grab') : 'inherit' }}
-        role="button"
+        role="group"
         tabIndex={viewportPan.canPan ? 0 : -1}
         aria-label={`Pan MRI slice ${instanceIndex + 1}`}
         aria-description="Drag to pan. Double-click or press Enter to reset pan."
-        aria-disabled={!viewportPan.canPan}
-        aria-busy={alignmentStatus === 'updating' || sharpDisplay.status === 'loading' || undefined}
+        aria-busy={imagePending || alignmentStatus === 'updating' || sharpDisplay.status === 'loading' || undefined}
         {...viewportPan.handlers}
       >
         {imageUrlOverride ? (
@@ -804,7 +565,6 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             imageFilter={imageFilter}
             imageTransform={imageTransform}
             alt={`Slice ${instanceIndex + 1}`}
-            imgRef={imgRef}
           />
         ) : imageSource ? (
           <CornerstoneImage
@@ -819,11 +579,21 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
             sharpDisplay={sharpDisplay}
             suspendImageSwap={suspendImageSwap}
           />
-        ) : (
+        ) : !lookupError ? (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
             Loading...
           </div>
-        )}
+        ) : null}
+
+        {lookupError && !imageUrlOverride ? (
+          <ErrorOverlay
+            message={`Unable to open slice ${effectiveInstanceIndex + 1}. ${lookupError}${displayedForScores ? ` Showing slice ${displayedForScores.instanceIndex + 1}.` : ''}`}
+            onRetry={() => {
+              setLookupFailure(null);
+              setLookupAttempt((value) => value + 1);
+            }}
+          />
+        ) : null}
 
         {derivedFrame && !imageUrlOverride ? (
           <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-1rem)] rounded-[2px] border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-1 font-[family-name:var(--font-mono)] text-[11px] text-[var(--signal-metal)]">
@@ -846,6 +616,8 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       {children ? (
         <div
           className="absolute inset-0 pointer-events-none"
+          inert={imagePending || alignmentPending}
+          aria-busy={imagePending || alignmentPending}
           style={{
             transform: `translate(${panXPx - panX * viewportSize.width}px, ${panYPx - panY * viewportSize.height}px)`,
           }}
@@ -855,7 +627,7 @@ export const DicomViewer = forwardRef<DicomViewerHandle, DicomViewerProps>(funct
       ) : null}
     </div>
   );
-});
+}
 
 interface CornerstoneImageProps {
   imageSource: DicomImageSource;
@@ -908,10 +680,22 @@ function DelayedSpinnerOverlay({ delayMs = 150 }: { delayMs?: number }) {
   );
 }
 
-function ErrorOverlay({ message }: { message: string }) {
+function ErrorOverlay({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)] bg-black">
-      {message}
+    <div
+      role="alert"
+      className="absolute inset-x-3 bottom-3 z-30 flex items-center justify-between gap-3 rounded border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3 text-sm text-[var(--text-primary)]"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <span>{message}</span>
+      <button
+        type="button"
+        className="shrink-0 rounded border border-[var(--border-color)] px-3 py-2 focus-visible:outline-2 focus-visible:outline-[var(--focus-ring)]"
+        onClick={onRetry}
+      >
+        Retry image
+      </button>
     </div>
   );
 }
@@ -954,7 +738,15 @@ function CornerstoneImage({
     failedImage?: DerivedImagePresentation;
   } | null>(null);
   const loadedImageId = displayed?.sharpImage?.imageId ?? displayed?.source.imageId ?? null;
-  const [errorImageId, setErrorImageId] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ source: DicomImageSource; message: string } | null>(null);
+  // A deadline stops waiting, not decoding. Retry the same promise while it is
+  // pending; a rejected load may be evicted, never a still-running shared job.
+  const sourceLoadRef = useRef<{
+    imageId: string;
+    promise: ReturnType<typeof loadCornerstoneImage>;
+    rejected: boolean;
+  } | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   // Track which contentKey the currently-loaded image corresponds to.
   // This lets us avoid applying the *new* settings/transform to the *old* image
@@ -969,15 +761,13 @@ function CornerstoneImage({
     onDisplayedContentKeyRef.current = onDisplayedContentKey;
   }, [onDisplayedContentKey]);
 
-  // Derive status from comparison
-  const status: 'loading' | 'loaded' | 'error' =
-    errorImageId === imageId ? 'error' : loadedContent?.imageId === imageId ? 'loaded' : 'loading';
-
   const isContentInSync =
     loadedContent?.imageId === imageId &&
-    loadedContent.derivedFrame === derivedFrame &&
+    sameDerivedAlignmentContent(loadedContent.derivedFrame, derivedFrame) &&
     loadedContent?.contentKey === contentKey &&
     loadedContent.presentationKey === presentationKey;
+  const status: 'loading' | 'loaded' | 'error' =
+    failure?.source === imageSource ? 'error' : isContentInSync ? 'loaded' : 'loading';
 
   // While navigating, keep rendering the previous image with the previous in-sync settings.
   // We snapshot the latest in-sync filter/transform so they only update once the new image is
@@ -1029,17 +819,39 @@ function CornerstoneImage({
     const controller = new AbortController();
     const { signal } = controller;
 
-    void enabledDeferred.promise
+    const loading = enabledDeferred.promise
       .then(() => {
         signal.throwIfAborted();
-        return loadCornerstoneImage(imageSource.imageId);
+        let sourceLoad = sourceLoadRef.current;
+        if (!sourceLoad || sourceLoad.imageId !== imageSource.imageId || sourceLoad.rejected) {
+          if (
+            sourceLoad?.imageId === imageSource.imageId &&
+            sourceLoad.rejected &&
+            cornerstone.imageCache?.getImageLoadObject?.(imageSource.imageId)
+          ) {
+            cornerstone.imageCache.removeImageLoadObject(imageSource.imageId);
+          }
+          sourceLoad = {
+            imageId: imageSource.imageId,
+            promise: loadCornerstoneImage(imageSource.imageId),
+            rejected: false,
+          };
+          sourceLoadRef.current = sourceLoad;
+          const owner = sourceLoad;
+          void owner.promise.catch(() => {
+            owner.rejected = true;
+          });
+        }
+        return sourceLoad.promise;
       })
       .then((cached) => {
         signal.throwIfAborted();
         const original = imageSource.derivedFrame;
+        const cachedSource = cached.derivedSource?.deref?.();
         // A rerun may reuse a derived ID with different pixels or tone. Refresh
-        // only this presentation, leaving the native cache and registration alone.
-        return original && cached.derivedSource?.deref?.() !== original
+        // only changed content, not an exact replay's new request wrapper.
+        return original &&
+          (!cachedSource || getDerivedAlignmentContent(cachedSource) !== getDerivedAlignmentContent(original))
           ? createDerivedImagePresentation(
               original,
               `${imageSource.imageId}:original:${crypto.randomUUID()}`,
@@ -1047,23 +859,25 @@ function CornerstoneImage({
               signal,
             )
           : cached;
-      })
+      });
+    void waitForBoundedOperation(loading, { signal, timeoutMs: IMAGE_LOAD_TIMEOUT_MS, label: 'DICOM image load' })
       .then((image) => {
         signal.throwIfAborted();
         setAvailable({ ...imageSource, image });
-        setErrorImageId(null);
+        setFailure(null);
       })
       .catch((err: unknown) => {
         if (!signal.aborted) {
           console.error('Failed to load DICOM image:', err);
-          setErrorImageId(imageSource.imageId);
+          setFailure({ source: imageSource, message: err instanceof Error ? err.message : 'Image decode failed.' });
+          controller.abort();
         }
       });
 
     return () => {
       controller.abort();
     };
-  }, [enabledDeferred, imageSource]);
+  }, [attempt, enabledDeferred, imageSource]);
 
   const replacement = sharpDisplay?.sourceKey === imageId ? sharpDisplay.image : undefined;
   // One canvas commit owns both variants. Keep the loaded original for immediate
@@ -1074,7 +888,7 @@ function CornerstoneImage({
       !element ||
       !available ||
       available.imageId !== imageId ||
-      available.derivedFrame !== derivedFrame ||
+      !sameDerivedAlignmentContent(available.derivedFrame, derivedFrame) ||
       available.contentKey !== contentKey ||
       available.presentationKey !== presentationKey
     )
@@ -1108,13 +922,23 @@ function CornerstoneImage({
           }
         }
         console.error('Failed to display DICOM image:', error);
-        setErrorImageId(imageId);
+        setFailure({ source: imageSource, message: error instanceof Error ? error.message : 'Image display failed.' });
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [available, contentKey, derivedFrame, displayed, imageId, presentationKey, replacement, suspendImageSwap]);
+  }, [
+    available,
+    contentKey,
+    derivedFrame,
+    displayed,
+    imageId,
+    imageSource,
+    presentationKey,
+    replacement,
+    suspendImageSwap,
+  ]);
 
   // Handle resize
   useEffect(() => {
@@ -1137,6 +961,8 @@ function CornerstoneImage({
   }, []);
 
   const originalShown = displayed && !displayed.sharpImage ? ' · Original shown' : '';
+  const shown = loadedContent ? parseDicomViewerContentKey(loadedContent.contentKey) : null;
+  const displayedAlt = shown ? `Slice ${shown.instanceIndex + 1}` : alt;
   return (
     <>
       <div className="w-full h-full relative" style={{ transform: appliedImageTransform, filter: appliedImageFilter }}>
@@ -1144,12 +970,23 @@ function CornerstoneImage({
           ref={elementRef}
           className="w-full h-full"
           style={{ minWidth: '100px', minHeight: '100px' }}
-          aria-label={alt}
+          role="img"
+          aria-label={displayedAlt}
           data-image-id={loadedImageId ?? undefined}
         />
         {status === 'loading' && <DelayedSpinnerOverlay delayMs={loadedImageId ? 350 : 150} />}
-        {status === 'error' && <ErrorOverlay message="Failed to load image" />}
       </div>
+      {status === 'error' &&
+      imageSource.contentKey === contentKey &&
+      imageSource.presentationKey === presentationKey ? (
+        <ErrorOverlay
+          message={`Unable to load ${alt.toLowerCase()}. ${failure?.message}${shown ? ` Showing slice ${shown.instanceIndex + 1}.` : ''}`}
+          onRetry={() => {
+            setFailure(null);
+            setAttempt((value) => value + 1);
+          }}
+        />
+      ) : null}
       {displayed?.sharpImage || (sharpDisplay && sharpDisplay.status !== 'original') ? (
         <div
           role="status"
