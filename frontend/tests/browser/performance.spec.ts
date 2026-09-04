@@ -1,197 +1,583 @@
-import { expect, test } from '@playwright/test';
-import { writeFile } from 'node:fs/promises';
+import { chromium, expect, test } from '@playwright/test';
+import { copyFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { constants } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import type { BrowserContext, Page, TestInfo } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import type {} from './probes';
-import { attachReceipt, capture } from './evidence';
+import { attachReceipt, capture, savedVolumeSelections } from './evidence';
+import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
+import type { DicomInstance, DerivedAlignmentFrameRow, ModelRecord, PanelSettingsRow } from '../../src/db/schema';
 import { measureSelectionEditing } from './selectionEditingWorkflow';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 
-test('backup capacity rejects oversized input and restores sparse below-limit payloads', async ({ page }, info) => {
-  const errors: string[] = [];
-  let downloads = 0;
-  page.on('pageerror', (error) => errors.push(error.message));
-  page.on('download', () => downloads++);
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Import scans', exact: true }).click();
-  const intake = page.getByRole('dialog', { name: 'Import scans' });
-  const files = await Promise.all(
-    createSyntheticSvrDicomFiles({ imageSize: 8, slicesPerOrientation: 1, orientations: 1 }).map(async (file) => ({
-      name: file.name,
-      mimeType: file.type,
-      buffer: Buffer.from(await file.arrayBuffer()),
-    })),
-  );
-  await intake.getByLabel('Select DICOM image files').setInputFiles(files);
-  await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
-  await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
-  await intake.getByRole('button', { name: 'Done', exact: true }).click();
-  const declaredModelBytes = await page.evaluate(async () => {
-    // These are real native Blob sizes, composed from shared synthetic blocks,
-    // not patched size getters or real ONNX weights. Export treats cached bytes
-    // as opaque input; inference and large-file DICOM parsing are out of scope.
-    const tile = new Blob([new Uint8Array(1024 * 1024).fill(0x5a)]);
-    const blob = new Blob(Array.from({ length: 256 }, () => tile));
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('miraviewer:model-cache', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('models');
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    try {
-      const tx = db.transaction('models', 'readwrite');
-      for (const key of ['synthetic-capacity-a', 'synthetic-capacity-b'])
-        tx.objectStore('models').put({ key, blob, savedAtMs: 0 }, key);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onabort = () => reject(tx.error);
-      });
-    } finally {
-      db.close();
-    }
-    const work = { arrayBufferCalls: 0, streamCalls: 0, readBytes: 0 };
-    const arrayBuffer = Blob.prototype.arrayBuffer,
-      stream = Blob.prototype.stream;
-    Blob.prototype.arrayBuffer = function () {
-      if (this.size >= 1024 * 1024) {
-        work.arrayBufferCalls++;
-        work.readBytes += this.size;
-      }
-      return arrayBuffer.call(this);
-    };
-    Blob.prototype.stream = function () {
-      if (this.size >= 1024 * 1024) {
-        work.streamCalls++;
-        work.readBytes += this.size;
-      }
-      return stream.call(this);
-    };
-    Object.assign(window, { backupCapacityWork: work });
-    return blob.size * 2;
-  });
-  expect(declaredModelBytes).toBe(512 * 1024 * 1024);
-  await page.getByRole('button', { name: 'Application menu' }).click();
-  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
-  const exportDialog = page.getByRole('dialog', { name: 'Export Backup (ZIP)' });
-  await exportDialog.getByRole('button', { name: 'Export', exact: true }).click();
-  await expect(exportDialog.getByRole('alert')).toContainText('512 MiB safe restore limit');
-  await expect(exportDialog.getByRole('alert')).toContainText('DICOM reimport alone does not restore saved work');
-  const work = await page.evaluate(
-    () =>
-      (
-        window as unknown as {
-          backupCapacityWork: { arrayBufferCalls: number; streamCalls: number; readBytes: number };
-        }
-      ).backupCapacityWork,
-  );
-  expect(work).toEqual({ arrayBufferCalls: 0, streamCalls: 0, readBytes: 0 });
-  expect(downloads).toBe(0);
-  expect(errors).toEqual([]);
-  await expect(exportDialog.getByRole('button', { name: 'Export', exact: true })).toBeEnabled();
-  await capture(page, info, 'backup-capacity-desktop');
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(exportDialog.getByRole('button', { name: 'Export', exact: true })).toBeInViewport();
-  await capture(page, info, 'backup-capacity-mobile');
+type BackupIo = {
+  name: string;
+  startedAt: number;
+  finishedAt?: number;
+  arrayBufferBytes: number;
+  maxArrayBufferBytes: number;
+  streamBytes: number;
+  maxStreamChunkBytes: number;
+  pending: number;
+  lastReadAt: number;
+};
+declare global {
+  interface Window {
+    backupIo: { current: BackupIo | null; start: (name: string) => void; stop: () => BackupIo };
+    restoreBackupWrites?: () => void;
+  }
+}
 
-  // The small form of the same highly compressible payload must also survive
-  // the actual reader's expansion checks. Only these synthetic cache records
-  // are changed; the imported DICOM and all ordinary app controls are retained.
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await exportDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('miraviewer:model-cache');
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+/** Incognito IndexedDB is in-memory, so it cannot establish disk-backed backup resource costs. */
+async function withBackupBrowser<T>(info: TestInfo, consume: (context: BrowserContext) => Promise<T>): Promise<T> {
+  const profile = await mkdtemp(join(tmpdir(), 'miraviewer-backup-profile-'));
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      ...info.project.use.launchOptions,
+      channel: info.project.use.channel,
+      headless: info.project.use.headless,
+      viewport: info.project.use.viewport,
+      baseURL: 'http://127.0.0.1:43134',
+      acceptDownloads: true,
     });
-    try {
-      const tx = db.transaction('models', 'readwrite');
-      tx.objectStore('models').put(
-        { key: 'synthetic-capacity-a', blob: new Blob([new Uint8Array(1024 * 1024).fill(0x5a)]), savedAtMs: 0 },
-        'synthetic-capacity-a',
-      );
-      tx.objectStore('models').delete('synthetic-capacity-b');
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onabort = () => reject(tx.error);
+    return await consume(context);
+  } finally {
+    await context?.close();
+    await rm(profile, { recursive: true, force: true });
+  }
+}
+
+const backupTest = test.extend({
+  context: async ({ browserName }, use, info) => {
+    if (browserName !== 'chromium') throw new Error('The backup resource receipt requires Chromium IndexedDB.');
+    await withBackupBrowser(info, use);
+  },
+});
+
+async function readBackupContents(page: Page, verifyModels = false) {
+  const records = await page.evaluate(async (verify) => {
+    const read = <T>(request: IDBRequest<T>) =>
+      new Promise<T>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
       });
+    const db = await read(indexedDB.open('MiraViewerDB'));
+    const digest = async (bytes: ArrayBuffer) =>
+      Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('');
+    try {
+      const tx = db.transaction([
+        'instances',
+        'models',
+        'panel_settings',
+        'derived_alignment_frames',
+        'app_state',
+        'backup_staging',
+      ]);
+      const [images, models, settings, frames, token, staging] = await Promise.all([
+        read(tx.objectStore('instances').getAll()) as Promise<DicomInstance[]>,
+        read(tx.objectStore('models').getAll()) as Promise<ModelRecord[]>,
+        read(tx.objectStore('panel_settings').getAll()) as Promise<PanelSettingsRow[]>,
+        read(tx.objectStore('derived_alignment_frames').getAll()) as Promise<DerivedAlignmentFrameRow[]>,
+        read(tx.objectStore('app_state').get('dataset_token')),
+        read(tx.objectStore('backup_staging').count()),
+      ]);
+      const modelRecords = [];
+      for (const model of models) {
+        let matches = true;
+        const expected = 0x40 + Number(model.key.split('-').at(-1));
+        for (let offset = 0; verify && offset < model.blob.size; offset += 1024 * 1024) {
+          const bytes = new Uint8Array(await model.blob.slice(offset, offset + 1024 * 1024).arrayBuffer());
+          if (!bytes.every((byte) => byte === expected)) matches = false;
+        }
+        modelRecords.push({
+          key: model.key,
+          bytes: model.blob.size,
+          savedAtMs: model.savedAtMs,
+          matches: verify ? matches : null,
+        });
+      }
+      return {
+        token: token?.value as string,
+        staging,
+        images: await Promise.all(
+          images.map(async (row) => ({
+            uid: row.sopInstanceUid,
+            sha256: await digest(await row.fileBlob.arrayBuffer()),
+          })),
+        ),
+        models: modelRecords,
+        settings,
+        frames: await Promise.all(
+          frames.map(async (row) => ({
+            id: row.id,
+            pixels: await digest(Float32Array.from(row.pixels).buffer),
+            valid: row.valid ? await digest(Uint8Array.from(row.valid).buffer) : null,
+            sourceImageId: row.sourceImageId,
+            referenceSopInstanceUid: row.referenceSopInstanceUid,
+          })),
+        ),
+      };
     } finally {
       db.close();
     }
-  });
-  await page.getByRole('button', { name: 'Application menu' }).click();
-  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
-  const downloaded = page.waitForEvent('download');
-  await page.getByRole('dialog').getByRole('button', { name: 'Export', exact: true }).click();
-  const download = await downloaded;
-  const archive = info.outputPath('synthetic-sparse-backup.zip');
-  await download.saveAs(archive);
-  expect(await download.failure()).toBeNull();
-  const context = await page.context().browser()!.newContext();
-  let restored;
-  try {
-    const target = await context.newPage();
-    target.on('pageerror', (error) => errors.push(error.message));
-    await target.goto('http://127.0.0.1:43134/');
-    await target.getByRole('button', { name: 'Import scans', exact: true }).click();
-    const restore = target.getByRole('dialog', { name: 'Import scans' });
-    await restore.getByLabel('Select a complete backup or image archive').setInputFiles(archive);
-    await restore.getByRole('checkbox').check();
-    await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
-    await expect(restore.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
-    restored = await target.evaluate(async () => {
+  }, verifyModels);
+  return { ...records, selections: await savedVolumeSelections(page) };
+}
+
+function verifyBackupArchive(archive: string, corrupted?: string) {
+  return JSON.parse(
+    execFileSync(
+      'python3',
+      [
+        '-c',
+        `
+import hashlib,json,os,struct,sys,zipfile
+archive=sys.argv[1]; corrupted=sys.argv[2] if len(sys.argv)>2 else None; offset=None
+with zipfile.ZipFile(archive) as z:
+ m=json.loads(z.read('export.json')); files=[]
+ for kind in ['instances','volumeSegmentations','derivedAlignmentFrames','models']:
+  for row in m['records'].get(kind,[]):
+   for field in ['file','validFile']:
+    if field not in row: continue
+    desc=row[field]; h=hashlib.sha256(); count=0
+    with z.open(desc['path']) as member:
+     while chunk:=member.read(1024*1024): h.update(chunk); count+=len(chunk)
+    assert count==desc['byteLength'] and h.hexdigest()==desc['sha256']
+    files.append({'path':desc['path'],'bytes':count,'sha256':h.hexdigest()})
+ if corrupted:
+  target=z.getinfo(m['records']['models'][0]['file']['path'])
+  with open(corrupted,'r+b') as f:
+   f.seek(target.header_offset); header=f.read(30)
+   offset=target.header_offset+30+sum(struct.unpack_from('<HH',header,26))
+   f.seek(offset); value=f.read(1); f.seek(offset); f.write(bytes([value[0]^255]))
+print(json.dumps({'physicalBytes':os.path.getsize(archive),'verifiedMembers':len(files),'files':files,'corruptedOffset':offset}))
+`,
+        archive,
+        ...(corrupted ? [corrupted] : []),
+      ],
+      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+    ),
+  );
+}
+
+backupTest(
+  'backup capacity streams a multi-GiB archive and preserves saved work across failed and successful restores',
+  async ({ page }, info) => {
+    test.setTimeout(720_000);
+    const errors: string[] = [];
+    let downloads = 0;
+    page.on('pageerror', (error) => errors.push(error.message));
+    page.on('download', () => downloads++);
+    await page.context().addInitScript(() => {
+      const io: Window['backupIo'] = {
+        current: null,
+        start(name) {
+          this.current = {
+            name,
+            startedAt: Date.now(),
+            arrayBufferBytes: 0,
+            maxArrayBufferBytes: 0,
+            streamBytes: 0,
+            maxStreamChunkBytes: 0,
+            pending: 0,
+            lastReadAt: Date.now(),
+          };
+        },
+        stop() {
+          const result = { ...this.current!, finishedAt: Date.now() };
+          this.current = null;
+          return result;
+        },
+      };
+      window.backupIo = io;
+      const arrayBuffer = Blob.prototype.arrayBuffer;
+      Blob.prototype.arrayBuffer = function () {
+        const record = io.current;
+        if (record) {
+          record.arrayBufferBytes += this.size;
+          record.maxArrayBufferBytes = Math.max(record.maxArrayBufferBytes, this.size);
+          record.pending++;
+          record.lastReadAt = Date.now();
+        }
+        return arrayBuffer.call(this).finally(() => {
+          if (record) {
+            record.pending--;
+            record.lastReadAt = Date.now();
+          }
+        });
+      };
+      const read = ReadableStreamDefaultReader.prototype.read;
+      ReadableStreamDefaultReader.prototype.read = function () {
+        const record = io.current;
+        if (record) record.pending++;
+        return read
+          .call(this)
+          .then((result) => {
+            if (record && result.value instanceof Uint8Array) {
+              record.streamBytes += result.value.byteLength;
+              record.maxStreamChunkBytes = Math.max(record.maxStreamChunkBytes, result.value.byteLength);
+            }
+            return result;
+          })
+          .finally(() => {
+            if (record) {
+              record.pending--;
+              record.lastReadAt = Date.now();
+            }
+          });
+      };
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Import scans', exact: true }).click();
+    const intake = page.getByRole('dialog', { name: 'Import scans' });
+    const files = await Promise.all(
+      createSyntheticSvrDicomFiles({
+        imageSize: 256,
+        slicesPerOrientation: 128,
+        orientations: 1,
+        pixelPaddingValue: null,
+      }).map(async (file) => ({ name: file.name, mimeType: file.type, buffer: Buffer.from(await file.arrayBuffer()) })),
+    );
+    await intake.getByLabel('Select DICOM image files').setInputFiles(files);
+    await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
+    await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
+    await intake.getByRole('button', { name: 'Done', exact: true }).click();
+    const source = await page.evaluate(async (defaults) => {
       const read = <T>(request: IDBRequest<T>) =>
         new Promise<T>((resolve, reject) => {
           request.onsuccess = () => resolve(request.result);
           request.onerror = () => reject(request.error);
         });
-      const data = await read(indexedDB.open('MiraViewerDB'));
-      const models = await read(indexedDB.open('miraviewer:model-cache'));
+      const done = (tx: IDBTransaction) =>
+        new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onabort = () => reject(tx.error);
+        });
+      const db = await read(indexedDB.open('MiraViewerDB'));
       try {
-        const [instances, savedModels] = await Promise.all([
-          read(data.transaction('instances').objectStore('instances').getAll()),
-          read(models.transaction('models').objectStore('models').getAll()),
-        ]);
-        const pixels = await instances[0].fileBlob.arrayBuffer();
-        const model = new Uint8Array(await savedModels[0].blob.arrayBuffer());
-        return {
-          images: instances.length,
-          models: savedModels.map((row) => row.key),
-          dicomSha256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', pixels)), (byte) =>
-            byte.toString(16).padStart(2, '0'),
-          ).join(''),
-          modelBytes: model.byteLength,
-          modelMatches: model.every((byte) => byte === 0x5a),
+        const images = (await read(db.transaction('instances').objectStore('instances').getAll())) as DicomInstance[];
+        images.sort((a, b) => a.instanceNumber - b.instanceNumber);
+        const first = images[0]!;
+        const patientKey = (
+          await read(db.transaction('app_state').objectStore('app_state').get('selected_patient_key'))
+        ).value as string;
+        const labels = new Uint8Array(256 * 256 * 128);
+        for (let offset = 0; offset < labels.length; offset += 4096) labels[offset] = 1;
+        labels[labels.length - 1] = 2;
+        const seeds = {
+          foreground: Uint32Array.of(0, 4096, labels.length - 1),
+          background: Uint32Array.of(1, 4097),
+          lastStroke: { plane: 'axial', slice: 127 },
         };
+        const tx = db.transaction(['panel_settings', 'volume_segmentations', 'derived_alignment_frames'], 'readwrite');
+        tx.objectStore('panel_settings').put({
+          comboId: `source:${encodeURIComponent(first.seriesInstanceUid)}`,
+          source: { studyUid: first.studyInstanceUid, seriesUid: first.seriesInstanceUid },
+          settings: { [first.studyInstanceUid]: { ...defaults, zoom: 1.25, panX: 0.12 } },
+        });
+        tx.objectStore('volume_segmentations').put({
+          volumeKey: 'synthetic-backup-selection',
+          patientKey,
+          studyUid: first.studyInstanceUid,
+          seriesUids: [first.seriesInstanceUid],
+          dims: [256, 256, 128],
+          labels,
+          seeds,
+          reviewState: 'reviewed',
+          updatedAt: 123,
+        });
+        tx.objectStore('derived_alignment_frames').put({
+          id: 'synthetic-backup-plane',
+          patientKey,
+          datasetRevision: 1,
+          sequenceId: 'synthetic-sequence',
+          targetStudyUid: first.studyInstanceUid,
+          targetSeriesUid: first.seriesInstanceUid,
+          targetSopInstanceUid: first.sopInstanceUid,
+          targetFrameIndex: 0,
+          referenceStudyUid: first.studyInstanceUid,
+          referenceSeriesUid: first.seriesInstanceUid,
+          referenceSopInstanceUid: first.sopInstanceUid,
+          referenceFrameIndex: 0,
+          referenceImagePositionPatient: first.imagePositionPatient,
+          referenceImageOrientationPatient: first.imageOrientationPatient,
+          referencePixelSpacing: first.pixelSpacing,
+          referenceRows: first.rows,
+          referenceColumns: first.columns,
+          rows: first.rows,
+          columns: first.columns,
+          sourceImageId: `miradb:${first.sopInstanceUid}`,
+          pixels: new Float32Array(first.rows * first.columns).fill(12.5),
+          valid: new Uint8Array(first.rows * first.columns).fill(1),
+          createdAt: 123,
+        });
+        await done(tx);
+        for (let index = 0; index < 16; index++) {
+          // Real native Blob payloads and real persisted bytes, never fake size getters.
+          // One model transaction at a time keeps fixture construction bounded too.
+          const tile = new Blob([new Uint8Array(1024 * 1024).fill(0x40 + index)]);
+          const blob = new Blob(Array.from({ length: 128 }, () => tile));
+          const key = `synthetic-large-${String(index).padStart(2, '0')}`;
+          const tx = db.transaction('models', 'readwrite');
+          tx.objectStore('models').put({ key, blob, savedAtMs: index + 1 }, key);
+          await done(tx);
+        }
+        return { imageCount: images.length, labelBytes: labels.length, modelBytes: 16 * 128 * 1024 * 1024 };
       } finally {
-        data.close();
-        models.close();
+        db.close();
+      }
+    }, DEFAULT_PANEL_SETTINGS);
+    const expected = await readBackupContents(page);
+    expect(expected.images).toHaveLength(128);
+    expect(expected.images.map((image) => image.sha256).sort()).toEqual(
+      files.map((file) => createHash('sha256').update(file.buffer).digest('hex')).sort(),
+    );
+    expect(expected.models.reduce((sum, row) => sum + row.bytes, 0)).toBe(2 * 1024 ** 3);
+    const phases: BackupIo[] = [];
+    const openExport = async () => {
+      await page.getByRole('button', { name: 'Application menu' }).click();
+      await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
+      return page.getByRole('dialog', { name: 'Export Backup (ZIP)' });
+    };
+    let dialog = await openExport();
+    await page.evaluate(() => window.backupIo.start('export-cancel'));
+    await dialog.getByRole('button', { name: 'Export', exact: true }).click();
+    await page.waitForFunction(() => (window.backupIo.current?.arrayBufferBytes ?? 0) > 1024 * 1024);
+    const exportCancelAt = Date.now();
+    await dialog.getByRole('button', { name: 'Cancel export', exact: true }).click();
+    await page.waitForFunction(
+      () => window.backupIo.current?.pending === 0 && Date.now() - window.backupIo.current.lastReadAt > 250,
+    );
+    phases.push(await page.evaluate(() => window.backupIo.stop()));
+    const exportCancelSettledMs = Date.now() - exportCancelAt;
+    expect(downloads).toBe(0);
+    dialog = await openExport();
+    await page.evaluate(() => window.backupIo.start('export-multi-gib-download'));
+    const downloaded = page.waitForEvent('download', { timeout: 240_000 });
+    await dialog.getByRole('button', { name: 'Export', exact: true }).click();
+    const download = await downloaded;
+    const archive = info.outputPath('synthetic-multi-gib-backup.zip');
+    await download.saveAs(archive);
+    expect(await download.failure()).toBeNull();
+    phases.push(await page.evaluate(() => window.backupIo.stop()));
+    expect((await stat(archive)).size).toBeGreaterThan(2 * 1024 ** 3);
+    expect(phases.at(-1)!.maxArrayBufferBytes).toBeLessThanOrEqual(1024 * 1024);
+
+    const corrupted = info.outputPath('synthetic-corrupted-backup.zip');
+    if (process.platform === 'darwin') execFileSync('/bin/cp', ['-c', archive, corrupted]);
+    else await copyFile(archive, corrupted, constants.COPYFILE_FICLONE);
+    // Independent stdlib ZIP reader checks every physical member's CRC and SHA
+    // with bounded reads. Only the cloned negative fixture receives a byte flip.
+    const independent = verifyBackupArchive(archive, corrupted);
+    expect(independent.verifiedMembers).toBe(147); // 128 images, labels, pixels/support, 16 models.
+    await attachReceipt(info, 'streaming-backup-export-checkpoint', {
+      source,
+      phases,
+      independent,
+      expected,
+      exportCancelSettledMs,
+    });
+
+    // Keep a different valid dataset visible while trying cancel/corruption/quota.
+    await expect(dialog).not.toBeVisible();
+    await page.evaluate(async () => {
+      const read = <T>(request: IDBRequest<T>) =>
+        new Promise<T>((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      const db = await read(indexedDB.open('MiraViewerDB'));
+      try {
+        const tx = db.transaction(['models', 'volume_segmentations', 'panel_settings'], 'readwrite');
+        for (let index = 0; index < 16; index++) {
+          const key = `synthetic-large-${String(index).padStart(2, '0')}`;
+          tx.objectStore('models').put(
+            { key, blob: new Blob([new Uint8Array(1024 * 1024).fill(0x40 + index)]), savedAtMs: index + 1 },
+            key,
+          );
+        }
+        const selection = await read(tx.objectStore('volume_segmentations').get('synthetic-backup-selection'));
+        selection.labels[0] = 0;
+        selection.seeds.foreground = Uint32Array.of(4096);
+        selection.seeds.background = Uint32Array.of(0, 1);
+        selection.reviewState = 'draft';
+        tx.objectStore('volume_segmentations').put(selection);
+        for (const row of (await read(tx.objectStore('panel_settings').getAll())) as PanelSettingsRow[]) {
+          for (const value of Object.values(row.settings)) value.zoom = 1.75;
+          tx.objectStore('panel_settings').put(row);
+        }
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onabort = () => reject(tx.error);
+        });
+      } finally {
+        db.close();
       }
     });
-    expect(restored).toEqual({
-      images: 1,
-      models: ['synthetic-capacity-a'],
-      dicomSha256: createHash('sha256').update(files[0]!.buffer).digest('hex'),
-      modelBytes: 1024 * 1024,
-      modelMatches: true,
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Application menu' })).toBeVisible();
+    const previous = await readBackupContents(page, true);
+    const failures = [];
+    for (const reason of ['cancel', 'corrupt', 'publication-quota'] as const) {
+      await page.getByRole('button', { name: 'Import additional scans', exact: true }).click();
+      const restore = page.getByRole('dialog', { name: 'Import scans' });
+      await restore
+        .getByLabel('Select a complete backup or image archive')
+        .setInputFiles(reason === 'corrupt' ? corrupted : archive);
+      await expect(restore.getByText(/allow space for two copies/i)).toBeVisible();
+      if (reason === 'cancel') await capture(page, info, 'streaming-backup-restore-review');
+      await restore.getByRole('checkbox').check();
+      if (reason === 'publication-quota')
+        await page.evaluate(() => {
+          const put = IDBObjectStore.prototype.put;
+          IDBObjectStore.prototype.put = function (...args) {
+            if (this.name === 'models')
+              throw new DOMException('Synthetic publication quota exhausted', 'QuotaExceededError');
+            return Reflect.apply(put, this, args);
+          };
+          window.restoreBackupWrites = () => {
+            IDBObjectStore.prototype.put = put;
+          };
+        });
+      await page.evaluate((name) => window.backupIo.start(name), `restore-${reason}`);
+      await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+      let cancelSettledMs: number | undefined;
+      if (reason === 'cancel') {
+        await expect
+          .poll(() =>
+            page.evaluate(async () => {
+              const db = await new Promise<IDBDatabase>((resolve, reject) => {
+                const r = indexedDB.open('MiraViewerDB');
+                r.onsuccess = () => resolve(r.result);
+                r.onerror = () => reject(r.error);
+              });
+              try {
+                return await new Promise<number>((resolve, reject) => {
+                  const r = db.transaction('backup_staging').objectStore('backup_staging').count();
+                  r.onsuccess = () => resolve(r.result);
+                  r.onerror = () => reject(r.error);
+                });
+              } finally {
+                db.close();
+              }
+            }),
+          )
+          .toBeGreaterThan(0);
+        const cancelAt = Date.now();
+        await restore.getByRole('button', { name: 'Cancel import', exact: true }).click();
+        await expect(restore.getByText('Import canceled', { exact: true })).toBeVisible();
+        cancelSettledMs = Date.now() - cancelAt;
+      } else
+        await expect(restore.getByRole('alert')).toContainText(
+          reason === 'corrupt' ? /CRC32|integrity/ : /publication quota exhausted/,
+          { timeout: 240_000 },
+        );
+      phases.push(await page.evaluate(() => window.backupIo.stop()));
+      await page.evaluate(() => window.restoreBackupWrites?.());
+      const actual = await readBackupContents(page, true);
+      await attachReceipt(info, `streaming-backup-${reason}-checkpoint`, {
+        previous,
+        actual,
+        phase: phases.at(-1),
+        cancelSettledMs,
+      });
+      expect(actual).toEqual(previous);
+      failures.push({ reason, unchanged: true, cancelSettledMs });
+      await restore.getByRole('button', { name: 'Done', exact: true }).click();
+    }
+
+    // Exercise the other output path with a real native writable file. Only the
+    // OS picker is substituted; writes, abort/close and readback use Chromium OPFS.
+    await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory();
+      const handle = await root.getFileHandle('synthetic-direct-backup.zip', { create: true });
+      Object.defineProperty(window, 'showSaveFilePicker', { configurable: true, value: async () => handle });
     });
-  } finally {
-    await context.close();
-  }
-  expect(errors).toEqual([]);
-  await attachReceipt(info, 'backup-capacity-receipt', {
-    build: await (await page.request.get('/browser-build.json')).json(),
-    browser: page.context().browser()!.version(),
-    declaredModelBytes,
-    dicomBytes: files.reduce((sum, file) => sum + file.buffer.byteLength, 0),
-    work,
-    downloadsAfterRejection: 0,
-    completedDownloads: downloads,
-    restored,
-    errors,
-    scope:
-      'Normal production export UI. One imported synthetic DICOM and two composed native Blob cache records. No virtual size getters, private data, real model weights, inference, or claim of 512 MiB resident allocation. Oversized rejection precedes any large payload read; a 1 MiB sparse model then round-trips through export and fresh-context restore with exact source bytes.',
-  });
-});
+    dialog = await openExport();
+    await page.evaluate(() => window.backupIo.start('export-native-file'));
+    await dialog.getByRole('button', { name: 'Save directly…' }).click();
+    await expect(dialog.getByText('Export complete')).toBeVisible({ timeout: 90_000 });
+    phases.push(await page.evaluate(() => window.backupIo.stop()));
+    const nativeDownloaded = page.waitForEvent('download');
+    const nativeFileBytes = await page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory();
+      const file = await (await root.getFileHandle('synthetic-direct-backup.zip')).getFile();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(file);
+      link.download = 'native-file-backup.zip';
+      link.click();
+      URL.revokeObjectURL(link.href);
+      return file.size;
+    });
+    expect(nativeFileBytes).toBeGreaterThan(32 * 1024 * 1024);
+    const nativeDownload = await nativeDownloaded;
+    const nativeArchive = info.outputPath('synthetic-native-file-backup.zip');
+    await nativeDownload.saveAs(nativeArchive);
+    expect(await nativeDownload.failure()).toBeNull();
+    const nativeVerification = verifyBackupArchive(nativeArchive);
+    expect(nativeVerification.verifiedMembers).toBe(independent.verifiedMembers);
+
+    let restored;
+    let restoreTiming;
+    let nativeRestored;
+    await withBackupBrowser(info, async (context) => {
+      const target = await context.newPage();
+      target.on('pageerror', (error) => errors.push(error.message));
+      await target.goto('http://127.0.0.1:43134/');
+      await target.getByRole('button', { name: 'Import scans', exact: true }).click();
+      const restore = target.getByRole('dialog', { name: 'Import scans' });
+      await restore.getByLabel('Select a complete backup or image archive').setInputFiles(archive);
+      await restore.getByRole('checkbox').check();
+      const startedAt = Date.now();
+      await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+      await expect(restore.getByText('Complete backup restored', { exact: true })).toBeVisible({ timeout: 240_000 });
+      restoreTiming = { startedAt, finishedAt: Date.now() };
+      restored = await readBackupContents(target, true);
+      expect(restored.staging).toBe(0);
+      expect(restored.images).toEqual(expected.images);
+      expect(restored.models.map((row) => ({ ...row, matches: null }))).toEqual(expected.models);
+      expect(restored.models.every((row) => row.matches)).toBe(true);
+      expect(restored.settings).toEqual(expected.settings);
+      expect(restored.frames).toEqual(expected.frames);
+      expect(restored.selections).toEqual(expected.selections);
+      await restore.getByRole('button', { name: 'Done', exact: true }).click();
+      await target.getByRole('button', { name: 'Import additional scans', exact: true }).click();
+      await restore.getByLabel('Select a complete backup or image archive').setInputFiles(nativeArchive);
+      await restore.getByRole('checkbox').check();
+      await restore.getByRole('button', { name: 'Restore complete backup', exact: true }).click();
+      await expect(restore.getByText('Complete backup restored', { exact: true })).toBeVisible({ timeout: 90_000 });
+      nativeRestored = await readBackupContents(target, true);
+      expect(nativeRestored.token).not.toBe(previous.token);
+      expect({ ...nativeRestored, token: previous.token }).toEqual(previous);
+    });
+    expect(errors).toEqual([]);
+    await attachReceipt(info, 'streaming-backup-receipt', {
+      build: await (await page.request.get('/browser-build.json')).json(),
+      browser: page.context().browser()!.version(),
+      source,
+      storage: 'Separate disposable persistent Chromium profiles with disk-backed IndexedDB, not incognito contexts.',
+      archiveBytes: (await stat(archive)).size,
+      independent,
+      phases,
+      exportCancelSettledMs,
+      failures,
+      nativeFileBytes,
+      restored,
+      restoreTiming,
+      nativeVerification,
+      nativeRestored,
+      errors,
+      scope:
+        'Normal production app, real multi-GiB ZIP and fresh-context restore, 128 generated DICOMs, labels, literal marks, source settings, derived pixels/support and opaque synthetic model bytes. Whole physical members independently CRC/SHA-verified with Python zipfile. Browser process RSS is recorded by the owned runner. Native file output uses a real OPFS FileSystemWritableFileStream with only the picker substituted; no OS-picker or inference claim. No private inputs.',
+    });
+  },
+);
 
 test('sparse brush edits preserve durable history without rebuilding grayscale or copying whole masks', async ({
   page,

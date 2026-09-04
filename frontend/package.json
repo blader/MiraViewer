@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@itk-wasm/elastix": "^1.0.2",
+    "@noble/hashes": "2.4.0",
     "@tailwindcss/vite": "^4.1.18",
     "cornerstone-core": "^2.6.1",
     "cornerstone-math": "^0.1.10",

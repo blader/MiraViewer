@@ -109,6 +109,39 @@ async function importComparisonExaminations(
   return files.length;
 }
 
+test('backup controls show per-file limits and a reachable direct-save action', async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await importComparisonExaminations(
+    page,
+    null,
+    [{ studyDate: '20370101', studyUid: '1.2.826.0.1.3680043.10.543.20370101.1' }],
+    true,
+  );
+  await page.getByRole('button', { name: 'Application menu' }).click();
+  await page.getByRole('button', { name: 'Export backup (ZIP)' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Export Backup (ZIP)' });
+  await expect(dialog.getByText(/each individual file can be up to 512 MiB/i)).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Save directly…' })).toBeInViewport();
+  await capture(page, info, 'streaming-backup-export-desktop');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(dialog.getByRole('button', { name: 'Save directly…' })).toBeInViewport();
+  await expect(dialog.getByRole('button', { name: 'Export', exact: true })).toBeInViewport();
+  await capture(page, info, 'streaming-backup-export-mobile');
+  expect(errors).toEqual([]);
+  await attachReceipt(info, 'backup-ui-receipt', {
+    build: await (await page.request.get('/browser-build.json')).json(),
+    browser: page.context().browser()!.version(),
+    viewports: [
+      { width: 1440, height: 1000 },
+      { width: 390, height: 844 },
+    ],
+    errors,
+    scope:
+      'Normal production backup dialog with an imported synthetic examination. Static desktop/mobile controls; not a file-picker, throughput, or large-restore proof.',
+  });
+});
+
 test('normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged', async ({
   page,
 }, info) => {

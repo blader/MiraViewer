@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
+import { openDB } from 'idb';
 import { Blob as NativeBlob } from 'node:buffer';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import { deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
+import { DATASET_TOKEN_STATE_KEY, deleteAllStoredMriData, getDB, resetDbForTests } from '../src/db/db';
 import { initializeComparisonState } from '../src/db/comparisonState';
 import { acquisitionChoiceKey, sourceSettingsKey } from '../src/db/comparisonIdentity';
 import { usePanelSettings } from '../src/hooks/usePanelSettings';
@@ -14,18 +15,20 @@ import {
   saveVolumeSegmentation,
 } from '../src/utils/localApi';
 import { DEFAULT_PANEL_SETTINGS } from '../src/utils/constants';
-import type { VolumeSegmentationRow } from '../src/db/schema';
-import { loadSafeArchive } from '../src/services/archiveSafety';
+import type { BackupStagingRow, VolumeSegmentationRow } from '../src/db/schema';
+import { loadSafeArchive, MAX_ENTRY_BYTES } from '../src/services/archiveSafety';
+import { BackupZip } from '../src/services/backupZip';
 import {
   exportStudiesToZip,
-  assertSnapshotCapacity,
+  exportStudiesToFile,
   getSnapshotRestoreBytes,
-  MAX_SNAPSHOT_RESTORE_BYTES,
   readSnapshotManifest,
   restoreSnapshot,
 } from '../src/services/exportBackup';
 import {
   deleteModelCache,
+  deleteModelBlob,
+  getAllModelRecords,
   getModelBlob,
   MODEL_CACHE_DB_NAME,
   putModelBlob,
@@ -176,6 +179,7 @@ function selectionRow(): VolumeSegmentationRow {
   labels[13] = labels[19] = 2;
   return {
     volumeKey: 'synthetic-native-selection',
+    patientKey: 'P1',
     studyUid: 'study-1',
     seriesUids: ['series-1'],
     frameOfReferenceUid: 'frame-1',
@@ -244,12 +248,14 @@ describe('exportBackup', () => {
   });
 
   it('enforces the import identity policy when a restored Study UID has a conflicting patient name', async () => {
-    const { archive, manifest } = await seedSnapshot();
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    await putModelBlob('synthetic-model', new NativeBlob(['previous model']));
     const db = await getDB();
     await db.put('studies', { ...manifest.records.studies[0]!, patientName: 'Conflicting patient' });
     await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/conflicting patient names/i);
     expect((await db.get('studies', 'study-1'))?.patientName).toBe('Conflicting patient');
     expect(await db.count('instances')).toBe(0);
+    expect(await (await getModelBlob('synthetic-model'))!.text()).toBe('previous model');
   });
 
   afterEach(async () => {
@@ -318,12 +324,13 @@ describe('exportBackup', () => {
     expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('storage');
     expect(manifest.records.volumeSegmentations[0]).not.toHaveProperty('revision');
     await restoreSnapshot(archive.zip, manifest);
-    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    expect(structuredClone(await getVolumeSegmentation(saved.volumeKey))).toStrictEqual(structuredClone(saved));
     await saveVolumeSegmentation({ ...saved, labels: new Uint8Array(saved.labels.length).fill(1) });
     expect(await (await getDB()).count('volume_segmentation_chunks')).toBeGreaterThan(0);
     await restoreSnapshot(archive.zip, manifest);
-    expect(await getVolumeSegmentation(saved.volumeKey)).toStrictEqual(structuredClone(saved));
-    expect(await (await getDB()).count('volume_segmentation_chunks')).toBe(0);
+    expect(structuredClone(await getVolumeSegmentation(saved.volumeKey))).toStrictEqual(structuredClone(saved));
+    const chunks = await (await getDB()).getAll('volume_segmentation_chunks');
+    expect(chunks.map((chunk) => Array.from(chunk.data))).toEqual([Array.from(saved.labels)]);
   });
 
   it.each(['axial', 'coronal', 'sagittal', 'absent'] as const)(
@@ -334,7 +341,7 @@ describe('exportBackup', () => {
       else saved.seeds!.lastStroke = { plane, slice: 1 };
       const { archive, manifest } = await seedSnapshot({ segmentation: saved });
       await restoreSnapshot(archive.zip, manifest);
-      const restored = await (await getDB()).get('volume_segmentations', saved.volumeKey);
+      const restored = structuredClone(await getVolumeSegmentation(saved.volumeKey));
       expect(Object.prototype.toString.call(restored!.seeds!.foreground)).toBe('[object Uint32Array]');
       expect(Object.prototype.toString.call(restored!.seeds!.background)).toBe('[object Uint32Array]');
       expect([...restored!.seeds!.foreground]).toEqual([19, 1, 13, 19]);
@@ -352,7 +359,7 @@ describe('exportBackup', () => {
     const legacy = await rewriteSnapshotManifest(blob, manifest);
     expect(legacy.manifest.records.volumeSegmentations[0]!.seeds!.foreground).toEqual({ 0: 19, 1: 1, 2: 13, 3: 19 });
     await restoreSnapshot(legacy.archive.zip, legacy.manifest);
-    const restored = await (await getDB()).get('volume_segmentations', saved.volumeKey);
+    const restored = structuredClone(await getVolumeSegmentation(saved.volumeKey));
     expect(ArrayBuffer.isView(restored!.seeds!.foreground)).toBe(true);
     expect(ArrayBuffer.isView(restored!.seeds!.background)).toBe(true);
     expect([...restored!.seeds!.foreground]).toEqual([19, 1, 13, 19]);
@@ -365,7 +372,7 @@ describe('exportBackup', () => {
     const { archive, manifest } = await seedSnapshot({ segmentation: legacy });
     expect(manifest.records.volumeSegmentations[0]!.seeds!.foreground).toEqual([19, 1, 13, 19]);
     await restoreSnapshot(archive.zip, manifest);
-    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    expect(structuredClone(await getVolumeSegmentation(saved.volumeKey))).toStrictEqual(structuredClone(saved));
   });
 
   it('rejects malformed stored editing marks during export instead of coercing or dropping them', async () => {
@@ -387,7 +394,7 @@ describe('exportBackup', () => {
         snapshot = { ...snapshot, ...(await rewriteSnapshotManifest(snapshot.blob, snapshot.manifest)) };
       }
       await restoreSnapshot(snapshot.archive.zip, snapshot.manifest);
-      const restored = await (await getDB()).get('volume_segmentations', saved.volumeKey);
+      const restored = structuredClone(await getVolumeSegmentation(saved.volumeKey));
       expect(restored).toStrictEqual(structuredClone(saved));
       if (kind === 'absent') expect(restored).not.toHaveProperty('seeds');
       else {
@@ -513,21 +520,29 @@ describe('exportBackup', () => {
   );
 
   it('stops restoration before medical mutation when cancelled during preparation', async () => {
-    const { archive, manifest } = await seedSnapshot({ segmentation: selectionRow() });
+    const { archive, manifest } = await seedSnapshot({ segmentation: selectionRow(), model: true });
     const controller = new AbortController();
     const committed = vi.fn();
 
     await expect(
-      restoreSnapshot(archive.zip, manifest, () => controller.abort(), {
-        signal: controller.signal,
-        onCommitStart: committed,
-      }),
+      restoreSnapshot(
+        archive.zip,
+        manifest,
+        (current, total) => {
+          if (current === total) controller.abort();
+        },
+        {
+          signal: controller.signal,
+          onCommitStart: committed,
+        },
+      ),
     ).rejects.toMatchObject({ name: 'AbortError' });
 
     expect(committed).not.toHaveBeenCalled();
     expect(await (await getDB()).count('studies')).toBe(0);
     expect(await (await getDB()).count('instances')).toBe(0);
     expect(await (await getDB()).count('volume_segmentations')).toBe(0);
+    expect(await (await getDB()).count('backup_staging')).toBe(0);
   });
 
   it('finishes the atomic medical commit once the noninterruptible commit phase begins', async () => {
@@ -543,24 +558,25 @@ describe('exportBackup', () => {
     expect(controller.signal.aborted).toBe(true);
     expect(result.ingested).toBe(1);
     expect(await (await getDB()).count('instances')).toBe(1);
-    expect(await (await getDB()).get('volume_segmentations', saved.volumeKey)).toStrictEqual(structuredClone(saved));
+    expect(structuredClone(await getVolumeSegmentation(saved.volumeKey))).toStrictEqual(structuredClone(saved));
+    expect(await (await getDB()).count('backup_staging')).toBe(0);
   });
 
-  it('rejects oversized complete backups before reading members or mutating any durable store', async () => {
+  it('rejects an oversized individual payload before reading members or mutating any durable store', async () => {
     const { archive, manifest } = await seedSnapshot({ model: true });
-    manifest.records.instances[0]!.file.byteLength = MAX_SNAPSHOT_RESTORE_BYTES + 1;
+    manifest.records.instances[0]!.file.byteLength = MAX_ENTRY_BYTES + 1;
     const committed = vi.fn();
 
-    expect(getSnapshotRestoreBytes(manifest)).toBeGreaterThan(MAX_SNAPSHOT_RESTORE_BYTES);
+    expect(() => getSnapshotRestoreBytes(manifest)).toThrow(/512 MiB per-file restore limit/);
     await expect(restoreSnapshot(archive.zip, manifest, undefined, { onCommitStart: committed })).rejects.toThrow(
-      /512 MiB safe restore limit/i,
+      /512 MiB per-file restore limit/i,
     );
     expect(committed).not.toHaveBeenCalled();
     expect(await (await getDB()).count('instances')).toBe(0);
     expect((await indexedDB.databases()).some((database) => database.name === MODEL_CACHE_DB_NAME)).toBe(false);
   });
 
-  it('rejects aggregate export capacity before consuming file bytes, labels, hashes or ZIP entries', async () => {
+  it('rejects an oversized export member before consuming file bytes, labels, hashes or ZIP entries', async () => {
     const saved = selectionRow();
     const { archive, manifest } = await seedSnapshot({ model: true, segmentation: saved });
     await restoreSnapshot(archive.zip, manifest);
@@ -569,13 +585,13 @@ describe('exportBackup', () => {
     const original = (await db.get('instances', 'inst-1'))!;
     // Virtual declared sizes exercise admission without allocating a GiB fixture.
     const rows = [original, { ...original, sopInstanceUid: 'inst-2', fileBlob: new NativeBlob([Uint8Array.of(4)]) }];
-    for (const row of rows) Object.defineProperty(row.fileBlob, 'size', { value: MAX_SNAPSHOT_RESTORE_BYTES / 2 });
+    Object.defineProperty(rows[0]!.fileBlob, 'size', { value: MAX_ENTRY_BYTES + 1 });
     const query = vi.spyOn(db, 'getAllFromIndex').mockResolvedValueOnce(rows);
     const bytes = vi.spyOn(NativeBlob.prototype, 'arrayBuffer');
-    const entries = vi.spyOn(JSZip.prototype, 'file');
+    const entries = vi.spyOn(BackupZip.prototype, 'add');
     const reads = vi.spyOn(IDBObjectStore.prototype, 'getAll');
     try {
-      await expect(exportStudiesToZip(['study-1'])).rejects.toThrow(/512 MiB safe restore limit/);
+      await expect(exportStudiesToZip(['study-1'])).rejects.toThrow(/512 MiB per-file restore limit/);
       expect(bytes).not.toHaveBeenCalled();
       expect(entries).not.toHaveBeenCalled();
       expect(reads.mock.contexts.filter((store) => store.name === 'volume_segmentation_chunks')).toHaveLength(0);
@@ -591,16 +607,19 @@ describe('exportBackup', () => {
     }
   });
 
-  it('uses an inclusive payload ceiling in both directions', () => {
-    expect(() => assertSnapshotCapacity(MAX_SNAPSHOT_RESTORE_BYTES)).not.toThrow();
-    expect(() => assertSnapshotCapacity(MAX_SNAPSHOT_RESTORE_BYTES + 1)).toThrow(/512 MiB/);
-    expect(() => assertSnapshotCapacity(Number.MAX_SAFE_INTEGER + 1)).toThrow(/invalid payload size/);
+  it('admits aggregate payloads above 512 MiB while rejecting invalid individual sizes', async () => {
+    const { manifest } = await seedSnapshot({ model: true });
+    manifest.records.instances[0]!.file.byteLength = MAX_ENTRY_BYTES;
+    manifest.records.models[0]!.file.byteLength = MAX_ENTRY_BYTES;
+    expect(getSnapshotRestoreBytes(manifest)).toBe(MAX_ENTRY_BYTES * 2);
+    manifest.records.models[0]!.file.byteLength = Number.MAX_SAFE_INTEGER + 1;
+    expect(() => getSnapshotRestoreBytes(manifest)).toThrow(/invalid declared size/);
   });
 
   it('round trips a highly compressible below-cap model without weakening archive expansion guards', async () => {
     const bytes = new Uint8Array(1024 * 1024);
     const { archive, manifest } = await seedSnapshot({ model: new NativeBlob([bytes]) });
-    expect(getSnapshotRestoreBytes(manifest)).toBeLessThan(MAX_SNAPSHOT_RESTORE_BYTES);
+    expect(getSnapshotRestoreBytes(manifest)).toBeLessThan(MAX_ENTRY_BYTES);
     await expect(restoreSnapshot(archive.zip, manifest)).resolves.toMatchObject({ ingested: 1 });
     const restored = new Uint8Array(await (await getModelBlob('synthetic-model'))!.arrayBuffer());
     expect(restored.byteLength).toBe(bytes.byteLength);
@@ -632,8 +651,10 @@ describe('exportBackup', () => {
 
   it('detects model-cache version conflicts before committing medical images or annotations', async () => {
     const { archive, manifest } = await seedSnapshot({ model: true });
+    // A fresh shared database must first admit an unmigrated legacy cache.
+    await deleteAllStoredMriData();
     const newer = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 2);
+      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 3);
       request.onupgradeneeded = () => request.result.createObjectStore('models');
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -649,19 +670,256 @@ describe('exportBackup', () => {
     expect(await (await getDB()).count('instances')).toBe(0);
   });
 
-  it('reports bounded SHA-verification degradation while retaining mandatory member CRC verification', async () => {
+  it('migrates legacy model bytes once, preserving metadata and avoiding resurrection after a model deletion', async () => {
+    await deleteModelCache();
+    await deleteAllStoredMriData();
+    const record = { key: 'legacy-private-model', blob: new NativeBlob(['synthetic legacy bytes']), savedAtMs: 123 };
+    const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(MODEL_CACHE_DB_NAME, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('models').put(record, record.key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    let retired = false;
+    legacy.onversionchange = () => {
+      retired = true;
+      legacy.close();
+    };
+    const copied = await getAllModelRecords();
+    expect(retired).toBe(true);
+    expect(copied).toHaveLength(1);
+    expect(copied[0]).toMatchObject({ key: record.key, savedAtMs: 123 });
+    expect(await copied[0]!.blob.text()).toBe('synthetic legacy bytes');
+    expect(await (await getDB()).count('models')).toBe(1);
+    await deleteModelBlob(record.key);
+    await resetDbForTests();
+    expect(await getAllModelRecords()).toEqual([]);
+  });
+
+  it.each(['models', 'backup_staging'] as const)(
+    'rolls back medical rows, models and saved-work identity when the %s write fails',
+    async (failedStore) => {
+      const selection = selectionRow();
+      const { archive, manifest } = await seedSnapshot({ model: true, segmentation: selection });
+      await restoreSnapshot(archive.zip, manifest);
+      const db = await getDB();
+      await db.put('instances', {
+        ...(await db.get('instances', 'inst-1'))!,
+        fileBlob: new NativeBlob(['prior scan']),
+      });
+      await putModelBlob('synthetic-model', new NativeBlob(['prior model']));
+      await saveVolumeSegmentation({
+        ...selection,
+        labels: Uint8Array.from(selection.labels, (_, index) => Number(index === 5)),
+        seeds: {
+          foreground: Uint32Array.of(5),
+          background: Uint32Array.of(19),
+          lastStroke: { plane: 'axial', slice: 0 },
+        },
+        reviewState: 'draft',
+      });
+      const token = await db.get('app_state', DATASET_TOKEN_STATE_KEY);
+      const labels = await getVolumeSegmentation(selection.volumeKey);
+      const original = IDBObjectStore.prototype.put;
+      const put = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+        this: IDBObjectStore,
+        ...args
+      ) {
+        if (this.name === failedStore && (failedStore === 'models' || (args[0] as BackupStagingRow).store === 'models'))
+          throw new DOMException('Synthetic model quota exhaustion', 'QuotaExceededError');
+        return Reflect.apply(original, this, args);
+      });
+      try {
+        await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/quota exhaustion/);
+      } finally {
+        put.mockRestore();
+      }
+      expect(await (await db.get('instances', 'inst-1'))!.fileBlob.text()).toBe('prior scan');
+      expect(await (await getModelBlob('synthetic-model'))!.text()).toBe('prior model');
+      expect(await db.get('app_state', DATASET_TOKEN_STATE_KEY)).toEqual(token);
+      expect(await getVolumeSegmentation(selection.volumeKey)).toEqual(labels);
+      expect(await db.count('backup_staging')).toBe(0);
+    },
+  );
+
+  it('keeps staged scans, labels and models invisible until the one publication boundary', async () => {
+    const saved = selectionRow();
+    const { archive, manifest } = await seedSnapshot({ model: true, segmentation: saved });
+    const db = await getDB();
+    let observed!: Promise<number[]>;
+    await restoreSnapshot(archive.zip, manifest, undefined, {
+      onCommitStart: () => {
+        // These read transactions precede the publication transaction. No await
+        // or archive read is allowed inside the publication callback itself.
+        observed = Promise.all(
+          ['studies', 'instances', 'volume_segmentations', 'models', 'backup_staging'].map((store) =>
+            db.count(store as 'instances'),
+          ),
+        );
+      },
+    });
+    const before = await observed;
+    expect(before.slice(0, 4)).toEqual([0, 0, 0, 0]);
+    expect(before[4]).toBe(4); // Image, nonzero label chunk, selection head, model.
+    expect(await db.count('instances')).toBe(1);
+    expect(await db.count('models')).toBe(1);
+    expect(await db.count('backup_staging')).toBe(0);
+    expect(structuredClone(await getVolumeSegmentation(saved.volumeKey))).toStrictEqual(structuredClone(saved));
+    expect((await getAllModelRecords())[0]!.savedAtMs).toBe(manifest.records.models[0]!.savedAtMs);
+  });
+
+  it.each(['staging removed', 'dataset replaced'] as const)(
+    'refuses publication when %s after verification',
+    async (change) => {
+      const { archive, manifest } = await seedSnapshot({ model: true, segmentation: selectionRow() });
+      const db = await getDB();
+      let mutation!: Promise<unknown>;
+      await expect(
+        restoreSnapshot(archive.zip, manifest, undefined, {
+          onCommitStart: () => {
+            mutation =
+              change === 'staging removed'
+                ? db.clear('backup_staging')
+                : db.put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'newer dataset owner' });
+          },
+        }),
+      ).rejects.toThrow(change === 'staging removed' ? /staging is incomplete/ : /replaced/);
+      await mutation;
+      expect(await db.count('studies')).toBe(0);
+      expect(await db.count('instances')).toBe(0);
+      expect(await db.count('models')).toBe(0);
+      expect(await db.count('backup_staging')).toBe(0);
+      if (change === 'dataset replaced')
+        expect((await db.get('app_state', DATASET_TOKEN_STATE_KEY))?.value).toBe('newer dataset owner');
+    },
+  );
+
+  it('reclaims abandoned lock-owned staging without deleting a producer that cannot use Web Locks', async () => {
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    const db = await getDB();
+    const record: BackupStagingRow = {
+      store: 'models',
+      row: { key: 'other-model', blob: new NativeBlob(['synthetic pending bytes']), savedAtMs: 1 },
+    };
+    await db.put('backup_staging', record, ['unlocked-live-producer', 0]);
+    await db.put('backup_staging', record, ['locked:abandoned-producer', 0]);
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const request = vi.fn((_name, _options, callback) => callback());
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } });
+    try {
+      await restoreSnapshot(archive.zip, manifest);
+      expect(request).toHaveBeenCalledOnce();
+      expect(await db.getAllKeys('backup_staging')).toEqual([['unlocked-live-producer', 0]]);
+      expect(await db.get('models', 'other-model')).toBeUndefined();
+      const retained = await db.get('backup_staging', ['unlocked-live-producer', 0]);
+      if (retained?.store !== 'models') throw new Error('The other producer lost its staged model.');
+      expect(await retained.row.blob.text()).toBe('synthetic pending bytes');
+      expect(await db.count('instances')).toBe(1);
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'locks', descriptor);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
+  });
+
+  it('reserves capacity for both staging and publication before reading any backup payload', async () => {
+    const { archive, manifest } = await seedSnapshot({ model: new NativeBlob([new Uint8Array(1024 * 1024)]) });
+    const storage = Object.getOwnPropertyDescriptor(navigator, 'storage');
+    Object.defineProperty(navigator, 'storage', {
+      configurable: true,
+      value: { estimate: async () => ({ quota: 3 * 1024 * 1024, usage: 512 * 1024 }) },
+    });
+    const committed = vi.fn();
+    try {
+      await expect(restoreSnapshot(archive.zip, manifest, undefined, { onCommitStart: committed })).rejects.toThrow(
+        /Insufficient browser storage/,
+      );
+      expect(committed).not.toHaveBeenCalled();
+      expect(await (await getDB()).count('backup_staging')).toBe(0);
+      expect(await (await getDB()).count('instances')).toBe(0);
+    } finally {
+      if (storage) Object.defineProperty(navigator, 'storage', storage);
+      else Reflect.deleteProperty(navigator, 'storage');
+    }
+  });
+
+  it('aborts a direct file on early failures but honors completion once file publication starts', async () => {
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    await restoreSnapshot(archive.zip, manifest);
+    const controller = new AbortController();
+    const sink = {
+      write: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    controller.abort();
+    await expect(
+      exportStudiesToFile(['study-1'], sink, undefined, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(sink.write).not.toHaveBeenCalled();
+    expect(sink.close).not.toHaveBeenCalled();
+    expect(sink.abort).toHaveBeenCalledOnce();
+    sink.abort.mockClear();
+    sink.write.mockRejectedValueOnce(new Error('Synthetic file write failed'));
+    sink.abort.mockImplementationOnce(() => {
+      throw new Error('Synthetic abort failed');
+    });
+    await expect(exportStudiesToFile(['study-1'], sink)).rejects.toThrow('Synthetic file write failed');
+    expect(sink.close).not.toHaveBeenCalled();
+    expect(sink.abort).toHaveBeenCalledOnce();
+    sink.abort.mockClear();
+    const finishing = new AbortController();
+    await expect(
+      exportStudiesToFile(['study-1'], sink, undefined, {
+        signal: finishing.signal,
+        onCommitStart: () => finishing.abort(),
+      }),
+    ).resolves.toBeUndefined();
+    expect(sink.close).toHaveBeenCalledOnce();
+    expect(sink.abort).not.toHaveBeenCalled();
+  });
+
+  it('does not publish an export from a replaced dataset', async () => {
+    const { archive, manifest } = await seedSnapshot();
+    await restoreSnapshot(archive.zip, manifest);
+    const db = await getDB();
+    let replacement: Promise<unknown> | undefined;
+    await expect(
+      exportStudiesToZip(['study-1'], (progress) => {
+        if (progress.stage === 'collecting' && !replacement)
+          replacement = db.put('app_state', { key: DATASET_TOKEN_STATE_KEY, value: 'newer dataset owner' });
+      }),
+    ).rejects.toThrow(/replaced/);
+    await replacement;
+  });
+
+  it('does not let restored app state re-enable an obsolete model authority', async () => {
+    const { archive, manifest } = await seedSnapshot({ model: true });
+    const legacy = await openDB(MODEL_CACHE_DB_NAME, 2, {
+      upgrade(db) {
+        db.createObjectStore('models');
+      },
+    });
+    await legacy.put(
+      'models',
+      { key: 'synthetic-model', blob: new NativeBlob(['obsolete bytes']), savedAtMs: 1 },
+      'synthetic-model',
+    );
+    legacy.close();
+    manifest.records.appState.push({ key: 'model_cache_migrated', value: false });
+    await restoreSnapshot(archive.zip, manifest);
+    await resetDbForTests();
+    expect(Array.from(new Uint8Array(await (await getModelBlob('synthetic-model'))!.arrayBuffer()))).toEqual([5, 6, 7]);
+  });
+
+  it('retains SHA verification even when WebCrypto is unavailable', async () => {
     const { archive, manifest } = await seedSnapshot();
     manifest.records.instances[0]!.file.sha256 = 'synthetic-digest-not-available';
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
     Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} });
 
     try {
-      const result = await restoreSnapshot(archive.zip, manifest);
-      expect(result.ingested).toBe(1);
-      expect(result.integrityWarnings).toEqual([
-        'SHA-256 verification was unavailable; every archive member passed its CRC32 check.',
-      ]);
-      expect(await (await getDB()).count('instances')).toBe(1);
+      await expect(restoreSnapshot(archive.zip, manifest)).rejects.toThrow(/integrity check/);
+      expect(await (await getDB()).count('instances')).toBe(0);
     } finally {
       if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor);
       else Reflect.deleteProperty(globalThis, 'crypto');

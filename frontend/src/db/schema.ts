@@ -382,7 +382,19 @@ export interface DerivedAlignmentFrameRow extends DerivedAlignmentFramePresentat
   createdAt: number;
 }
 
+export type ModelRecord = { key: string; blob: Blob; savedAtMs: number };
+
+/** Verified restore payloads are invisible until their one publication transaction. */
+export type BackupStagingRow =
+  | { store: 'instances'; row: DicomInstance }
+  | { store: 'volume_segmentations'; row: StoredVolumeSegmentationRow }
+  | { store: 'volume_segmentation_chunks'; row: VolumeSegmentationChunk }
+  | { store: 'derived_alignment_frames'; row: DerivedAlignmentFrameRow }
+  | { store: 'models'; row: ModelRecord };
+
 export interface MiraDB extends DBSchema {
+  models: { key: string; value: ModelRecord };
+  backup_staging: { key: [string, number]; value: BackupStagingRow };
   studies: {
     key: string; // studyInstanceUid
     value: DicomStudy;

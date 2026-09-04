@@ -1,0 +1,123 @@
+{
+  "scope": "Seven normal-production workflows; headed installed Chrome; synthetic fixtures only; no Storybook.",
+  "route": "http://127.0.0.1:43134/",
+  "sourceBefore": {
+    "head": "7d9b57b199046476fb2627abd54db773c7b39b99",
+    "sourceSha256": "18da86c9f15d6242835c4a973c336253b3a2fe6fa7dbb6c8ee8a3d0f8ef70435",
+    "applicationSourceSha256": "7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "7d9b57b199046476fb2627abd54db773c7b39b99",
+    "sourceSha256": "18da86c9f15d6242835c4a973c336253b3a2fe6fa7dbb6c8ee8a3d0f8ef70435",
+    "applicationSourceSha256": "7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "builtSource": {
+    "head": "7d9b57b199046476fb2627abd54db773c7b39b99",
+    "sourceSha256": "18da86c9f15d6242835c4a973c336253b3a2fe6fa7dbb6c8ee8a3d0f8ef70435",
+    "applicationSourceSha256": "7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+    "mode": "production",
+    "builtAt": "2026-09-04T08:01:01.763Z",
+    "fixture": "synthetic only"
+  },
+  "startedAt": "2026-09-04T08:06:53.269Z",
+  "finishedAt": "2026-09-04T08:07:35.675Z",
+  "stats": {
+    "startTime": "2026-09-04T08:06:53.782Z",
+    "duration": 40808.027,
+    "expected": 7,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "tests": [
+    {
+      "title": "backup controls show per-file limits and a reachable direct-save action",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1656
+        }
+      ]
+    },
+    {
+      "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 11557
+        }
+      ]
+    },
+    {
+      "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 6418
+        }
+      ]
+    },
+    {
+      "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 1571
+        }
+      ]
+    },
+    {
+      "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 2373
+        }
+      ]
+    },
+    {
+      "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 4294
+        }
+      ]
+    },
+    {
+      "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+      "status": "expected",
+      "results": [
+        {
+          "status": "passed",
+          "durationMs": 4878
+        }
+      ]
+    }
+  ],
+  "exitCode": 0,
+  "cleanup": "CLOSED",
+  "remainingOwnedPids": [],
+  "remainingProfiles": 0,
+  "port43134": "free",
+  "harness": [
+    {
+      "path": "frontend/tmp/sparse-editing.config.ts",
+      "sha256": "58e0a42bc4987a29a4087af055954b38486dd496192e7ed66912bed82780a4d6"
+    },
+    {
+      "path": "frontend/tmp/run-sparse-editing.mjs",
+      "sha256": "52a8d71d66a16aed2a4bfaea7ded1f97f66a808754d2be9d4985e9c9400ac0bd"
+    }
+  ]
+}

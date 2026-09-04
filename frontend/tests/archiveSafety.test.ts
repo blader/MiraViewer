@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
+import { createHash } from 'node:crypto';
 import { loadSafeArchive, readArchiveEntry } from '../src/services/archiveSafety';
+import { BackupZip, type BackupZipSink } from '../src/services/backupZip';
+import { inspectBlob } from '../src/services/archiveIntegrity';
 import { readSnapshotManifest } from '../src/services/exportBackup';
 
 async function makeArchive(
@@ -131,6 +134,57 @@ async function makeSparseZip64(options: { entries?: number; declaredBytes?: numb
 }
 
 describe('archiveSafety', () => {
+  it.each(['blob', 'stream'] as const)(
+    'writes %s backups with bounded payload reads and independent ZIP/SHA verification',
+    async (mode) => {
+      const original = Uint8Array.from({ length: 128 * 1024 + 7 }, (_, index) => index % 251);
+      const source = new Blob([original]);
+      const whole = vi.spyOn(source, 'arrayBuffer').mockRejectedValue(new Error('Whole payload reads are forbidden'));
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      const sink: BackupZipSink = {
+        write: vi.fn(async (value) => {
+          if (!(value instanceof Uint8Array)) throw new Error('Expected streamed bytes');
+          chunks.push(new Uint8Array(value));
+        }),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+      const zip = new BackupZip(undefined, mode === 'stream' ? sink : undefined);
+      const sizes: number[] = [];
+      const sha = await zip.add('models/synthetic-ä.onnx', source, (size) => sizes.push(size));
+      await zip.add('empty', new Blob());
+      const result = await zip.finish();
+      const archive = result ?? new Blob(chunks);
+      expect(whole).not.toHaveBeenCalled();
+      expect(Math.max(...sizes)).toBeLessThanOrEqual(64 * 1024);
+      expect(sizes.reduce((sum, size) => sum + size, 0)).toBe(original.length);
+      expect(sha).toBe(createHash('sha256').update(original).digest('hex'));
+      const independent = await JSZip.loadAsync(new Uint8Array(await archive.arrayBuffer()), { checkCRC32: true });
+      expect(await independent.file('models/synthetic-ä.onnx')!.async('uint8array')).toEqual(original);
+      expect((await independent.file('empty')!.async('uint8array')).length).toBe(0);
+      const safe = await loadSafeArchive(archive);
+      expect(
+        new Uint8Array(await (await readArchiveEntry(safe.zip.file('models/synthetic-ä.onnx')!)).arrayBuffer()),
+      ).toEqual(original);
+      if (mode === 'stream') expect(sink.close).toHaveBeenCalledOnce();
+      expect(sink.abort).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cancels hashing between bounded chunks and rejects unsafe output paths before reading bytes', async () => {
+    const signal = new AbortController();
+    const source = new Blob([new Uint8Array(256 * 1024)]);
+    const progress = vi.fn(() => signal.abort());
+    await expect(inspectBlob(source, { signal: signal.signal, onChunk: progress })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(progress).toHaveBeenCalledOnce();
+    const zip = new BackupZip();
+    await expect(zip.add('../unsafe', source)).rejects.toThrow(/unsafe file path/);
+    await zip.add('name', new Blob());
+    await expect(zip.add('name', source)).rejects.toThrow(/duplicate/);
+  });
+
   it.each(['STORE', 'DEFLATE'] as const)(
     'reads and verifies %s members without eagerly inflating them',
     async (mode) => {

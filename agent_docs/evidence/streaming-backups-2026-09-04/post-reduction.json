@@ -1,0 +1,237 @@
+{
+  "scope": "Post-reduction validation of commit 4824b5a. The original multi-GiB resource receipt retains its earlier fingerprint; it was not rerun or relabeled.",
+  "sourceBefore": {
+    "head": "4824b5ad08da75be5f2a6a512ff943a9eb572537",
+    "sourceSha256": "2933545c9088654bc1f85afcd2a159d6e2eccc8a0c899afd65c8bda68538c570",
+    "applicationSourceSha256": "b78d091699bd7b5dc8b302542983ad70db7e062e9f839c8c450a620d45606e6a",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceAfter": {
+    "head": "4824b5ad08da75be5f2a6a512ff943a9eb572537",
+    "sourceSha256": "2933545c9088654bc1f85afcd2a159d6e2eccc8a0c899afd65c8bda68538c570",
+    "applicationSourceSha256": "b78d091699bd7b5dc8b302542983ad70db7e062e9f839c8c450a620d45606e6a",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "unitSuite": {
+    "success": true,
+    "numPassedTests": 3209,
+    "numFailedTests": 0,
+    "numPendingTests": 54,
+    "command": "env -u MIRAVIEWER_SVR_CORPUS_DIR npm run test -- --maxWorkers=2 --reporter=json --outputFile=tmp/streaming-backup-full-final.json",
+    "scope": "Complete default suite; optional private corpus variables not configured.",
+    "original": {
+      "path": "frontend/tmp/streaming-backup-full-final.json",
+      "sha256": "f1ca80291d83801a0ed1756fecc53b67168049256cdbbd96293add67daf96c22"
+    }
+  },
+  "checks": {
+    "typescript": {
+      "status": "passed",
+      "scope": "Project references, including browser tests, passed after the reduction."
+    },
+    "lint": {
+      "status": "passed",
+      "command": "npm run lint",
+      "original": {
+        "path": "frontend/tmp/streaming-backup-lint-final.log",
+        "sha256": "0d4695f4da2780a75fa8d28ae5fabe88093b7de3774417c514e2ecd90774e01f"
+      }
+    },
+    "productionBuild": {
+      "status": "passed",
+      "mode": "production",
+      "builtAt": "2026-09-04T08:24:58.297Z",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "verifiedModelBytes": 75065470,
+      "warning": "Existing Vite large-chunk warnings remain.",
+      "original": {
+        "path": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-05/candidate-build.json",
+        "sha256": "ba2456bf772da9605e9da471d5e58a77cac8e1eb20c419e4de8548ce90d6ab70"
+      },
+      "log": {
+        "path": "frontend/tmp/streaming-backup-build-05.log",
+        "sha256": "0a129ea9fba25723cea589bcf2a07defe280f637398853c6d8767e1173658582"
+      }
+    }
+  },
+  "workflow": {
+    "route": "http://127.0.0.1:43134/",
+    "environment": "Normal production application; installed headed Chrome; generated inputs only; no Storybook.",
+    "startedAt": "2026-09-04T08:25:31.238Z",
+    "finishedAt": "2026-09-04T08:26:16.229Z",
+    "stats": {
+      "startTime": "2026-09-04T08:25:31.768Z",
+      "duration": 43269.229,
+      "expected": 7,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "tests": [
+      {
+        "title": "backup controls show per-file limits and a reachable direct-save action",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 1761
+          }
+        ]
+      },
+      {
+        "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 11455
+          }
+        ]
+      },
+      {
+        "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 5926
+          }
+        ]
+      },
+      {
+        "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 1525
+          }
+        ]
+      },
+      {
+        "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 2259
+          }
+        ]
+      },
+      {
+        "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 4798
+          }
+        ]
+      },
+      {
+        "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+        "status": "expected",
+        "results": [
+          {
+            "status": "passed",
+            "durationMs": 6343
+          }
+        ]
+      }
+    ],
+    "exitCode": 0,
+    "sourceUnchanged": true,
+    "cleanup": "CLOSED",
+    "original": {
+      "path": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-05/candidate-workflow-run.json",
+      "sha256": "79c4703fcea4677b5f715175b24730916155eae6a6812168b8a8702787076665"
+    },
+    "results": {
+      "path": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-05/candidate-workflow-results/results.json",
+      "sha256": "52186b7e6ef4149fe5264a54bffa7ac5248b9931f8c1b136e5f90a99e3443c50"
+    }
+  },
+  "captures": [
+    {
+      "file": "streaming-backup-export-desktop.png",
+      "source": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-05/candidate-workflow-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-workflow/streaming-backup-export-desktop.png",
+      "sha256": "bb927f555c5fd32eda945e611f49e7780f4e3968eed1cc194454acdcf3bf9ac2",
+      "sameBytesAsPreviouslyInspected": true,
+      "inspectionScope": "Byte-identical to the individually inspected original-detail attempt-04 image. No new motion or OS-picker claim."
+    },
+    {
+      "file": "streaming-backup-export-mobile.png",
+      "source": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-05/candidate-workflow-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-workflow/streaming-backup-export-mobile.png",
+      "sha256": "0a703540f3dbbbf3d2b34879b174ff8de102d1ae9174e12652344f8bb2e8690d",
+      "sameBytesAsPreviouslyInspected": true,
+      "inspectionScope": "Byte-identical to the individually inspected original-detail attempt-04 image. No new motion or OS-picker claim."
+    }
+  ],
+  "cleanup": {
+    "receiptCount": 20,
+    "currentBatch": "CLEAR",
+    "staleOwned": "CLEAR",
+    "preservation": "CLEAR - read-only scoped audit; no user or other-worktree browser touched",
+    "port43134": "free",
+    "original": {
+      "path": "artifacts/turbovac/2026-09-04-streaming-backups/browser-cleanup-final.json",
+      "sha256": "611a42ac0cce1c9f238521097ac09ac817de28073de191da3be1dc02a3a61df3"
+    }
+  },
+  "reduction": {
+    "iterations": 2,
+    "behaviorPreserved": true,
+    "commentTextRemoved": false,
+    "viableCutsRemaining": false,
+    "metricsScope": "Before second-pass publication documentation; code is unchanged by that documentation.",
+    "before": {
+      "base": "origin/main",
+      "mergeBase": "d4fb10fdfbf2d1e9aac44759eb2387ce1e5ba477",
+      "head": "eeac47ac4843846f1cbb8019fbc7c36a2eab2018",
+      "divergence": "0\t2",
+      "changedEntries": 30,
+      "binaryFiles": 3,
+      "additions": 6419,
+      "deletions": 853,
+      "churn": 7272,
+      "sourceAdditions": 2048,
+      "sourceDeletions": 847,
+      "commentAdditions": 42,
+      "commentDeletions": 22,
+      "nonCommentSourceAdditions": 2006,
+      "nonCommentSourceChurn": 2831,
+      "untrackedCodeLines": 0,
+      "fullWorkingTreeAdditions": 6419,
+      "fullWorkingTreeChurn": 7272,
+      "fullWorkingTreeCommentAdditions": 42,
+      "untrackedFileCount": 1
+    },
+    "after": {
+      "base": "origin/main",
+      "mergeBase": "d4fb10fdfbf2d1e9aac44759eb2387ce1e5ba477",
+      "head": "4824b5ad08da75be5f2a6a512ff943a9eb572537",
+      "divergence": "0\t3",
+      "changedEntries": 30,
+      "binaryFiles": 3,
+      "additions": 6281,
+      "deletions": 732,
+      "churn": 7013,
+      "sourceAdditions": 1910,
+      "sourceDeletions": 726,
+      "commentAdditions": 37,
+      "commentDeletions": 16,
+      "nonCommentSourceAdditions": 1873,
+      "nonCommentSourceChurn": 2583,
+      "untrackedCodeLines": 0,
+      "fullWorkingTreeAdditions": 6281,
+      "fullWorkingTreeChurn": 7013,
+      "fullWorkingTreeCommentAdditions": 37,
+      "untrackedFileCount": 1
+    },
+    "report": {
+      "path": "artifacts/turbovac/2026-09-04-streaming-backups/reduction/report.md",
+      "sha256": "46ee6e3a0904987343782794539d6822e80c05744187fab77b5a85fd8b32f502"
+    }
+  }
+}
