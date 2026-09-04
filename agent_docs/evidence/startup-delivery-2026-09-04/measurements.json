@@ -1,0 +1,3169 @@
+{
+  "fixture": "synthetic only",
+  "builds": {
+    "baseline-01": {
+      "head": "7da6db818a339a27ac2f9ffec853944d58aff370",
+      "sourceSha256": "f38b5eb4ab584607d45d1cfba2f055bf9f80bf12dd244c8e09e996857e209177",
+      "applicationSourceSha256": "bbdd41fd2945a404f3c5cfeee3417d2f4bb266d7ee36287ffae90bf33411aeca",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T13:58:09.055Z",
+      "fixture": "synthetic only",
+      "node": "v22.22.0",
+      "initialChunks": [
+        {
+          "key": "index.html",
+          "file": "assets/index-BpFccXPu.js",
+          "bytes": 2664701,
+          "gzipBytes": 814004,
+          "sha256": "625143a6dd5bae70c73984b580d9673c3c23782232283483c8c593839dbd8d7f"
+        }
+      ],
+      "vercelConfigSha256": "3ee46d56bc8118742b956e1262be739530542d6ddc6c4ff30e3221c84bd028bb"
+    },
+    "candidate-02": {
+      "head": "7da6db818a339a27ac2f9ffec853944d58aff370",
+      "sourceSha256": "6bf54e272737c647f4598dcf17292ed4de2561c10275fe954d216aeb494c1be9",
+      "applicationSourceSha256": "75ceda3a9851c9a00386d4244073711f61b1cc74c169e4eb844602fa6dd8e267",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T14:08:35.132Z",
+      "fixture": "synthetic only",
+      "node": "v22.22.0",
+      "initialChunks": [
+        {
+          "key": "index.html",
+          "file": "assets/index-DbQx9iuD.js",
+          "bytes": 2046336,
+          "gzipBytes": 658045,
+          "sha256": "77a97ddfddc46d2173f4cc381dc3b9794e42abae309758030f2d23dd4b0a478a"
+        }
+      ],
+      "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+    },
+    "candidate-04": {
+      "head": "7da6db818a339a27ac2f9ffec853944d58aff370",
+      "sourceSha256": "1779140f61c8136274b1555cf1c68e89f3edceca084eebd8edd38428c2be248c",
+      "applicationSourceSha256": "48504a54af41c7c47215e38d34968536c19894c120f68a426bb326177dd64e9b",
+      "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c",
+      "mode": "production",
+      "builtAt": "2026-09-04T14:45:37.702Z",
+      "fixture": "synthetic only",
+      "node": "v22.22.0",
+      "initialChunks": [
+        {
+          "key": "index.html",
+          "file": "assets/index-CQI0d0uY.js",
+          "bytes": 2047293,
+          "gzipBytes": 658515,
+          "sha256": "aa0e08fa4939331828b9f61170534d3efbf9dc42dee18f370388a1d53f9f81fa"
+        }
+      ],
+      "vercelConfigSha256": "a2b4d767f4916a2f3410644867b4ba1f2fe9396bf8af03ae1c6599770fede758"
+    }
+  },
+  "startup": {
+    "baseline-startup-02": {
+      "receipt": "artifacts/performance/audit-startup-delivery-2026-09-04/baseline-startup-02/performance-measures-cold--b6f0e-ies-the-shipped-RLE-decoder-performance/startup-and-codec.json",
+      "browser": "151.0.7922.34",
+      "samples": 10,
+      "shellMedianMs": 318.6675000190735,
+      "drawAfterImportMedianMs": 78.28750002384186,
+      "longTaskDurationMedianMs": 90.0,
+      "allRasters": [
+        "24cd3f9d325f9dcb17240d0489b08124791520b914f5746e1b28303287f37e5e"
+      ]
+    },
+    "candidate-startup-02": {
+      "receipt": "artifacts/performance/audit-startup-delivery-2026-09-04/candidate-startup-02/performance-measures-cold--b6f0e-ies-the-shipped-RLE-decoder-performance/startup-and-codec.json",
+      "browser": "151.0.7922.34",
+      "samples": 10,
+      "shellMedianMs": 263.3700000047684,
+      "drawAfterImportMedianMs": 74.39499998092651,
+      "longTaskDurationMedianMs": 57.5,
+      "allRasters": [
+        "24cd3f9d325f9dcb17240d0489b08124791520b914f5746e1b28303287f37e5e"
+      ]
+    },
+    "candidate-startup-04": {
+      "receipt": "artifacts/performance/audit-startup-delivery-2026-09-04/candidate-startup-04/performance-measures-cold--b6f0e-ies-the-shipped-RLE-decoder-performance/startup-and-codec.json",
+      "browser": "151.0.7922.34",
+      "samples": 10,
+      "shellMedianMs": 273.80250012874603,
+      "drawAfterImportMedianMs": 74.0550000667572,
+      "longTaskDurationMedianMs": 57.5,
+      "allRasters": [
+        "24cd3f9d325f9dcb17240d0489b08124791520b914f5746e1b28303287f37e5e"
+      ],
+      "entryContentEncoding": "gzip"
+    }
+  },
+  "warm": {
+    "warm-baseline-04": {
+      "sizes": {
+        "512": {
+          "phases": [
+            {
+              "name": "warm-step",
+              "done": 4,
+              "canceled": 0,
+              "medianWorkerMs": 41.644999980926514,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 19.514999866485596,
+              "lastRequestToReadyFrameMs": 51.0550000667572
+            },
+            {
+              "name": "playback-8",
+              "done": 11,
+              "canceled": 1,
+              "medianWorkerMs": 40.55499982833862,
+              "canceledBytes": 3932160,
+              "lastRequestToDrawMs": 12.125,
+              "lastRequestToReadyFrameMs": 33.69000005722046
+            },
+            {
+              "name": "playback-16",
+              "done": 16,
+              "canceled": 1,
+              "medianWorkerMs": 41.93250000476837,
+              "canceledBytes": 3932160,
+              "lastRequestToDrawMs": 12.230000019073486,
+              "lastRequestToReadyFrameMs": 34.65499997138977
+            },
+            {
+              "name": "playback-32",
+              "done": 0,
+              "canceled": 33,
+              "medianWorkerMs": null,
+              "canceledBytes": 129761280,
+              "lastRequestToDrawMs": 16.0,
+              "lastRequestToReadyFrameMs": 32.91000008583069
+            }
+          ],
+          "outputs": {
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.251": [
+              "80b19131442d05294d79eb6a315af3692cd47826e69549fa437ffd5018bb62bc",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.128": [
+              "bd2508e22b84693b7a9b8debb0c581902987a7d3bf063a2fbed40e0be405ae73",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.129": [
+              "ed986d84142a7271740139e7bd082cbf64d22bf2aac731170f0607eeb9e5eefa",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.130": [
+              "ce956fed673fbfc947281e3032755e28f9116d6cdd6c4ac15b971ab6973cfa97",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.131": [
+              "141497a404475fc50d218021ec86ea6d9213e00bcfe17861df5fcc508d9acf49",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.132": [
+              "fb3428a877b444d1be1fe56b6533044e1cfc035c996a0300574d6bd4d23c7d73",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.133": [
+              "079dd7730c34a97742a424c293fb0d9e6ab997052421681c5cff78b770312816",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.134": [
+              "54e0817d59ff4d1745f4ccdcdafde31266a8c6470715d33d6135031d59ce1bc3",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.135": [
+              "3c482b4c9e132d964c01b1ffc62486015780a700309385d312bebe6c6d401cab",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.136": [
+              "eb056e2a55f6d8f7eb5adab55e715cc0c090979762f48ecc92e00dc8dc402f1b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.137": [
+              "2594c7f017fe885bc4a952e60750d0e979b23cc7f627ec76c06261da78df1af9",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.138": [
+              "6450fbb711183b9d14aa6cfb336d054268113bf3dbf4ffd8f472acdc1d979d6b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.139": [
+              "efa2ce7309853868759ce77d9113d56c7d1adb2886539ce5c73a7ac3946fcd8c",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.140": [
+              "ea88262bce5ac06e79e29afbac36e8eb1283b0fb0268417b366ee9ceae0370c7",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.141": [
+              "0d2db0f233b8fd980eef945c545092062e053e7c42e5c2c5488935531bca3f43",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.142": [
+              "d1ab0b8ff5d732a13cd2704deeb762a7ba5d76804e3e936c59de3979bb902085",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.143": [
+              "60938e88b6aeb53c7e247bee8f01e24c339ff544284760c6a6a808de1b8ba893",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.144": [
+              "0f2426f6e7fd6311157a7d8b36ef5bee1f03710938f1b5372449e6f7dbc8c692",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.145": [
+              "1421041e88cdb715397c71eb07d877ef564de96f03aa6064c64ce2448b975b37",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.146": [
+              "3de4963241c541e37615cd96968118a565a62ba04c658a32ff090fff26b53a01",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.147": [
+              "61e4bea982d417110e8739dac01e1c9149622d93b5134113b9ad56a99e6ad830",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.148": [
+              "286725f6b8ee4ba5fdf031d3752ab7d0e704f41d02011d268d45fb48fe2039ed",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.149": [
+              "b8f7ae54929acdeb13352393fb10bc265945106af78cd3919c521ea2d4459f0d",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.150": [
+              "7aa9cb02949c59f3aaedbfdf3a31070d50710c24053d9202c1e1ecaef0c4d4ff",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.151": [
+              "3685aac141326180581c095d8f2d99f636451d132324b9ab0e74214a705bedc0",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.152": [
+              "35094f26140974b48c97fe69adf61e25db748957b90bdeaf82bc671f7521a656",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.153": [
+              "1f46dde7739e9a8f92a8992da2778296861e2b7c2c0699a9f70fd2e98660c92b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.154": [
+              "7d2f1abb0cc44fdc9e30a1471c7160d74a9ca6fb92004bc21cce122e020672b4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.155": [
+              "76029be57ff3d127fc60adfd07875ba45faca88b1f1667d0b8b3c7758273add4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.156": [
+              "ea2d00580c843df796193caaf3a2d7da2796920ed7296602d304192df98ed287",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.157": [
+              "966722189fe8f80d1481f8609c431980549bfa617f7c8db15a26547a365d4f1f",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.158": [
+              "492039ce9df804c533805a95edef4d27ebed44a771cbba4cc30291b8fcacdcae",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.159": [
+              "022d226909334c33f744832b3fcec8cb1fe25144496853eef0cb4d25ad49af6c",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ]
+          },
+          "workerStarts": 69,
+          "longTasks": [
+            {
+              "phase": "cold",
+              "at": 96.32999992370605,
+              "duration": 56
+            },
+            {
+              "phase": "cold",
+              "at": 17005.08999991417,
+              "duration": 65
+            },
+            {
+              "phase": "cold",
+              "at": 18733.480000019073,
+              "duration": 52
+            }
+          ],
+          "sourceCount": 512,
+          "sourceManifestSha256": "5fd4fa3359195a80ccc507bb3e60153fcc041aac65adb20a9796e6e90b91576d"
+        },
+        "256": {
+          "phases": [
+            {
+              "name": "warm-step",
+              "done": 4,
+              "canceled": 0,
+              "medianWorkerMs": 19.12000000476837,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 10.5,
+              "lastRequestToReadyFrameMs": 32.46500015258789
+            },
+            {
+              "name": "playback-8",
+              "done": 12,
+              "canceled": 0,
+              "medianWorkerMs": 18.632499933242798,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 23.414999961853027,
+              "lastRequestToReadyFrameMs": 39.174999952316284
+            },
+            {
+              "name": "playback-16",
+              "done": 17,
+              "canceled": 0,
+              "medianWorkerMs": 18.94000005722046,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 53.269999980926514,
+              "lastRequestToReadyFrameMs": 71.64000010490417
+            },
+            {
+              "name": "playback-32",
+              "done": 56,
+              "canceled": 1,
+              "medianWorkerMs": 18.737499952316284,
+              "canceledBytes": 983040,
+              "lastRequestToDrawMs": 59.64999985694885,
+              "lastRequestToReadyFrameMs": 76.79999995231628
+            }
+          ],
+          "outputs": {
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.112": [
+              "fce6dff0b8e2936f10311c7ef333c5b4fa7e151296ec293c103b4d2c3ab61cd8",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.64": [
+              "33010cf950ff0da5827fd149d75df3ce5aa62e5bc4ba943e3c9420b14ae22db4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.65": [
+              "502102129a374fe1790cc0ab9e1db5d051b69fac1dc6b8d9b10df6a664a1bc24",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.66": [
+              "5c3ce3d3ed55a9c262c6720b85e642f8ca505b7900f6b9271a3c5fd1a28a0c25",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.67": [
+              "302f017463567253d44d276f5b2bc05f93bbdf13940b5b522924c2fd529857c6",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.68": [
+              "71f99473cb3091bed1f378d893bc0ab9c618b0226b3ed21aea802951a580b41c",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.69": [
+              "a29d522db4e0821eddd774ef3d1e217c301d4779bdb9d91460eff4e31db8bd0d",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.70": [
+              "e9cda273b6a4f7dd43081456a3b80b5965ab3b0b3dd42c4d93f54552b1907752",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.71": [
+              "51a1baea52542c5aaba223e31872acdfb3e117b5ba4aac2603bff0a1a245b1a5",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.72": [
+              "0453f317b59d5eed4d295072843707bf03beddae642909670ed3856a09aee301",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.73": [
+              "e81307b037cf934f2b2176f4baa4a9c7d91772d3e407c4b4d7e47c063f800352",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.74": [
+              "94a8ef8fed77dd840e24812ab63a75b228ee700728c84dcf5380fbd1c38a2bab",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.75": [
+              "9445da4fe92c71fe5267827a51377d0f1fe4842e50d38231bf2f173c0c3a143e",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.76": [
+              "78f0a405a6cb6965a1fbddafbbae7b9c7b311e0580a09ebb5979174b0bcd010f",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.77": [
+              "4d874dc7809504f2d182190274fa5eff978565f381f5b637bf33ae874f80bb9a",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.78": [
+              "f03e0a689cb5d2193d989315dc20ed65a0aaa1f31fee3d3ce094674d618b1952",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.79": [
+              "3e487fb7febcaf970bacb1bf65b8c4f924dfec096f526d76b776ba6b0bcf0ff7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.80": [
+              "b7f7b939483b7a9c84c29a424bdb08783439a29cdffdd7be6d5f26fa4de8eae8",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.81": [
+              "b590288617844e018c46d08427dfd5d223245f8a4c572cb3a17b54d412a58708",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.82": [
+              "888b4e6c9ac886dcc0b9b59f0930b60a2dfc7d91fbc82a5fc5b5cfbe2fc2f709",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.83": [
+              "ca34d6af35ed0f794167d45aacc9cd0d165a2ccb2b6ba41811211270613453fd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.84": [
+              "fa7e487afaf776e7c74248bf9692ba2087b1ddf67e19a225f4a7ace47a989406",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.85": [
+              "9cba859decbc1e7c990e4401a2dcb83603b523b1788673464eb38c31c525ae12",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.86": [
+              "96dad94eb49dd5a9c6403d954d1cd89e4a29137257c6f7af7d265bfbe8307fc7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.87": [
+              "6bf3314c45fa331ae717918814f6b8443c33fc8d239e00dd01bacc1fbc8f3297",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.88": [
+              "e1149dd32fd82a0be85ddbd434300d80fd53e4be57ee7ec32f347c5dd5ee2c32",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.89": [
+              "f772feb83fca0787a3f2f2222e51579272e4a23b5c9d193d0824ba027fe3db82",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.90": [
+              "4f409ed53267e0b3408245edaf4da2ac8572c39b5bc55ad9a563e84ffa996c24",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.91": [
+              "f3363104cfdcf64acb721fbc69d866d0f81de1a9f6f76e0a1d0cfac7d101b45b",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.92": [
+              "2b51ec3a826079f466c4ee50eed53f9d752c43b22f23e87805efefcca768ed2f",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.93": [
+              "c0311dd4aa88555f4401656aec7228e039b8830150442cd167543cbc726fa6fc",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.94": [
+              "c9845a2602ee053b9a010cb03d10e53e93a3b792ba2f691c7ddb1eb2b5147daf",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.95": [
+              "726565765a9f97a5e06e5c42bd86a669b08f7cae458c4f909fcd8ba12b4fa3c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.96": [
+              "f158d91821cdb179a1499e4fc00707290afddce2faa0a865b75493a1846c61b9",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.97": [
+              "07870ebe10d45c5ea6a06fcbf01c81e8a3e2da8edd4294a74685fb30227cdd86",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.98": [
+              "5f58d1c238d61a0ba78aec792a62606e39244220f023ab3e20eb16f1633613dd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.99": [
+              "562b590b59ad4b5cae96447c922c0a19f61fd94c1d5d4734ba573030d93262d2",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.100": [
+              "bcbc1e78b8e1d16a2dcb2f27a2f753670a8855d5dff0ea435d44df2a33b5e228",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.101": [
+              "6c25e78ffa43b6615c9be922eca85f4c3adf3b6a43d11967eccec263be077819",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.102": [
+              "8a519042396bf054df818fb3b649fd83fc4250288976fbb06fde7a82dfbc18dd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.103": [
+              "88543d00423615063ed321419d664848425cf986dcd8e1fe66a5a02dd6606b7c",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.104": [
+              "0fd31b236a17e899485b5ccd149265fb0758dd1fb3410265207530464fccba29",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.105": [
+              "2c5bb8c7c66d778163d22c31bfcb56a7007e49e9e4d24808fd7eb5a7124d59a0",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.106": [
+              "d0d46d8b876f48960a9d92337e7047461f52579f4b9003576c22ece5bc47fa63",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.107": [
+              "dabbc4bde2a8800d8c915e369dd766eae347e6491ff84357ff5895de22b145c5",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.108": [
+              "cbc61f29817bfd7b187b684bd6bd9bf9a89ffb522e38a73ecf24a34504cae516",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.109": [
+              "07ec7b360a0d435c60bb907b6da1d643963f348402086417ba83e316711ac4cb",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.111": [
+              "81cbf50fe7acf467e8413febec42626932f63a70d787b43d8432828d873456fc",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.113": [
+              "d5cb7706e1ca8dde4b9abf1534066e6f3a041e5462785240d61474c76daa1909",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.114": [
+              "65e53466af461fb430dc43cdd4105ce213f8d2c7405e7e58fdff6cc7d3602ce3",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.115": [
+              "ae0b374909c5a6c5eaa8759ab11bf8611b7ec62d22c3a852ef3d767562c432a4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.116": [
+              "5c9927bf57cf4850fbb0b3754e77f2c03b1b9802c40c0d2c31cdebb2a574d7ab",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.117": [
+              "9f14ce62e83b94bd8e813f1db85d4cea9feedcf3abd4830a28bbcd37d1870ca9",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.118": [
+              "4fb603151edb2f88d99ee030e99fcd665fc3ec9b2211a81f69b88dfa1e2c8c46",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.119": [
+              "cb3e4a44d936f4e57833850b452ed08f318d1a2067de05bc102474f0a0458f47",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.120": [
+              "ae68d2d24ca3bfe4ed5231e7fe398c4938095a29614807457c9bda9e637baf3d",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.121": [
+              "b258f7d209a54903004b2f8d112923e0211ec8dc99dd6fbc7cffa71ab6599ece",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.122": [
+              "c7e545e6ba8e1bbfe28ac5a5a324775e22333e9d56d34b627dc043b7e0bb33c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.123": [
+              "a43331143b1b59ef518cad0a01a0bac73be5c71a68efff4b0ac379096978c3a7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.124": [
+              "698a90e611fa4b0c475a2be77e5d1690837122a191c7515e9538f26033c6f0b6",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.125": [
+              "a39471d4058766d40e8ad72571e482eb8716e8af58dff171736d6816554bd48e",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.126": [
+              "b13365bdceaa346c7a2f32b85cf71ae1115f207c743d96d3074b0c2618c109c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.127": [
+              "bdbbefeab81ef62a1a71ca88bfd3a61d700e403ca589f695a2f8ba3473538b86",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.128": [
+              "678edc183aba3864bd18677e7f40ef51eab048d2ae9491b88762abd479e96963",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ]
+          },
+          "workerStarts": 93,
+          "longTasks": [
+            {
+              "phase": "cold",
+              "at": 101.06500005722046,
+              "duration": 56
+            }
+          ],
+          "sourceCount": 256,
+          "sourceManifestSha256": "84a6fabe015a40bdbda03101142a3219678fce3bd53cc390ee403cb78beb2f08"
+        }
+      },
+      "browserRss": {
+        "errors": [],
+        "status": 1,
+        "peakRssBytes": 1527513088,
+        "scope": "250-ms OS RSS samples of only the owned acceptance runner's Chromium descendants, including browser, renderer and GPU processes. Sampled whole-browser high-water, not isolated worker retained allocation or an instantaneous peak. No user process was sampled or interrupted."
+      }
+    },
+    "warm-candidate-04": {
+      "sizes": {
+        "512": {
+          "phases": [
+            {
+              "name": "warm-step",
+              "done": 4,
+              "canceled": 0,
+              "medianWorkerMs": 35.2849999666214,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 17.490000009536743,
+              "lastRequestToReadyFrameMs": 52.44000005722046
+            },
+            {
+              "name": "playback-8",
+              "done": 11,
+              "canceled": 1,
+              "medianWorkerMs": 32.640000104904175,
+              "canceledBytes": 3932160,
+              "lastRequestToDrawMs": 17.920000076293945,
+              "lastRequestToReadyFrameMs": 43.58999991416931
+            },
+            {
+              "name": "playback-16",
+              "done": 16,
+              "canceled": 1,
+              "medianWorkerMs": 31.664999961853027,
+              "canceledBytes": 3932160,
+              "lastRequestToDrawMs": 12.265000104904175,
+              "lastRequestToReadyFrameMs": 35.99500012397766
+            },
+            {
+              "name": "playback-32",
+              "done": 22,
+              "canceled": 1,
+              "medianWorkerMs": 32.46749997138977,
+              "canceledBytes": 3932160,
+              "lastRequestToDrawMs": 75.95000004768372,
+              "lastRequestToReadyFrameMs": 110.08999991416931
+            }
+          ],
+          "outputs": {
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.251": [
+              "80b19131442d05294d79eb6a315af3692cd47826e69549fa437ffd5018bb62bc",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.128": [
+              "bd2508e22b84693b7a9b8debb0c581902987a7d3bf063a2fbed40e0be405ae73",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.129": [
+              "ed986d84142a7271740139e7bd082cbf64d22bf2aac731170f0607eeb9e5eefa",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.130": [
+              "ce956fed673fbfc947281e3032755e28f9116d6cdd6c4ac15b971ab6973cfa97",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.131": [
+              "141497a404475fc50d218021ec86ea6d9213e00bcfe17861df5fcc508d9acf49",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.132": [
+              "fb3428a877b444d1be1fe56b6533044e1cfc035c996a0300574d6bd4d23c7d73",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.133": [
+              "079dd7730c34a97742a424c293fb0d9e6ab997052421681c5cff78b770312816",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.134": [
+              "54e0817d59ff4d1745f4ccdcdafde31266a8c6470715d33d6135031d59ce1bc3",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.135": [
+              "3c482b4c9e132d964c01b1ffc62486015780a700309385d312bebe6c6d401cab",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.136": [
+              "eb056e2a55f6d8f7eb5adab55e715cc0c090979762f48ecc92e00dc8dc402f1b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.137": [
+              "2594c7f017fe885bc4a952e60750d0e979b23cc7f627ec76c06261da78df1af9",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.138": [
+              "6450fbb711183b9d14aa6cfb336d054268113bf3dbf4ffd8f472acdc1d979d6b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.139": [
+              "efa2ce7309853868759ce77d9113d56c7d1adb2886539ce5c73a7ac3946fcd8c",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.140": [
+              "ea88262bce5ac06e79e29afbac36e8eb1283b0fb0268417b366ee9ceae0370c7",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.141": [
+              "0d2db0f233b8fd980eef945c545092062e053e7c42e5c2c5488935531bca3f43",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.142": [
+              "d1ab0b8ff5d732a13cd2704deeb762a7ba5d76804e3e936c59de3979bb902085",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.143": [
+              "60938e88b6aeb53c7e247bee8f01e24c339ff544284760c6a6a808de1b8ba893",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.144": [
+              "0f2426f6e7fd6311157a7d8b36ef5bee1f03710938f1b5372449e6f7dbc8c692",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.145": [
+              "1421041e88cdb715397c71eb07d877ef564de96f03aa6064c64ce2448b975b37",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.146": [
+              "3de4963241c541e37615cd96968118a565a62ba04c658a32ff090fff26b53a01",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.147": [
+              "61e4bea982d417110e8739dac01e1c9149622d93b5134113b9ad56a99e6ad830",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.148": [
+              "286725f6b8ee4ba5fdf031d3752ab7d0e704f41d02011d268d45fb48fe2039ed",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.149": [
+              "b8f7ae54929acdeb13352393fb10bc265945106af78cd3919c521ea2d4459f0d",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.150": [
+              "7aa9cb02949c59f3aaedbfdf3a31070d50710c24053d9202c1e1ecaef0c4d4ff",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.151": [
+              "3685aac141326180581c095d8f2d99f636451d132324b9ab0e74214a705bedc0",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.152": [
+              "35094f26140974b48c97fe69adf61e25db748957b90bdeaf82bc671f7521a656",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.153": [
+              "1f46dde7739e9a8f92a8992da2778296861e2b7c2c0699a9f70fd2e98660c92b",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.154": [
+              "7d2f1abb0cc44fdc9e30a1471c7160d74a9ca6fb92004bc21cce122e020672b4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.155": [
+              "76029be57ff3d127fc60adfd07875ba45faca88b1f1667d0b8b3c7758273add4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.156": [
+              "ea2d00580c843df796193caaf3a2d7da2796920ed7296602d304192df98ed287",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.157": [
+              "966722189fe8f80d1481f8609c431980549bfa617f7c8db15a26547a365d4f1f",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.158": [
+              "492039ce9df804c533805a95edef4d27ebed44a771cbba4cc30291b8fcacdcae",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.159": [
+              "022d226909334c33f744832b3fcec8cb1fe25144496853eef0cb4d25ad49af6c",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.160": [
+              "2ed8a0583cf758cba99fea900ed09f69551f21236e46fa2c6cc4df50c6e4703c",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.161": [
+              "6bf7f2464c37e1d45213dba66ca73895fee2cccab3126756346fc9cf0a3b5cc4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.163": [
+              "992c5e92eb48960e315a32421cf0ffa66305947615a4717a712601ca0ebf4700",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.164": [
+              "83e8c7285b4c0f031bc5deda3107279856de8ad2cf1540e64a4d0e988fe3e8ae",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.166": [
+              "7c2e052d0e4145414bb049ea6826d27bd8f37d37063477547455eb9cbd2bbd2d",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.168": [
+              "84eb474f10e81bfd41043c780d46cc63b272dda021559529437197bc76b08c66",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.169": [
+              "de64f785f5927f8d66137b4b5e0af18b2b40f99643b825a5ae63d6f4ebc6d984",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.170": [
+              "e947f2b1c43be332f490f98e6cc110948f356db8a189fb6412b5eb44ec1a33f4",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.172": [
+              "6c767019a7b433278500fdf4531d401a675e704bc259cbf64fbb828fedbff4db",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.173": [
+              "3f3143e1f601b498b9f4ba2980e041b6bd45fe2953eae6a77acd1553955bf819",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.175": [
+              "425179ad2a631f3bbc704d6c6d3a52cdb0a9fedec4961404480d088c3285e741",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.176": [
+              "b6a6333ae930ba212c123ed3aecfe79d9f8a8d352cd62185eec9680186cf6b3d",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.178": [
+              "ce3c919105caa5e8c11b89802cc194dfe71ce165a59022b1ab4a3454c9856a79",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.179": [
+              "146b8527e8b9cd7bf1014cb135a969c9d8cb41c67707488bdfcd62c049812f01",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.181": [
+              "1880a01ae9603b1561a6238ea1c1c06a0cf80a0868ed7f93e893126252268993",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.182": [
+              "b37f48aecc2f6d91b548f7bbf2bfe769bfbca046601756cffdcc892f14415911",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.184": [
+              "4302e5adaef4d1687bd2f331b02ed80f7bb6d9338654f844f7781f0e24fa3972",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.186": [
+              "960f87b0bae1c4914d2fcd3f457a525975590fe11b36020409f92d77ef8bd479",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.187": [
+              "ca1541995bf4061b7db2aba9c5ebfca4ffde68cbc4f18a68bc2fb60a762f6c41",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.189": [
+              "d934d157a1a6fe57fcedc5ad767a4348427a552afac0cbed32f8f515e830a36a",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.190": [
+              "889d122c0d99cb409151e3be30ba95369baacb6056aac85acaebd8e2d725d5db",
+              "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d"
+            ]
+          },
+          "workerStarts": 5,
+          "longTasks": [
+            {
+              "phase": "cold",
+              "at": 98.91000008583069,
+              "duration": 57
+            },
+            {
+              "phase": "cold",
+              "at": 15727.634999990463,
+              "duration": 61
+            }
+          ],
+          "sourceCount": 512,
+          "sourceManifestSha256": "5fd4fa3359195a80ccc507bb3e60153fcc041aac65adb20a9796e6e90b91576d"
+        },
+        "256": {
+          "phases": [
+            {
+              "name": "warm-step",
+              "done": 4,
+              "canceled": 0,
+              "medianWorkerMs": 9.292500019073486,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 12.244999885559082,
+              "lastRequestToReadyFrameMs": 39.40999984741211
+            },
+            {
+              "name": "playback-8",
+              "done": 12,
+              "canceled": 0,
+              "medianWorkerMs": 7.6524999141693115,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 15.640000104904175,
+              "lastRequestToReadyFrameMs": 30.69000005722046
+            },
+            {
+              "name": "playback-16",
+              "done": 17,
+              "canceled": 0,
+              "medianWorkerMs": 8.024999856948853,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 42.170000076293945,
+              "lastRequestToReadyFrameMs": 59.390000104904175
+            },
+            {
+              "name": "playback-32",
+              "done": 65,
+              "canceled": 0,
+              "medianWorkerMs": 7.694999933242798,
+              "canceledBytes": 0,
+              "lastRequestToDrawMs": 31.380000114440918,
+              "lastRequestToReadyFrameMs": 56.08999991416931
+            }
+          ],
+          "outputs": {
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.112": [
+              "fce6dff0b8e2936f10311c7ef333c5b4fa7e151296ec293c103b4d2c3ab61cd8",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.64": [
+              "33010cf950ff0da5827fd149d75df3ce5aa62e5bc4ba943e3c9420b14ae22db4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.65": [
+              "502102129a374fe1790cc0ab9e1db5d051b69fac1dc6b8d9b10df6a664a1bc24",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.66": [
+              "5c3ce3d3ed55a9c262c6720b85e642f8ca505b7900f6b9271a3c5fd1a28a0c25",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.67": [
+              "302f017463567253d44d276f5b2bc05f93bbdf13940b5b522924c2fd529857c6",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.68": [
+              "71f99473cb3091bed1f378d893bc0ab9c618b0226b3ed21aea802951a580b41c",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.69": [
+              "a29d522db4e0821eddd774ef3d1e217c301d4779bdb9d91460eff4e31db8bd0d",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.70": [
+              "e9cda273b6a4f7dd43081456a3b80b5965ab3b0b3dd42c4d93f54552b1907752",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.71": [
+              "51a1baea52542c5aaba223e31872acdfb3e117b5ba4aac2603bff0a1a245b1a5",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.72": [
+              "0453f317b59d5eed4d295072843707bf03beddae642909670ed3856a09aee301",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.73": [
+              "e81307b037cf934f2b2176f4baa4a9c7d91772d3e407c4b4d7e47c063f800352",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.74": [
+              "94a8ef8fed77dd840e24812ab63a75b228ee700728c84dcf5380fbd1c38a2bab",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.75": [
+              "9445da4fe92c71fe5267827a51377d0f1fe4842e50d38231bf2f173c0c3a143e",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.76": [
+              "78f0a405a6cb6965a1fbddafbbae7b9c7b311e0580a09ebb5979174b0bcd010f",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.77": [
+              "4d874dc7809504f2d182190274fa5eff978565f381f5b637bf33ae874f80bb9a",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.78": [
+              "f03e0a689cb5d2193d989315dc20ed65a0aaa1f31fee3d3ce094674d618b1952",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.79": [
+              "3e487fb7febcaf970bacb1bf65b8c4f924dfec096f526d76b776ba6b0bcf0ff7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.80": [
+              "b7f7b939483b7a9c84c29a424bdb08783439a29cdffdd7be6d5f26fa4de8eae8",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.81": [
+              "b590288617844e018c46d08427dfd5d223245f8a4c572cb3a17b54d412a58708",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.82": [
+              "888b4e6c9ac886dcc0b9b59f0930b60a2dfc7d91fbc82a5fc5b5cfbe2fc2f709",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.83": [
+              "ca34d6af35ed0f794167d45aacc9cd0d165a2ccb2b6ba41811211270613453fd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.84": [
+              "fa7e487afaf776e7c74248bf9692ba2087b1ddf67e19a225f4a7ace47a989406",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.85": [
+              "9cba859decbc1e7c990e4401a2dcb83603b523b1788673464eb38c31c525ae12",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.86": [
+              "96dad94eb49dd5a9c6403d954d1cd89e4a29137257c6f7af7d265bfbe8307fc7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.87": [
+              "6bf3314c45fa331ae717918814f6b8443c33fc8d239e00dd01bacc1fbc8f3297",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.88": [
+              "e1149dd32fd82a0be85ddbd434300d80fd53e4be57ee7ec32f347c5dd5ee2c32",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.89": [
+              "f772feb83fca0787a3f2f2222e51579272e4a23b5c9d193d0824ba027fe3db82",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.90": [
+              "4f409ed53267e0b3408245edaf4da2ac8572c39b5bc55ad9a563e84ffa996c24",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.91": [
+              "f3363104cfdcf64acb721fbc69d866d0f81de1a9f6f76e0a1d0cfac7d101b45b",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.92": [
+              "2b51ec3a826079f466c4ee50eed53f9d752c43b22f23e87805efefcca768ed2f",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.93": [
+              "c0311dd4aa88555f4401656aec7228e039b8830150442cd167543cbc726fa6fc",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.94": [
+              "c9845a2602ee053b9a010cb03d10e53e93a3b792ba2f691c7ddb1eb2b5147daf",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.95": [
+              "726565765a9f97a5e06e5c42bd86a669b08f7cae458c4f909fcd8ba12b4fa3c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.96": [
+              "f158d91821cdb179a1499e4fc00707290afddce2faa0a865b75493a1846c61b9",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.97": [
+              "07870ebe10d45c5ea6a06fcbf01c81e8a3e2da8edd4294a74685fb30227cdd86",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.98": [
+              "5f58d1c238d61a0ba78aec792a62606e39244220f023ab3e20eb16f1633613dd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.99": [
+              "562b590b59ad4b5cae96447c922c0a19f61fd94c1d5d4734ba573030d93262d2",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.100": [
+              "bcbc1e78b8e1d16a2dcb2f27a2f753670a8855d5dff0ea435d44df2a33b5e228",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.101": [
+              "6c25e78ffa43b6615c9be922eca85f4c3adf3b6a43d11967eccec263be077819",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.102": [
+              "8a519042396bf054df818fb3b649fd83fc4250288976fbb06fde7a82dfbc18dd",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.103": [
+              "88543d00423615063ed321419d664848425cf986dcd8e1fe66a5a02dd6606b7c",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.104": [
+              "0fd31b236a17e899485b5ccd149265fb0758dd1fb3410265207530464fccba29",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.105": [
+              "2c5bb8c7c66d778163d22c31bfcb56a7007e49e9e4d24808fd7eb5a7124d59a0",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.106": [
+              "d0d46d8b876f48960a9d92337e7047461f52579f4b9003576c22ece5bc47fa63",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.107": [
+              "dabbc4bde2a8800d8c915e369dd766eae347e6491ff84357ff5895de22b145c5",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.108": [
+              "cbc61f29817bfd7b187b684bd6bd9bf9a89ffb522e38a73ecf24a34504cae516",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.109": [
+              "07ec7b360a0d435c60bb907b6da1d643963f348402086417ba83e316711ac4cb",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.110": [
+              "544286a17d6f0aaa6d26b8c5f9e33f24e39568b729535f0c919d65b0ffe6fff5",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.111": [
+              "81cbf50fe7acf467e8413febec42626932f63a70d787b43d8432828d873456fc",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.113": [
+              "d5cb7706e1ca8dde4b9abf1534066e6f3a041e5462785240d61474c76daa1909",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.114": [
+              "65e53466af461fb430dc43cdd4105ce213f8d2c7405e7e58fdff6cc7d3602ce3",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.115": [
+              "ae0b374909c5a6c5eaa8759ab11bf8611b7ec62d22c3a852ef3d767562c432a4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.116": [
+              "5c9927bf57cf4850fbb0b3754e77f2c03b1b9802c40c0d2c31cdebb2a574d7ab",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.117": [
+              "9f14ce62e83b94bd8e813f1db85d4cea9feedcf3abd4830a28bbcd37d1870ca9",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.118": [
+              "4fb603151edb2f88d99ee030e99fcd665fc3ec9b2211a81f69b88dfa1e2c8c46",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.119": [
+              "cb3e4a44d936f4e57833850b452ed08f318d1a2067de05bc102474f0a0458f47",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.120": [
+              "ae68d2d24ca3bfe4ed5231e7fe398c4938095a29614807457c9bda9e637baf3d",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.121": [
+              "b258f7d209a54903004b2f8d112923e0211ec8dc99dd6fbc7cffa71ab6599ece",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.122": [
+              "c7e545e6ba8e1bbfe28ac5a5a324775e22333e9d56d34b627dc043b7e0bb33c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.123": [
+              "a43331143b1b59ef518cad0a01a0bac73be5c71a68efff4b0ac379096978c3a7",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.124": [
+              "698a90e611fa4b0c475a2be77e5d1690837122a191c7515e9538f26033c6f0b6",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.125": [
+              "a39471d4058766d40e8ad72571e482eb8716e8af58dff171736d6816554bd48e",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.126": [
+              "b13365bdceaa346c7a2f32b85cf71ae1115f207c743d96d3074b0c2618c109c4",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.127": [
+              "bdbbefeab81ef62a1a71ca88bfd3a61d700e403ca589f695a2f8ba3473538b86",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ],
+            "1.2.826.0.1.3680043.10.543.20360701.1.1.128": [
+              "678edc183aba3864bd18677e7f40ef51eab048d2ae9491b88762abd479e96963",
+              "916b144867c340614f515c7b0e5415c74832d899c05264ded2a277a6e81d81ff"
+            ]
+          },
+          "workerStarts": 2,
+          "longTasks": [
+            {
+              "phase": "cold",
+              "at": 110.70500016212463,
+              "duration": 71
+            }
+          ],
+          "sourceCount": 256,
+          "sourceManifestSha256": "84a6fabe015a40bdbda03101142a3219678fce3bd53cc390ee403cb78beb2f08"
+        }
+      },
+      "browserRss": {
+        "errors": [],
+        "status": 0,
+        "peakRssBytes": 1638809600,
+        "scope": "250-ms OS RSS samples of only the owned acceptance runner's Chromium descendants, including browser, renderer and GPU processes. Sampled whole-browser high-water, not isolated worker retained allocation or an instantaneous peak. No user process was sampled or interrupted."
+      }
+    }
+  },
+  "hosts": {
+    "runtime-preview-01": {
+      "origin": "http://127.0.0.1:43134",
+      "browser": "151.0.7922.34",
+      "headers": {
+        "coop": "same-origin",
+        "coep": "require-corp"
+      },
+      "result": {
+        "count": 13824,
+        "mismatches": 0,
+        "mode": "wasm",
+        "timeline": [
+          {
+            "type": "running",
+            "at": 674.8900001049042
+          },
+          {
+            "type": "inference",
+            "at": 676
+          },
+          {
+            "type": "done",
+            "at": 687.0700001716614
+          }
+        ]
+      },
+      "runtime": {
+        "isolated": true,
+        "hardwareConcurrency": 16,
+        "numThreads": 8,
+        "versions": {
+          "common": "1.23.2",
+          "web": "1.23.2"
+        }
+      },
+      "workers": [
+        {
+          "url": "http://127.0.0.1:43134/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43134/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        }
+      ],
+      "errors": [],
+      "scope": "Fresh owned profile and the actual custom-model worker with a 24-cube synthetic pointwise oracle. Explicit WASM-only session; configuration read from its already-loaded ORT module after real completion. All listed runtime, pipeline and pinned model assets fetched and hashed in the page under the actual host policy. Offline blocks every other origin. Not anatomical, WebGPU performance, or arbitrary model admission proof.",
+      "assets": [
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "bytes": 49998,
+          "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 49998,
+            "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.wasm",
+          "bytes": 23824254,
+          "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 23824254,
+            "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort.all.bundle.min.mjs",
+          "bytes": 840590,
+          "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 840590,
+            "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.js",
+          "bytes": 81169,
+          "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.umd.js",
+          "bytes": 89045,
+          "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm",
+          "bytes": 494608,
+          "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494608,
+            "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm.zst",
+          "bytes": 168926,
+          "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 168926,
+            "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.js",
+          "bytes": 84584,
+          "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84584,
+            "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.umd.js",
+          "bytes": 97691,
+          "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 97691,
+            "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm",
+          "bytes": 16266096,
+          "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 16266096,
+            "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm.zst",
+          "bytes": 2398447,
+          "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 2398447,
+            "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.js",
+          "bytes": 89328,
+          "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89328,
+            "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.umd.js",
+          "bytes": 89506,
+          "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89506,
+            "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm",
+          "bytes": 442935,
+          "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 442935,
+            "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm.zst",
+          "bytes": 158421,
+          "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 158421,
+            "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.js",
+          "bytes": 81654,
+          "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81654,
+            "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.umd.js",
+          "bytes": 89516,
+          "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89516,
+            "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm",
+          "bytes": 494262,
+          "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494262,
+            "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm.zst",
+          "bytes": 226923,
+          "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 226923,
+            "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.js",
+          "bytes": 84600,
+          "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84600,
+            "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.wasm.zst",
+          "bytes": 2421017,
+          "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 2421017,
+            "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.js",
+          "bytes": 88855,
+          "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 88855,
+            "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.umd.js",
+          "bytes": 89035,
+          "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89035,
+            "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm",
+          "bytes": 469669,
+          "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 469669,
+            "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm.zst",
+          "bytes": 170035,
+          "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 170035,
+            "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.js",
+          "bytes": 81169,
+          "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.umd.js",
+          "bytes": 89045,
+          "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm",
+          "bytes": 524918,
+          "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 524918,
+            "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm.zst",
+          "bytes": 196695,
+          "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 196695,
+            "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/encoder.onnx",
+          "bytes": 25073825,
+          "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 25073825,
+            "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/decoder.onnx",
+          "bytes": 17824943,
+          "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 17824943,
+            "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-attention.onnx",
+          "bytes": 26333948,
+          "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 26333948,
+            "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-encoder.onnx",
+          "bytes": 5568818,
+          "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 5568818,
+            "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-position.f32",
+          "bytes": 262144,
+          "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 262144,
+            "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-temporal-positions.f32",
+          "bytes": 1792,
+          "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 1792,
+            "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 11357,
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/NOTICE",
+          "bytes": 1976,
+          "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 1976,
+            "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0"
+          }
+        },
+        {
+          "path": "/assets/customModel.worker-CiA-CGC9.js",
+          "bytes": 8410,
+          "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 8410,
+            "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9"
+          }
+        }
+      ]
+    },
+    "runtime-offline-01": {
+      "origin": "http://127.0.0.1:43125",
+      "browser": "151.0.7922.34",
+      "headers": {
+        "coop": "same-origin",
+        "coep": "require-corp"
+      },
+      "result": {
+        "count": 13824,
+        "mismatches": 0,
+        "mode": "wasm",
+        "timeline": [
+          {
+            "type": "running",
+            "at": 516.2949998378754
+          },
+          {
+            "type": "inference",
+            "at": 516.9849998950958
+          },
+          {
+            "type": "done",
+            "at": 526.9349999427795
+          }
+        ]
+      },
+      "runtime": {
+        "isolated": true,
+        "hardwareConcurrency": 16,
+        "numThreads": 8,
+        "versions": {
+          "common": "1.23.2",
+          "web": "1.23.2"
+        }
+      },
+      "workers": [
+        {
+          "url": "http://127.0.0.1:43125/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        },
+        {
+          "url": "http://127.0.0.1:43125/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "closed": true
+        }
+      ],
+      "errors": [],
+      "scope": "Fresh owned profile and the actual custom-model worker with a 24-cube synthetic pointwise oracle. Explicit WASM-only session; configuration read from its already-loaded ORT module after real completion. All listed runtime, pipeline and pinned model assets fetched and hashed in the page under the actual host policy. Offline blocks every other origin. Not anatomical, WebGPU performance, or arbitrary model admission proof.",
+      "assets": [
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "bytes": 49998,
+          "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 49998,
+            "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.wasm",
+          "bytes": 23824254,
+          "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 23824254,
+            "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort.all.bundle.min.mjs",
+          "bytes": 840590,
+          "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 840590,
+            "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.js",
+          "bytes": 81169,
+          "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.umd.js",
+          "bytes": 89045,
+          "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm",
+          "bytes": 494608,
+          "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494608,
+            "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm.zst",
+          "bytes": 168926,
+          "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 168926,
+            "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.js",
+          "bytes": 84584,
+          "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84584,
+            "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.umd.js",
+          "bytes": 97691,
+          "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 97691,
+            "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm",
+          "bytes": 16266096,
+          "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 16266096,
+            "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm.zst",
+          "bytes": 2398447,
+          "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 2398447,
+            "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.js",
+          "bytes": 89328,
+          "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89328,
+            "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.umd.js",
+          "bytes": 89506,
+          "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89506,
+            "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm",
+          "bytes": 442935,
+          "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 442935,
+            "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm.zst",
+          "bytes": 158421,
+          "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 158421,
+            "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.js",
+          "bytes": 81654,
+          "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81654,
+            "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.umd.js",
+          "bytes": 89516,
+          "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89516,
+            "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm",
+          "bytes": 494262,
+          "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494262,
+            "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm.zst",
+          "bytes": 226923,
+          "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 226923,
+            "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.js",
+          "bytes": 84600,
+          "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84600,
+            "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.wasm.zst",
+          "bytes": 2421017,
+          "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 2421017,
+            "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.js",
+          "bytes": 88855,
+          "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 88855,
+            "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.umd.js",
+          "bytes": 89035,
+          "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89035,
+            "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm",
+          "bytes": 469669,
+          "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 469669,
+            "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm.zst",
+          "bytes": 170035,
+          "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 170035,
+            "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.js",
+          "bytes": 81169,
+          "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.umd.js",
+          "bytes": 89045,
+          "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm",
+          "bytes": 524918,
+          "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 524918,
+            "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm.zst",
+          "bytes": 196695,
+          "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 196695,
+            "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/encoder.onnx",
+          "bytes": 25073825,
+          "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 25073825,
+            "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/decoder.onnx",
+          "bytes": 17824943,
+          "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 17824943,
+            "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-attention.onnx",
+          "bytes": 26333948,
+          "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 26333948,
+            "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-encoder.onnx",
+          "bytes": 5568818,
+          "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 5568818,
+            "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-position.f32",
+          "bytes": 262144,
+          "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 262144,
+            "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-temporal-positions.f32",
+          "bytes": 1792,
+          "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 1792,
+            "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 11357,
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/NOTICE",
+          "bytes": 1976,
+          "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 1976,
+            "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0"
+          }
+        },
+        {
+          "path": "/assets/customModel.worker-CiA-CGC9.js",
+          "bytes": 8410,
+          "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 8410,
+            "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9"
+          }
+        }
+      ]
+    },
+    "runtime-dev-02": {
+      "origin": "http://localhost:43124",
+      "browser": "151.0.7922.34",
+      "headers": {
+        "coop": "same-origin",
+        "coep": "require-corp"
+      },
+      "result": {
+        "count": 13824,
+        "mismatches": 0,
+        "mode": "wasm",
+        "timeline": [
+          {
+            "type": "running",
+            "at": 857.5299999713898
+          },
+          {
+            "type": "inference",
+            "at": 858.164999961853
+          },
+          {
+            "type": "done",
+            "at": 868.1549999713898
+          }
+        ]
+      },
+      "runtime": {
+        "isolated": true,
+        "hardwareConcurrency": 16,
+        "numThreads": 8,
+        "versions": {
+          "common": "1.23.2",
+          "web": "1.23.2"
+        }
+      },
+      "workers": [
+        {
+          "url": "http://localhost:43124/src/utils/segmentation/onnx/customModel.worker.ts?worker_file&type=module",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        },
+        {
+          "url": "http://localhost:43124/node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs?v=2faede35",
+          "closed": true
+        }
+      ],
+      "errors": [],
+      "scope": "Fresh owned profile and the actual custom-model worker with a 24-cube synthetic pointwise oracle. Explicit WASM-only session; configuration read from its already-loaded ORT module after real completion. All listed runtime, pipeline and pinned model assets fetched and hashed in the page under the actual host policy. Offline blocks every other origin. Not anatomical, WebGPU performance, or arbitrary model admission proof.",
+      "assets": [
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "bytes": 49998,
+          "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 49998,
+            "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.wasm",
+          "bytes": 23824254,
+          "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 23824254,
+            "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort.all.bundle.min.mjs",
+          "bytes": 840590,
+          "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 840590,
+            "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.js",
+          "bytes": 81169,
+          "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.umd.js",
+          "bytes": 89045,
+          "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm",
+          "bytes": 494608,
+          "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494608,
+            "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm.zst",
+          "bytes": 168926,
+          "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 168926,
+            "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.js",
+          "bytes": 84584,
+          "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84584,
+            "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.umd.js",
+          "bytes": 97691,
+          "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 97691,
+            "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm",
+          "bytes": 16266096,
+          "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 16266096,
+            "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm.zst",
+          "bytes": 2398447,
+          "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 2398447,
+            "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.js",
+          "bytes": 89328,
+          "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89328,
+            "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.umd.js",
+          "bytes": 89506,
+          "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89506,
+            "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm",
+          "bytes": 442935,
+          "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 442935,
+            "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm.zst",
+          "bytes": 158421,
+          "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 158421,
+            "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.js",
+          "bytes": 81654,
+          "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81654,
+            "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.umd.js",
+          "bytes": 89516,
+          "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89516,
+            "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm",
+          "bytes": 494262,
+          "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494262,
+            "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm.zst",
+          "bytes": 226923,
+          "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 226923,
+            "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.js",
+          "bytes": 84600,
+          "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 84600,
+            "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.wasm.zst",
+          "bytes": 2421017,
+          "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 2421017,
+            "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.js",
+          "bytes": 88855,
+          "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 88855,
+            "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.umd.js",
+          "bytes": 89035,
+          "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89035,
+            "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm",
+          "bytes": 469669,
+          "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 469669,
+            "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm.zst",
+          "bytes": 170035,
+          "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 170035,
+            "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.js",
+          "bytes": 81169,
+          "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 81169,
+            "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.umd.js",
+          "bytes": 89045,
+          "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225",
+          "observed": {
+            "status": 200,
+            "contentType": "text/javascript",
+            "bytes": 89045,
+            "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm",
+          "bytes": 524918,
+          "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 524918,
+            "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm.zst",
+          "bytes": 196695,
+          "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 196695,
+            "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/encoder.onnx",
+          "bytes": 25073825,
+          "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 25073825,
+            "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/decoder.onnx",
+          "bytes": 17824943,
+          "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 17824943,
+            "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-attention.onnx",
+          "bytes": 26333948,
+          "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 26333948,
+            "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-encoder.onnx",
+          "bytes": 5568818,
+          "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 5568818,
+            "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-position.f32",
+          "bytes": 262144,
+          "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 262144,
+            "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-temporal-positions.f32",
+          "bytes": 1792,
+          "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 1792,
+            "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 11357,
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/NOTICE",
+          "bytes": 1976,
+          "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0",
+          "observed": {
+            "status": 200,
+            "contentType": "",
+            "bytes": 1976,
+            "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0"
+          }
+        }
+      ]
+    },
+    "runtime-hosted-baseline-01": {
+      "origin": "https://miraviewer.org",
+      "browser": "151.0.7922.34",
+      "headers": {
+        "coop": null,
+        "coep": null
+      },
+      "result": {
+        "count": 13824,
+        "mismatches": 0,
+        "mode": "wasm",
+        "timeline": [
+          {
+            "type": "running",
+            "at": 2615.2999999523163
+          },
+          {
+            "type": "inference",
+            "at": 2616
+          },
+          {
+            "type": "done",
+            "at": 2625.600000143051
+          }
+        ]
+      },
+      "runtime": {
+        "isolated": false,
+        "hardwareConcurrency": 16,
+        "numThreads": 1,
+        "versions": {
+          "common": "1.23.2",
+          "web": "1.23.2"
+        }
+      },
+      "workers": [
+        {
+          "url": "https://miraviewer.org/assets/customModel.worker-CiA-CGC9.js",
+          "closed": true
+        }
+      ],
+      "errors": [],
+      "scope": "Fresh owned profile and the actual custom-model worker with a 24-cube synthetic pointwise oracle. Explicit WASM-only session; configuration read from its already-loaded ORT module after real completion. All listed runtime, pipeline and pinned model assets fetched and hashed in the page under the actual host policy. Offline blocks every other origin. Not anatomical, WebGPU performance, or arbitrary model admission proof.",
+      "assets": [
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.mjs",
+          "bytes": 49998,
+          "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 49998,
+            "sha256": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort-wasm-simd-threaded.jsep.wasm",
+          "bytes": 23824254,
+          "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 23824254,
+            "sha256": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d"
+          }
+        },
+        {
+          "path": "/onnxruntime/ort.all.bundle.min.mjs",
+          "bytes": 840590,
+          "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 840590,
+            "sha256": "831930b0c3f074e04d9e7592f89ed8d427e26b500dce1c26ea4748e3c47fb0a3"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.js",
+          "bytes": 81169,
+          "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 81169,
+            "sha256": "ac4248773f0887a4473e94fc4b040ee268e82bd8d0997e53f3392e68c85d6b7b"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.umd.js",
+          "bytes": 89045,
+          "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89045,
+            "sha256": "ec5361cb8710446b98c499790c1f71a7bb784e40a66fef0a93f679e1b6f768e9"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm",
+          "bytes": 494608,
+          "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494608,
+            "sha256": "9b58190a43dd3d6e2c32456acc5de6550801b95744862d70ecc7e5fd4d1559a8"
+          }
+        },
+        {
+          "path": "/pipelines/default-parameter-map.wasm.zst",
+          "bytes": 168926,
+          "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 168926,
+            "sha256": "4244d413c3f94dd232190c38476738d68f8ff5ab630616dc74d63442de932ce9"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.js",
+          "bytes": 84584,
+          "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 84584,
+            "sha256": "c545496ac43c3c44af1ae484c9481e0beb766a325817957dddb57e6452ad0a99"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.umd.js",
+          "bytes": 97691,
+          "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 97691,
+            "sha256": "2e29ca791e3a2797918e206618df795df6564193d0e679daf72726c8ebf20120"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm",
+          "bytes": 16266096,
+          "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 16266096,
+            "sha256": "601d489a86baf9e8d61739ed2d1c7abc6e29630fda9e4e35c15d7039e6d79dfc"
+          }
+        },
+        {
+          "path": "/pipelines/elastix.wasm.zst",
+          "bytes": 2398447,
+          "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 2398447,
+            "sha256": "f7d131925bdeb9563d3bbfd7b94d20b2201342929a2a986b4f52ae725f317756"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.js",
+          "bytes": 89328,
+          "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89328,
+            "sha256": "239f329f48b0caa2b6b91c524ee17b8cd246489462df6fe89f7520954d522b3f"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.umd.js",
+          "bytes": 89506,
+          "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89506,
+            "sha256": "5d5924d96dcffb39798bb020d7eb0358c2198151933a54dc157204ae9e9db9e3"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm",
+          "bytes": 442935,
+          "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 442935,
+            "sha256": "f0da6edf867600aefbeab45ad6256273befc7ba307d922a66b47d9821dc80d96"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-file.wasm.zst",
+          "bytes": 158421,
+          "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 158421,
+            "sha256": "d60c63d27e8616e6185f9308cb2eed46904ffdbc6118041f24bc406e30cd4eae"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.js",
+          "bytes": 81654,
+          "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 81654,
+            "sha256": "19b009d9815473cf28aa1e8bc6f94db38d65700603880b178f66146cdc83d361"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.umd.js",
+          "bytes": 89516,
+          "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89516,
+            "sha256": "20406a32791cd10958f183ffc55027d2c6c173f05e4d08485cdf20e568ce18f9"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm",
+          "bytes": 494262,
+          "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 494262,
+            "sha256": "b7520dd3665a8f02ab39defe62395b34d3485b1a7e329199b8258adbf6f88f19"
+          }
+        },
+        {
+          "path": "/pipelines/read-parameter-files.wasm.zst",
+          "bytes": 226923,
+          "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 226923,
+            "sha256": "4cbcdfc37070eb09b8a706a39f2627f72b57d5fe7cca632ed830895c8a9fde67"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.js",
+          "bytes": 84600,
+          "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 84600,
+            "sha256": "5f3eec8de2377db9598019ef7d71bb1630e83380266081ec867c0a938507455a"
+          }
+        },
+        {
+          "path": "/pipelines/transformix.wasm.zst",
+          "bytes": 2421017,
+          "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 2421017,
+            "sha256": "7f349f8ae8cf2d0c3687c27ec0ff988818c4e2eeb3920f447ae26271ac521630"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.js",
+          "bytes": 88855,
+          "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 88855,
+            "sha256": "57c4862cabdb07ffa62eaf504edd9eac8f955d2b985fdb9a9d37d4c26de535c6"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.umd.js",
+          "bytes": 89035,
+          "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89035,
+            "sha256": "532f1c40e5da4098217fdefa6354d4fcb38af4840bd9ad983d9bc36040e2565a"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm",
+          "bytes": 469669,
+          "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 469669,
+            "sha256": "a8cdf6376db9c623ca726b7d0d1634ce57b5b8a3403a87740e92f4c27e4e5215"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-file.wasm.zst",
+          "bytes": 170035,
+          "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 170035,
+            "sha256": "82060f75850496a6bff78a758a92b847f9028a34a349f09d2c57bab3bd5e0dfb"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.js",
+          "bytes": 81169,
+          "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 81169,
+            "sha256": "20675bdc835db95a7218c7422f70117cf82c858c5d3bb25118e6dfe95d02163b"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.umd.js",
+          "bytes": 89045,
+          "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 89045,
+            "sha256": "1daa3b6e538c2bdece36794e549295010a79fcde9db44087a37d0a4d7c464225"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm",
+          "bytes": 524918,
+          "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94",
+          "observed": {
+            "status": 200,
+            "contentType": "application/wasm",
+            "bytes": 524918,
+            "sha256": "431488946e3bb11f83d32db7c606a8c80db20266846c4541ed51ba9bdb1a5d94"
+          }
+        },
+        {
+          "path": "/pipelines/write-parameter-files.wasm.zst",
+          "bytes": 196695,
+          "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 196695,
+            "sha256": "da3946bdbc551e9d78f447a6be6ff6563844d7b482656bee7f2d33c1ea2f2d79"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/encoder.onnx",
+          "bytes": 25073825,
+          "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 25073825,
+            "sha256": "2d3e01fb7aff950b3486053b2145449e15b663f0e4fb2d8ac702df4e2342cce1"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/decoder.onnx",
+          "bytes": 17824943,
+          "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 17824943,
+            "sha256": "fe243fef4a2f7e6f17199a1fc172f05a110c2ea2e8e7ddb554435c2a5affbbbd"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-attention.onnx",
+          "bytes": 26333948,
+          "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 26333948,
+            "sha256": "a9195ed61d2ddbd3b30cdab6f91a5253e30e2d8514fd76181a246ecece531dd7"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-encoder.onnx",
+          "bytes": 5568818,
+          "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 5568818,
+            "sha256": "b909e69d2b6c3b7f979ac4b37db5b084635740544436cc53647c15ae2aede455"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-position.f32",
+          "bytes": 262144,
+          "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 262144,
+            "sha256": "b76af0bb1f640cf38714797b4fb9024c3451f797679912fa59b517799ee7ef1d"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/memory-temporal-positions.f32",
+          "bytes": 1792,
+          "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 1792,
+            "sha256": "a11e3f5d6b3b3b0912992761ce9e6618d80a3f5cb94dfc185b4b1bd682f962a9"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 11357,
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+          }
+        },
+        {
+          "path": "/models/efficienttam-tiny512-v2/NOTICE",
+          "bytes": 1976,
+          "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0",
+          "observed": {
+            "status": 200,
+            "contentType": "application/octet-stream",
+            "bytes": 1976,
+            "sha256": "f6c0436a8e1f5bee6c206c9b3a2cd22f7c0614635d2be9acc3cd87b8faae03c0"
+          }
+        },
+        {
+          "path": "/assets/customModel.worker-CiA-CGC9.js",
+          "bytes": 8410,
+          "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9",
+          "observed": {
+            "status": 200,
+            "contentType": "application/javascript; charset=utf-8",
+            "bytes": 8410,
+            "sha256": "fd5c68b877afe71c4c0d36898ef615e279e2eafaaabfafdaf53a62dbf2925af9"
+          }
+        }
+      ]
+    }
+  },
+  "visual": [
+    {
+      "file": "dialog-delivery-loading.png",
+      "sourceRun": "candidate-dialogs-visual-02",
+      "sha256": "40419347d2ed93178090e51e778ffd28dc7d101e3152e3f8de0f67cc01fc4e87",
+      "verdict": "PASS for individually inspected static 1440x1000 actual-app capture; no motion, anatomy, mobile or GPU performance claim"
+    },
+    {
+      "file": "dialog-delivery-unavailable.png",
+      "sourceRun": "candidate-dialogs-visual-02",
+      "sha256": "bbecebc6d14574812267da86861b02c75a40f0193e40b4373692c29f1f99d5d5",
+      "verdict": "PASS for individually inspected static 1440x1000 actual-app capture; no motion, anatomy, mobile or GPU performance claim"
+    },
+    {
+      "file": "compressed-first-image.png",
+      "sourceRun": "candidate-startup-02",
+      "sha256": "3afa1616bd5ddf2b87e8a5fee1665d8e2d484aa9d6ac07d22f883e736049f8d2",
+      "verdict": "PASS for individually inspected static 1440x1000 actual-app capture; no motion, anatomy, mobile or GPU performance claim"
+    }
+  ],
+  "workflow": {
+    "startTime": "2026-09-04T14:57:45.175Z",
+    "duration": 43786.143,
+    "expected": 11,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

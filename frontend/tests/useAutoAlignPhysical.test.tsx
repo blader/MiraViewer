@@ -12,6 +12,7 @@ import {
 import { buildOutputPlaneGrid, outputGridFingerprint } from '../src/utils/outputPlaneGrid';
 import { getSliceGeometryFromInstance } from '../src/utils/svr/dicomGeometry';
 import type * as LongitudinalFrames from '../src/utils/svr/longitudinalFrames';
+import type * as longitudinalRunner from '../src/utils/svr/runLongitudinalRegistration';
 import { resliceStackToReferencePlane } from '../src/utils/svr/longitudinalRegistration';
 import { deferred } from './helpers/deferred';
 import { selectFinalAffineProposal } from '../src/utils/structuralAffineSelection';
@@ -75,7 +76,8 @@ vi.mock('../src/utils/svr/longitudinalFrames', async (importOriginal) => {
   };
 });
 
-vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({
+vi.mock('../src/utils/svr/runLongitudinalRegistration', async (importOriginal) => ({
+  ...(await importOriginal<typeof longitudinalRunner>()),
   runLongitudinalEstimate: mocks.register3d,
 }));
 

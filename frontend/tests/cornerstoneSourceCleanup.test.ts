@@ -21,9 +21,6 @@ vi.mock('cornerstone-core', async (importOriginal) => {
     },
   };
 });
-vi.mock('cornerstone-tools', () => ({ default: { init: vi.fn(), external: {} } }));
-vi.mock('cornerstone-math', () => ({ default: {} }));
-vi.mock('hammerjs', () => ({ default: {} }));
 vi.mock('dicom-parser', () => ({ default: { parseDicom: (byteArray: Uint8Array) => ({ byteArray }) } }));
 vi.mock('../src/db/db', () => ({ getDB: async () => ({ get: mocks.instance }) }));
 vi.mock('../src/utils/derivedAlignmentFrame', () => ({ getDerivedAlignmentFrameByImageId: vi.fn() }));

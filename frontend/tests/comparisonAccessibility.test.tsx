@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { ComparisonFiltersSidebar } from '../src/components/comparison/ComparisonFiltersSidebar';
 import { SliceLoopNavigator } from '../src/components/comparison/SliceLoopNavigator';
@@ -128,6 +128,52 @@ describe('comparison accessibility', () => {
       expect(screen.getByRole('slider', { name: 'Loop start position' })).toBeDisabled();
       expect(screen.getByRole('slider', { name: 'Loop end position' })).toBeDisabled();
       expect(props.setProgress).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('coalesces playback behind visible computation without blocking manual navigation or Pause', () => {
+    let callback: FrameRequestCallback | undefined;
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((next: FrameRequestCallback) => {
+        callback = next;
+        return 17;
+      }),
+    );
+    const cancelFrame = vi.fn();
+    vi.stubGlobal('cancelAnimationFrame', cancelFrame);
+    try {
+      const progressRef = { current: 0.5 };
+      const props = {
+        selectedSeqId: 'completed-plane-playback',
+        playbackInstanceCount: 101,
+        progress: 0.5,
+        progressRef,
+        setProgress: vi.fn(),
+      };
+      const { rerender, unmount } = render(<SliceLoopNavigator {...props} waitingForAlignment />);
+      fireEvent.click(screen.getByRole('button', { name: 'Playback speed 4 times' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Play slices' }));
+      for (const time of [0, 50, 100, 150, 200]) act(() => callback!(time));
+      expect(props.setProgress).not.toHaveBeenCalled();
+      expect(screen.getByRole('slider', { name: 'Slice position' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Pause slice playback' })).toBeEnabled();
+
+      rerender(<SliceLoopNavigator {...props} />);
+      act(() => callback!(250));
+      // Eight elapsed steps are one current request, not eight obsolete jobs.
+      expect(props.setProgress).toHaveBeenCalledExactlyOnceWith(0.58);
+      expect(cancelFrame).not.toHaveBeenCalled();
+
+      rerender(<SliceLoopNavigator {...props} waitingForAlignment />);
+      const slider = screen.getByRole('slider', { name: 'Slice position' }) as HTMLInputElement;
+      fireEvent.change(slider, { target: { value: String(Number(slider.max) * 0.7) } });
+      expect(props.setProgress).toHaveBeenLastCalledWith(0.7);
+      fireEvent.click(screen.getByRole('button', { name: 'Pause slice playback' }));
+      expect(cancelFrame).toHaveBeenCalledWith(17);
+      unmount();
     } finally {
       vi.unstubAllGlobals();
     }

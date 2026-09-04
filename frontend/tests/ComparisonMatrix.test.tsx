@@ -143,7 +143,7 @@ describe('ComparisonMatrix', () => {
     fireEvent.click(screen.getByTitle('Menu'));
     fireEvent.click(screen.getByRole('button', { name: 'Import scans' }));
 
-    const dialog = screen.getByRole('dialog', { name: 'Import scans' });
+    const dialog = await screen.findByRole('dialog', { name: 'Import scans' });
     const file = new File([new Uint8Array([1])], 'scan.dcm', { type: 'application/dicom' });
     fireEvent.change(within(dialog).getByLabelText('Select DICOM image files'), {
       target: { files: [file] },

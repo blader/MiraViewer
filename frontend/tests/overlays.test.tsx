@@ -2,6 +2,7 @@ import { render, fireEvent, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { HelpModal } from '../src/components/HelpModal';
 import { AccessibleDialog } from '../src/components/ui/AccessibleDialog';
+import { ComparisonDialog } from '../src/components/comparison/ComparisonDialog';
 describe('HelpModal', () => {
   it('closes when backdrop is clicked', () => {
     const onClose = vi.fn();
@@ -33,6 +34,37 @@ describe('HelpModal', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('deferred comparison dialogs', () => {
+  it('keeps the app inert through loading and restores the original trigger after the loaded dialog closes', async () => {
+    const appRoot = document.createElement('div');
+    appRoot.id = 'root';
+    const trigger = document.createElement('button');
+    trigger.textContent = 'Open help';
+    appRoot.append(trigger);
+    document.body.append(appRoot);
+    trigger.focus();
+    const onClose = vi.fn();
+    const view = render(
+      <ComparisonDialog dialog="help" onClose={onClose} onUploadComplete={async () => {}} onReset={vi.fn()} />,
+    );
+    try {
+      expect(screen.getByRole('dialog', { name: 'Opening dialog' })).toBeInTheDocument();
+      expect(appRoot).toHaveAttribute('inert');
+      expect(await screen.findByRole('dialog', { name: /help/i })).toBeInTheDocument();
+      expect(appRoot).toHaveAttribute('inert');
+      expect(screen.getByRole('button', { name: /close help/i })).toHaveFocus();
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(onClose).toHaveBeenCalledOnce();
+      view.unmount();
+      expect(trigger).toHaveFocus();
+      expect(appRoot).not.toHaveAttribute('inert');
+    } finally {
+      view.unmount();
+      appRoot.remove();
+    }
   });
 });
 

@@ -70,7 +70,7 @@ import {
   type LongitudinalReferenceAnatomy,
   type PreparedLongitudinalReferenceInput,
 } from '../utils/svr/longitudinalFrames';
-import { runLongitudinalEstimate } from '../utils/svr/runLongitudinalRegistration';
+import { LongitudinalResliceRuntime, runLongitudinalEstimate } from '../utils/svr/runLongitudinalRegistration';
 import { getSliceGeometryFromInstance } from '../utils/svr/dicomGeometry';
 import {
   resample2dAreaAverage,
@@ -186,7 +186,12 @@ export function useAutoAlign() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const physicalRegistrationsRef = useRef(new Map<string, PhysicalAlignmentModel>());
-  const clearRegistrationCache = useCallback(() => physicalRegistrationsRef.current.clear(), []);
+  const resliceRuntimeRef = useRef<LongitudinalResliceRuntime | null>(null);
+  const clearRegistrationCache = useCallback(() => {
+    physicalRegistrationsRef.current.clear();
+    resliceRuntimeRef.current?.dispose();
+    resliceRuntimeRef.current = null;
+  }, []);
   const canReuseRegistration = useCallback(
     (
       reference: AlignmentReference,
@@ -204,7 +209,13 @@ export function useAutoAlign() {
     [],
   );
 
-  useEffect(() => () => abortControllerRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      abortControllerRef.current?.abort();
+      clearRegistrationCache();
+    },
+    [clearRegistrationCache],
+  );
 
   /**
    * Abort the current alignment operation.
@@ -237,6 +248,7 @@ export function useAutoAlign() {
       abortControllerRef.current?.abort();
       const alignmentAbortController = new AbortController();
       abortControllerRef.current = alignmentAbortController;
+      const resliceRuntime = (resliceRuntimeRef.current ??= new LongitudinalResliceRuntime());
       const runId =
         globalThis.crypto?.randomUUID?.() ?? `alignment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       let reference = selectedReference;
@@ -348,6 +360,7 @@ export function useAutoAlign() {
               outputMode: options.outputMode,
               manualSliceOffset: options.targetSliceOffsets?.get(date) ?? 0,
               signal: alignmentAbortController.signal,
+              runtime: resliceRuntime,
             });
           } catch (error) {
             ensureNotAborted();
@@ -933,6 +946,7 @@ export function useAutoAlign() {
             selectedReference,
             presentationEstimate,
             {
+              runtime: resliceRuntime,
               signal: alignmentAbortController.signal,
               maxSlices: 96,
               maxDimension: Math.max(operationOutputGrid.rows, operationOutputGrid.columns),
@@ -975,6 +989,7 @@ export function useAutoAlign() {
                       }
                     : estimatedRegistration,
                   {
+                    runtime: resliceRuntime,
                     signal: alignmentAbortController.signal,
                     outputGrid: operationOutputGrid,
                     maxSlices: 96,

@@ -16,6 +16,37 @@ import type {
 } from './longitudinalRegistration.worker';
 
 const LONGITUDINAL_REGISTRATION_TIMEOUT_MS = 120_000;
+
+/** One idle runtime, not a source-pixel cache. Active work belongs to its abort signal. */
+export class LongitudinalResliceRuntime {
+  private idle: Worker | undefined;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
+
+  take(): Worker | undefined {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    const worker = this.idle;
+    this.idle = undefined;
+    return worker;
+  }
+
+  retain(worker: Worker): void {
+    this.take()?.terminate();
+    if (this.disposed) {
+      worker.terminate();
+      return;
+    }
+    this.idle = worker;
+    this.timer = setTimeout(() => this.take()?.terminate(), 30_000);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.take()?.terminate();
+  }
+}
+
 type LongitudinalWorkerResult = LongitudinalWorkerResponse['result'];
 type LongitudinalWorkerInput =
   | { type: 'run' | 'estimate'; options: RegisterLongitudinalOptions }
@@ -32,6 +63,7 @@ function failed(message: string): LongitudinalRegistrationFailure {
 async function runLongitudinalWorker(
   request: LongitudinalWorkerInput,
   signal?: AbortSignal,
+  runtime?: LongitudinalResliceRuntime,
 ): Promise<LongitudinalWorkerResult> {
   const input = request.options;
   const effectiveSignal = signal ?? input.signal;
@@ -52,7 +84,9 @@ async function runLongitudinalWorker(
 
   let worker: Worker;
   try {
-    worker = new Worker(new URL('./longitudinalRegistration.worker.ts', import.meta.url), { type: 'module' });
+    worker =
+      runtime?.take() ??
+      new Worker(new URL('./longitudinalRegistration.worker.ts', import.meta.url), { type: 'module' });
   } catch (error) {
     return failed(
       `Longitudinal registration worker could not start: ${error instanceof Error ? error.message : String(error)}`,
@@ -69,7 +103,8 @@ async function runLongitudinalWorker(
       effectiveSignal?.removeEventListener('abort', onAbort);
       worker.onmessage = null;
       worker.onerror = null;
-      worker.terminate();
+      if (runtime && result?.ok) runtime.retain(worker);
+      else worker.terminate();
       resolve(result);
     };
 
@@ -163,8 +198,9 @@ export async function runLongitudinalEstimate(
 export async function runLongitudinalDenseReslice(
   input: DenseLongitudinalResliceOptions,
   signal?: AbortSignal,
+  runtime?: LongitudinalResliceRuntime,
 ): Promise<DenseLongitudinalResliceResult | LongitudinalRegistrationFailure> {
-  return (await runLongitudinalWorker({ type: 'reslice', options: input }, signal)) as
+  return (await runLongitudinalWorker({ type: 'reslice', options: input }, signal, runtime)) as
     | DenseLongitudinalResliceResult
     | LongitudinalRegistrationFailure;
 }

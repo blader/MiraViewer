@@ -12,6 +12,7 @@ import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
 import type { DicomInstance, DerivedAlignmentFrameRow, ModelRecord, PanelSettingsRow } from '../../src/db/schema';
 import { measureSelectionEditing } from './selectionEditingWorkflow';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
+import { goToSlice, importComparisonExaminations } from './comparisonWorkflow';
 
 type BackupIo = {
   name: string;
@@ -26,10 +27,352 @@ type BackupIo = {
 };
 declare global {
   interface Window {
+    warmAudit: {
+      phase: string;
+      timeOrigin: number;
+      workerStarts: { created: number; terminated?: number }[];
+      jobs: {
+        workerId: number;
+        phase: string;
+        posted?: number;
+        finished?: number;
+        terminated?: number;
+        type?: string;
+        reference?: string;
+        inputBytes?: number;
+        sourceFrames?: string[];
+        outputBytes?: number;
+        pixelsSha256?: string;
+        supportSha256?: string;
+        ok?: boolean;
+      }[];
+      draws: { phase: string; at: number; imageId: string | null }[];
+      longTasks: { phase: string; at: number; duration: number }[];
+    };
+    startupAudit: {
+      shellFrameMs?: number;
+      firstImageDrawMs?: number;
+      importStartedMs?: number;
+      imageUnblockedFrameMs?: number;
+      longTasks: { startTime: number; duration: number }[];
+    };
     backupIo: { current: BackupIo | null; start: (name: string) => void; stop: () => BackupIo };
     restoreBackupWrites?: () => void;
   }
 }
+
+for (const imageSize of [256, 512] as const) {
+  test(`measures correct warm planes, superseded work and final display during real slice playback (${imageSize})`, async ({
+    page,
+  }, info) => {
+    const referenceSlice = imageSize / 4;
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      window.warmAudit = {
+        phase: 'cold',
+        timeOrigin: performance.timeOrigin,
+        workerStarts: [],
+        jobs: [],
+        draws: [],
+        longTasks: [],
+      };
+      new PerformanceObserver((entries) => {
+        for (const entry of entries.getEntries())
+          window.warmAudit.longTasks.push({
+            phase: window.warmAudit.phase,
+            at: entry.startTime,
+            duration: entry.duration,
+          });
+      }).observe({ type: 'longtask', buffered: true });
+      document.addEventListener(
+        'cornerstoneimagerendered',
+        (event) => {
+          const element = event.target;
+          if (!(element instanceof HTMLElement) || !element.closest('[data-diagnostic-surface]')) return;
+          const imageId = element.dataset.imageId ?? null;
+          if (imageId?.startsWith('miraderived:'))
+            window.warmAudit.draws.push({ phase: window.warmAudit.phase, at: performance.now(), imageId });
+        },
+        true,
+      );
+      const NativeWorker = window.Worker;
+      window.Worker = class extends NativeWorker {
+        record?: Window['warmAudit']['jobs'][number];
+        workerId: number | null;
+        constructor(url: string | URL, options?: WorkerOptions) {
+          const created = performance.now();
+          super(url, options);
+          this.workerId = String(url).includes('longitudinalRegistration.worker')
+            ? window.warmAudit.workerStarts.length
+            : null;
+          if (this.workerId !== null) window.warmAudit.workerStarts.push({ created });
+          this.addEventListener('message', (event) => {
+            const record = this.record;
+            if (event.data?.type !== 'done' || !record) return;
+            const result = event.data.result;
+            Object.assign(record, {
+              finished: performance.now(),
+              ok: result?.ok === true,
+              outputBytes: (result?.pixels?.byteLength ?? 0) + (result?.valid?.byteLength ?? 0),
+            });
+            for (const [field, values] of [
+              ['pixelsSha256', result?.pixels],
+              ['supportSha256', result?.valid],
+            ] as const) {
+              if (!values) continue;
+              void crypto.subtle
+                .digest('SHA-256', new Uint8Array(values.buffer, values.byteOffset, values.byteLength))
+                .then((digest) => {
+                  record[field] = Array.from(new Uint8Array(digest), (value) =>
+                    value.toString(16).padStart(2, '0'),
+                  ).join('');
+                });
+            }
+          });
+        }
+        postMessage(message: unknown, transfer?: Transferable[] | StructuredSerializeOptions) {
+          const request = message as {
+            type?: string;
+            options?: {
+              referencePlane?: { sopInstanceUid?: string };
+              targetSlices?: { sopInstanceUid?: string; pixels: Float32Array; valid?: Uint8Array }[];
+            };
+          };
+          if (request?.options?.targetSlices && this.workerId !== null) {
+            this.record = {
+              phase: window.warmAudit.phase,
+              workerId: this.workerId,
+              type: request.type,
+              posted: performance.now(),
+              reference: request.options.referencePlane?.sopInstanceUid,
+              inputBytes: request.options.targetSlices.reduce(
+                (sum, frame) => sum + frame.pixels.byteLength + (frame.valid?.byteLength ?? 0),
+                0,
+              ),
+              sourceFrames: request.options.targetSlices.map((frame) => frame.sopInstanceUid ?? ''),
+            };
+            window.warmAudit.jobs.push(this.record);
+          }
+          if (Array.isArray(transfer)) super.postMessage(message, transfer);
+          else super.postMessage(message, transfer);
+        }
+        terminate() {
+          const at = performance.now();
+          if (this.workerId !== null) window.warmAudit.workerStarts[this.workerId]!.terminated = at;
+          if (this.record) this.record.terminated = at;
+          super.terminate();
+        }
+      };
+    });
+    const inputDirectory = info.outputPath('dicom-input');
+    const count = await importComparisonExaminations(
+      page,
+      null,
+      undefined,
+      true,
+      {
+        imageSize,
+        slicesPerOrientation: imageSize / 2,
+      },
+      inputDirectory,
+    );
+    const target = page.locator('[data-diagnostic-surface] [data-image-id^="miraderived:"]').first();
+    await expect(target).toBeVisible();
+    await expect(page.getByLabel('Automatic alignment status')).toHaveText('Scans aligned');
+    const phases = [];
+    for (const [name, speed] of [
+      ['warm-step', 0],
+      ['playback-8', 1],
+      ['playback-16', 2],
+      ['playback-32', 4],
+    ] as const) {
+      const started = await page.evaluate((phase) => {
+        window.warmAudit.phase = phase;
+        return performance.now();
+      }, name);
+      if (!speed) {
+        for (const slice of [1, 2, 3, 4].map((offset) => referenceSlice + offset)) {
+          const before = await target.getAttribute('data-image-id');
+          await goToSlice(page, slice);
+          await expect(target).not.toHaveAttribute('data-image-id', before!);
+          await expect(page.getByLabel('Automatic alignment status')).toHaveText('Scans aligned');
+        }
+      } else {
+        await page.getByRole('button', { name: `Playback speed ${speed} times`, exact: true }).click();
+        await page.getByRole('button', { name: 'Play slices', exact: true }).click();
+        await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 2000)));
+        await page.getByRole('button', { name: 'Pause slice playback', exact: true }).click();
+      }
+      const requestedAt = await page.evaluate(() => performance.now());
+      await goToSlice(page, referenceSlice);
+      await expect(page.getByLabel('Automatic alignment status')).toHaveText('Scans aligned');
+      const completedAt = await page.evaluate(
+        () =>
+          new Promise<number>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))),
+          ),
+      );
+      phases.push({
+        name,
+        speed,
+        started,
+        requestedAt,
+        completedAt,
+        finalImageId: await target.getAttribute('data-image-id'),
+      });
+    }
+    const measured = await page.evaluate(() => window.warmAudit);
+    await attachReceipt(info, 'warm-browsing', {
+      build: await (await page.request.get('/browser-build.json')).json(),
+      browser: page.context().browser()!.version(),
+      fixture: {
+        files: count,
+        rows: imageSize,
+        columns: imageSize,
+        slices: imageSize / 2,
+        examinations: 2,
+        inputDirectory,
+      },
+      phases,
+      measured,
+      errors,
+      scope:
+        'Native synthetic source planes and actual 8/16/32-slice controls. Worker input/output and visible render events are observed without changing production rendering. No anatomical or hardware-wide pacing claim.',
+    });
+    expect(errors).toEqual([]);
+    expect(measured.jobs.filter((record) => record.phase !== 'cold' && record.type === 'estimate')).toEqual([]);
+    for (const phase of phases) {
+      expect(
+        measured.draws.some(
+          (draw) => draw.at >= phase.started && draw.at <= phase.requestedAt && draw.phase === phase.name,
+        ),
+      ).toBe(true);
+      expect(
+        measured.jobs.some((job) => job.phase === phase.name && job.ok && job.finished! <= phase.requestedAt),
+        `Uncached native planes must complete during ${phase.name}`,
+      ).toBe(true);
+    }
+  });
+}
+
+test('measures cold startup through first image and verifies the shipped RLE decoder', async ({ browser }, info) => {
+  const samples = [];
+  const rasters = new Set<string>();
+  let build: Record<string, unknown> | undefined;
+  for (const transferSyntax of ['explicit-vr-le', 'rle'] as const) {
+    const file = createSyntheticSvrDicomFiles({ orientations: 1, transferSyntax })[12]!;
+    const bytes = Buffer.from(await file.arrayBuffer());
+    for (let sample = 0; sample < 5; sample++) {
+      const context = await browser.newContext({
+        baseURL: info.project.use.baseURL,
+        viewport: info.project.use.viewport,
+      });
+      try {
+        const page = await context.newPage();
+        build ??= await (await page.request.get('/browser-build.json')).json();
+        const errors: string[] = [];
+        page.on('pageerror', (error) => errors.push(error.message));
+        await page.addInitScript(() => {
+          window.startupAudit = { longTasks: [] };
+          new PerformanceObserver((list) => {
+            for (const entry of list.getEntries())
+              window.startupAudit.longTasks.push({ startTime: entry.startTime, duration: entry.duration });
+          }).observe({ type: 'longtask', buffered: true });
+          const shell = new MutationObserver(() => {
+            if (!document.querySelector('.instrument-empty-heading')) return;
+            shell.disconnect();
+            requestAnimationFrame(() => {
+              window.startupAudit.shellFrameMs = performance.now();
+            });
+          });
+          shell.observe(document, { childList: true, subtree: true });
+          document.addEventListener(
+            'click',
+            (event) => {
+              const button = event.target instanceof Element ? event.target.closest('button') : null;
+              if (button?.closest('dialog') && button.textContent?.trim() === 'Import scans')
+                window.startupAudit.importStartedMs = performance.now();
+              if (button?.closest('dialog') && button.textContent?.trim() === 'Done')
+                requestAnimationFrame(() =>
+                  requestAnimationFrame(() => {
+                    window.startupAudit.imageUnblockedFrameMs = performance.now();
+                  }),
+                );
+            },
+            true,
+          );
+          document.addEventListener(
+            'cornerstoneimagerendered',
+            (event) => {
+              if (event.target instanceof Element && event.target.closest('[data-diagnostic-surface]'))
+                window.startupAudit.firstImageDrawMs ??= performance.now();
+            },
+            true,
+          );
+        });
+        await page.goto('/');
+        const trigger = page.getByRole('button', { name: 'Import scans', exact: true });
+        await expect(trigger).toBeVisible();
+        await expect.poll(() => page.evaluate(() => window.startupAudit.shellFrameMs)).toBeGreaterThan(0);
+        await trigger.click();
+        const intake = page.getByRole('dialog', { name: 'Import scans', exact: true });
+        await expect(intake).toBeVisible();
+        await intake
+          .getByLabel('Select DICOM image files')
+          .setInputFiles({ name: file.name, mimeType: 'application/dicom', buffer: bytes });
+        await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
+        await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
+        await intake.getByRole('button', { name: 'Done', exact: true }).click();
+        await expect.poll(() => page.evaluate(() => window.startupAudit.firstImageDrawMs)).toBeGreaterThan(0);
+        const canvas = page.locator('[data-diagnostic-surface] canvas').first();
+        await expect(canvas).toBeVisible();
+        const raster = await canvas.evaluate(async (canvas) => {
+          const pixels = (canvas as HTMLCanvasElement)
+            .getContext('2d')!
+            .getImageData(0, 0, (canvas as HTMLCanvasElement).width, (canvas as HTMLCanvasElement).height).data;
+          const levels = new Set<number>();
+          for (let offset = 0; offset < pixels.length; offset += 16) levels.add(pixels[offset]!);
+          const sha = await crypto.subtle.digest('SHA-256', new Uint8Array(pixels));
+          return {
+            levels: levels.size,
+            sha256: Array.from(new Uint8Array(sha), (value) => value.toString(16).padStart(2, '0')).join(''),
+          };
+        });
+        expect(raster.levels).toBeGreaterThan(5);
+        rasters.add(raster.sha256);
+        const measured = await page.evaluate(() => ({
+          ...window.startupAudit,
+          isolation: crossOriginIsolated,
+          navigation: performance.getEntriesByType('navigation')[0]!.toJSON(),
+          resources: performance.getEntriesByType('resource').map((entry) => entry.toJSON()),
+        }));
+        expect(measured.isolation).toBe(true);
+        expect(errors).toEqual([]);
+        samples.push({
+          sample,
+          transferSyntax,
+          fixtureSha256: createHash('sha256').update(bytes).digest('hex'),
+          ...measured,
+          raster,
+          errors,
+        });
+        if (sample === 0 && transferSyntax === 'rle') await capture(page, info, 'compressed-first-image');
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  expect(rasters.size, 'Both transfer syntaxes must produce exactly the same displayed pixels').toBe(1);
+  await attachReceipt(info, 'startup-and-codec', {
+    build,
+    browser: browser.version(),
+    channel: info.project.use.channel,
+    samples,
+    scope:
+      'Fresh contexts and HTTP caches, local normal-production assets, fixed synthetic source and viewport. Shell animation-frame and actual Cornerstone draw completion, not physical screen latency or general hardware pacing.',
+  });
+});
 
 /** Incognito IndexedDB is in-memory, so it cannot establish disk-backed backup resource costs. */
 async function withBackupBrowser<T>(info: TestInfo, consume: (context: BrowserContext) => Promise<T>): Promise<T> {

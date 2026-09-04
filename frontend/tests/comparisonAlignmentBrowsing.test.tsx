@@ -16,6 +16,7 @@ import type { SeriesFrameManifest } from '../src/utils/localApi';
 import { getProgressFromSlice, getSliceIndex } from '../src/utils/math';
 import { buildOutputPlaneGrid } from '../src/utils/outputPlaneGrid';
 import * as longitudinalFrames from '../src/utils/svr/longitudinalFrames';
+import type * as longitudinalRunner from '../src/utils/svr/runLongitudinalRegistration';
 import {
   resliceStackToReferencePlane,
   type LongitudinalReferencePlane,
@@ -52,7 +53,10 @@ vi.mock('../src/utils/cornerstoneSliceCapture', () => ({ renderSliceToPixels: mo
 vi.mock('../src/utils/decodedFrame', () => ({
   loadCornerstoneImage: (imageId: string) => cornerstone.loadImage(imageId),
 }));
-vi.mock('../src/utils/svr/runLongitudinalRegistration', () => ({ runLongitudinalEstimate: mocks.register }));
+vi.mock('../src/utils/svr/runLongitudinalRegistration', async (importOriginal) => ({
+  ...(await importOriginal<typeof longitudinalRunner>()),
+  runLongitudinalEstimate: mocks.register,
+}));
 vi.mock('../src/utils/svr/longitudinalFrames', async (importOriginal) => ({
   ...(await importOriginal<typeof longitudinalFrames>()),
   prepareLongitudinalReferenceInput: mocks.prepareReference,
@@ -220,10 +224,12 @@ type HarnessHandle = {
 function Comparison({
   sliceIndex,
   includeCold = false,
+  presentedDates,
   ref,
 }: {
   sliceIndex: number;
   includeCold?: boolean;
+  presentedDates?: readonly string[];
   ref: Ref<HarnessHandle>;
 }) {
   const panel = usePanelSettings('synthetic', 'cold,reference,warm', 'synthetic-patient', false, series);
@@ -244,6 +250,7 @@ function Comparison({
     data,
     sequenceId: 'synthetic',
     columns,
+    presentedDates,
     viewportSize: 512,
     outputMode: 'native',
     enabled: true,
@@ -362,6 +369,7 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     const handle = createRef<HarnessHandle>();
     const { rerender, getByTestId } = render(<Comparison ref={handle} sliceIndex={1} />);
     await tick();
+    expect(handle.current!.alignment.waitingForVisibleAlignment).toBe(false);
     await tick(650);
     const first = displayed('warm');
     expect(first.frame?.referenceFrameIndex).toBe(1);
@@ -417,7 +425,13 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     await tick(650);
     expect(mocks.capture).toHaveBeenCalledOnce();
     expect(handle.current!.alignment.isAligning).toBe(true);
+    expect(handle.current!.alignment.waitingForVisibleAlignment).toBe(true);
     expect(displayed('warm').image).toBe(next.image);
+
+    // Overlay playback follows its completed visible pair, not the pending cold date.
+    rerender(<Comparison ref={handle} sliceIndex={2} includeCold presentedDates={['reference', 'warm']} />);
+    expect(handle.current!.alignment.isAligning).toBe(true);
+    expect(handle.current!.alignment.waitingForVisibleAlignment).toBe(false);
 
     // Revisit needs neither analysis nor a second native reslice: the exact original
     // array is presented again, with the same manually adjusted transform and tone.
@@ -444,9 +458,10 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
       }
       return result;
     });
-    rerender(<Comparison ref={handle} sliceIndex={3} includeCold />);
+    rerender(<Comparison ref={handle} sliceIndex={3} includeCold presentedDates={['reference', 'warm']} />);
     await tick();
     expect(oldResult).toBeDefined();
+    expect(handle.current!.alignment.waitingForVisibleAlignment).toBe(true);
     rerender(<Comparison ref={handle} sliceIndex={0} includeCold />);
     await tick();
     const latest = displayed('warm');
@@ -464,5 +479,13 @@ describe('comparison aligned-pixel browsing while cold alignment is pending', ()
     expect(handle.current!.alignment.results.some((result) => result.derivedFrame?.referenceFrameIndex === 3)).toBe(
       false,
     );
+
+    // A terminal visible failure must not deadlock playback behind background work.
+    mocks.densify.mockRejectedValueOnce(new Error('Synthetic reslice failure'));
+    rerender(<Comparison ref={handle} sliceIndex={4} includeCold presentedDates={['reference', 'warm']} />);
+    await tick();
+    expect(handle.current!.alignment.results.find((result) => result.date === 'warm')?.outcome).toBe('failed');
+    expect(handle.current!.alignment.isAligning).toBe(true);
+    expect(handle.current!.alignment.waitingForVisibleAlignment).toBe(false);
   });
 });

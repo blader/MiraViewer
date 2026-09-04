@@ -30,6 +30,8 @@ export type SliceLoopNavigatorProps = {
   setProgress: (nextProgress: number) => void;
   /** Modal dialogs and active registration own navigation until they complete. */
   interactionBlocked?: boolean;
+  /** Coalesce automatic steps while a visible plane is computing; manual navigation remains available. */
+  waitingForAlignment?: boolean;
 };
 
 type LoopRangeHandlesProps = {
@@ -164,6 +166,7 @@ export function SliceLoopNavigator({
   progressRef,
   setProgress,
   interactionBlocked = false,
+  waitingForAlignment = false,
 }: SliceLoopNavigatorProps) {
   const referenceOffset = reference?.offset ?? 0;
   const reverseSliceOrder = reference?.reverseSliceOrder ?? false;
@@ -243,7 +246,10 @@ export function SliceLoopNavigator({
     else if (draggingHandle === 'end') updateLoop(loopStart, position);
   });
 
-  // rAF-driven ping-pong playback (advances by slice-sized steps to avoid overwhelming the UI)
+  const canAdvancePlayback = useEffectEvent(() => !waitingForAlignment);
+
+  // Keep the clock running during computation, then coalesce elapsed slice steps
+  // into one request. Advancing before completion would cancel every slow plane.
   useEffect(() => {
     if (!isLooping || interactionBlocked) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -277,6 +283,10 @@ export function SliceLoopNavigator({
       }
 
       loopStepAccumRef.current += dt * baseSlicesPerSecond * loopSpeed;
+      if (!canAdvancePlayback()) {
+        rafRef.current = requestAnimationFrame(step);
+        return;
+      }
       let didAdvance = false;
 
       while (loopStepAccumRef.current >= 1) {

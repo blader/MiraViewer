@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { expectAcquiredPixels, goToSlice, importComparisonExaminations } from './comparisonWorkflow';
 import type { Locator, Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
@@ -77,71 +78,6 @@ async function readSaved(page: Page) {
       db.close();
     }
   });
-}
-
-async function expectAcquiredPixels(page: Page) {
-  const canvas = page.locator('[data-diagnostic-surface] canvas').first();
-  await expect(canvas).toBeVisible();
-  await expect
-    .poll(() =>
-      canvas.evaluate((element) => {
-        const canvas = element as HTMLCanvasElement;
-        const context = canvas.getContext('2d');
-        if (!context || !canvas.width || !canvas.height) return 0;
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-        const levels = new Set<number>();
-        for (let i = 0; i < pixels.length; i += 16) levels.add(pixels[i]!);
-        return levels.size;
-      }),
-    )
-    .toBeGreaterThan(5);
-}
-
-async function goToSlice(page: Page, slice: number) {
-  const field = page.getByRole('spinbutton', { name: 'Go to slice' });
-  await field.fill(String(slice));
-  await field.press('Enter');
-  await expect(page.getByRole('group', { name: `Pan MRI slice ${slice}`, exact: true }).first()).toBeVisible();
-}
-
-async function importComparisonExaminations(
-  page: Page,
-  pixelPaddingValue: 0 | null,
-  examinations = [
-    { studyUid: '1.2.826.0.1.3680043.10.543.20350701.1', studyDate: '20350701' },
-    { studyUid: '1.2.826.0.1.3680043.10.543.20360701.1', studyDate: '20360701' },
-  ],
-  nativeOnly = false,
-) {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Import scans', exact: true }).click();
-  const files = (
-    await Promise.all(
-      examinations.map(async (examination, index) =>
-        Promise.all(
-          createSyntheticSvrDicomFiles({
-            imageSize: 36,
-            slicesPerOrientation: 24,
-            pixelPaddingValue,
-            ...examination,
-          })
-            .filter((file) => !nativeOnly || file.name.startsWith('synthetic-svr-0-'))
-            .map(async (file) => ({
-              name: `exam-${index}-${file.name}`,
-              mimeType: file.type,
-              buffer: Buffer.from(await file.arrayBuffer()),
-            })),
-        ),
-      ),
-    )
-  ).flat();
-  const intake = page.getByRole('dialog', { name: 'Import scans' });
-  await intake.getByLabel('Select DICOM image files').setInputFiles(files);
-  await intake.getByRole('button', { name: 'Import scans', exact: true }).click();
-  await expect(intake.getByText('Import complete', { exact: true })).toBeVisible();
-  await intake.getByRole('button', { name: 'Done', exact: true }).click();
-  await goToSlice(page, 12);
-  return files.length;
 }
 
 async function openLegacySyntheticStudy(page: Page) {
@@ -319,6 +255,83 @@ async function expectGrayscalePixels(canvas: Locator) {
     )
     .toBeGreaterThan(5);
 }
+
+test('loads dialogs on demand and preserves focus through failed or canceled delivery', async ({ page }, info) => {
+  const errors: string[] = [];
+  const requests: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('request', (request) => requests.push(new URL(request.url()).pathname));
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Bring your scans into Mira.' })).toBeVisible();
+  expect(requests.filter((path) => /(?:Help|Upload|Export|ClearData)Modal-.*\.js$/.test(path))).toEqual([]);
+
+  const help = page.getByRole('button', { name: 'Help and keyboard shortcuts' });
+  await page.route('**/HelpModal-*.js', (route) => route.abort(), { times: 1 });
+  await help.press('Space');
+  const unavailable = page.getByRole('dialog', { name: 'Dialog unavailable' });
+  await expect(unavailable.getByRole('alert')).toBeVisible();
+  await capture(page, info, 'dialog-delivery-unavailable');
+  await expect(page.locator('#root')).toHaveAttribute('inert', '');
+  await page.keyboard.press('Escape');
+  await expect(help).toBeFocused();
+  await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
+  await help.press('Space');
+  await expect(unavailable).toBeVisible();
+  await unavailable.getByRole('button', { name: 'Reload MiraViewer' }).click();
+  await expect(page.getByRole('heading', { name: 'Bring your scans into Mira.' })).toBeVisible();
+  await help.press('Space');
+  await expect(page.getByRole('dialog', { name: /help/i })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(help).toBeFocused();
+  await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
+
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    '**/UploadModal-*.js',
+    async (route) => {
+      await pending;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  const trigger = page.getByRole('button', { name: 'Import scans', exact: true });
+  try {
+    await trigger.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Opening dialog' })).toBeVisible();
+    await capture(page, info, 'dialog-delivery-loading');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+    const delivered = page.waitForResponse((response) =>
+      /\/UploadModal-.*\.js$/.test(new URL(response.url()).pathname),
+    );
+    release();
+    await delivered;
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await trigger.press('Enter');
+    await expect(page.getByRole('dialog', { name: 'Import scans', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    expect(await readSaved(page)).toMatchObject({ instances: 0, outlines: [], settings: [] });
+    expect(errors).toEqual([]);
+    await attachReceipt(info, 'dialog-delivery', {
+      requests,
+      errors,
+      completed: [
+        'dismissed failure and explicit reload recovery',
+        'focus isolation and restoration',
+        'close while loading',
+        'no late reopen',
+        'ordinary reopen',
+      ],
+    });
+  } finally {
+    release();
+  }
+});
 
 test('shows a clear metadata-only repair summary for existing scans on desktop and mobile', async ({ page }, info) => {
   const errors: string[] = [];
@@ -846,11 +859,14 @@ test('imports, navigates, annotates, reopens, and restores a complete synthetic 
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
   await page.getByRole('button', { name: 'Import scans', exact: true }).click();
   const files = await Promise.all(
-    createSyntheticSvrDicomFiles({ imageSize: 36, slicesPerOrientation: 24 }).map(async (file) => ({
-      name: file.name,
-      mimeType: file.type,
-      buffer: Buffer.from(await file.arrayBuffer()),
-    })),
+    // Keep compressed decoding in the normal CI workflow, not just the timing suite.
+    createSyntheticSvrDicomFiles({ imageSize: 36, slicesPerOrientation: 24, transferSyntax: 'rle' }).map(
+      async (file) => ({
+        name: file.name,
+        mimeType: file.type,
+        buffer: Buffer.from(await file.arrayBuffer()),
+      }),
+    ),
   );
   const intake = page.getByRole('dialog', { name: 'Import scans' });
   await intake.getByLabel('Select DICOM image files').setInputFiles(files);
