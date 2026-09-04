@@ -161,6 +161,8 @@ STORE avoids rejecting sparse backups under the archive expansion guard; files m
 
 Legacy source metadata is enriched on demand, not by a full database-open payload migration. A completed per-instance metadata version owns resumption; invalid or unknown geometry still fails physical admission. Header reads are bounded to 2 MiB, with four readers and 32-row commit batches. The 3D workspace prepares acquisitions sequentially; alignment passes its cancellation and source scope. Same-SOP reimport can fill legacy metadata while retaining the original image and saved work. The [source-metadata report](../evidence/source-metadata-2026-09-04/README.md) records schema-6 recovery, interrupted/resumed batches, physical viewing, exact image hashes, saved marks and fresh-context backup restoration.
 
+The focus preview consumes prepared source manifests rather than independently reading stale ordering and geometry. Same-source refresh retains valid presentation and focus intent; source/patient replacement retires it. Preparation retains valid individual manifests even if another selected source fails, allowing inspection without enabling reconstruction or labeling a rejected group verified.
+
 Legacy volume-key migration and broader warm native rendering remain active audit work. Sparse edit persistence and the source-owned settings/acquisition picker have their own linked regression and browser evidence. The implementation ledger is the status authority; old plans and old test totals are historical evidence.
 
 ## Private fixtures

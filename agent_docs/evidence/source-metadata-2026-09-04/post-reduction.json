@@ -1,0 +1,374 @@
+{
+  "source": {
+    "head": "164cb0989f560009c2b2c37ab3d908c9733e7736",
+    "sourceSha256": "9054411f36f270fb3c329df163b9538df1632a41ac3b670934352c25e24846ef",
+    "applicationSourceSha256": "2131c232d2f75b669ed31fa34cfefa2a4a571f7346736ee18c81b70dccbc67c4",
+    "modelManifestSha256": "5662be7768cef65140ce885dde9099fb16c0e64f0b90927d79ef8a9461aa725c"
+  },
+  "sourceUnchanged": true,
+  "sourceScope": "Code commit and fingerprints identify the exact checked candidate. Type/lint ran immediately before that normal commit with the same source bytes. Later publication changes are documentation/evidence only.",
+  "fixture": "Synthetic DICOM images and generated model graphs only; all MIRAVIEWER_ environment variables removed. No private MRI or private model weights.",
+  "checks": [
+    {
+      "name": "Complete default unit suite",
+      "recordedHead": "164cb0989f560009c2b2c37ab3d908c9733e7736",
+      "sourceFingerprintMatches": true,
+      "sourceUnchanged": true,
+      "exitCode": 0,
+      "startedAt": "2026-09-04T10:08:39.114Z",
+      "finishedAt": "2026-09-04T10:09:59.554Z"
+    },
+    {
+      "name": "TypeScript project references",
+      "recordedHead": "f064e649bf5bcae6f4712d1630dcf3d88e94654a",
+      "sourceFingerprintMatches": true,
+      "sourceUnchanged": true,
+      "exitCode": 0,
+      "startedAt": "2026-09-04T10:07:05.535Z",
+      "finishedAt": "2026-09-04T10:07:11.034Z"
+    },
+    {
+      "name": "Zero-warning full ESLint",
+      "recordedHead": "f064e649bf5bcae6f4712d1630dcf3d88e94654a",
+      "sourceFingerprintMatches": true,
+      "sourceUnchanged": true,
+      "exitCode": 0,
+      "startedAt": "2026-09-04T10:06:52.090Z",
+      "finishedAt": "2026-09-04T10:07:05.506Z"
+    }
+  ],
+  "unitSuite": {
+    "total": 3279,
+    "passed": 3225,
+    "failed": 0,
+    "skipped": 54,
+    "files": 173,
+    "maxWorkers": 2
+  },
+  "workflow": {
+    "route": "http://127.0.0.1:43134/",
+    "browser": "152.0.7977.82",
+    "channel": "installed Chrome",
+    "headless": false,
+    "buildMode": "production",
+    "builtAt": "2026-09-04T10:11:08.756Z",
+    "fullSourceMatch": true,
+    "stats": {
+      "startTime": "2026-09-04T10:11:43.489Z",
+      "duration": 46474.231999999996,
+      "expected": 9,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "tests": [
+      {
+        "title": "shows a clear metadata-only repair summary for existing scans on desktop and mobile",
+        "status": "passed",
+        "durationMs": 1856
+      },
+      {
+        "title": "upgrades a legacy database for physical viewing and preserves original bytes and saved work through backup restore",
+        "status": "passed",
+        "durationMs": 4104
+      },
+      {
+        "title": "backup controls show per-file limits and a reachable direct-save action",
+        "status": "passed",
+        "durationMs": 856
+      },
+      {
+        "title": "normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged",
+        "status": "passed",
+        "durationMs": 11908
+      },
+      {
+        "title": "imports, navigates, annotates, reopens, and restores a complete synthetic backup",
+        "status": "passed",
+        "durationMs": 6155
+      },
+      {
+        "title": "keeps saved source adjustments through explicit acquisition switches and a later date collision",
+        "status": "passed",
+        "durationMs": 1597
+      },
+      {
+        "title": "replays a two-examination alignment without replacing pixels or restarting sharp work",
+        "status": "passed",
+        "durationMs": 2318
+      },
+      {
+        "title": "settles the displayed overlay pair before offscreen alignment on cold and warm navigation",
+        "status": "passed",
+        "durationMs": 4847
+      },
+      {
+        "title": "keeps scan context legible beside a real alignment rejection on desktop and mobile",
+        "status": "passed",
+        "durationMs": 5298
+      }
+    ]
+  },
+  "roundTrip": {
+    "seedSchema": 6,
+    "schemaAfterApplicationOpen": 10,
+    "frames": 24,
+    "imageHashesUnchanged": true,
+    "perFrameHashesAndGeometry": "round-trip.json: frames; verified identical against this new raw receipt.",
+    "metadataVersion": 1,
+    "physicalPositions": [
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      21, 22, 23
+    ],
+    "metadataOnlyRevisionBefore": 7,
+    "metadataOnlyRevisionAfter": 7,
+    "metadataOnlyTokenUnchanged": true,
+    "restoredRevision": 8,
+    "restoreRotatedToken": true,
+    "restoredFrameMetadataExact": true,
+    "settingsBaseline": "Navigate to slice 12 and wait for its progress save before freezing the preservation baseline; metadata preparation itself must not change these settings.",
+    "settings": [
+      {
+        "comboId": "source:1.2.826.0.1.3680043.10.543.20370904.1.1",
+        "source": {
+          "studyUid": "1.2.826.0.1.3680043.10.543.20370904.1",
+          "seriesUid": "1.2.826.0.1.3680043.10.543.20370904.1.1"
+        },
+        "settings": {
+          "1.2.826.0.1.3680043.10.543.20370904.1": {
+            "offset": 0,
+            "reverseSliceOrder": false,
+            "zoom": 1.25,
+            "rotation": 0,
+            "brightness": 100,
+            "contrast": 100,
+            "panX": 0.12,
+            "panY": 0,
+            "affine00": 1,
+            "affine01": 0,
+            "affine10": 0,
+            "affine11": 1,
+            "progress": 0.4782608695652174,
+            "alignmentPaused": false
+          }
+        }
+      }
+    ],
+    "retainedSelections": [
+      {
+        "volumeKey": "synthetic-retained-legacy-grid",
+        "dims": [2, 2, 2],
+        "reviewState": "reviewed",
+        "labelBytes": 8,
+        "selectedCount": 1,
+        "labelsSha256": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8",
+        "seeds": {
+          "foreground": [0],
+          "background": [1],
+          "lastStroke": {
+            "plane": "axial",
+            "slice": 0
+          }
+        }
+      }
+    ],
+    "errors": [],
+    "scope": "Synthetic legacy metadata and saved-work preservation. Real source-stack admission, reopen, ZIP export and fresh-context restore; retained legacy labels are storage evidence, not automatic remapping to the newly opened grid or anatomical evidence."
+  },
+  "captures": [
+    {
+      "source": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-desktop.png",
+      "publicFile": "legacy-metadata-repair-desktop.png",
+      "sha256": "fab71470c92f30388dc191f921c9396069d06c0142276c56514f9049b6a34aaf",
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Static desktop repair-summary hierarchy, typography, contrast, preservation wording and reachable Done control."
+    },
+    {
+      "source": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-shows-a-clear-met-6cc59-scans-on-desktop-and-mobile-workflow/legacy-metadata-repair-mobile.png",
+      "publicFile": "legacy-metadata-repair-mobile.png",
+      "sha256": "135c5bb867725127ff7eb63b4bc2bcd8545560706ac5e7c3e8f71a980d248454",
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Static 390x844 repair-summary wrapping, spacing and reachable Done control."
+    },
+    {
+      "source": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-focus.png",
+      "publicFile": "legacy-metadata-focus.png",
+      "sha256": "8b401aeb5e32c95acde84e726252ac86027eaefb8f30608381fe030dd8cc8522",
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Initial prepared-source focus preview shows the synthetic phantom at slice 12 of 24; no stale spatial-metadata error. Static visible controls, not motion or anatomy."
+    },
+    {
+      "source": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-selection.png",
+      "publicFile": "legacy-metadata-selection.png",
+      "sha256": "7221ce540745e10aad3b681d3138f2f1a43da25f5253468912266a86684fcf62",
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Opened synthetic axial editing image and visible controls. Lower panes extend beyond the viewport; not full-page, motion or anatomical sign-off."
+    },
+    {
+      "source": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-restored-selection.png",
+      "publicFile": "legacy-metadata-selection.png",
+      "sha256": "7221ce540745e10aad3b681d3138f2f1a43da25f5253468912266a86684fcf62",
+      "detail": "original",
+      "verdict": "PASS",
+      "scope": "Fresh-context restored synthetic axial editing image and visible controls, separately inspected. Not legacy-label remapping, full-page, motion or anatomical sign-off."
+    }
+  ],
+  "visualScope": "Five current captures were individually inspected at original detail. Other workflow screenshots are retained but are not newly claimed as visually validated by this report.",
+  "storybook": false,
+  "cleanup": {
+    "at": "2026-09-04T10:13:26.525Z",
+    "receiptCount": 27,
+    "currentBatch": "CLEAR",
+    "staleOwned": "CLEAR",
+    "preservation": "CLEAR - read-only audit; no process, browser, profile, source, or private artifact changed.",
+    "port43134": "free",
+    "cleanup": "CLOSED"
+  },
+  "reduction": {
+    "base": "origin/main",
+    "mergeBase": "76e64347f045b07a041a40af8e01d00373d838ce",
+    "iterations": 2,
+    "implementationCommit": "164cb0989f560009c2b2c37ab3d908c9733e7736",
+    "before": {
+      "additions": 3112,
+      "deletions": 509,
+      "churn": 3621,
+      "sourceAdditions": 1301,
+      "sourceDeletions": 507,
+      "commentAdditions": 20,
+      "commentDeletions": 14,
+      "nonCommentSourceAdditions": 1281,
+      "nonCommentSourceChurn": 1774,
+      "untrackedCodeLines": 0
+    },
+    "after": {
+      "additions": 3239,
+      "deletions": 644,
+      "churn": 3883,
+      "sourceAdditions": 1428,
+      "sourceDeletions": 642,
+      "commentAdditions": 24,
+      "commentDeletions": 18,
+      "nonCommentSourceAdditions": 1404,
+      "nonCommentSourceChurn": 2028,
+      "untrackedCodeLines": 0
+    },
+    "percentageReduction": {
+      "additions": -4.08098,
+      "deletions": -26.52259,
+      "churn": -7.23557,
+      "nonCommentSourceAdditions": -9.60187,
+      "nonCommentSourceChurn": -14.31793
+    },
+    "runtimeNetLinesRemoved": 81,
+    "testNetLinesAdded": 73,
+    "allChangedFilesReadEachPass": true,
+    "changedPathsPerPass": 37,
+    "remainingViableReductions": false,
+    "metricsScope": "Reduction window only, before final documentation and evidence refresh. The confirmed first-focus consumer fix and meaningful regressions increased PR insertions/churn despite removing runtime duplication.",
+    "coverageReceipts": [
+      "pass-01-reviewed-ranges.json",
+      "pass-01-modified-diff-coverage.json",
+      "pass-02-reviewed-ranges.json"
+    ],
+    "plan": "reduction-plan-final.md"
+  },
+  "rawEvidence": [
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-build.json",
+      "sha256": "0966e6fa83792041ffc20e3c4fae799c827ad90b5308b107543bdd6b21908f1d"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-run.json",
+      "sha256": "aa53f4c4fdbeb8eb4c8c647f6a71168f65368a8e80f10898d4bf2cc21c6ca58f"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/results.json",
+      "sha256": "2cde593ca8c212322f49ed8aa3b17aead25df460b695d9a6a3d5adbd515c3e26"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/legacy-metadata-receipt.json",
+      "sha256": "90e2e5b4bd7db7a0a3c58f7c64abcf65e65b0edb58ee68460fa3be045a6d9360"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/candidate-workflow-results/workflow-upgrades-a-legacy-fdcff-work-through-backup-restore-workflow/synthetic-legacy-metadata-backup.zip",
+      "sha256": "942e282ab97dbd758dd4d5bae81c50112cb576de4b865c44a31f106bcfa9993f"
+    },
+    {
+      "path": "artifacts/performance/audit-source-metadata-2026-09-04/attempt-07/cleanup-audit.json",
+      "sha256": "546998b9a13f4b456faa8c7da8758d1ecf85c9a48acb1660a691e2812632840d"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-full-03.json",
+      "sha256": "29499ee101b61aa2af970373ee668cdf0c347fea90a9a25550f37cbdf68daef4"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-full-03.log",
+      "sha256": "c4e97cf3642e8e40457138c0e46a9563875de3d28d4b1442775d7e174f8bd631"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-full-03-source.json",
+      "sha256": "e980ed25798aa0c0a23e0955573a7196acc67ac94292ac280e5d1a2a63788e79"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-types-10.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-types-10-source.json",
+      "sha256": "93d1e99ad142108bcda40af784835fa57843859bc287bfad629ed382798f4511"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-lint-04.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-lint-04-source.json",
+      "sha256": "7fc5c151f35342bec4e9c81d6af9541002469be3e8fec9d680da728d8817a8ae"
+    },
+    {
+      "path": "frontend/tmp/source-metadata-build-07.log",
+      "sha256": "259f5b179b779ae08c85e3db6ce915b4e01377c6bcc9d52c3c950742561044ed"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/reduction-result.json",
+      "sha256": "a93a419ff173f08b2df16fb107e8a6c404d9200c489cc46e7b5eb588c8d4802f"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-01-before.json",
+      "sha256": "33c5f62155647f5bd8edd8db89aee120232410fd15a5b1e8cb5ebd68c06449b1"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-01-after.json",
+      "sha256": "672af0867aede2ae20a5df86b750cf91a326aae7b56479588733fb2c07265ecc"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-02-before.json",
+      "sha256": "0ca02c84e4e9a300a64f76ef4261cb98200fd1cb7f07ae6983479184cd735dcd"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-02-after.json",
+      "sha256": "0ca02c84e4e9a300a64f76ef4261cb98200fd1cb7f07ae6983479184cd735dcd"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-01-reviewed-ranges.json",
+      "sha256": "6a85133cb4de66c76cb409f4180ab0f1643adfbbe936cde8ba76f36648abd086"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-01-modified-diff-coverage.json",
+      "sha256": "e1b7c772c12d252bf3480d7bf91569acb241cda091672d5035607a4e8b5d5029"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/pass-02-reviewed-ranges.json",
+      "sha256": "235064ece7a6ca05e4270f7fc59c4012c941fb48b1edbf97ff1b61530b8e510c"
+    },
+    {
+      "path": "artifacts/turbovac/source-metadata-2026-09-04/reduction-plan-final.md",
+      "sha256": "b6d123b10c4c8160127692a6fa41381cbb6f2e10351639f69677386c61054c0b"
+    }
+  ]
+}
