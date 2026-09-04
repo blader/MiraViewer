@@ -1,0 +1,32 @@
+[
+  {
+    "file": "streaming-backup-export-desktop.png",
+    "sha256": "bb927f555c5fd32eda945e611f49e7780f4e3968eed1cc194454acdcf3bf9ac2",
+    "original": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-01/candidate-backup-ui-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-backup-ui/streaming-backup-export-desktop.png",
+    "inspection": "Direct single-source original-detail inspection; PASS within the stated static scope.",
+    "currentReinspection": {
+      "source": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-04/candidate-workflow-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-workflow/streaming-backup-export-desktop.png",
+      "sameBytesAsOriginal": true,
+      "applicationSourceSha256": "7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619",
+      "inspection": "Direct individual original-detail inspection; PASS for desktop/mobile export layout, typography, wrapping, and unclipped actions. Not motion or OS-picker evidence."
+    }
+  },
+  {
+    "file": "streaming-backup-export-mobile.png",
+    "sha256": "0a703540f3dbbbf3d2b34879b174ff8de102d1ae9174e12652344f8bb2e8690d",
+    "original": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-01/candidate-backup-ui-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-backup-ui/streaming-backup-export-mobile.png",
+    "inspection": "Direct single-source original-detail inspection; PASS within the stated static scope.",
+    "currentReinspection": {
+      "source": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-04/candidate-workflow-results/workflow-backup-controls-s-9a644-eachable-direct-save-action-workflow/streaming-backup-export-mobile.png",
+      "sameBytesAsOriginal": true,
+      "applicationSourceSha256": "7c7631bda4c3bb809dd8201e3ce3249a666b598fca792604143e186b561aa619",
+      "inspection": "Direct individual original-detail inspection; PASS for desktop/mobile export layout, typography, wrapping, and unclipped actions. Not motion or OS-picker evidence."
+    }
+  },
+  {
+    "file": "streaming-backup-restore-review.png",
+    "sha256": "c259c37690becfe35ed22eb5701ad9614cdd8b3140e9ba65fd3740ebf49a5f59",
+    "original": "artifacts/performance/audit-streaming-backups-2026-09-04/attempt-03/candidate-capacity-results/performance-backup-capacit-f232b-led-and-successful-restores-capacity/streaming-backup-restore-review.png",
+    "inspection": "Direct single-source original-detail inspection; PASS within the stated static scope."
+  }
+]

@@ -6,12 +6,7 @@ import { loadSafeArchive, readArchiveEntry } from '../services/archiveSafety';
 import type { SafeArchive } from '../services/archiveSafety';
 import { isDicomCandidate, processFiles } from '../services/dicomIngestion';
 import type { ProcessFilesProgress, ProcessFilesResult } from '../services/dicomIngestion';
-import {
-  getSnapshotRestoreBytes,
-  MAX_SNAPSHOT_RESTORE_BYTES,
-  readSnapshotManifest,
-  restoreSnapshot,
-} from '../services/exportBackup';
+import { getSnapshotRestoreBytes, readSnapshotManifest, restoreSnapshot } from '../services/exportBackup';
 import { yieldToMain } from '../utils/svr/svrUtils';
 import { AccessibleDialog } from './ui/AccessibleDialog';
 import { formatBytes } from '../utils/format';
@@ -152,13 +147,11 @@ async function* iterateDirectory(
 
 function IntakeManifest({
   source,
-  backupExceedsLimit,
   busy,
   restoreConfirmed,
   onRestoreConfirmed,
 }: {
   source: IntakeSource;
-  backupExceedsLimit: boolean;
   busy: boolean;
   restoreConfirmed: boolean;
   onRestoreConfirmed: (confirmed: boolean) => void;
@@ -203,16 +196,9 @@ function IntakeManifest({
         <div className="intake-backup-review">
           <p>This backup also restores saved work and may update the active patient.</p>
           <p>
-            Restore size: {formatBytes(source.restoreBytes ?? 0)} · complete backup safety limit:{' '}
-            {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)}
+            Restore size: {formatBytes(source.restoreBytes ?? 0)}. Files are verified in temporary storage before saved
+            work changes. Allow space for two copies of this payload until the restore finishes.
           </p>
-          {backupExceedsLimit && (
-            <div className="intake-notice intake-notice-error" role="alert">
-              This complete backup exceeds the {formatBytes(MAX_SNAPSHOT_RESTORE_BYTES)} safe restore limit. Keep the
-              archive and your local data: DICOM reimport alone does not restore saved annotations, selections, settings
-              or models.
-            </div>
-          )}
           <ul>
             {[
               ['Examinations', source.manifest.records.studies.length],
@@ -852,10 +838,6 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
     typeof storageHealth.quota === 'number' && typeof storageHealth.usage === 'number'
       ? Math.max(0, storageHealth.quota - storageHealth.usage)
       : null;
-  const backupExceedsLimit =
-    source?.kind === 'complete-backup' &&
-    typeof source.restoreBytes === 'number' &&
-    source.restoreBytes > MAX_SNAPSHOT_RESTORE_BYTES;
 
   return (
     <AccessibleDialog
@@ -947,7 +929,6 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
         {source && (
           <IntakeManifest
             source={source}
-            backupExceedsLimit={backupExceedsLimit}
             busy={busy}
             restoreConfirmed={restoreConfirmed}
             onRestoreConfirmed={(confirmed) => updateIntake({ restoreConfirmed: confirmed })}
@@ -1073,9 +1054,7 @@ export function UploadModal({ onClose, onUploadComplete }: UploadModalProps) {
             <button
               type="button"
               onClick={() => void handleUpload()}
-              disabled={
-                !source || busy || backupExceedsLimit || (source.kind === 'complete-backup' && !restoreConfirmed)
-              }
+              disabled={!source || busy || (source.kind === 'complete-backup' && !restoreConfirmed)}
               className="intake-button intake-button-primary"
             >
               {busy ? (

@@ -1,10 +1,14 @@
 import type JSZip from 'jszip';
 import { Inflate } from 'pako';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { assertStorageHeadroom } from '../db/db';
+import { inspectBlob, updateCrc } from './archiveIntegrity';
+import { yieldToMain } from '../utils/svr/svrUtils';
 
-const MAX_ARCHIVE_ENTRIES = 50_000;
-const MAX_ENTRY_BYTES = 512 * 1024 * 1024;
-const MAX_CENTRAL_DIRECTORY_BYTES = 64 * 1024 * 1024;
+export const MAX_ARCHIVE_ENTRIES = 50_000;
+export const MAX_ENTRY_BYTES = 512 * 1024 * 1024;
+export const MAX_CENTRAL_DIRECTORY_BYTES = 64 * 1024 * 1024;
 const MAX_EXPANSION_RATIO = 500;
 const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY = 0x06064b50;
@@ -14,15 +18,10 @@ const LOCAL_FILE_HEADER = 0x04034b50;
 const MAX_UINT16 = 0xffff;
 const MAX_UINT32 = 0xffffffff;
 
-const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
-  let crc = index;
-  for (let bit = 0; bit < 8; bit++) crc = (crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1) >>> 0;
-  return crc;
-});
-
 export type ArchiveReadOptions = {
   signal?: AbortSignal;
 };
+type ArchiveEntryReadOptions = ArchiveReadOptions & { sha256?: string };
 
 export type ArchiveLoadOptions = ArchiveReadOptions & {
   onProgress?: (current: number, total: number) => void;
@@ -31,7 +30,7 @@ export type ArchiveLoadOptions = ArchiveReadOptions & {
 
 type LazyArchiveEntry = JSZip.JSZipObject & {
   _data: Pick<ArchiveMember, 'compressedSize' | 'uncompressedSize' | 'crc32'>;
-  readVerified: (signal?: AbortSignal) => Promise<Blob>;
+  readVerified: (options?: ArchiveEntryReadOptions) => Promise<Blob>;
 };
 
 type ArchiveMember = {
@@ -47,6 +46,19 @@ export type SafeArchive = {
   entries: JSZip.JSZipObject[];
   uncompressedBytes: number;
 };
+
+export function normalizeArchivePath(name: string): string {
+  const normalized = name.replace(/\\/g, '/').normalize('NFC');
+  if (
+    !normalized ||
+    normalized.includes('\0') ||
+    normalized.startsWith('/') ||
+    /^[a-z]:/i.test(normalized) ||
+    normalized.split('/').includes('..')
+  )
+    throw new Error('This archive contains an unsafe file path.');
+  return normalized;
+}
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('Archive import cancelled.', 'AbortError');
@@ -69,13 +81,6 @@ async function readSlice(file: Blob, start: number, end: number, signal?: AbortS
   throwIfAborted(signal);
   if (bytes.byteLength !== end - start) throw new Error('This archive is truncated or incomplete.');
   return bytes;
-}
-
-function updateCrc(crc: number, bytes: Uint8Array): number {
-  for (let index = 0; index < bytes.length; index++) {
-    crc = CRC_TABLE[(crc ^ bytes[index]!) & 0xff]! ^ (crc >>> 8);
-  }
-  return crc >>> 0;
 }
 
 function parseZip64Extra(
@@ -171,7 +176,13 @@ async function locateCentralDirectory(file: Blob, signal?: AbortSignal) {
   return { count, offset, size };
 }
 
-async function readMember(file: Blob, member: ArchiveMember, directoryOffset: number, signal?: AbortSignal) {
+async function readMember(
+  file: Blob,
+  member: ArchiveMember,
+  directoryOffset: number,
+  options: ArchiveEntryReadOptions = {},
+) {
+  const { signal, sha256: expectedHash } = options;
   throwIfAborted(signal);
   const headerBytes = await readSlice(file, member.localHeaderOffset, member.localHeaderOffset + 30, signal);
   const header = new DataView(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength);
@@ -192,6 +203,8 @@ async function readMember(file: Blob, member: ArchiveMember, directoryOffset: nu
   const chunks: Uint8Array<ArrayBuffer>[] = [];
   let total = 0;
   let crc = MAX_UINT32;
+  const hash = expectedHash ? sha256.create() : undefined;
+  let yielded = performance.now();
   const accept = (chunk: Uint8Array) => {
     throwIfAborted(signal);
     total += chunk.byteLength;
@@ -199,7 +212,10 @@ async function readMember(file: Blob, member: ArchiveMember, directoryOffset: nu
       throw new Error('An archive entry exceeded its declared safe uncompressed size.');
     }
     crc = updateCrc(crc, chunk);
-    chunks.push(new Uint8Array(chunk));
+    hash?.update(chunk);
+    // STORE members already have immutable file-backed bytes. Verify the
+    // stream, then return that range instead of retaining a second payload.
+    if (member.compressionMethod !== 0) chunks.push(new Uint8Array(chunk));
   };
   const inflater = member.compressionMethod === 8 ? new Inflate({ raw: true, chunkSize: 64 * 1024 }) : undefined;
   if (inflater) inflater.onData = accept;
@@ -218,21 +234,27 @@ async function readMember(file: Blob, member: ArchiveMember, directoryOffset: nu
       } else {
         accept(result.value);
       }
+      if (performance.now() - yielded >= 8) {
+        await yieldToMain();
+        yielded = performance.now();
+      }
     }
     if (inflater && !inflater.ended && !inflater.push(new Uint8Array(), true)) {
       throw new Error('An archive entry is corrupt or cannot be decompressed.');
     }
+    throwIfAborted(signal);
+    if (total !== member.uncompressedSize)
+      throw new Error('An archive entry did not match its declared uncompressed size.');
+    if ((crc ^ MAX_UINT32) >>> 0 !== member.crc32)
+      throw new Error('An archive entry failed its CRC32 integrity check.');
+    if (hash && bytesToHex(hash.digest()) !== expectedHash)
+      throw new Error('A backup file failed its SHA-256 integrity check.');
+    return member.compressionMethod === 0 ? file.slice(dataOffset, dataEnd) : new Blob(chunks);
   } finally {
+    hash?.destroy();
     signal?.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
-  throwIfAborted(signal);
-  if (total !== member.uncompressedSize)
-    throw new Error('An archive entry did not match its declared uncompressed size.');
-  if ((crc ^ MAX_UINT32) >>> 0 !== member.crc32) {
-    throw new Error('An archive entry failed its CRC32 integrity check.');
-  }
-  return new Blob(chunks);
 }
 
 export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = {}): Promise<SafeArchive> {
@@ -278,16 +300,7 @@ export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = 
       ));
     }
     const name = decoder.decode(bytes.subarray(nameOffset, extraOffset));
-    const normalizedName = name.replace(/\\/g, '/').normalize('NFC');
-    if (
-      !normalizedName ||
-      normalizedName.includes('\0') ||
-      normalizedName.startsWith('/') ||
-      /^[a-z]:/i.test(normalizedName) ||
-      normalizedName.split('/').includes('..')
-    ) {
-      throw new Error('This archive contains an unsafe file path.');
-    }
+    const normalizedName = normalizeArchivePath(name);
     if (normalizedPaths.has(normalizedName)) throw new Error('This archive contains duplicate file paths.');
     normalizedPaths.add(normalizedName);
     if ((flags & 1) !== 0) throw new Error('Encrypted ZIP archives are not supported.');
@@ -313,7 +326,8 @@ export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = 
       compressionMethod,
       localHeaderOffset,
     };
-    const readVerified = (entrySignal?: AbortSignal) => readMember(file, member, directory.offset, entrySignal);
+    const readVerified = (readOptions?: ArchiveEntryReadOptions) =>
+      readMember(file, member, directory.offset, readOptions);
     const entry = {
       name,
       dir: normalizedName.endsWith('/'),
@@ -349,21 +363,22 @@ export async function loadSafeArchive(file: Blob, options: ArchiveLoadOptions = 
   return { zip, entries, uncompressedBytes };
 }
 
-export async function readArchiveEntry(entry: JSZip.JSZipObject, options: ArchiveReadOptions = {}): Promise<Blob> {
+export async function readArchiveEntry(entry: JSZip.JSZipObject, options: ArchiveEntryReadOptions = {}): Promise<Blob> {
   throwIfAborted(options.signal);
   const lazy = entry as Partial<LazyArchiveEntry>;
-  if (lazy.readVerified) return lazy.readVerified(options.signal);
+  if (lazy.readVerified) return lazy.readVerified(options);
   const bytes = await entry.async('uint8array');
   throwIfAborted(options.signal);
   const metadata = lazy._data;
   if (typeof metadata?.uncompressedSize === 'number' && bytes.byteLength !== metadata.uncompressedSize) {
     throw new Error('An archive entry did not match its declared uncompressed size.');
   }
-  if (
-    typeof metadata?.crc32 === 'number' &&
-    (updateCrc(MAX_UINT32, bytes) ^ MAX_UINT32) >>> 0 !== metadata.crc32 >>> 0
-  ) {
+  const blob = new Blob([new Uint8Array(bytes)]);
+  const actual = await inspectBlob(blob, options);
+  if (typeof metadata?.crc32 === 'number' && actual.crc32 !== metadata.crc32 >>> 0) {
     throw new Error('An archive entry failed its CRC32 integrity check.');
   }
-  return new Blob([new Uint8Array(bytes)]);
+  if (options.sha256 && actual.sha256 !== options.sha256)
+    throw new Error('A backup file failed its SHA-256 integrity check.');
+  return blob;
 }

@@ -4,7 +4,7 @@ import type { MiraDB } from './schema';
 import { initializeComparisonState } from './comparisonState';
 
 export const DB_NAME = 'MiraViewerDB';
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 export const SELECTED_PATIENT_STATE_KEY = 'selected_patient_key';
 export const SELECTED_PATIENT_STUDY_STATE_KEY = 'selected_patient_study_uid';
 export const DATASET_REVISION_STATE_KEY = 'dataset_revision';
@@ -77,6 +77,7 @@ export function getDB() {
     dbPromise = openDB<MiraDB>(DB_NAME, DB_VERSION, {
       upgrade(db, _oldVersion, _newVersion, transaction) {
         if (!db.objectStoreNames.contains('models')) db.createObjectStore('models');
+        if (!db.objectStoreNames.contains('backup_staging')) db.createObjectStore('backup_staging');
         // Studies
         if (!db.objectStoreNames.contains('studies')) {
           db.createObjectStore('studies', { keyPath: 'studyInstanceUid' });

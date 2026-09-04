@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Blob as NativeBlob } from 'node:buffer';
 import {
   deleteAllStoredMriData,
   getDB,
@@ -84,6 +85,32 @@ describe('db', () => {
     ]);
     expect(frames.map((frame) => frame.id)).toEqual(['retained-plane']);
     expect(Array.from(frames[0]!.pixels)).toEqual([3, 4]);
+  });
+
+  it('adds restore staging to a schema-9 database without replacing already migrated models', async () => {
+    const previous = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('MiraViewerDB', 9);
+      request.onupgradeneeded = () =>
+        request.result
+          .createObjectStore('models')
+          .put(
+            { key: 'retained-model', blob: new NativeBlob(['synthetic retained bytes']), savedAtMs: 123 },
+            'retained-model',
+          );
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    previous.close();
+    const db = await getDB();
+    const model = await db.get('models', 'retained-model');
+    expect(await model!.blob.text()).toBe('synthetic retained bytes');
+    expect(model!.savedAtMs).toBe(123);
+    await db.put(
+      'backup_staging',
+      { store: 'models', row: { ...model!, blob: new NativeBlob(['unpublished replacement']) } },
+      ['synthetic-operation', 0],
+    );
+    expect(await (await db.get('models', 'retained-model'))!.blob.text()).toBe('synthetic retained bytes');
   });
 
   it('requests persistent storage when available', async () => {

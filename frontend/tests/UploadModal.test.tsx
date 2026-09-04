@@ -558,7 +558,7 @@ describe('UploadModal', () => {
     await waitFor(() => expect(screen.getByText('Complete backup restored')).toBeInTheDocument());
   });
 
-  it('discloses oversized complete backups before consent and prevents unsafe restore', async () => {
+  it('rejects oversized individual backup files before consent and prevents unsafe restore', async () => {
     const restore = vi.spyOn(exportBackup, 'restoreSnapshot');
     render(<UploadModal onClose={vi.fn()} />);
     const backup = await archiveFile(
@@ -567,11 +567,24 @@ describe('UploadModal', () => {
     );
     selectFiles([backup], 'Select a complete backup or image archive');
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/512 mib safe restore limit/i));
-    const consent = screen.getByRole('checkbox', { name: /restore saved work/i });
-    fireEvent.click(consent);
-    expect(screen.getByRole('button', { name: 'Restore complete backup' })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/512 mib per-file restore limit/i));
+    expect(screen.queryByRole('checkbox', { name: /restore saved work/i })).toBeNull();
     expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('allows consent for a multi-file backup above 512 MiB and explains temporary storage', async () => {
+    const manifest = backupManifest(300 * 1024 * 1024);
+    manifest.records.models[0]!.file.byteLength = 300 * 1024 * 1024;
+    const restore = vi.spyOn(exportBackup, 'restoreSnapshot').mockResolvedValue(makeSummary());
+    render(<UploadModal onClose={vi.fn()} />);
+    selectFiles(
+      [await archiveFile({ 'export.json': JSON.stringify(manifest) }, 'large-backup.zip')],
+      'Select a complete backup or image archive',
+    );
+    await waitFor(() => expect(screen.getByText(/allow space for two copies/i)).toBeVisible());
+    fireEvent.click(screen.getByRole('checkbox', { name: /restore saved work/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore complete backup' }));
+    await waitFor(() => expect(restore).toHaveBeenCalledOnce());
   });
 
   it('disables cancellation once a complete-backup commit becomes indivisible', async () => {
