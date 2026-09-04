@@ -29,7 +29,8 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   projects: [
-    { name: 'workflow', testMatch: 'workflow.spec.ts' },
+    // Exercise the regular browser implementation, not the separate headless shell.
+    { name: 'workflow', testMatch: 'workflow.spec.ts', use: { channel: 'chromium' } },
     { name: 'gpu', testMatch: 'gpu.spec.ts' },
     { name: 'performance', testMatch: 'performance.spec.ts' },
     { name: 'inference', testMatch: 'inference.spec.ts' },
