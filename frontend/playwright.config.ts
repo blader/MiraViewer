@@ -36,10 +36,10 @@ export default defineConfig({
       testMatch: 'workflow.spec.ts',
       use: {
         channel: 'chromium',
-        // The CI job supplies Xvfb and Mesa. Select their OpenGL path;
-        // using the regular browser binary alone did not fix Linux stalls.
+        // The isolated CI job supplies Xvfb and Mesa. Select OpenGL and admit
+        // its software driver, which Chromium otherwise blocks for WebGL2.
         ...(process.env.CI && process.platform === 'linux'
-          ? { launchOptions: { args: [...launchArgs, '--use-angle=gl'] } }
+          ? { launchOptions: { args: [...launchArgs, '--use-angle=gl', '--ignore-gpu-blocklist'] } }
           : {}),
       },
     },

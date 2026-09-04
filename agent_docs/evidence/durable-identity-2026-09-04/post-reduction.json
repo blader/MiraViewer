@@ -336,5 +336,58 @@
     "cleanup": "CLOSED",
     "ownedReceiptCount": 37,
     "scope": "Full local workflow after the fail-fast WebGL2 requirement. Same normal-production application/model as attempt-08; browser test only changed. Linux CI remains separate."
+  },
+  "linuxGraphicsDiagnosis": {
+    "scope": "Controlled Linux x64 Chromium startup experiment, not hosted application acceptance or hardware performance.",
+    "failedHostedRun": "https://github.com/blader/MiraViewer/actions/runs/33874751474",
+    "failedHostedResult": {
+      "unitPassed": 3254,
+      "unitFailed": 0,
+      "existingOptionalSkips": 54,
+      "webgl2": null,
+      "applicationWorkflowsRun": 0
+    },
+    "containerImage": "mcr.microsoft.com/playwright@sha256:c091b21d9fae78c76e85cd4356431e9b018402f172a214fc7d7a5e9a7e29d8ac",
+    "platform": "linux",
+    "architecture": "x64",
+    "profiles": [
+      {
+        "name": "current-linux-profile",
+        "args": ["--use-angle=gl"],
+        "browser": "151.0.7922.34",
+        "graphics": {
+          "available": false,
+          "creationErrors": [
+            "Could not create a WebGL context, VENDOR = 0xffff, DEVICE = 0xffff, GL_VENDOR = Google Inc. (Mesa), GL_RENDERER = ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.2), GL_VERSION = 25.2.8, Sandboxed = no, Optimus = no, AMD switchable = no, Reset notification strategy = 0x8261, ErrorMessage = BindToCurrentSequence failed: ."
+          ]
+        }
+      },
+      {
+        "name": "explicit-software-admission",
+        "args": ["--use-angle=gl", "--ignore-gpu-blocklist"],
+        "browser": "151.0.7922.34",
+        "graphics": {
+          "available": true,
+          "creationErrors": [],
+          "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+          "vendor": "Google Inc. (Mesa)",
+          "renderer": "ANGLE (Mesa, llvmpipe (LLVM 20.1.2 128 bits), OpenGL 4.5)",
+          "pixel": [255, 0, 0, 255],
+          "error": 0
+        }
+      }
+    ],
+    "traceMessage": "ContextResult::kFatalFailure: WebGL2 blocklisted",
+    "originalTrace": {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-graphics-diagnostic/results.json",
+      "sha256": "5df64fcf241bd519bdfb086a414341623da3945ee497de0c569f038bf5a65724"
+    },
+    "closure": {
+      "path": "artifacts/turbovac/durable-identity-2026-09-04/linux-graphics-diagnostic/closed.json",
+      "sha256": "267c9853ec0199719c48b4ee65e047a69de6010fff6a1127ddc3a3ca7598ad75",
+      "containerAbsent": true,
+      "bothBrowserProcessesExited": true
+    },
+    "preservation": "Only the public Playwright package and authored diagnostic were mounted read-only; no private data, app source or models. No running host service was changed."
   }
 }
