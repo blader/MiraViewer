@@ -553,6 +553,7 @@ describe('SVR canonical source admission and acquired support', () => {
     expect(JSON.stringify(accepted)).toBe(snapshot);
   });
 
+  // This full-size assembly checks memory/source ownership, not a five-second latency budget on a shared test host.
   it('loads context beside the actual default overview only within its explicit combined native-source budget', async () => {
     cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
     const pixels = Int16Array.from({ length: 512 * 512 }, (_, index) => (index % 32000) - 16000);
@@ -617,7 +618,7 @@ describe('SVR canonical source admission and acquired support', () => {
     await setSelectedPatientKey('another-active-patient');
     await expect(ordinary.load(roi, admitted)).rejects.toThrow(/currently selected patient/);
     expect(cornerstone.loadImage).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it.each(['no accepted source', 'no region', 'independent source', 'invalid budget'] as const)(
     'does not apply a native-context budget to %s',
