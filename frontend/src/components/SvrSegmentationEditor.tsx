@@ -795,7 +795,7 @@ export function SvrSegmentationEditor({
             ) : null}
           </div>
         </div>
-        {/* Notices float over the view so the toolbar keeps one fixed height. */}
+        {/* Notices float over the lower-right of the view so the toolbar keeps one fixed height. */}
         <div className="svr-selection-notices">
           {disabled && disabledReason ? (
             <div className="svr-selection-guidance" role="status" aria-live="polite">
