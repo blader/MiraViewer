@@ -36,7 +36,6 @@
 }
 .svr-selection-notices > * {
   pointer-events: auto;
-  margin-top: 0;
   padding: 4px 10px;
   border-radius: 3px;
   background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);

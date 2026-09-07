@@ -366,7 +366,7 @@ export function createTrackingController({
   let operation: Promise<TrackingResult | TrackingSnapshotResult> | null = null;
   let closing: Promise<void> | undefined;
 
-  function createRunScope(signal: AbortSignal | undefined, progress: (phase: string) => void) {
+  function createRunScope(source: TrackingSource, signal: AbortSignal | undefined, progress: (phase: string) => void) {
     const owned = new Set<Ort.Tensor>();
     const check = () => {
       if (disposed) throw new DOMException('Tracking was disposed.', 'AbortError');
@@ -399,26 +399,31 @@ export function createTrackingController({
       return result;
     }
     const flag = (value: boolean) => tensor('bool', Uint8Array.of(value ? 1 : 0), [1]);
-    return { owned, check, release, tensor, graph, flag };
+    const { readFrame, width, height, sourceRange, featureCache } = source;
+    async function encodeFrame(index: number) {
+      const cached = featureCache?.get(index);
+      if (cached) {
+        check();
+        return tensor('float32', cached.slice(), [1, 256, 32, 32]);
+      }
+      let pixels: Float32Array | null = await readFrame(index, signal);
+      check();
+      const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
+      pixels = null;
+      const image = tensor('float32', normalized, [1, 3, 512, 512]);
+      const { features } = await graph('encoder', { image });
+      release(image);
+      featureCache?.set(index, floatData(features, FEATURE_VALUES, 'Image encoder').slice());
+      return features;
+    }
+    return { owned, check, release, tensor, graph, flag, encodeFrame };
   }
 
-  async function runFrames({
-    readFrame,
-    featureCache,
-    width,
-    height,
-    sourceRange,
-    frameCount,
-    anchorIndex,
-    points,
-    labels,
-    direction = 1,
-    stopIndex = direction === 1 ? frameCount - 1 : 0,
-    allowDirectionStop,
-    signal,
-    onFrame,
-    onProgress = () => {},
-  }: TrackingOptions): Promise<TrackingResult> {
+  async function runFrames(options: TrackingOptions): Promise<TrackingResult> {
+    const { width, height, frameCount, anchorIndex, points, labels, direction = 1, allowDirectionStop } = options;
+    const { signal, onFrame, onProgress = () => {} } = options;
+    // The barrier frame may shorten the traversal, so the stop index stays mutable.
+    let stopIndex = options.stopIndex ?? (direction === 1 ? frameCount - 1 : 0);
     if (allowDirectionStop !== undefined && allowDirectionStop !== true)
       throw new Error('Directional stopping requires explicit permission.');
     if (
@@ -444,7 +449,7 @@ export function createTrackingController({
     );
     const promptLabels = BigInt64Array.from(labels, BigInt);
     const recent = new Map<number, TrackingMemoryEntry>();
-    const { owned, check, release, tensor, graph, flag } = createRunScope(signal, progress);
+    const { owned, check, release, tensor, graph, flag, encodeFrame } = createRunScope(options, signal, progress);
     let anchor: TrackingMemoryEntry | null = null;
     let frameIndex = anchorIndex;
     function progress(phase: string): void {
@@ -467,22 +472,6 @@ export function createTrackingController({
       });
     }
     let completedFrames = 0;
-    const encodeFrame = async (index: number) => {
-      const cached = featureCache?.get(index);
-      if (cached) {
-        check();
-        return tensor('float32', cached.slice(), [1, 256, 32, 32]);
-      }
-      let pixels: Float32Array | null = await readFrame(index, signal);
-      check();
-      const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
-      pixels = null;
-      const image = tensor('float32', normalized, [1, 3, 512, 512]);
-      const { features } = await graph('encoder', { image });
-      release(image);
-      featureCache?.set(index, floatData(features, FEATURE_VALUES, 'Image encoder').slice());
-      return features;
-    };
     try {
       for (frameIndex = anchorIndex; (stopIndex - frameIndex) * direction >= 0; frameIndex += direction) {
         check();
@@ -613,9 +602,8 @@ export function createTrackingController({
     type ConditioningEntry = TrackingMemoryEntry & Omit<TrackingFrameOutput, 'direction' | 'initial'>;
     const conditioning = new Map<number, ConditioningEntry>();
     const recent = new Map<number, TrackingMemoryEntry>();
-    const { width, height, frameCount, anchorIndex, sourceRange, signal, readFrame, featureCache, onFrame, onProgress } =
-      options;
-    const { owned, check, release, tensor, graph, flag } = createRunScope(signal, progress);
+    const { width, height, frameCount, anchorIndex, signal, onFrame, onProgress } = options;
+    const { owned, check, release, tensor, graph, flag, encodeFrame } = createRunScope(options, signal, progress);
     let stage: 'prepare' | 'final' = 'prepare';
     let direction: 1 | -1 = 1;
     let index = anchorIndex;
@@ -684,22 +672,6 @@ export function createTrackingController({
       )
         throw new Error('Mask decoder returned nonfinite values.');
       return { tensors: result, output };
-    }
-    async function encodeFrame(frameIndex: number) {
-      const cached = featureCache?.get(frameIndex);
-      if (cached) {
-        check();
-        return tensor('float32', cached.slice(), [1, 256, 32, 32]);
-      }
-      let pixels: Float32Array | null = await readFrame(frameIndex, signal);
-      check();
-      const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
-      pixels = null;
-      const image = tensor('float32', normalized, [1, 3, 512, 512]);
-      const { features } = await graph('encoder', { image });
-      release(image);
-      featureCache?.set(frameIndex, floatData(features, FEATURE_VALUES, 'Image encoder').slice());
-      return features;
     }
     async function compute(prompts?: TrackingFramePrompts, initial = false) {
       check();

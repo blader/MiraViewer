@@ -194,19 +194,13 @@ describe('consumer-certified directional prefixes', () => {
 
   it('reuses cached image features across runs and skips reading or encoding cached planes', async () => {
     const runtime = fakeRuntime();
-    const frames = new Map<number, Float32Array>();
-    const featureCache = {
-      get: (index: number) => frames.get(index),
-      set: (index: number, features: Float32Array) => {
-        frames.set(index, features);
-      },
-    };
+    const featureCache = new Map<number, Float32Array>();
     const readFrame = vi.fn(async () => Float32Array.of(0, 1, 2, 3));
     const first = await runtime.controller.run(options({ frameCount: 3, featureCache, readFrame }));
     expect(runtime.calls.filter((call) => call.name === 'encoder')).toHaveLength(3);
     expect(readFrame).toHaveBeenCalledTimes(3);
-    expect([...frames.keys()]).toEqual([0, 1, 2]);
-    for (const features of frames.values()) expect(features).toHaveLength(FEATURE_VALUES);
+    expect([...featureCache.keys()]).toEqual([0, 1, 2]);
+    for (const features of featureCache.values()) expect(features).toHaveLength(FEATURE_VALUES);
     runtime.calls.length = 0;
     readFrame.mockClear();
     const second = await runtime.controller.run(options({ frameCount: 3, featureCache, readFrame }));

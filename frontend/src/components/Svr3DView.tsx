@@ -44,9 +44,7 @@ import type { NativeSourceGrid } from '../utils/svr/nativeSourceContext';
 
 /** Distinguishes successive native crops for the tracking runtime's feature cache. */
 let selectionContextSequence = 0;
-import {
-  admitInteractiveSelection,
-} from '../utils/segmentation/interactiveAdmission';
+import { admitInteractiveSelection } from '../utils/segmentation/interactiveAdmission';
 import { InteractiveTrackingWorker } from '../utils/segmentation/interactiveTrackingWorker';
 import { proposeInteractiveSelection } from '../utils/segmentation/interactiveSelection';
 import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
@@ -1324,7 +1322,12 @@ function useSvrReconstructionWorkspace({
         selectedSeries,
         parameters: selectionParameters,
       }));
-      const plan = planInteractiveSelectionContext(selectionVolume, context.grid, request.seeds, owner!.selection?.grid);
+      const plan = planInteractiveSelectionContext(
+        selectionVolume,
+        context.grid,
+        request.seeds,
+        owner!.selection?.grid,
+      );
       const admit = async () => {
         const owners = measureOwners();
         const sourceLoadPeakBytes =
@@ -1345,10 +1348,9 @@ function useSvrReconstructionWorkspace({
           literalMarkCount: plan.literalMarkCount,
         };
         // The warm runtime is always worth keeping between corrections; no ceiling forces its release.
-        const retainRuntimeAfterRun = true;
-        const admitted = await admitInteractiveSelection({ ...admission, retainRuntimeAfterRun });
+        const admitted = await admitInteractiveSelection({ ...admission, retainRuntimeAfterRun: true });
         assertCurrent();
-        return { ...admitted, retainRuntimeAfterRun };
+        return { ...admitted, retainRuntimeAfterRun: true };
       };
       const progress = (start: number, span: number) => (progress: { current: number; total: number }) => {
         assertCurrent();
@@ -1579,7 +1581,9 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
               {estimatedPeakMemoryMiB !== null ? (
                 <div className="mt-1 flex items-center justify-between gap-2">
                   <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
-                  <span className="tabular-nums text-[var(--text-primary)]">{Math.ceil(estimatedPeakMemoryMiB)} MiB</span>
+                  <span className="tabular-nums text-[var(--text-primary)]">
+                    {Math.ceil(estimatedPeakMemoryMiB)} MiB
+                  </span>
                 </div>
               ) : null}
               {!nativeSource ? (

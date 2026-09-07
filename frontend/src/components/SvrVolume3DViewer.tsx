@@ -285,15 +285,6 @@ function v3Dot(a: Vec3, b: Vec3): number {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-/** Patient posterior and superior in the raymarcher's object frame (rows of the direction matrix; identity when absent). */
-function patientAxesObject(volume: SvrVolume | null): { posterior: Vec3; superior: Vec3 } {
-  const d = volume?.direction;
-  return {
-    posterior: { x: d?.[3] ?? 0, y: d?.[4] ?? 1, z: d?.[5] ?? 0 },
-    superior: { x: d?.[6] ?? 0, y: d?.[7] ?? 0, z: d?.[8] ?? 1 },
-  };
-}
-
 /**
  * Turntable camera. `home` maps the patient's superior axis to screen-up and a
  * reference facing toward the viewer; azimuth orbits around superior and
@@ -311,24 +302,21 @@ function orbitRotation({ home, azimuth, elevation }: Orbit): Quat {
   return quatNormalize(quatMultiply(pitch, quatMultiply(yaw, home)));
 }
 
-/** Superior up; `forward` (object space) toward the viewer, or anterior when it is absent or parallel to superior. */
+/**
+ * Superior up; `forward` (object space) toward the viewer, or anterior when it is absent or
+ * parallel to superior. Patient axes are rows of the direction matrix (identity when absent),
+ * so anterior is always perpendicular to superior.
+ */
 function orbitHome(volume: SvrVolume | null, forward?: Vec3): Quat {
-  const { posterior, superior } = patientAxesObject(volume);
-  const up = v3Normalize(superior);
+  const d = volume?.direction;
+  const up = v3Normalize({ x: d?.[6] ?? 0, y: d?.[7] ?? 0, z: d?.[8] ?? 1 });
+  const anterior = { x: -(d?.[3] ?? 0), y: -(d?.[4] ?? 1), z: -(d?.[5] ?? 0) };
   const level = (v: Vec3): Vec3 => {
     const along = v3Dot(v, up);
     return { x: v.x - along * up.x, y: v.y - along * up.y, z: v.z - along * up.z };
   };
-  const candidates = [forward, { x: -posterior.x, y: -posterior.y, z: -posterior.z }, { x: 0, y: 0, z: 1 }, { x: 1, y: 0, z: 0 }];
-  let facing: Vec3 = { x: 0, y: 0, z: 1 };
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const leveled = level(candidate);
-    if (Math.hypot(leveled.x, leveled.y, leveled.z) > 1e-6) {
-      facing = v3Normalize(leveled);
-      break;
-    }
-  }
+  const leveled = forward ? level(forward) : anterior;
+  const facing = v3Normalize(Math.hypot(leveled.x, leveled.y, leveled.z) > 1e-6 ? leveled : level(anterior));
   return quatFromRotationRows(v3Cross(up, facing), up, facing);
 }
 

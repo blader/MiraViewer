@@ -5,12 +5,7 @@ import { SLICE_AXES } from '../segmentation/selectionEditing';
 import { voxelPoint, type VoxelBounds } from '../segmentation/voxelGeometry';
 import type { NativeSourceGrid } from './nativeSourceContext';
 import { assertNotAborted, yieldToMain } from './svrUtils';
-import {
-  IDENTITY_DIRECTION,
-  patientToVolumeVoxel,
-  physicalVolumeBounds,
-  volumeVoxelToPatient,
-} from './volumeGeometry';
+import { IDENTITY_DIRECTION, patientToVolumeVoxel, physicalVolumeBounds, volumeVoxelToPatient } from './volumeGeometry';
 
 type Triple = [number, number, number];
 const PLANES = ['sagittal', 'coronal', 'axial'] as const;
@@ -178,16 +173,10 @@ function preferredGridStart(source: NativeSourceGrid, grid: NativeSourceGrid): T
   return start.every((value, axis) => Math.abs(value - rounded[axis]!) < 1e-6) ? rounded : null;
 }
 
-/** True when `loaded` samples every cell of `desired` on the same native lattice. */
+/** True when both grids sample the same cells: same lattice, same start cell, same extent. */
 export function sameInteractiveSelectionGrid(a: NativeSourceGrid, b: NativeSourceGrid): boolean {
-  const aDirection = a.direction ?? IDENTITY_DIRECTION,
-    bDirection = b.direction ?? IDENTITY_DIRECTION;
-  return (
-    a.dims.every((size, axis) => size === b.dims[axis]) &&
-    a.voxelSizeMm.every((pitch, axis) => Math.abs(pitch - b.voxelSizeMm[axis]!) < 1e-9) &&
-    a.originMm.every((value, axis) => Math.abs(value - b.originMm[axis]!) < 1e-6) &&
-    aDirection.every((value, index) => Math.abs(value - bDirection[index]!) < 1e-12)
-  );
+  const start = preferredGridStart(a, b);
+  return start !== null && start.every((cell) => cell === 0) && a.dims.every((size, axis) => size === b.dims[axis]);
 }
 
 /**
