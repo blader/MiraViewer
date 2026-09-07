@@ -11,14 +11,9 @@ export function proposedRegion(indices: Iterable<number> = [30, 31, 32], voxels 
   return { data, contextLimited: false, boundaryCount: 0 };
 }
 
-export function setAutoFill(enabled: boolean) {
-  const checkbox = screen.getByRole('checkbox', { name: 'Auto-fill' }) as HTMLInputElement;
-  if (checkbox.checked !== enabled) fireEvent.click(checkbox);
-}
-
-export function paint(x = 5, y = 6, kind: 'Add' | 'Remove' = 'Add', cancel = false) {
+export function paint(x = 5, y = 6, kind: 'Add' | 'Erase' = 'Add', cancel = false) {
   fireEvent.click(screen.getByRole('button', { name: kind }));
-  fireEvent.change(screen.getByRole('slider', { name: 'Selection brush radius in millimeters' }), {
+  fireEvent.change(screen.getByRole('slider', { name: 'Brush radius in millimeters' }), {
     target: { value: '0.5' },
   });
   const canvas = screen.getByRole('application', { name: /axial reconstructed slice/i });

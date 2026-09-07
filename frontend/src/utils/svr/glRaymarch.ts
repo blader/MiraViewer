@@ -377,7 +377,7 @@ export function buildOccupancyMaxGridAsync(
 
 export type NativePlaneDisplay = {
   enabled: boolean;
-  /** Opaque calibrated source samples; nearer opaque anatomy may occlude them. */
+  /** Opaque calibrated source samples where the volume is visible; nearer opaque anatomy may occlude them. */
   exact?: boolean;
   selectionOnly?: boolean;
   contour?: boolean;
@@ -784,7 +784,7 @@ vec4 nativeSurface(vec3 ro, vec3 rd, out float planeT) {
     // Use the exact CPU-projected annotation, never a reduced GPU label grid.
     // A selected dark MRI pixel is still valid tissue, not transparent air.
     if (mask <= 0.0) return vec4(0.0);
-  } else if (u_nativeExact == 0 && windowed(texture(u_vol, tc).r) < saturate(u_thr) && !(u_labelsEnabled != 0 && mask > 0.0)) {
+  } else if (windowed(texture(u_vol, tc).r) < saturate(u_thr) && !(u_labelsEnabled != 0 && mask > 0.0)) {
     return vec4(0.0);
   }
   float value = texelFetch(u_nativeImage, pixel, 0).r;

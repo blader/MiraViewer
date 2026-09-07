@@ -20,6 +20,12 @@ export type TrackingSessions = Record<TrackingGraph, Pick<Ort.InferenceSession, 
 export type TrackingFrameDecision = 'stop-direction' | void;
 export type TrackingDirectionEndpoints = { forward: number; reverse: number };
 
+/** Encoded image features per source plane; valid only while the planes and source range are unchanged. */
+export interface TrackingFeatureCache {
+  get(index: number): Float32Array | undefined;
+  set(index: number, features: Float32Array): void;
+}
+
 export interface TrackingSource {
   width: number;
   height: number;
@@ -27,6 +33,8 @@ export interface TrackingSource {
   sourceRange: TrackingSourceRange;
   /** Complete source-context planes, row-major XY; no display tone or inferred pixels. */
   readFrame(index: number, signal?: AbortSignal): Float32Array | Promise<Float32Array>;
+  /** Optional caller-owned cache; a hit skips reading and encoding that plane. */
+  featureCache?: TrackingFeatureCache;
 }
 
 export interface TrackingFrameOutput {
@@ -396,6 +404,7 @@ export function createTrackingController({
 
   async function runFrames({
     readFrame,
+    featureCache,
     width,
     height,
     sourceRange,
@@ -458,19 +467,28 @@ export function createTrackingController({
       });
     }
     let completedFrames = 0;
+    const encodeFrame = async (index: number) => {
+      const cached = featureCache?.get(index);
+      if (cached) {
+        check();
+        return tensor('float32', cached.slice(), [1, 256, 32, 32]);
+      }
+      let pixels: Float32Array | null = await readFrame(index, signal);
+      check();
+      const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
+      pixels = null;
+      const image = tensor('float32', normalized, [1, 3, 512, 512]);
+      const { features } = await graph('encoder', { image });
+      release(image);
+      featureCache?.set(index, floatData(features, FEATURE_VALUES, 'Image encoder').slice());
+      return features;
+    };
     try {
       for (frameIndex = anchorIndex; (stopIndex - frameIndex) * direction >= 0; frameIndex += direction) {
         check();
         progress('before-source-frame');
         check();
-        let pixels: Float32Array | null = await readFrame(frameIndex, signal);
-        check();
-        const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
-        pixels = null;
-        const image = tensor('float32', normalized, [1, 3, 512, 512]);
-        const { features } = await graph('encoder', { image });
-        release(image);
-        floatData(features, FEATURE_VALUES, 'Image encoder');
+        const features = await encodeFrame(frameIndex);
         const initial = frameIndex === anchorIndex;
         let fused = features;
         if (!initial) {
@@ -595,7 +613,8 @@ export function createTrackingController({
     type ConditioningEntry = TrackingMemoryEntry & Omit<TrackingFrameOutput, 'direction' | 'initial'>;
     const conditioning = new Map<number, ConditioningEntry>();
     const recent = new Map<number, TrackingMemoryEntry>();
-    const { width, height, frameCount, anchorIndex, sourceRange, signal, readFrame, onFrame, onProgress } = options;
+    const { width, height, frameCount, anchorIndex, sourceRange, signal, readFrame, featureCache, onFrame, onProgress } =
+      options;
     const { owned, check, release, tensor, graph, flag } = createRunScope(signal, progress);
     let stage: 'prepare' | 'final' = 'prepare';
     let direction: 1 | -1 = 1;
@@ -666,18 +685,27 @@ export function createTrackingController({
         throw new Error('Mask decoder returned nonfinite values.');
       return { tensors: result, output };
     }
-    async function compute(prompts?: TrackingFramePrompts, initial = false) {
-      check();
-      progress('before-source-frame');
-      check();
-      let pixels: Float32Array | null = await readFrame(index, signal);
+    async function encodeFrame(frameIndex: number) {
+      const cached = featureCache?.get(frameIndex);
+      if (cached) {
+        check();
+        return tensor('float32', cached.slice(), [1, 256, 32, 32]);
+      }
+      let pixels: Float32Array | null = await readFrame(frameIndex, signal);
       check();
       const normalized = prepareTrackingFrame(pixels, width, height, sourceRange);
       pixels = null;
       const image = tensor('float32', normalized, [1, 3, 512, 512]);
       const { features } = await graph('encoder', { image });
       release(image);
-      floatData(features, FEATURE_VALUES, 'Image encoder');
+      featureCache?.set(frameIndex, floatData(features, FEATURE_VALUES, 'Image encoder').slice());
+      return features;
+    }
+    async function compute(prompts?: TrackingFramePrompts, initial = false) {
+      check();
+      progress('before-source-frame');
+      check();
+      const features = await encodeFrame(index);
       let fused = features;
       if (!initial) {
         const packed = packConditioningMemory(

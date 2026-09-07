@@ -21,11 +21,7 @@ import type { SliceGeometry } from '../utils/svr/dicomGeometry';
 import { getSliceGeometryFromInstance, INDEPENDENT_NORMAL_COSINE, sliceCornersMm } from '../utils/svr/dicomGeometry';
 import { estimateSvrSourceMemory } from '../utils/svr/sourceMemory';
 import { CORNERSTONE_MEMORY_FALLBACK_BYTES, measureCornerstoneImageMemory } from '../utils/cornerstoneMemory';
-import {
-  estimateSvrPeakMemoryBytes,
-  estimateSvrRegistrationBytes,
-  SVR_MEMORY_BUDGET_BYTES,
-} from '../utils/svr/svrMemoryPlan';
+import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes } from '../utils/svr/svrMemoryPlan';
 import { quantileSorted } from '../utils/svr/svrUtils';
 import { dot } from '../utils/svr/vec3';
 import { SvrVolume3DViewer } from './SvrVolume3DViewer';
@@ -42,20 +38,23 @@ import { createNativeSourceContext, type NativeSourceContext } from '../utils/sv
 import {
   cropInteractiveSelectionContext,
   planInteractiveSelectionContext,
+  sameInteractiveSelectionGrid,
 } from '../utils/svr/interactiveSelectionContext';
+import type { NativeSourceGrid } from '../utils/svr/nativeSourceContext';
+
+/** Distinguishes successive native crops for the tracking runtime's feature cache. */
+let selectionContextSequence = 0;
 import {
   admitInteractiveSelection,
-  estimateInteractiveSelectionMemory,
-  interactiveSelectionBudgetBytes,
 } from '../utils/segmentation/interactiveAdmission';
 import { InteractiveTrackingWorker } from '../utils/segmentation/interactiveTrackingWorker';
 import { proposeInteractiveSelection } from '../utils/segmentation/interactiveSelection';
 import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
 import {
+  assertEnhancementFits,
   cropEnhancementSource,
   enhancementContextFits,
   enhancementSelectionRoi,
-  prepareEnhancementMemory,
   type EnhancementSourceLoader,
 } from '../utils/svr/superResolutionRegion';
 import { retainedDerivedAlignmentBytes } from '../utils/derivedAlignmentFrame';
@@ -663,33 +662,7 @@ function planReconstruction(
     };
   };
 
-  const requested = evaluate(params.targetVoxelSizeMm);
-  if (requested.memoryPlan.totalBytes <= SVR_MEMORY_BUDGET_BYTES) return requested;
-
-  let lower = Math.floor(params.targetVoxelSizeMm * 100);
-  let upper = Math.min(1000, Math.max(lower + 1, Math.ceil(lower * 1.25)));
-  let nearestSafe = evaluate(upper / 100);
-
-  while (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES && upper < 1000) {
-    lower = upper;
-    upper = Math.min(1000, Math.ceil(upper * 1.5));
-    nearestSafe = evaluate(upper / 100);
-  }
-
-  if (nearestSafe.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) return requested;
-
-  while (upper - lower > 1) {
-    const midpoint = Math.floor((lower + upper) / 2);
-    const candidate = evaluate(midpoint / 100);
-    if (candidate.memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES) {
-      lower = midpoint;
-    } else {
-      upper = midpoint;
-      nearestSafe = candidate;
-    }
-  }
-
-  return nearestSafe;
+  return evaluate(params.targetVoxelSizeMm);
 }
 
 export type Svr3DViewProps = {
@@ -1140,10 +1113,6 @@ function useSvrReconstructionWorkspace({
   const memoryPlan = plannedReconstruction?.memoryPlan ?? null;
   const sourceMemoryBytes = plannedReconstruction?.sourceBytes ?? 0;
   const effectiveVoxelSizeMm = plannedReconstruction?.effectiveVoxelSizeMm ?? params.targetVoxelSizeMm;
-  const automaticallyAdjustedVoxelSpacing = Boolean(
-    plannedReconstruction && plannedReconstruction.effectiveParams.targetVoxelSizeMm > params.targetVoxelSizeMm,
-  );
-  const exceedsMemoryBudget = Boolean(memoryPlan && memoryPlan.totalBytes > SVR_MEMORY_BUDGET_BYTES);
 
   const sourceReadinessMessage = !selectedGroup
     ? 'Select an examination and sequence to inspect its acquired source images.'
@@ -1155,13 +1124,7 @@ function useSvrReconstructionWorkspace({
           ? 'Verifying acquired frames and physical source geometry…'
           : !nativeSource && !selectedGroup.weight?.trim() && !selectedGroup.sequence?.trim()
             ? 'The selected acquisitions have no verified shared contrast or sequence and cannot be fused safely.'
-            : exceedsMemoryBudget
-              ? nativeSource
-                ? 'This native-detail region exceeds the 512 MiB processing budget. Draw a smaller focus box or clear the previous volume; original detail will not be silently reduced.'
-                : acceptedResult
-                  ? 'The selected quality exceeds the safe browser-memory budget. Clear the previous reconstruction or reduce the maximum volume size.'
-                  : 'The selected quality exceeds the safe browser-memory budget. Reduce the maximum volume size.'
-              : null;
+            : null;
 
   const canRun =
     !isRunning &&
@@ -1192,6 +1155,8 @@ function useSvrReconstructionWorkspace({
     readiness: typeof currentReadiness;
     running: boolean;
     context?: NativeSourceContext;
+    /** The last exact native crop; reused while every mark stays inside its field. */
+    selection?: { grid: NativeSourceGrid; context: SvrVolume; token: string };
     worker: InteractiveTrackingWorker;
   } | null>(null);
   useLayoutEffect(() => {
@@ -1286,28 +1251,10 @@ function useSvrReconstructionWorkspace({
       // Raw aligned frames survive compare → 3D navigation independently of
       // Cornerstone's decoded presentation cache, and must remain reusable.
       const additionalRetainedBytes = (options.retainedBytes ?? 0) + retainedDerivedAlignmentBytes();
-      const imageCache = cornerstone.imageCache ?? {};
-      const protectedImageIds = () => {
-        const displayed = new Set<{ imageId?: string }>(
-          (cornerstone.getEnabledElements?.() ?? []).flatMap((element: { image?: { imageId?: string } }) =>
-            element.image ? [element.image] : [],
-          ),
-        );
-        const ids = new Set<string>();
-        for (const image of displayed) if (image.imageId) ids.add(image.imageId);
-        // miradb cache keys wrap images whose own ID is still dicomfile:N.
-        // Match the actual displayed object, not that recyclable inner loader ID.
-        for (const entry of imageCache.cachedImages ?? [])
-          if (entry.image && displayed.has(entry.image)) ids.add(entry.imageId);
-        return ids;
-      };
       const cropAccepted = () =>
         cropEnhancementSource(volume, labels, {
           ...options,
           retainedBytes: additionalRetainedBytes + nativePlaneBytes,
-          imageCache,
-          protectedImageIds,
-          getEnabledElements: cornerstone.getEnabledElements,
         });
       if (!volume.nativeVoxelSizeMm) return cropAccepted();
       if (!nativeSource || !currentReadiness || !volume.sourceProvenance) {
@@ -1325,29 +1272,8 @@ function useSvrReconstructionWorkspace({
       const memory = { retainedBytes, decodedCacheBytes, nativePlaneBytes };
       const plan = context.plan(roi, memory);
       if (hasNativeDetail(volume) && enhancementContextFits(volume, plan)) return cropAccepted();
-      const count = plan.dims.reduce((product, axis) => product * axis, 1);
-      await prepareEnhancementMemory(
-        count,
-        retainedBytes + nativePlaneBytes,
-        imageCache,
-        protectedImageIds,
-        options.signal,
-        cornerstone.getEnabledElements,
-      );
-      // Native assembly finishes before enhancement begins. Each phase admits
-      // its own peak; future worker/output buffers are not resident during decoding.
-      const source = await context.load(roi, { ...options, ...memory });
-      // Browsing may have populated decoded frames while the native source loaded.
-      // Re-admit the actual source and current cache before worker allocations.
-      await prepareEnhancementMemory(
-        source.data.length,
-        retainedBytes + nativePlaneBytes,
-        imageCache,
-        protectedImageIds,
-        options.signal,
-        cornerstone.getEnabledElements,
-      );
-      return source;
+      assertEnhancementFits(plan.dims.reduce((product, axis) => product * axis, 1));
+      return context.load(roi, { ...options, ...memory });
     },
     [acceptedResult, isRunning, nativeSource, currentReadiness, params, selectedSeries],
   );
@@ -1377,11 +1303,6 @@ function useSvrReconstructionWorkspace({
           'Original MRI source data is unavailable for this selection. Reopen the examination before suggesting a boundary.',
         );
 
-      const budgetBytes = interactiveSelectionBudgetBytes(
-        typeof navigator === 'undefined'
-          ? undefined
-          : (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
-      );
       const measureOwners = () => {
         assertCurrent();
         const retainedBytes =
@@ -1403,11 +1324,11 @@ function useSvrReconstructionWorkspace({
         selectedSeries,
         parameters: selectionParameters,
       }));
-      const plan = planInteractiveSelectionContext(selectionVolume, context.grid, request.seeds);
+      const plan = planInteractiveSelectionContext(selectionVolume, context.grid, request.seeds, owner!.selection?.grid);
       const admit = async () => {
         const owners = measureOwners();
         const sourceLoadPeakBytes =
-          context.plan(plan.loaderRoi, { ...owners, budgetBytes }).memoryPlan.totalBytes + owners.cacheGrowthBytes;
+          context.plan(plan.loaderRoi, owners).memoryPlan.totalBytes + owners.cacheGrowthBytes;
         const admission = {
           signal: request.signal,
           retainedRuntimeBytes: owner!.worker.retainedBytes,
@@ -1423,18 +1344,8 @@ function useSvrReconstructionWorkspace({
           maximumFramePrompts: plan.maximumFramePrompts,
           literalMarkCount: plan.literalMarkCount,
         };
-        // Warm sessions are reclaimable, not a reason to reject an otherwise
-        // faithful job. Drop a previous larger arena before loading if necessary.
-        if (admission.retainedRuntimeBytes && estimateInteractiveSelectionMemory(admission).totalBytes > budgetBytes) {
-          if (!owner!.worker.releaseIdle())
-            throw new Error('Wait for the current boundary suggestion to finish before starting another.');
-          admission.retainedRuntimeBytes = owner!.worker.retainedBytes;
-        }
-        const retainRuntimeAfterRun =
-          estimateInteractiveSelectionMemory({
-            ...admission,
-            retainRuntimeAfterRun: true,
-          }).totalBytes <= budgetBytes;
+        // The warm runtime is always worth keeping between corrections; no ceiling forces its release.
+        const retainRuntimeAfterRun = true;
         const admitted = await admitInteractiveSelection({ ...admission, retainRuntimeAfterRun });
         assertCurrent();
         return { ...admitted, retainRuntimeAfterRun };
@@ -1448,20 +1359,25 @@ function useSvrReconstructionWorkspace({
       // and mask membership. It remains an explicit source-normalization policy.
       const sourceRange = await context.intensityRange({ signal: request.signal, onProgress: progress(0, 0.1) });
       assertCurrent();
-      const nativeContext = await (async () => {
-        const owners = measureOwners();
-        const loaded = await context.load(plan.loaderRoi, {
-          ...owners,
-          retainedBytes: owners.retainedBytes + owner!.worker.retainedBytes,
-          budgetBytes,
-          signal: request.signal,
-          onProgress: progress(0.1, 0.2),
-        });
-        assertCurrent();
-        // Native patient-AABB assembly and exact model crop coexist during copying.
-        await admit();
-        return cropInteractiveSelectionContext(loaded, plan.grid, { signal: request.signal });
-      })();
+      const retained = owner!.selection;
+      const nativeContext =
+        retained && sameInteractiveSelectionGrid(retained.grid, plan.grid)
+          ? retained.context
+          : await (async () => {
+              const owners = measureOwners();
+              const loaded = await context.load(plan.loaderRoi, {
+                ...owners,
+                retainedBytes: owners.retainedBytes + owner!.worker.retainedBytes,
+                signal: request.signal,
+                onProgress: progress(0.1, 0.2),
+              });
+              assertCurrent();
+              // Native patient-AABB assembly and exact model crop coexist during copying.
+              await admit();
+              const cropped = await cropInteractiveSelectionContext(loaded, plan.grid, { signal: request.signal });
+              owner!.selection = { grid: plan.grid, context: cropped, token: `context-${++selectionContextSequence}` };
+              return cropped;
+            })();
       assertCurrent();
       // Browsing can populate decoded/raw frames during the yielding source copy.
       const { provider, estimate, retainRuntimeAfterRun } = await admit();
@@ -1476,6 +1392,7 @@ function useSvrReconstructionWorkspace({
           worker: owner!.worker,
           retainRuntimeAfterRun,
           retainMarkedComponents: true,
+          contextToken: owner!.selection!.token,
         },
         {
           ...request,
@@ -1505,7 +1422,6 @@ function useSvrReconstructionWorkspace({
     effectiveRoiSliceIndex,
     error,
     estimatedPeakMemoryMiB,
-    exceedsMemoryBudget,
     generationCollapsed,
     isRunning,
     params,
@@ -1546,7 +1462,6 @@ function useSvrReconstructionWorkspace({
       nativeSource && currentReadiness && selectionVolume?.sourceProvenance ? proposeSelection : undefined,
     status,
     stepRoiSlice,
-    automaticallyAdjustedVoxelSpacing,
     volumeIdentity,
     workspaceIdentity,
   };
@@ -1557,11 +1472,9 @@ type SvrReconstructionWorkspace = ReturnType<typeof useSvrReconstructionWorkspac
 function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspace }) {
   const {
     acceptedResult,
-    automaticallyAdjustedVoxelSpacing,
     currentReadiness,
     effectiveVoxelSizeMm,
     estimatedPeakMemoryMiB,
-    exceedsMemoryBudget,
     isRunning,
     params,
     selectedSequenceKey,
@@ -1666,11 +1579,7 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
               {estimatedPeakMemoryMiB !== null ? (
                 <div className="mt-1 flex items-center justify-between gap-2">
                   <span>{acceptedResult ? 'Next conservative peak' : 'Conservative peak'}</span>
-                  <span
-                    className={`tabular-nums ${exceedsMemoryBudget ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}
-                  >
-                    {Math.ceil(estimatedPeakMemoryMiB)} MiB
-                  </span>
+                  <span className="tabular-nums text-[var(--text-primary)]">{Math.ceil(estimatedPeakMemoryMiB)} MiB</span>
                 </div>
               ) : null}
               {!nativeSource ? (
@@ -1689,19 +1598,14 @@ function SvrSourceEvidence({ workspace }: { workspace: SvrReconstructionWorkspac
                 </span>
                 <span className="tabular-nums">{effectiveVoxelSizeMm.toFixed(2)} mm</span>
               </div>
-              {automaticallyAdjustedVoxelSpacing ? (
-                <div className="mt-2 leading-relaxed text-[var(--text-tertiary)]">
-                  Source sampling automatically adjusted to stay within the 512 MiB memory budget.
-                </div>
-              ) : null}
             </div>
             {currentReadiness.acquisition ? (
               <p className="leading-relaxed text-[var(--text-secondary)]">{currentReadiness.acquisition.explanation}</p>
             ) : null}
             {nativeSource ? (
               <p className="leading-relaxed text-[var(--text-tertiary)]">
-                Original MRI values are preserved. The overview adapts to available memory; a focus region loads at the
-                original stored spacing. No reconstruction or reformat fusion is applied.
+                Original MRI values are preserved at the original stored spacing. No reconstruction or reformat fusion
+                is applied.
               </p>
             ) : null}
             <p className="leading-relaxed text-[var(--text-tertiary)]">
@@ -1814,8 +1718,7 @@ function SvrAdvancedSettings({ workspace }: { workspace: SvrReconstructionWorksp
         <p className="text-xs leading-relaxed text-[var(--text-tertiary)]">
           Smaller voxels and more iterations take longer and use more memory. Zero iterations uses only the initial
           average. Slice size caps input sampling; maximum volume size caps the output grid. Input downsampling respects
-          the requested voxel spacing, and output spacing adjusts when needed to fit the memory budget. A focus box
-          limits processing to the area you need.
+          the requested voxel spacing. A focus box limits processing to the area you need.
         </p>
       </div>
     </details>
@@ -2013,7 +1916,6 @@ function SvrReconstructionStatus({ workspace }: { workspace: SvrReconstructionWo
     cancel,
     currentReadiness,
     error,
-    exceedsMemoryBudget,
     isRunning,
     percent,
     progress,
@@ -2063,7 +1965,7 @@ function SvrReconstructionStatus({ workspace }: { workspace: SvrReconstructionWo
         className={`border-b border-[var(--border-color)] px-4 py-3 text-xs leading-relaxed sm:px-6 ${
           error
             ? 'text-[var(--danger)]'
-            : currentReadiness?.error || exceedsMemoryBudget
+            : currentReadiness?.error
               ? 'text-[var(--warning)]'
               : 'text-[var(--text-secondary)]'
         }`}
@@ -2095,7 +1997,6 @@ export function Svr3DView(props: Svr3DViewProps) {
     displayedDate,
     displayedPatient,
     effectiveRoiSeriesUid,
-    exceedsMemoryBudget,
     generationCollapsed,
     isRunning,
     roiDragRef,
@@ -2211,7 +2112,7 @@ export function Svr3DView(props: Svr3DViewProps) {
                 ) : (
                   <>
                     <h2 className="text-2xl font-normal text-[var(--text-primary)] [font-family:var(--font-display)]">
-                      {currentReadiness?.error || exceedsMemoryBudget
+                      {currentReadiness?.error
                         ? 'Check the source images'
                         : selectedGroup
                           ? 'Explore this MRI in 3D'

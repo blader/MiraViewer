@@ -192,6 +192,32 @@ describe('consumer-certified directional prefixes', () => {
     },
   );
 
+  it('reuses cached image features across runs and skips reading or encoding cached planes', async () => {
+    const runtime = fakeRuntime();
+    const frames = new Map<number, Float32Array>();
+    const featureCache = {
+      get: (index: number) => frames.get(index),
+      set: (index: number, features: Float32Array) => {
+        frames.set(index, features);
+      },
+    };
+    const readFrame = vi.fn(async () => Float32Array.of(0, 1, 2, 3));
+    const first = await runtime.controller.run(options({ frameCount: 3, featureCache, readFrame }));
+    expect(runtime.calls.filter((call) => call.name === 'encoder')).toHaveLength(3);
+    expect(readFrame).toHaveBeenCalledTimes(3);
+    expect([...frames.keys()]).toEqual([0, 1, 2]);
+    for (const features of frames.values()) expect(features).toHaveLength(FEATURE_VALUES);
+    runtime.calls.length = 0;
+    readFrame.mockClear();
+    const second = await runtime.controller.run(options({ frameCount: 3, featureCache, readFrame }));
+    expect(runtime.calls.filter((call) => call.name === 'encoder')).toHaveLength(0);
+    expect(readFrame).not.toHaveBeenCalled();
+    expect(runtime.calls.filter((call) => call.name === 'decoder')).toHaveLength(3);
+    expect(second).toEqual(first);
+    expect(runtime.alive.size).toBe(0);
+    await runtime.controller.dispose();
+  });
+
   it('preserves full traversal and result shape when the consumer does not opt in', async () => {
     const runtime = fakeRuntime();
     const frames: number[] = [];

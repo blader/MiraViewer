@@ -38,8 +38,7 @@ import type {
 import { computeSvrFromLoadedSlices } from './svrComputeCore';
 import { estimateSvrSourceMemory, SVR_SOURCE_PREFETCH_LIMIT } from './sourceMemory';
 import { measureCornerstoneImageMemory } from '../cornerstoneMemory';
-import { SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
-import { assertNotAborted, formatMiB, yieldToMain } from './svrUtils';
+import { assertNotAborted, yieldToMain } from './svrUtils';
 
 const DECODE_PROGRESS_START = 5;
 const DECODE_PROGRESS_END = 35;
@@ -744,16 +743,6 @@ export async function reconstructVolumeMultiPlane(params: {
     { cacheMemory, acceptedSourceTransforms },
   );
   const nativePlaneBytes = nativePlaneMemoryBytes(contributingSeries.map((source) => source.manifest));
-  const sourceResidentFloor =
-    sourceMemory.sourceBytes +
-    sourceMemory.decodedSourceCacheBytes +
-    sourceMemory.sourceDecodeBytes +
-    (params.retainedBytes ?? 0) +
-    nativePlaneBytes;
-  if (sourceResidentFloor > SVR_MEMORY_BUDGET_BYTES)
-    throw new Error(
-      `SVR source inputs alone require an estimated ${formatMiB(sourceResidentFloor)}, exceeding the ${formatMiB(SVR_MEMORY_BUDGET_BYTES)} browser memory budget before decoding. Select a smaller focus region or clear the previous volume.`,
-    );
   onProgress?.({ phase: 'loading', current: DECODE_PROGRESS_START, total: 100, message: 'Loading acquired slices…' });
 
   const allSlices: LoadedSlice[] = [];

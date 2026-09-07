@@ -22,6 +22,8 @@ type InteractiveSelectionSource = {
   retainRuntimeAfterRun?: boolean;
   /** Opt-in consumer contract: hard marks and foreground-connected components determine the final mask. */
   retainMarkedComponents?: true;
+  /** Identity of `nativeContext`; a stable token lets the runtime reuse encoded planes across corrections. */
+  contextToken?: string;
 };
 
 function supported(volume: SvrVolume, index: number): boolean {
@@ -54,6 +56,7 @@ export async function proposeInteractiveSelection(
     worker,
     retainRuntimeAfterRun,
     retainMarkedComponents,
+    contextToken,
   }: InteractiveSelectionSource,
   { volume, seeds, signal, onProgress }: SelectionProposalRequest,
 ): Promise<SelectionProposalResult> {
@@ -124,6 +127,7 @@ export async function proposeInteractiveSelection(
       labels: anchor.labels,
       markedFrames: frames.filter((frame) => frame !== anchor),
       ...(certifyEmptyPlane ? { allowDirectionStop: true as const } : {}),
+      ...(contextToken ? { contextToken } : {}),
       signal,
       readFrame: reader.readFrame,
       onProgress(progress) {

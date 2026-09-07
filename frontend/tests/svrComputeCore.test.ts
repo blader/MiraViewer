@@ -4,7 +4,6 @@ import type { SvrReconstructionGrid, SvrReconstructionOptions } from '../src/uti
 import { buildObservedSupportFromSlices, reconstructVolumeFromSlices } from '../src/utils/svr/reconstructionCore';
 import type { LoadedSlice } from '../src/utils/svr/rigidRegistration';
 import { computeSvrFromLoadedSlices } from '../src/utils/svr/svrComputeCore';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import type { SvrParams } from '../src/types/svr';
 
 // Synthetic-slice helpers mirror tests/svrPhantom.test.ts (its helpers are not
@@ -511,34 +510,16 @@ describe('svr/computeCore', () => {
     expect(result.volume).toEqual(reference);
   });
 
-  it('rejects decoded-frame cache residency before allocating an otherwise admissible output volume', async () => {
-    const allSlices = makeAllSlices();
-
-    await expect(
-      computeSyntheticSvr(
-        allSlices,
-        { ...SVR_PARAMS, iterations: 0 },
-        { residentCacheBytes: SVR_MEMORY_BUDGET_BYTES - 1_000 },
-      ),
-    ).rejects.toThrow(/cache.*budget|budget.*cache/i);
-
-    expect(allSlices).toHaveLength(18);
-  });
-
-  it.each(['retainedBytes', 'nativePlaneBytes'] as const)(
-    'includes %s before independent reconstruction allocation',
+  it.each(['residentCacheBytes', 'retainedBytes', 'nativePlaneBytes'] as const)(
+    'reconstructs regardless of %s residency; peak estimates are diagnostic, not an admission ceiling',
     async (owner) => {
       const allSlices = makeAllSlices();
-      await expect(
-        computeSyntheticSvr(
-          allSlices,
-          { ...SVR_PARAMS, iterations: 0 },
-          {
-            [owner]: SVR_MEMORY_BUDGET_BYTES - 1000,
-          },
-        ),
-      ).rejects.toThrow(/budget/);
-      expect(allSlices).toHaveLength(18);
+      const result = await computeSyntheticSvr(
+        allSlices,
+        { ...SVR_PARAMS, iterations: 0 },
+        { [owner]: 8 * 1024 * 1024 * 1024 },
+      );
+      expect(result.volume.length).toBeGreaterThan(0);
     },
   );
 
@@ -553,35 +534,6 @@ describe('svr/computeCore', () => {
         },
       ),
     ).rejects.toThrow(/no accepted patient-space pose/);
-    expect(allSlices).toHaveLength(18);
-  });
-
-  it('rejects ROI-rigid registration scratch before starting an otherwise admissible reconstruction', async () => {
-    const roi: NonNullable<SvrParams['roi']> = {
-      mode: 'cube',
-      sourcePlane: 'axial',
-      sourceSeriesUid: 's-ax',
-      boundsMm: { min: [0, 0, 0], max: [32, 32, 32] },
-    };
-    const residentCacheBytes = SVR_MEMORY_BUDGET_BYTES - 1_000_000;
-    const withoutRegistration = await computeSyntheticSvr(
-      makeAllSlices(),
-      { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'none', roi },
-      { residentCacheBytes },
-    );
-    const allSlices = makeAllSlices();
-    const progress: string[] = [];
-
-    expect(withoutRegistration.volume.length).toBeGreaterThan(0);
-    await expect(
-      computeSyntheticSvr(
-        allSlices,
-        { ...SVR_PARAMS, iterations: 0, seriesRegistrationMode: 'roi-rigid', roi },
-        { residentCacheBytes, onProgress: (event) => progress.push(event.message) },
-      ),
-    ).rejects.toThrow(/registration.*budget|budget.*registration/i);
-
-    expect(progress).not.toContain('ROI rigid alignment…');
     expect(allSlices).toHaveLength(18);
   });
 

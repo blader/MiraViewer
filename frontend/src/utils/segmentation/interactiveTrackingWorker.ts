@@ -38,6 +38,8 @@ export type InteractiveTrackingWorkerOptions = Omit<
   /** Streamed predictions are provisional. Successful run() releases job state, not the reusable model runtime. */
   onFrame(frame: InteractiveTrackingFrame): TrackingFrameDecision | Promise<TrackingFrameDecision>;
   onProgress?(progress: InteractiveTrackingProgress): void;
+  /** Same token, same source planes: the retained runtime may reuse their encoded features. */
+  contextToken?: string;
 };
 
 export type InteractiveTrackingJob = Pick<
@@ -52,6 +54,7 @@ export type InteractiveTrackingJob = Pick<
   | 'provider'
   | 'markedFrames'
   | 'allowDirectionStop'
+  | 'contextToken'
 >;
 export type InteractiveTrackingWorkerResult = TrackingSnapshotResult;
 
@@ -143,7 +146,10 @@ function snapshotJob(options: InteractiveTrackingWorkerOptions): InteractiveTrac
       labels: [...frame.labels],
     };
   });
+  if (options.contextToken !== undefined && (typeof options.contextToken !== 'string' || !options.contextToken))
+    throw new Error('A selection context token must be a nonempty string.');
   return {
+    ...(options.contextToken ? { contextToken: options.contextToken } : {}),
     width,
     height,
     frameCount,

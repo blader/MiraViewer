@@ -41,7 +41,7 @@ import { dot, v3 } from './vec3';
 import { boundsCornersMm, cropSliceToRoiInPlace } from './sliceRoiCrop';
 import { debugSvrLog } from '../debugSvr';
 import { normalizeSvrIntensities } from './intensityNormalization';
-import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes, SVR_MEMORY_BUDGET_BYTES } from './svrMemoryPlan';
+import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes } from './svrMemoryPlan';
 import {
   applyRigidToSeriesSlices,
   boundsCenterMm,
@@ -859,17 +859,6 @@ export async function computeSvrFromLoadedSlices(
     registrationBytes,
   });
   const peakBytes = memoryPlan.totalBytes;
-
-  if (peakBytes > SVR_MEMORY_BUDGET_BYTES) {
-    throw new Error(
-      `SVR volume too large (${dims.nx}×${dims.ny}×${dims.nz}); estimated peak ${formatMiB(peakBytes)} ` +
-        `(source ${formatMiB(memoryPlan.sourceBytes)}, solver ${formatMiB(memoryPlan.solverBytes)}, ` +
-        `support ${formatMiB(memoryPlan.supportBytes)}, display ${formatMiB(memoryPlan.displayBytes)}, ` +
-        `decoded cache ${formatMiB(memoryPlan.retainedBytes)}, registration ${formatMiB(memoryPlan.registrationBytes)}) ` +
-        `exceeds budget ${formatMiB(SVR_MEMORY_BUDGET_BYTES)}. ` +
-        'Select a smaller focus region, lower the maximum dimension, or explicitly choose a coarser voxel size.',
-    );
-  }
 
   const voxelSizeIncreased = voxelSizeMm > svrParams.targetVoxelSizeMm + 1e-6;
   console.info('[svr] Output grid chosen', {

@@ -2,7 +2,7 @@ import type { SvrDirection, SvrParams, SvrPatientTransform, SvrVolume } from '..
 import type { SeriesFrameManifest } from '../localApi';
 import { getSliceGeometryFromInstance } from './dicomGeometry';
 import { waitForNativeFrame } from './nativeFrameWait';
-import { estimateSvrPeakMemoryBytes, SVR_MEMORY_BUDGET_BYTES, type SvrMemoryPlan } from './svrMemoryPlan';
+import { estimateSvrPeakMemoryBytes, type SvrMemoryPlan } from './svrMemoryPlan';
 import { assertNotAborted, yieldToMain } from './svrUtils';
 import { CORNERSTONE_MEMORY_FALLBACK_BYTES } from '../cornerstoneMemory';
 import {
@@ -35,7 +35,8 @@ export type NativeVolumePlan = {
   decodedCacheBytes: number;
   memoryPlan: SvrMemoryPlan;
   totalBytes: number;
-  budgetBytes: number;
+  /** Present only when the caller admits against its own envelope; native assembly itself has no ceiling. */
+  budgetBytes?: number;
   overview: boolean;
 };
 
@@ -291,9 +292,9 @@ export function planNativeVolume(
   const decodedCacheBytes = Math.max(0, options.decodedCacheBytes ?? nativeDecodedCacheBudgetBytes());
   // Source-plane cache plus R32F intensity / acquired validity / categorical mask.
   const nativePlaneBytes = options.nativePlaneBytes ?? nativePlaneMemoryBytes([manifest]);
-  const budgetBytes = options.budgetBytes ?? SVR_MEMORY_BUDGET_BYTES;
+  const budgetBytes = options.budgetBytes;
   if (
-    [sourceBytes, decodedCacheBytes, nativePlaneBytes, options.retainedBytes ?? 0, budgetBytes].some(
+    [sourceBytes, decodedCacheBytes, nativePlaneBytes, options.retainedBytes ?? 0, budgetBytes ?? 0].some(
       (bytes) => !Number.isFinite(bytes) || bytes < 0,
     )
   )
@@ -315,6 +316,7 @@ export function planNativeVolume(
   let memoryPlan = memory();
   // Only an overview may subsample. A regional plan remains exact and reports admission failure before allocation.
   if (
+    budgetBytes !== undefined &&
     !params.roi &&
     memoryPlan.totalBytes > budgetBytes &&
     sourceBytes + decodedCacheBytes + (options.retainedBytes ?? 0) + nativePlaneBytes < budgetBytes
@@ -376,7 +378,7 @@ export async function assembleNativeVolume(
   readFrame: (frame: NativeFrame) => Promise<NativeFrameSamples>,
   options: { signal?: AbortSignal; onProgress?: (current: number, total: number) => void } = {},
 ): Promise<SvrVolume> {
-  if (plan.totalBytes > plan.budgetBytes)
+  if (plan.budgetBytes !== undefined && plan.totalBytes > plan.budgetBytes)
     throw new Error(
       'This native-resolution region exceeds the browser memory budget. Select a smaller region or clear the previous volume; native detail will not be silently reduced.',
     );

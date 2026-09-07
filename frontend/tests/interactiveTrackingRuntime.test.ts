@@ -150,7 +150,7 @@ describe('production interactive tracking worker runtime', () => {
       expect(runSnapshot).not.toHaveBeenCalled();
       expect(createModel.mock.calls[0][0]).toMatchObject({
         provider,
-        wasmThreads: 1,
+        wasmThreads: 'auto',
         signal: expect.any(AbortSignal),
       });
       expect(

@@ -1,9 +1,5 @@
 import { estimateTrackingSnapshotMemory } from './interactiveTracking';
 import manifest from './efficientTam/assetManifest.json';
-import {
-  learnedImagingBudgetBytes as interactiveSelectionBudgetBytes,
-  LEARNED_IMAGING_MAX_BUDGET_BYTES as MAX_BUDGET_BYTES,
-} from './learnedMemoryBudget';
 export { learnedImagingBudgetBytes as interactiveSelectionBudgetBytes } from './learnedMemoryBudget';
 
 const MIB = 1024 * 1024;
@@ -203,38 +199,6 @@ export function estimateInteractiveSelectionMemory(
   return plan;
 }
 
-type PromptCounts = Pick<
-  InteractiveSelectionAdmission,
-  'conditioningFrames' | 'maximumFramePrompts' | 'literalMarkCount'
->;
-
-/** An admission estimate and application safety policy, never a measured browser allocation limit. */
-export class InteractiveSelectionMemoryError extends Error {
-  readonly estimate: InteractiveSelectionMemoryEstimate;
-  readonly budgetBytes: number;
-  readonly atAppCap: boolean;
-  readonly counts: Readonly<PromptCounts>;
-  constructor(estimate: InteractiveSelectionMemoryEstimate, budgetBytes: number, counts: PromptCounts) {
-    const atAppCap = budgetBytes === MAX_BUDGET_BYTES;
-    super(
-      `This boundary suggestion is estimated to need ${Math.ceil(estimate.totalBytes / MIB)} MiB at peak; ` +
-        `MiraViewer's safety budget is ${Math.floor(budgetBytes / MIB)} MiB. ` +
-        'This is an estimate, not measured memory usage or a browser hard limit. ' +
-        (atAppCap ? 'MiraViewer has reached its application safety cap. ' : '') +
-        'Model inference was not started. Your current selection and marks are unchanged.',
-    );
-    this.name = 'InteractiveSelectionMemoryError';
-    this.estimate = estimate;
-    this.budgetBytes = budgetBytes;
-    this.atAppCap = atAppCap;
-    this.counts = Object.freeze({
-      conditioningFrames: counts.conditioningFrames,
-      maximumFramePrompts: counts.maximumFramePrompts,
-      literalMarkCount: counts.literalMarkCount,
-    });
-  }
-}
-
 /** One explicit faithful provider; a model failure never triggers a classifier/provider retry. */
 export async function admitInteractiveSelection(request: InteractiveSelectionAdmission): Promise<{
   provider: 'wasm';
@@ -242,11 +206,8 @@ export async function admitInteractiveSelection(request: InteractiveSelectionAdm
 }> {
   const { signal } = request;
   signal.throwIfAborted();
+  // The estimate is diagnostic; no resident-memory ceiling rejects a boundary suggestion.
   const plan = estimateInteractiveSelectionMemory(request);
-  const budget = interactiveSelectionBudgetBytes(
-    typeof navigator === 'undefined' ? undefined : (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
-  );
-  if (plan.totalBytes > budget) throw new InteractiveSelectionMemoryError(plan, budget, request);
   if (typeof Worker === 'undefined' || typeof WebAssembly === 'undefined')
     throw new Error(
       'This browser does not support local learned selection. Your current selection and marks are unchanged.',

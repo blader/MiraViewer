@@ -386,7 +386,7 @@ describe('native source volume preservation', () => {
         nativePlaneBytes: nativePlaneMemoryBytes([manifest, { frames: [{ rows: 1024, columns: 1024 }] }]),
       },
     );
-    expect(plan.totalBytes).toBeLessThanOrEqual(plan.budgetBytes);
+    expect(plan.budgetBytes).toBeUndefined();
     expect(plan.overview).toBe(false);
     expect(plan.voxelSizeMm).toEqual([0.6, 0.4296875, 0.4296875]);
     expect(plan.sourceStrides).toEqual([1, 1, 1]);
@@ -394,20 +394,21 @@ describe('native source volume preservation', () => {
     expect(plan.memoryPlan.retainedBytes).toBeGreaterThan(retainedBytes + cache.cacheSizeInBytes);
   });
 
-  it('retains native pitch for a small ROI before budgeting full frame copies', () => {
+  it('retains native pitch for a small ROI while an explicitly budgeted overview subsamples', () => {
     const manifest = stack({ dims: [1024, 1024, 221], spacing: [0.25, 0.25, 0.6], origin: [0, 0, 0] });
-    const overview = planNativeVolume(manifest, {});
+    const overview = planNativeVolume(manifest, {}, { budgetBytes: 512 * 1024 * 1024 });
+    expect(planNativeVolume(manifest, {}).overview).toBe(false);
     const detail = planNativeVolume(manifest, {
       roi: { mode: 'cube', sourcePlane: 'axial', boundsMm: { min: [120, 120, 60], max: [130, 130, 70] } },
     });
     expect(overview.overview).toBe(true);
-    expect(overview.totalBytes).toBeLessThanOrEqual(overview.budgetBytes);
+    expect(overview.totalBytes).toBeLessThanOrEqual(overview.budgetBytes!);
     expect(detail.sourceStrides).toEqual([1, 1, 1]);
     expect(detail.voxelSizeMm).toEqual([0.25, 0.25, 0.6]);
     expect(detail.dims[0]).toBeLessThan(50);
     expect(detail.dims[1]).toBeLessThan(50);
     expect(detail.dims[2]).toBeLessThan(25);
-    expect(detail.totalBytes).toBeLessThanOrEqual(detail.budgetBytes);
+    expect(detail.budgetBytes).toBeUndefined();
     expect(detail.sourceBytes).toBe(1024 * 1024 * 4);
   });
 
@@ -455,11 +456,11 @@ describe('native source volume preservation', () => {
     for (const frame of manifest.frames) frame.spacingBetweenSlices = 1e-14;
     const estimate = vi.spyOn(memoryPlanning, 'estimateSvrPeakMemoryBytes');
     try {
-      const plan = planNativeVolume(manifest, {});
+      const plan = planNativeVolume(manifest, {}, { budgetBytes: 512 * 1024 * 1024 });
       expect(plan.sourceDims).toEqual([2, 2, 100_000_000_000_001]);
       expect(plan.nativeVoxelSizeMm).toEqual([1, 1, 1e-14]);
       expect(plan.sourceStrides[2]).toBeGreaterThan(1_000_000);
-      expect(plan.totalBytes).toBeLessThanOrEqual(plan.budgetBytes);
+      expect(plan.totalBytes).toBeLessThanOrEqual(plan.budgetBytes!);
       // At most 53 integer probes per source axis, not one per required stride.
       expect(estimate.mock.calls.length).toBeLessThanOrEqual(165);
     } finally {
