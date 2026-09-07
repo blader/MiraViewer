@@ -107,7 +107,7 @@ describe('Native MRI workspace controls', () => {
     expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next original MRI slice' }));
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(6);
-    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    fireEvent.click(screen.getByRole('button', { name: '3D + slices' }));
     expect(screen.getByRole('spinbutton', { name: 'Axial slice' })).toHaveValue(4);
     fireEvent.click(screen.getByRole('button', { name: 'Previous original MRI slice' }));
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(5);
@@ -134,28 +134,22 @@ describe('Native MRI workspace controls', () => {
     }));
     volume.sourceProvenance!.sources = [...volume.sourceProvenance!.sources, ...orthogonal];
     renderVolume(volume);
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
     const planeControls = within(screen.getByRole('group', { name: 'MRI slice plane' }));
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('0');
+    expect(useSvrNativePlane).toHaveBeenLastCalledWith({ volume, sourceIndex: 0, frameIndex: 4 });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Original MRI slice' }), { target: { value: '6' } });
     fireEvent.click(planeControls.getByRole('button', { name: 'Coronal', exact: true }));
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('2');
-    expect(screen.getByText('Scanner reformat', { selector: '.svr-source-kind' })).toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(5);
     expect(useSvrNativePlane).toHaveBeenLastCalledWith({ volume, sourceIndex: 2, frameIndex: 4 });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Original MRI slice' }), { target: { value: '3' } });
     fireEvent.click(planeControls.getByRole('button', { name: 'Sagittal', exact: true }));
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('3');
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(5);
     expect(useSvrNativePlane).toHaveBeenLastCalledWith({ volume, sourceIndex: 3, frameIndex: 4 });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Original MRI slice' }), { target: { value: '7' } });
     fireEvent.click(planeControls.getByRole('button', { name: 'Axial', exact: true }));
     // The primary acquisition wins over another accepted source in the same plane.
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('0');
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(6);
     expect(useSvrNativePlane).toHaveBeenLastCalledWith({ volume, sourceIndex: 0, frameIndex: 5 });
-    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
+    fireEvent.click(screen.getByRole('button', { name: '3D + slices' }));
     expect(screen.getByRole('spinbutton', { name: 'Axial slice' })).toHaveValue(4);
     expect(screen.getByRole('spinbutton', { name: 'Coronal slice' })).toHaveValue(3);
     expect(screen.getByRole('spinbutton', { name: 'Sagittal slice' })).toHaveValue(7);
@@ -204,33 +198,26 @@ describe('Native MRI workspace controls', () => {
       },
     };
     renderVolume(volume, labels);
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
     const planeControls = within(screen.getByRole('group', { name: 'MRI slice plane' }));
     fireEvent.click(planeControls.getByRole('button', { name: 'Coronal', exact: true }));
-    expect(screen.getByText('Volume reformat', { selector: '.svr-source-kind' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('-1');
-    expect(
-      screen.getByText(/this reformat uses the current volume grid; it is not an additional acquisition/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Volume reformat', { selector: '.svr-native-source-note' })).toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Volume reformat slice' })).toHaveValue(5);
     expect(useSvrNativePlane).toHaveBeenLastCalledWith({ volume: null, sourceIndex: -1, frameIndex: 4 });
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Volume reformat slice' }), { target: { value: '3' } });
     fireEvent.click(planeControls.getByRole('button', { name: 'Sagittal', exact: true }));
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Volume reformat slice' }), { target: { value: '7' } });
     fireEvent.click(planeControls.getByRole('button', { name: 'Axial', exact: true }));
-    expect(screen.getByRole('combobox', { name: 'MRI plane source' })).toHaveValue('0');
-    expect(screen.getByText('Original MRI', { selector: '.svr-source-kind' })).toBeInTheDocument();
+    expect(screen.queryByText('Volume reformat', { selector: '.svr-native-source-note' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next original MRI slice' }));
     expect(screen.getByRole('spinbutton', { name: 'Original MRI slice' })).toHaveValue(6);
-    fireEvent.click(screen.getByRole('button', { name: 'View slices' }));
+    fireEvent.click(screen.getByRole('button', { name: '3D + slices' }));
     expect(screen.getByRole('spinbutton', { name: 'Axial slice' })).toHaveValue(4);
     expect(screen.getByRole('spinbutton', { name: 'Coronal slice' })).toHaveValue(3);
     expect(screen.getByRole('spinbutton', { name: 'Sagittal slice' })).toHaveValue(7);
     fireEvent.click(planeControls.getByRole('button', { name: 'Coronal', exact: true }));
     expect(screen.getByRole('spinbutton', { name: 'Volume reformat slice' })).toHaveValue(3);
-    fireEvent.change(screen.getByRole('slider', { name: 'Original MRI window width' }), { target: { value: '40' } });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Interpolate display' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show display settings' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Contrast' }), { target: { value: '40' } });
     expect(volume.data).toEqual(originalData);
     expect(Object.is(volume.data[10], -0)).toBe(true);
     expect(volume.observedSupport).toEqual(originalSupport);
@@ -244,83 +231,28 @@ describe('Native MRI workspace controls', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2/i));
   });
 
-  it.each([
-    { source: 'primary acquisition', sourceIndex: 0, shared: true },
-    { source: 'another source', sourceIndex: 1, shared: false },
-  ])('shares overview contrast only with the primary acquisition: $source', async ({ sourceIndex, shared }) => {
-    const volume = nativeVolume();
-    const original = volume.data.slice();
-    const support = volume.observedSupport!.slice();
-    renderVolume(volume);
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'MRI plane source' }), {
-      target: { value: String(sourceIndex) },
-    });
-    expect(screen.getByRole('slider', { name: 'Original MRI window width' })).toHaveValue(shared ? '63' : '64');
-    fireEvent.change(screen.getByRole('slider', { name: 'Original MRI window width' }), { target: { value: '16' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
-    fireEvent.click(screen.getByText('Slice settings', { selector: 'summary' }));
-    expect(screen.getByRole('slider', { name: 'MRI window width' })).toHaveValue(shared ? '16' : '63');
-    fireEvent.change(screen.getByRole('slider', { name: 'MRI window width' }), {
-      target: { value: '20' },
-    });
-    expect(screen.getByRole('slider', { name: 'Original MRI window width' })).toHaveValue(shared ? '20' : '16');
-    fireEvent.click(screen.getByRole('button', { name: 'Reset source contrast' }));
-    expect(screen.getByRole('slider', { name: 'Original MRI window width' })).toHaveValue(shared ? '63' : '64');
-    expect(screen.getByRole('slider', { name: 'MRI window width' })).toHaveValue(shared ? '63' : '20');
-    fireEvent.change(screen.getByRole('slider', { name: 'Original MRI window width' }), { target: { value: '12' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Reset contrast', exact: true }));
-    expect(screen.getByRole('slider', { name: 'MRI window width' })).toHaveValue('63');
-    expect(screen.getByRole('slider', { name: 'Original MRI window width' })).toHaveValue(shared ? '63' : '12');
-    expect(volume.data).toEqual(original);
-    expect(volume.observedSupport).toEqual(support);
-    expect(volume.displayWindow).toEqual([0, 63]);
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2/i));
-  });
-
-  it('labels scanner reformats honestly and withholds selection-only clipping until marks exist', async () => {
+  it('withholds tumor-only clipping and tumor fitting until marks exist', async () => {
     renderVolume();
     expect(screen.getByRole('button', { name: 'MRI slice' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.queryByRole('combobox', { name: 'MRI plane source' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    fireEvent.click(screen.getByText('Source image', { selector: 'summary' }));
-    expect(screen.queryByRole('group', { name: 'MRI plane coverage' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Selection only' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Fit selection' })).toBeDisabled();
-    expect(screen.getByText('Original MRI', { selector: '.svr-source-kind' })).toBeInTheDocument();
-    fireEvent.change(screen.getByRole('combobox', { name: 'MRI plane source' }), { target: { value: '1' } });
-    expect(screen.getByText('Scanner reformat', { selector: '.svr-source-kind' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tumor only' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show display settings' }));
+    expect(screen.queryByRole('button', { name: 'Fit tumor' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Face slice' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'MRI slice' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.queryByText('Original MRI', { selector: '.svr-source-kind' })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2/i));
   });
 
-  it.each([
-    { source: 'overview', expected: '1.00 × 1.00 × 2.00 mm overview' },
-    { source: 'native', expected: '1.00 mm stored samples' },
-    { source: 'reconstructed', expected: '1.00 × 1.00 × 2.00 mm grid' },
-  ])('discloses $source sampling without claiming new acquired resolution', async ({ source, expected }) => {
+  it('offers volume reformat planes for a reconstructed grid without an original source', async () => {
     const volume = nativeVolume();
-    if (source === 'native') volume.voxelSizeMm = [1, 1, 1];
-    if (source === 'reconstructed') {
-      delete volume.nativeVoxelSizeMm;
-      delete volume.sourceProvenance;
-    }
+    delete volume.nativeVoxelSizeMm;
+    delete volume.sourceProvenance;
     renderVolume(volume);
-    expect(screen.queryByText('Volume details')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    const details = screen.getByText('Volume details').closest('details')!;
-    fireEvent.click(within(details).getByText('Volume details'));
-    expect(within(details).getByText(expected)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'MRI slice' })).toBeEnabled();
-    if (source === 'reconstructed') {
-      const planeControls = within(screen.getByRole('group', { name: 'MRI slice plane' }));
-      for (const plane of ['Axial', 'Coronal', 'Sagittal']) {
-        fireEvent.click(planeControls.getByRole('button', { name: plane, exact: true }));
-        expect(planeControls.getByRole('button', { name: plane, exact: true })).toHaveAttribute('aria-pressed', 'true');
-        expect(screen.getByRole('spinbutton', { name: 'Volume reformat slice' })).toBeEnabled();
-      }
+    const planeControls = within(screen.getByRole('group', { name: 'MRI slice plane' }));
+    for (const plane of ['Axial', 'Coronal', 'Sagittal']) {
+      fireEvent.click(planeControls.getByRole('button', { name: plane, exact: true }));
+      expect(planeControls.getByRole('button', { name: plane, exact: true })).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByRole('spinbutton', { name: 'Volume reformat slice' })).toBeEnabled();
     }
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/webgl2/i));
   });

@@ -5,7 +5,7 @@ import { SLICE_AXES } from '../segmentation/selectionEditing';
 import { voxelPoint, type VoxelBounds } from '../segmentation/voxelGeometry';
 import type { NativeSourceGrid } from './nativeSourceContext';
 import { assertNotAborted, yieldToMain } from './svrUtils';
-import { IDENTITY_DIRECTION, physicalVolumeBounds, volumeVoxelToPatient } from './volumeGeometry';
+import { IDENTITY_DIRECTION, patientToVolumeVoxel, physicalVolumeBounds, volumeVoxelToPatient } from './volumeGeometry';
 
 type Triple = [number, number, number];
 const PLANES = ['sagittal', 'coronal', 'axial'] as const;
@@ -27,6 +27,7 @@ export function planInteractiveSelectionContext(
   editing: SvrVolume,
   source: NativeSourceGrid,
   seeds: SvrSelectionSeeds,
+  preferredGrid?: NativeSourceGrid,
 ) {
   if (!seeds.lastStroke) throw new Error('Add a mark on a source slice before growing the selection.');
   const lastStroke = mapInteractivePlane(editing, source, seeds.lastStroke);
@@ -93,6 +94,29 @@ export function planInteractiveSelectionContext(
     minimum[axis] = Math.max(0, Math.min(centered, source.dims[axis]! - cells));
     maximum[axis] = minimum[axis]! + cells - 1;
   }
+  // A previously loaded field that still holds every mark and its halo stays in
+  // place, so consecutive strokes reuse the same native crop and model features
+  // instead of re-centering the context after each edit.
+  const preferredStart = preferredGrid ? preferredGridStart(source, preferredGrid) : null;
+  if (
+    preferredStart &&
+    [0, 1, 2].every((axis) => {
+      const end = preferredStart[axis]! + preferredGrid!.dims[axis]! - 1;
+      if (preferredStart[axis]! < 0 || end >= source.dims[axis]!) return false;
+      if (axis === slice) return minimum[axis]! >= preferredStart[axis]! && maximum[axis]! <= end;
+      // In plane, the marks and their halo must fit; the field itself need not be re-centered.
+      const halo = Math.ceil(MARK_HALO_MM / source.voxelSizeMm[axis]!);
+      return (
+        Math.max(0, lower[axis]! - halo) >= preferredStart[axis]! &&
+        Math.min(source.dims[axis]! - 1, upper[axis]! + halo) <= end
+      );
+    })
+  ) {
+    for (const axis of [0, 1, 2]) {
+      minimum[axis] = preferredStart[axis]!;
+      maximum[axis] = preferredStart[axis]! + preferredGrid!.dims[axis]! - 1;
+    }
+  }
   const dims = source.dims.map((_, axis) => maximum[axis]! - minimum[axis]! + 1) as Triple;
   const grid: NativeSourceGrid = {
     dims,
@@ -133,6 +157,26 @@ export function planInteractiveSelectionContext(
     ],
     frameCount: dims[slice]!,
   };
+}
+
+/** Integer source-cell start of a grid sampled on the same lattice as the source, or null. */
+function preferredGridStart(source: NativeSourceGrid, grid: NativeSourceGrid): Triple | null {
+  const sourceDirection = source.direction ?? IDENTITY_DIRECTION,
+    gridDirection = grid.direction ?? IDENTITY_DIRECTION;
+  if (
+    grid.voxelSizeMm.some((pitch, axis) => Math.abs(pitch - source.voxelSizeMm[axis]!) > 1e-9) ||
+    sourceDirection.some((value, index) => Math.abs(value - gridDirection[index]!) > 1e-12)
+  )
+    return null;
+  const start = patientToVolumeVoxel(source, grid.originMm);
+  const rounded = start.map(Math.round) as Triple;
+  return start.every((value, axis) => Math.abs(value - rounded[axis]!) < 1e-6) ? rounded : null;
+}
+
+/** True when both grids sample the same cells: same lattice, same start cell, same extent. */
+export function sameInteractiveSelectionGrid(a: NativeSourceGrid, b: NativeSourceGrid): boolean {
+  const start = preferredGridStart(a, b);
+  return start !== null && start.every((cell) => cell === 0) && a.dims.every((size, axis) => size === b.dims[axis]);
 }
 
 /**

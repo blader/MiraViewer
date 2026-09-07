@@ -3,10 +3,8 @@ import {
   admitInteractiveSelection,
   estimateInteractiveSelectionMemory,
   interactiveSelectionBudgetBytes,
-  InteractiveSelectionMemoryError,
   type InteractiveSelectionAdmission,
 } from '../src/utils/segmentation/interactiveAdmission';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import assetManifest from '../src/utils/segmentation/efficientTam/assetManifest.json';
 
 const graphOverride = vi.hoisted(() => ({ value: undefined as Record<string, unknown> | undefined }));
@@ -53,8 +51,7 @@ afterEach(() => {
 });
 
 describe('interactive selection admission', () => {
-  it('keeps learned-selection estimates separate from the native reconstruction limit', () => {
-    expect(SVR_MEMORY_BUDGET_BYTES).toBe(512 * MIB);
+  it('derives the learned-selection envelope from reported device memory', () => {
     expect(interactiveSelectionBudgetBytes(32)).toBe(3072 * MIB);
     expect(interactiveSelectionBudgetBytes(16)).toBe(3072 * MIB);
     expect(interactiveSelectionBudgetBytes(8)).toBe(2048 * MIB);
@@ -262,21 +259,13 @@ describe('interactive selection admission', () => {
       );
       vi.stubGlobal('navigator', { deviceMemory: 32 });
       vi.stubGlobal('Worker', class {});
-      if (conditioningFrames === 140) {
-        expect(blocked.totalBytes).toBeLessThan(interactiveSelectionBudgetBytes(32));
-        expect(await admitInteractiveSelection(input)).toMatchObject({
-          provider: 'wasm',
-          estimate: estimateInteractiveSelectionMemory(input),
-        });
-      } else {
-        expect(blocked.totalBytes).toBeGreaterThan(interactiveSelectionBudgetBytes(32));
-        await expect(admitInteractiveSelection(input)).rejects.toMatchObject({
-          name: 'InteractiveSelectionMemoryError',
-          budgetBytes: 3072 * MIB,
-          atAppCap: true,
-          counts: { conditioningFrames, literalMarkCount: conditioningFrames * 32, maximumFramePrompts: 32 },
-        });
-      }
+      // The device envelope is a diagnostic comparison only; admission never rejects on it.
+      if (conditioningFrames === 140) expect(blocked.totalBytes).toBeLessThan(interactiveSelectionBudgetBytes(32));
+      else expect(blocked.totalBytes).toBeGreaterThan(interactiveSelectionBudgetBytes(32));
+      expect(await admitInteractiveSelection(input)).toMatchObject({
+        provider: 'wasm',
+        estimate: estimateInteractiveSelectionMemory(input),
+      });
       expect(input).toMatchObject({ conditioningFrames, literalMarkCount: conditioningFrames * 32 });
     },
   );
@@ -360,6 +349,15 @@ describe('interactive selection admission', () => {
     expect(() => estimateInteractiveSelectionMemory(request(changes))).toThrow();
   });
 
+  it('admits an estimate above the device envelope instead of rejecting the boundary suggestion', async () => {
+    vi.stubGlobal('navigator', { deviceMemory: 4 });
+    vi.stubGlobal('Worker', class {});
+    const input = request({ sourceLoadPeakBytes: 4000 * MIB });
+    const estimate = estimateInteractiveSelectionMemory(input);
+    expect(estimate.totalBytes).toBeGreaterThan(interactiveSelectionBudgetBytes(4));
+    expect(await admitInteractiveSelection(input)).toEqual({ provider: 'wasm', estimate });
+  });
+
   it('chooses only the faithful WASM path, even when a GPU is available', async () => {
     const requestAdapter = vi.fn();
     vi.stubGlobal('navigator', { deviceMemory: 32, gpu: { requestAdapter } });
@@ -367,48 +365,6 @@ describe('interactive selection admission', () => {
     expect(await admitInteractiveSelection(request())).toMatchObject({ provider: 'wasm' });
     expect(requestAdapter).not.toHaveBeenCalled();
   });
-
-  it('fails before inference with a structured estimate, not a claimed measurement or browser hard limit', async () => {
-    vi.stubGlobal('navigator', { deviceMemory: 4 });
-    vi.stubGlobal('Worker', class {});
-    const input = request();
-    const error = await admitInteractiveSelection(input).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(InteractiveSelectionMemoryError);
-    expect(error).toMatchObject({
-      name: 'InteractiveSelectionMemoryError',
-      budgetBytes: 1024 * MIB,
-      atAppCap: false,
-      estimate: estimateInteractiveSelectionMemory(input),
-      counts: { conditioningFrames: 1, maximumFramePrompts: 32, literalMarkCount: 103 },
-    });
-    const admission = error as InteractiveSelectionMemoryError;
-    expect(admission.message).toMatch(/estimated.*MiraViewer's safety budget.*unchanged/);
-    expect(admission.message).toContain('not measured memory usage or a browser hard limit');
-    expect(admission.message).not.toMatch(/fewer editing marks|delete.*marks|use a browser with more memory/i);
-    input.literalMarkCount = 104;
-    expect(admission.counts.literalMarkCount).toBe(103);
-    expect(Object.isFrozen(admission.counts)).toBe(true);
-    expect(admission.counts).not.toHaveProperty('signal');
-  });
-
-  it.each([16, 32, 128])(
-    'identifies the unchanged MiraViewer cap on a %s GiB device without prescribing more RAM or fewer marks',
-    async (deviceMemory) => {
-      vi.stubGlobal('navigator', { deviceMemory });
-      vi.stubGlobal('Worker', class {});
-      const error = await admitInteractiveSelection(request({ sourceLoadPeakBytes: 4000 * MIB })).catch(
-        (error: unknown) => error,
-      );
-      expect(error).toBeInstanceOf(InteractiveSelectionMemoryError);
-      expect(error).toMatchObject({ budgetBytes: 3072 * MIB, atAppCap: true });
-      const admission = error as InteractiveSelectionMemoryError;
-      expect(admission.message).toContain("MiraViewer's safety budget is 3072 MiB");
-      expect(admission.message).toContain('MiraViewer has reached its application safety cap');
-      expect(admission.message).toContain('not measured memory usage or a browser hard limit');
-      expect(admission.message).not.toMatch(/use.*more (?:memory|ram)|fewer.*marks|delete.*marks/i);
-      expect(admission.message).toContain('Your current selection and marks are unchanged');
-    },
-  );
 
   it.each(['Worker', 'WebAssembly'])('reports unsupported %s without invoking another classifier', async (name) => {
     vi.stubGlobal('navigator', { deviceMemory: 32 });

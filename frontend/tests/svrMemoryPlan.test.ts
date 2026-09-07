@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import {
-  estimateSvrPeakMemoryBytes,
-  estimateSvrRegistrationBytes,
-  SVR_MEMORY_BUDGET_BYTES,
-} from '../src/utils/svr/svrMemoryPlan';
+import { estimateSvrPeakMemoryBytes, estimateSvrRegistrationBytes } from '../src/utils/svr/svrMemoryPlan';
 
-describe('svr/shared memory admission', () => {
+describe('svr/shared memory accounting', () => {
   it('counts source frames, solver scratch, acquired support, and GPU presentation once', () => {
     const plan = estimateSvrPeakMemoryBytes({ voxelCount: 100, sourceBytes: 500, iterations: 3 });
 
@@ -28,10 +24,9 @@ describe('svr/shared memory admission', () => {
 
     expect(coarse.solverBytes).toBe(80);
     expect(refined.solverBytes).toBe(120);
-    expect(SVR_MEMORY_BUDGET_BYTES).toBe(512 * 1024 * 1024);
   });
 
-  it('rejects a formerly admitted reconstruction when its displayed prior result remains resident', () => {
+  it('counts a displayed prior result as an independent resident owner', () => {
     const voxelCount = 256 ** 3;
     const sourceBytes = 150 * 1024 * 1024;
     const previousVolumeSupportDisplayAndLabelsBytes = voxelCount * 9;
@@ -45,12 +40,10 @@ describe('svr/shared memory admission', () => {
     });
 
     expect(withoutRetainedResult.totalBytes).toBe(438 * 1024 * 1024);
-    expect(withoutRetainedResult.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
     expect(withRetainedResult.totalBytes).toBe(582 * 1024 * 1024);
-    expect(withRetainedResult.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
   });
 
-  it('rejects a formerly admitted reconstruction when its independent decoded-frame cache remains resident', () => {
+  it('counts an independent decoded-frame cache as a resident owner', () => {
     const voxelCount = 256 ** 3;
     const sourceBytes = 150 * 1024 * 1024;
     const residentCacheBytes = 80 * 1024 * 1024;
@@ -64,8 +57,6 @@ describe('svr/shared memory admission', () => {
 
     expect(withoutCache.totalBytes).toBe(438 * 1024 * 1024);
     expect(withCache.totalBytes).toBe(518 * 1024 * 1024);
-    expect(withoutCache.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
-    expect(withCache.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
   });
 
   it('bounds registration volumes and sample vectors to the exact simultaneous score-grid owners', () => {
@@ -78,7 +69,7 @@ describe('svr/shared memory admission', () => {
     expect(estimateSvrRegistrationBytes(Number.NaN)).toBe(0);
   });
 
-  it('rejects a formerly admitted reconstruction when ROI-rigid score volumes remain unaccounted', () => {
+  it('adds ROI-rigid score volumes on top of the reconstruction owners', () => {
     const voxelCount = 256 ** 3;
     const sourceBytes = 170 * 1024 * 1024;
     const withoutRegistration = estimateSvrPeakMemoryBytes({ voxelCount, sourceBytes, iterations: 1 });
@@ -90,9 +81,8 @@ describe('svr/shared memory admission', () => {
     });
 
     expect(withoutRegistration.totalBytes).toBe(458 * 1024 * 1024);
-    expect(withoutRegistration.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
     expect(withRegistration.registrationBytes).toBe(160 ** 3 * 14 + 1_600_000);
-    expect(withRegistration.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(withRegistration.totalBytes).toBe(withoutRegistration.totalBytes + withRegistration.registrationBytes);
   });
 
   it('counts only the accepted Float32 volume during inference, never released reconstruction scratch', () => {
@@ -111,7 +101,7 @@ describe('svr/shared memory admission', () => {
     expect(inference.totalBytes).toBe(3_200);
   });
 
-  it('blocks inference when existing and replacement label buffers overlap beyond the budget', () => {
+  it('counts existing and replacement label buffers separately during inference', () => {
     const voxelCount = 257 ** 3;
     const modelTensorBytes = voxelCount * (Float32Array.BYTES_PER_ELEMENT + 4 * Float32Array.BYTES_PER_ELEMENT);
     const withoutExistingLabels = estimateSvrPeakMemoryBytes({
@@ -131,8 +121,7 @@ describe('svr/shared memory admission', () => {
       modelTensorBytes,
     });
 
-    expect(withoutExistingLabels.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
-    expect(withExistingAndReplacementLabels.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(withExistingAndReplacementLabels.totalBytes - withoutExistingLabels.totalBytes).toBe(voxelCount);
   });
 
   it('counts every independent registration and presentation owner exactly once', () => {

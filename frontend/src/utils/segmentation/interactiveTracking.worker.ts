@@ -1,5 +1,10 @@
 import { createInteractiveTrackingModel } from './efficientTam/model';
-import type { TrackingController, TrackingFrameDecision, TrackingFrameOutput } from './interactiveTracking';
+import type {
+  TrackingController,
+  TrackingFeatureCache,
+  TrackingFrameDecision,
+  TrackingFrameOutput,
+} from './interactiveTracking';
 import type {
   InteractiveTrackingJob,
   InteractiveTrackingWorkerRequest,
@@ -15,6 +20,27 @@ let abort = new AbortController();
 let channel: MessagePort | null = null;
 let model: TrackingController | undefined;
 let modelProvider: InteractiveTrackingJob['provider'] | undefined;
+/** Encoded planes of the most recent context; retained with the runtime, dropped with it or on a new context. */
+const FEATURE_CACHE_LIMIT_BYTES = 768 * 1024 * 1024;
+let featureCache: { token: string; frames: Map<number, Float32Array>; bytes: number } | null = null;
+
+function featureCacheFor(job: InteractiveTrackingJob): TrackingFeatureCache | undefined {
+  if (!job.contextToken) {
+    featureCache = null;
+    return undefined;
+  }
+  if (featureCache?.token !== job.contextToken)
+    featureCache = { token: job.contextToken, frames: new Map(), bytes: 0 };
+  const cache = featureCache;
+  return {
+    get: (index) => cache.frames.get(index),
+    set(index, features) {
+      if (cache.frames.has(index) || cache.bytes + features.byteLength > FEATURE_CACHE_LIMIT_BYTES) return;
+      cache.frames.set(index, features);
+      cache.bytes += features.byteLength;
+    },
+  };
+}
 let waiting: {
   requestId: number;
   reply: 'source' | 'consumed';
@@ -98,8 +124,8 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
       post({ type: 'progress', progress: { phase: 'loading' } });
       model = await createInteractiveTrackingModel({
         provider: job.provider,
-        // Four-thread diagnostics passed the cropped fixture; normal full-volume adoption remains on hold.
-        wasmThreads: 1,
+        // Four threads when the page is cross-origin isolated; the runtime falls back to one otherwise.
+        wasmThreads: 'auto',
         signal: abort.signal,
         onProgress: (asset) => post({ type: 'progress', progress: { phase: 'loading', asset } }),
         // The controller is reused, but progress always belongs to the current isolated job channel.
@@ -108,10 +134,12 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
       modelProvider = job.provider;
     }
     abort.signal.throwIfAborted();
+    const features = featureCacheFor(job);
     if (hasCorrections) {
       let direction: 1 | -1 = 1;
       await model.runSnapshot({
         ...job,
+        featureCache: features,
         signal: abort.signal,
         readFrame: (index) => readSource(index, direction, stage),
         onFrame: sendFrame,
@@ -136,6 +164,7 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
       for (const direction of [1, -1] as const) {
         await model.run({
           ...job,
+          featureCache: features,
           direction,
           signal: abort.signal,
           readFrame: (index) => readSource(index, direction),
@@ -160,6 +189,7 @@ async function run(job: InteractiveTrackingJob): Promise<void> {
     } finally {
       model = undefined;
       modelProvider = undefined;
+      featureCache = null;
     }
     throw error;
   }

@@ -12,14 +12,8 @@ import {
   retainedSvrVolumeBytes,
 } from '../src/utils/svr/nativeVolume';
 import { enhanceVolume2x } from '../src/utils/svr/superResolution';
-import {
-  assertEnhancementFits,
-  enhancementSelectionRoi,
-  enhancementWorkingBytes,
-  prepareEnhancementMemory,
-} from '../src/utils/svr/superResolutionRegion';
+import { assertEnhancementFits, enhancementSelectionRoi } from '../src/utils/svr/superResolutionRegion';
 import { MAX_SR_OUTPUT_VOXELS, MIN_SR_CONTEXT_DIM } from '../src/utils/svr/superResolutionTypes';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import {
   IDENTITY_PATIENT_TRANSFORM,
   patientToVolumeVoxel,
@@ -95,9 +89,6 @@ it('exposes measurable corpus cache owners and retains the displayed image after
   const measured = measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements });
   expect(measured.measured).toBe(true);
   expect(measured.bytes).toBe(pixels.byteLength);
-  await expect(
-    prepareEnhancementMemory(MIN_SR_CONTEXT_DIM ** 3, 0, cache, new Set([id]), undefined, getEnabledElements),
-  ).resolves.toBe(pixels.byteLength);
   cache.removeImageLoadObject(id);
   expect(measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements }).bytes).toBe(pixels.byteLength);
   expect(measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements: () => [] }).bytes).toBe(0);
@@ -172,7 +163,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
       if (remember) cache.remember(`miradb:${frame.sopInstanceUid}`, decoded.pixels);
       return { pixels: decoded.pixels };
     };
-    const overviewPlan = planNativeVolume(manifest, {}, { decodedCacheBytes: 0 });
+    const overviewPlan = planNativeVolume(manifest, {}, { decodedCacheBytes: 0, budgetBytes: 512 * MiB });
     expect(overviewPlan.overview).toBe(true);
     expect(overviewPlan.sourceDims).toEqual([source.columns, source.rows, source.frames.length]);
     expect(overviewPlan.cropMin).toEqual([0, 0, 0]);
@@ -183,7 +174,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
       ),
     );
     expect(overviewPlan.dims.reduce((product, size) => product * size, 1)).toBeGreaterThanOrEqual(16 * 1024 * 1024);
-    expect(overviewPlan.totalBytes).toBeLessThanOrEqual(SVR_MEMORY_BUDGET_BYTES);
+    expect(overviewPlan.totalBytes).toBeLessThanOrEqual(overviewPlan.budgetBytes!);
     // Retain real decoded frames in this same decode pass to model subsequent
     // slice browsing without replaying 256 decodes. Native assembly itself does
     // not populate Cornerstone's cache in the application.
@@ -226,11 +217,6 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
     const originalGeometry = createHash('sha256').update(JSON.stringify(overviewPlan)).digest('hex');
     const nativePlaneBytes = nativePlaneMemoryBytes([manifest]);
     const retainedBytes = retainedSvrVolumeBytes(overview) + nativePlaneBytes;
-    // This is the pre-fix admission equation: a smaller selection could not
-    // overcome its fixed retained-volume/cache floor, even at minimum context.
-    expect(retainedBytes + initialCacheBytes + enhancementWorkingBytes(MIN_SR_CONTEXT_DIM ** 3)).toBeGreaterThan(
-      SVR_MEMORY_BUDGET_BYTES,
-    );
 
     const landmark = buildOutputPlaneGrid(axial.frames[78]!);
     const point = outputGridPixelToWorld(landmark, (landmark.rows - 1) * 0.453, (landmark.columns - 1) * 0.503);
@@ -244,7 +230,6 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
     const protectedImage = cache.cachedImages.find((entry) => entry.imageId === protectedId);
     expect(protectedImage).toBeDefined();
     const protectedPixels = fingerprint(protectedImage!.image.getPixelData());
-    const protectedIds = new Set([protectedId]);
     const getEnabledElements = () => [{ image: protectedImage!.image }];
     const measureCache = () => measureCornerstoneImageMemory({ imageCache: cache, getEnabledElements });
     expect(measureCache().measured).toBe(true);
@@ -295,7 +280,6 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
           nativeDims: plan.dims,
           fixedRetainedMiB: retainedBytes / MiB,
           initialCacheMiB: initialCacheBytes / MiB,
-          oldPeakMiB: (retainedBytes + initialCacheBytes + enhancementWorkingBytes(count)) / MiB,
         }),
       );
       // Oblique contexts can expand when represented as patient-axis AABBs.
@@ -316,19 +300,10 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
               expect(corner[axis]).toBeLessThanOrEqual(plan.dims[axis]! - 6.5 + 0.0001);
             }
           }
-      expect(() => assertEnhancementFits(count, retainedBytes + initialCacheBytes)).toThrow(
-        /no room for even a small/i,
-      );
-      const decodedCacheBytes = await prepareEnhancementMemory(
-        count,
-        retainedBytes,
-        cache,
-        protectedIds,
-        undefined,
-        getEnabledElements,
-      );
-      expect(decodedCacheBytes).toBeLessThan(initialCacheBytes);
-      expect(() => assertEnhancementFits(count, retainedBytes + decodedCacheBytes)).not.toThrow();
+      // Resident cache and retained owners are reported, never an admission ceiling; only the output cap applies.
+      const decodedCacheBytes = measureCache().bytes;
+      expect(decodedCacheBytes).toBe(initialCacheBytes);
+      expect(() => assertEnhancementFits(count)).not.toThrow();
       plan = planNativeVolume(
         manifest,
         { roi },
@@ -338,7 +313,7 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
           nativePlaneBytes,
         },
       );
-      expect(plan.totalBytes).toBeLessThanOrEqual(SVR_MEMORY_BUDGET_BYTES);
+      expect(plan.budgetBytes).toBeUndefined();
       expect(fingerprint(labels.data)).toBe(maskBefore);
       expect([fingerprint(labels.seeds!.foreground), fingerprint(labels.seeds!.background)]).toEqual(seedsBefore);
       selections.push({
@@ -348,14 +323,6 @@ describe.skipIf(!runCorpus)('2x enhancement admission on the private full MRI ov
       });
       if (radius === 0) {
         enhancedSource = await assembleNativeVolume(plan, readFrame);
-        await prepareEnhancementMemory(
-          enhancedSource.data.length,
-          retainedBytes,
-          cache,
-          protectedIds,
-          undefined,
-          getEnabledElements,
-        );
         finalLabels = labels;
         finalLabelFingerprint = maskBefore;
         finalSeedFingerprints = seedsBefore;

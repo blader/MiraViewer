@@ -2,7 +2,6 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SvrLabelVolume, SvrSelectionPlane, SvrVolume } from '../types/svr';
 import { retainMarkedComponents } from '../utils/segmentation/seedConnectedSelection';
 import type { SelectionProposer } from '../utils/segmentation/selectionProposal';
-import { InteractiveSelectionMemoryError } from '../utils/segmentation/interactiveAdmission';
 import {
   applySelectionPatch,
   combineSelectionPatches,
@@ -31,7 +30,6 @@ type SelectionStatus = {
   running: boolean;
   progress?: number;
   error?: string;
-  memoryError?: InteractiveSelectionMemoryError;
   boundaryCount?: number;
   contextLimited?: boolean;
 };
@@ -289,7 +287,6 @@ export function useSvrSelection(
           setStatus({
             running: false,
             error: error instanceof Error ? error.message : String(error),
-            ...(error instanceof InteractiveSelectionMemoryError ? { memoryError: error } : {}),
           });
       } finally {
         if (request.current === controller) request.current = null;
@@ -306,7 +303,6 @@ export function useSvrSelection(
         setStatus((current) => ({
           ...current,
           error: 'This stroke contains no acquired MRI tissue. Move the brush inside the observed image.',
-          memoryError: undefined,
         }));
         return;
       }
@@ -314,7 +310,6 @@ export function useSvrSelection(
         setStatus((current) => ({
           ...current,
           error: 'The stroke plane does not match its marked MRI voxels.',
-          memoryError: undefined,
         }));
         return;
       }

@@ -63,7 +63,6 @@ import {
   type CustomModelRequest,
   type CustomModelResponse,
 } from '../src/utils/segmentation/onnx/customModelWorker';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 
 const MODEL_KEY = 'brats-tumor-v1';
 const MANIFEST_KEY = `${MODEL_KEY}:manifest`;
@@ -589,7 +588,7 @@ describe('useOnnxTumorSession verified model ownership', () => {
     act(() => result.current.runSegmentation());
     await waitFor(() => expect(onLabels).toHaveBeenCalledOnce());
     expect(result.current.preflight).toMatchObject({ blockedByDefault: false, budgetBytes: 2048 * 1024 * 1024 });
-    expect(result.current.preflight!.estimatedPeakBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(result.current.preflight!.estimatedPeakBytes).toBeGreaterThan(512 * 1024 * 1024);
     expect(WorkerHarness.instances).toHaveLength(1);
     expect(WorkerHarness.instances[0]!.terminate).toHaveBeenCalledOnce();
   });

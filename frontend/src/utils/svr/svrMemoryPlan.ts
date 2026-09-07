@@ -1,5 +1,4 @@
-/** Shared resident-memory authority for SVR admission and reconstruction. */
-export const SVR_MEMORY_BUDGET_BYTES = 512 * 1024 * 1024;
+/** Conservative resident-memory estimates for SVR planning diagnostics; no admission ceiling is enforced. */
 
 export type SvrMemoryPlan = {
   sourceBytes: number;

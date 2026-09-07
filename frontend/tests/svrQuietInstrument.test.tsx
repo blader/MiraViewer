@@ -222,18 +222,16 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     };
 
     const { container } = render(<Svr3DView data={comparisonData()} />);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Select tissue' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '3D + slices' })).toBeEnabled());
     expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Region selection workspace' })).toHaveAttribute('data-editing', 'false');
-    fireEvent.click(screen.getByRole('button', { name: 'Select tissue' }));
-    fireEvent.click(screen.getByText('Slice settings', { selector: 'summary' }));
+    expect(screen.getByRole('region', { name: 'Tumor selection workspace' })).toHaveAttribute('data-editing', 'false');
+    fireEvent.click(screen.getByRole('button', { name: '3D + slices' }));
     const planes = ['Axial', 'Coronal', 'Sagittal'].map((plane) =>
       screen.getByRole('application', { name: new RegExp(plane + ' reconstructed slice', 'i') }),
     );
 
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
-    expect(screen.queryByRole('complementary', { name: '3D settings' })).not.toBeInTheDocument();
-    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
+    expect(screen.queryByRole('complementary', { name: 'Display settings' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /show reconstruction sources and controls/i }));
     fireEvent.click(screen.getByRole('button', { name: /hide reconstruction sources and controls/i }));
@@ -243,10 +241,9 @@ describe('Quiet Instrument reconstruction lightbox', () => {
     ).not.toBeInTheDocument();
     expect(container.querySelector('.svr-volume-layout')).toHaveAttribute('data-controls-open', 'false');
     for (const canvas of planes) expect(canvas).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Show 3D settings' }));
-    expect(screen.getByRole('complementary', { name: '3D settings' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show display settings' }));
+    expect(screen.getByRole('complementary', { name: 'Display settings' })).toBeInTheDocument();
     for (const canvas of planes) expect(canvas).toBeInTheDocument();
-    expect(screen.getByRole('status', { name: 'Crosshair position' })).toHaveTextContent('No acquired support');
   });
 
   it('marks a real selected focus boundary without tinting acquired image pixels', () => {

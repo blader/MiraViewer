@@ -10,7 +10,6 @@ import { physicalBrushIndices, SLICE_AXES } from '../src/utils/segmentation/sele
 import { classifySvrAcquisitions } from '../src/utils/svr/acquisitionProvenance';
 import { assembleNativeVolume, planNativeVolume, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
 import { resampleSelectionForRefinement, selectionFocusRoi } from '../src/utils/svr/refineRegion';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { patientToVolumeVoxel, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 
 const sourceDims = [31, 27, 19] as const;
@@ -70,15 +69,8 @@ function nativeWorkflow() {
   const classification = classifySvrAcquisitions([reformat, original]);
   const source = classification.primaryOriginal3d ?? reformat;
   const cold = planNativeVolume(source, {}, { decodedCacheBytes: 0 });
-  // Model other live owners without allocating them or changing the production memory budget.
-  const constrained = planNativeVolume(
-    source,
-    {},
-    {
-      decodedCacheBytes: 0,
-      retainedBytes: SVR_MEMORY_BUDGET_BYTES - cold.totalBytes + 1,
-    },
-  );
+  // An explicit caller budget still admits a subsampled overview; production native assembly passes none.
+  const constrained = planNativeVolume(source, {}, { decodedCacheBytes: 0, budgetBytes: cold.totalBytes - 1 });
   const readFrame = vi.fn(async (frame: SeriesFrameManifest['frames'][number]) => {
     expect(frame.seriesInstanceUid).toBe(original.seriesUid);
     return {
@@ -151,9 +143,9 @@ describe('native Add → Auto-fill workflow invariants, not an anatomy accuracy 
     expect(derivedOnly.primaryOriginal3d).toBeNull();
     expect(fixture.cold.overview).toBe(false);
     expect(fixture.constrained.overview).toBe(true);
+    expect(fixture.cold.budgetBytes).toBeUndefined();
+    expect(fixture.constrained.totalBytes).toBeLessThanOrEqual(fixture.constrained.budgetBytes!);
     for (const plan of [fixture.cold, fixture.constrained]) {
-      expect(plan.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
-      expect(plan.totalBytes).toBeLessThanOrEqual(plan.budgetBytes);
       const volume = await assembleNativeVolume(plan, fixture.readFrame);
       expect(volume.nativeVoxelSizeMm).toEqual([1.3, 0.5, 0.8]);
       expect(volume.displayInvert).toBe(true);

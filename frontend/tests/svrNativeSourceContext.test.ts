@@ -6,7 +6,6 @@ import { assembleNativeVolume, planNativeVolume, retainedSvrVolumeBytes } from '
 import { createNativeSourceContext } from '../src/utils/svr/nativeSourceContext';
 import { reconstructVolumeMultiPlane } from '../src/utils/svr/reconstructVolume';
 import { MAX_SR_OUTPUT_VOXELS } from '../src/utils/svr/superResolutionTypes';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { patientToVolumeVoxel, physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
 import { deferred } from './helpers/deferred';
 
@@ -179,7 +178,7 @@ describe('accepted native source context', () => {
     const plan = context.plan(roi, f.options);
     expect(plan.dims).toEqual([129, 129, 129]);
     expect(plan.dims.reduce((count, size) => count * size, 1) * 8).toBeGreaterThan(MAX_SR_OUTPUT_VOXELS);
-    expect(plan.totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(plan.budgetBytes).toBeUndefined();
     expect(context.plan(f.roi, f.options).dims.every((size) => size < 32)).toBe(true);
     expect(reconstruct).not.toHaveBeenCalled();
   });
@@ -236,17 +235,17 @@ describe('accepted native source context', () => {
     expect(f.volume.data).toEqual(before);
   });
 
-  it('leaves live source-phase admission to the assembler even when cache residency changes after planning', async () => {
+  it('leaves live source-phase admission to the assembler when it is given an explicit budget', async () => {
     const f = fixture();
     const context = createNativeSourceContext(f.options);
-    expect(context.plan(f.roi, f.options).totalBytes).toBeLessThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(context.plan(f.roi, f.options).budgetBytes).toBeUndefined();
     const readFrame = vi.fn(async () => ({ pixels: new Int16Array() }));
     reconstruct.mockImplementation(async (request) => ({
       volume: await assembleNativeVolume(
         planNativeVolume(f.nativeSource, request.svrParams, {
           ...f.options,
           transform: f.transform,
-          decodedCacheBytes: SVR_MEMORY_BUDGET_BYTES,
+          budgetBytes: 1,
         }),
         readFrame,
       ),

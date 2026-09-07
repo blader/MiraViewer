@@ -8,10 +8,7 @@ import type * as DerivedAlignmentFrames from '../src/utils/derivedAlignmentFrame
 import type * as ReconstructionHooks from '../src/hooks/useSvrReconstruction';
 import type * as DecodedFrames from '../src/utils/decodedFrame';
 import type * as InteractiveAdmission from '../src/utils/segmentation/interactiveAdmission';
-import {
-  estimateInteractiveSelectionMemory,
-  interactiveSelectionBudgetBytes,
-} from '../src/utils/segmentation/interactiveAdmission';
+import { estimateInteractiveSelectionMemory } from '../src/utils/segmentation/interactiveAdmission';
 import type { EnhancementSourceLoader } from '../src/utils/svr/superResolutionRegion';
 import type { SelectionProposer } from '../src/utils/segmentation/selectionProposal';
 import { planInteractiveSelectionContext } from '../src/utils/svr/interactiveSelectionContext';
@@ -24,7 +21,6 @@ import {
   retainedSvrVolumeBytes,
 } from '../src/utils/svr/nativeVolume';
 import { regionalRefinementParameters, selectionFocusRoi } from '../src/utils/svr/refineRegion';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { deferred } from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({
@@ -523,7 +519,6 @@ describe('Native interactive selection workspace', () => {
       expect(mocks.reconstruct.mock.lastCall![0]).toMatchObject({
         acceptedProvenance: previous.volume.sourceProvenance,
         retainedBytes: owners.retainedBytes,
-        nativeContextBudgetBytes: 1536 * 1024 * 1024,
         svrParams: { ...previous.parameters, roi: planned.loaderRoi },
       });
       expect(mocks.proposeSelection).toHaveBeenCalledOnce();
@@ -557,7 +552,7 @@ describe('Native interactive selection workspace', () => {
   });
 
   it('measures one acquisition range across corrections, re-admits current owners and drops it with the accepted source', async () => {
-    const { comparisonData, previous, proposer, request, sourceManifest, rerender } = await setupSelection();
+    const { comparisonData, previous, proposer, request, sourceManifest, rerender } = await setupSelection(0, 128);
     mocks.proposeSelection.mockResolvedValue({
       data: new Uint8Array(previous.volume.data.length),
       boundaryCount: 0,
@@ -567,14 +562,29 @@ describe('Native interactive selection workspace', () => {
     await proposer({ ...request, retainedBytes: request.retainedBytes + 9876 });
     const rangeReads = () => mocks.decodedFrame.mock.calls.filter(([, , options]) => options?.cache === 'reuse-only');
     expect(rangeReads()).toHaveLength(sourceManifest.frames.length);
+    // The second correction stays inside the first field: the native crop and its token are reused.
+    expect(mocks.reconstruct).toHaveBeenCalledOnce();
+    expect(mocks.admitSelection).toHaveBeenCalledTimes(5);
+    const [firstSource, secondSource] = mocks.proposeSelection.mock.calls.map(([source]) => source);
+    expect(secondSource!.nativeContext).toBe(firstSource!.nativeContext);
+    expect(firstSource!.contextToken).toMatch(/^context-\d+$/);
+    expect(secondSource!.contextToken).toBe(firstSource!.contextToken);
+    // A mark outside the retained field loads a fresh crop under a new token.
+    await proposer({
+      ...request,
+      seeds: { ...request.seeds, foreground: Uint32Array.of(request.seeds.foreground[0]!, (2 * 64 + 2) * 24 + 12) },
+    });
     expect(mocks.reconstruct).toHaveBeenCalledTimes(2);
-    expect(mocks.admitSelection).toHaveBeenCalledTimes(6);
+    const thirdSource = mocks.proposeSelection.mock.lastCall![0];
+    expect(thirdSource.nativeContext).not.toBe(firstSource!.nativeContext);
+    expect(thirdSource.contextToken).not.toBe(firstSource!.contextToken);
     expect(
       mocks.admitSelection.mock.calls[3]![0].retainedBytes - mocks.admitSelection.mock.calls[0]![0].retainedBytes,
     ).toBe(9876);
     expect(mocks.proposeSelection.mock.calls.map(([source]) => source.sourceRange)).toEqual([
-      [-17, 64 ** 3 - 18],
-      [-17, 64 ** 3 - 18],
+      [-17, 128 ** 3 - 18],
+      [-17, 128 ** 3 - 18],
+      [-17, 128 ** 3 - 18],
     ]);
     const firstWorker = mocks.proposeSelection.mock.calls[0]![0].worker;
     expect(firstWorker.run).toBeTypeOf('function');
@@ -612,68 +622,6 @@ describe('Native interactive selection workspace', () => {
     expect(admissions[1].retainedBytes - admissions[0].retainedBytes).toBe(16_384);
     expect(admissions[2].retainedBytes).toBe(admissions[1].retainedBytes);
     expect(admissions[1].sourceLoadPeakBytes - admissions[0].sourceLoadPeakBytes).toBe(16_384);
-  });
-
-  it.each([false, true])(
-    'accounts for retained sessions and reclaims an oversized idle arena before source loading: %s',
-    async (oversized) => {
-      const { previous, proposer, request } = await setupSelection();
-      const result = { data: new Uint8Array(previous.volume.data.length), contextLimited: false };
-      mocks.proposeSelection.mockResolvedValue(result);
-      await proposer(request);
-      const worker = mocks.proposeSelection.mock.lastCall![0].worker;
-      const firstAdmission = mocks.admitSelection.mock.calls[0]![0];
-      const bytes = oversized
-        ? interactiveSelectionBudgetBytes()
-        : estimateInteractiveSelectionMemory(firstAdmission).runtimeBytes;
-      let retainedBytes = bytes;
-      vi.spyOn(worker, 'retainedBytes', 'get').mockImplementation(() => retainedBytes);
-      const release = vi.spyOn(worker, 'releaseIdle').mockImplementation(() => {
-        retainedBytes = 0;
-        return true;
-      });
-      const load = mocks.reconstruct.getMockImplementation()!;
-      mocks.reconstruct.mockImplementation(async (input) => {
-        expect(input.retainedBytes).toBe(
-          retainedSvrVolumeBytes(previous.volume) + request.retainedBytes + (oversized ? 0 : bytes),
-        );
-        expect(release).toHaveBeenCalledTimes(oversized ? 1 : 0);
-        return load(input);
-      });
-      await expect(proposer(request)).resolves.toBe(result);
-      expect(mocks.proposeSelection.mock.lastCall![0].worker).toBe(worker);
-      for (const [admission] of mocks.admitSelection.mock.calls.slice(3)) {
-        expect(admission.retainedRuntimeBytes).toBe(oversized ? 0 : bytes);
-        expect(admission.retainedBytes).toBe(firstAdmission.retainedBytes);
-      }
-    },
-  );
-
-  it('admits a release-before-publication plan when the same faithful correction cannot retain idle sessions', async () => {
-    const { previous, proposer, request } = await setupSelection();
-    const result = { data: new Uint8Array(previous.volume.data.length), contextLimited: false };
-    mocks.proposeSelection.mockResolvedValue(result);
-    await proposer(request);
-    const baseline = estimateInteractiveSelectionMemory({
-      ...mocks.admitSelection.mock.calls[0]![0],
-      retainRuntimeAfterRun: false,
-    });
-    const extra =
-      interactiveSelectionBudgetBytes() - baseline.trackingPeakBytes - Math.floor(baseline.publicationScratchBytes / 2);
-    await expect(proposer({ ...request, retainedBytes: request.retainedBytes + extra })).resolves.toBe(result);
-    const [source, submitted] = mocks.proposeSelection.mock.lastCall!;
-    expect(source.retainRuntimeAfterRun).toBe(false);
-    expect(submitted.volume).toBe(request.volume);
-    expect(submitted.seeds).toBe(request.seeds);
-    for (const [admission] of mocks.admitSelection.mock.calls.slice(3)) {
-      expect(admission.retainRuntimeAfterRun).toBe(false);
-      expect(estimateInteractiveSelectionMemory(admission).totalBytes).toBeLessThanOrEqual(
-        interactiveSelectionBudgetBytes(),
-      );
-      expect(
-        estimateInteractiveSelectionMemory({ ...admission, retainRuntimeAfterRun: true }).totalBytes,
-      ).toBeGreaterThan(interactiveSelectionBudgetBytes());
-    }
   });
 
   it.each(['reconstruction', 'refinement', 'enhancement', 'unmount'] as const)(
@@ -954,196 +902,6 @@ describe('SVR reconstruction workspace', () => {
     },
   );
 
-  it.each([false, true])(
-    'reports non-reclaimable retained memory honestly before %s native preparation',
-    async (reload) => {
-      const comparisonData = nativeComparisonData();
-      const { sourceManifest, previous, labels } = nativeEnhancementFixture(
-        reload ? [24, 64, 64] : [64, 64, 64],
-        reload ? [20, 0, 0] : [0, 0, 0],
-        reload ? [12, 32, 32] : [32, 32, 32],
-      );
-      mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 400 * 1024 * 1024 });
-      mocks.manifests.mockResolvedValue(sourceManifest);
-      mocks.hook.result = previous;
-      mocks.hook.resultIdentity = identity(comparisonData);
-      mocks.hook.status = 'ready';
-      render(<Svr3DView data={comparisonData} />);
-      openSources();
-      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeInTheDocument());
-      await waitFor(() => expect(mocks.enhancementLoader.mock.lastCall![0]).toBeTypeOf('function'));
-      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
-      await expect(load(labels, { retainedBytes: 100 * 1024 * 1024 })).rejects.toThrow(
-        /open volume and working data.*even a small enhancement/i,
-      );
-      expect(mocks.reconstruct).not.toHaveBeenCalled();
-      expect(mocks.removeCachedImage).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each([false, true])(
-    'reclaims only idle MRI and protects displayed loader aliases before %s native preparation',
-    async (reload) => {
-      const mib = 1024 * 1024;
-      const comparisonData = nativeComparisonData();
-      const { sourceManifest, previous, labels } = nativeEnhancementFixture(
-        reload ? [24, 64, 64] : [64, 64, 64],
-        reload ? [20, 0, 0] : [0, 0, 0],
-        reload ? [12, 32, 32] : [32, 32, 32],
-      );
-      const decodedImage = (imageId: string, sizeMiB: number) => {
-        const pixels = new Uint8Array(sizeMiB * mib);
-        return { imageId, getPixelData: () => pixels };
-      };
-      const displayedImage = decodedImage('dicomfile:0', 64);
-      mocks.cachedImages.push(
-        {
-          imageId: 'miradb:displayed',
-          sizeInBytes: 64 * mib,
-          timeStamp: 1,
-          loaded: true,
-          image: displayedImage,
-          imageLoadObject: {},
-        },
-        {
-          imageId: 'miradb:loading',
-          sizeInBytes: 80 * mib,
-          timeStamp: 2,
-          loaded: false,
-          image: decodedImage('miradb:loading', 80),
-          imageLoadObject: {},
-        },
-        // Inner file-manager IDs can be reused; a different object with the
-        // same dicomfile ID must not be mistaken for the displayed frame.
-        {
-          imageId: 'miradb:idle-old',
-          sizeInBytes: 80 * mib,
-          timeStamp: 3,
-          loaded: true,
-          image: decodedImage('dicomfile:0', 80),
-          imageLoadObject: {},
-        },
-        {
-          imageId: 'miraderived:idle-recent',
-          sizeInBytes: 176 * mib,
-          timeStamp: 4,
-          loaded: true,
-          image: decodedImage('miraderived:idle-recent', 176),
-          imageLoadObject: {},
-        },
-      );
-      mocks.cacheInfo.mockImplementation(() => ({
-        cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
-        maximumSizeInBytes: 512 * mib,
-      }));
-      mocks.enabledElements.mockReturnValue([{ image: displayedImage }]);
-      mocks.manifests.mockResolvedValue(sourceManifest);
-      mocks.hook.result = previous;
-      mocks.hook.resultIdentity = identity(comparisonData);
-      mocks.hook.status = 'ready';
-      const loaded = nativeEnhancementFixture([33, 33, 33], [16, 16, 16], [16, 16, 16]).previous;
-      mocks.reconstruct.mockResolvedValue(loaded);
-      render(<Svr3DView data={comparisonData} />);
-      openSources();
-      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
-      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
-      const before = previous.volume.data.slice();
-      const result = await load(labels, { retainedBytes: 100 * mib });
-      expect(result.dims.every((size) => size >= 32)).toBe(true);
-      expect(result.voxelSizeMm).toEqual([1, 1, 1]);
-      expect(mocks.removeCachedImage.mock.calls).toEqual([['miradb:idle-old']]);
-      expect(mocks.cachedImages.map((entry) => entry.imageId)).toEqual([
-        'miradb:displayed',
-        'miradb:loading',
-        'miraderived:idle-recent',
-      ]);
-      expect(previous.volume.data).toEqual(before);
-      expect(labels.data.reduce((total, value) => total + value, 0)).toBe(1);
-      if (reload) {
-        expect(mocks.reconstruct).toHaveBeenCalledOnce();
-        expect(mocks.reconstruct.mock.lastCall![0].retainedBytes).toBe(
-          retainedSvrVolumeBytes(previous.volume) + 100 * mib,
-        );
-      } else expect(mocks.reconstruct).not.toHaveBeenCalled();
-    },
-  );
-
-  it('counts the raw alignment-frame cache separately from decoded presentation images', async () => {
-    const mib = 1024 * 1024;
-    const comparisonData = nativeComparisonData();
-    const { sourceManifest, previous, labels } = nativeEnhancementFixture([64, 64, 64], [0, 0, 0], [32, 32, 32]);
-    mocks.retainedAlignmentBytes.mockReturnValue(64 * mib);
-    mocks.cacheInfo.mockReturnValue({ cacheSizeInBytes: 380 * mib });
-    mocks.manifests.mockResolvedValue(sourceManifest);
-    mocks.hook.result = previous;
-    mocks.hook.resultIdentity = identity(comparisonData);
-    mocks.hook.status = 'ready';
-    render(<Svr3DView data={comparisonData} />);
-    openSources();
-    await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
-    const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
-    await expect(load(labels, {})).rejects.toThrow(/no room for even a small enhancement/i);
-    expect(mocks.reconstruct).not.toHaveBeenCalled();
-    expect(mocks.removeCachedImage).not.toHaveBeenCalled();
-  });
-
-  it.each([false, true])(
-    'rechecks decoded cache after native source loading (new frames protected: %s)',
-    async (protectedFrame) => {
-      const mib = 1024 * 1024;
-      const comparisonData = nativeComparisonData();
-      const { sourceManifest, previous, labels } = nativeEnhancementFixture([24, 64, 64], [20, 0, 0], [12, 32, 32]);
-      const pixels = new Uint8Array(320 * mib);
-      const displayedImage = { imageId: 'miradb:displayed', getPixelData: () => pixels };
-      mocks.cachedImages.push({
-        imageId: 'miradb:displayed',
-        sizeInBytes: 320 * mib,
-        timeStamp: 1,
-        loaded: true,
-        image: displayedImage,
-        imageLoadObject: {},
-      });
-      mocks.cacheInfo.mockImplementation(() => ({
-        cacheSizeInBytes: mocks.cachedImages.reduce((bytes, entry) => bytes + entry.sizeInBytes, 0),
-        maximumSizeInBytes: 512 * mib,
-      }));
-      mocks.enabledElements.mockReturnValue([{ image: displayedImage }]);
-      mocks.manifests.mockResolvedValue(sourceManifest);
-      mocks.hook.result = previous;
-      mocks.hook.resultIdentity = identity(comparisonData);
-      mocks.hook.status = 'ready';
-      const loaded = nativeEnhancementFixture([33, 33, 33], [16, 16, 16], [16, 16, 16]).previous;
-      mocks.reconstruct.mockImplementation(async () => {
-        const newPixels = new Uint8Array(80 * mib);
-        const newImage = { imageId: 'miradb:new-frame', getPixelData: () => newPixels };
-        mocks.cachedImages.push({
-          imageId: 'miradb:new-frame',
-          sizeInBytes: 80 * mib,
-          timeStamp: 2,
-          loaded: true,
-          image: newImage,
-          imageLoadObject: {},
-        });
-        if (protectedFrame) mocks.enabledElements.mockReturnValue([{ image: displayedImage }, { image: newImage }]);
-        return loaded;
-      });
-      render(<Svr3DView data={comparisonData} />);
-      openSources();
-      await waitFor(() => expect(screen.getByRole('button', { name: /open 3d volume/i })).toBeEnabled());
-      const load = mocks.enhancementLoader.mock.lastCall![0] as EnhancementSourceLoader;
-      if (protectedFrame) {
-        await expect(load(labels, { retainedBytes: 100 * mib })).rejects.toThrow(
-          /no room for even a small enhancement/i,
-        );
-        expect(mocks.removeCachedImage).not.toHaveBeenCalled();
-      } else {
-        await expect(load(labels, { retainedBytes: 100 * mib })).resolves.toBe(loaded.volume);
-        expect(mocks.removeCachedImage.mock.calls).toEqual([['miradb:new-frame']]);
-      }
-      expect(mocks.reconstruct).toHaveBeenCalledOnce();
-    },
-  );
-
   it('refines accepted source settings and registration instead of the controls for the next run', async () => {
     const comparisonData = data('patient-a');
     const previous = acceptedResult();
@@ -1183,7 +941,7 @@ describe('SVR reconstruction workspace', () => {
     expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
   });
 
-  it('rejects exact native refinement using live retained owners before decoding and preserves the visible draft/settings', async () => {
+  it('passes live retained owners to exact native refinement before decoding and preserves the visible draft/settings when the assembler rejects', async () => {
     const { useSvrReconstruction } = await vi.importActual<typeof ReconstructionHooks>(
       '../src/hooks/useSvrReconstruction',
     );
@@ -1204,7 +962,7 @@ describe('SVR reconstruction workspace', () => {
       decodedCacheBytes: 0,
       transform,
     });
-    const decodedCacheBytes = SVR_MEMORY_BUDGET_BYTES - base.totalBytes - 32;
+    const decodedCacheBytes = 4096;
     const editing = new Uint32Array(16);
     const alignment = new Float32Array(32);
     const prepareMemory = vi.fn(() => editing.buffer.byteLength);
@@ -1214,18 +972,19 @@ describe('SVR reconstruction workspace', () => {
       expect(request.acceptedProvenance).toBe(previous.volume.sourceProvenance);
       expect(request.svrParams).toEqual(requested);
       expect(request.retainedBytes).toBe(retainedVolume + editing.buffer.byteLength + alignment.buffer.byteLength);
-      const plan = planNativeVolume(sourceManifest, request.svrParams, {
-        retainedBytes: request.retainedBytes,
-        decodedCacheBytes,
-        transform,
-      });
       const withoutEditing = planNativeVolume(sourceManifest, request.svrParams, {
         retainedBytes: retainedVolume,
         decodedCacheBytes,
         transform,
       });
-      expect(withoutEditing.totalBytes).toBeLessThanOrEqual(SVR_MEMORY_BUDGET_BYTES);
-      expect(plan.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+      // An explicit assembler budget sized to the pre-editing owners proves the live editor bytes were counted.
+      const plan = planNativeVolume(sourceManifest, request.svrParams, {
+        retainedBytes: request.retainedBytes,
+        decodedCacheBytes,
+        transform,
+        budgetBytes: withoutEditing.totalBytes,
+      });
+      expect(plan.totalBytes).toBeGreaterThan(withoutEditing.totalBytes);
       expect(plan.sourceStrides).toEqual([1, 1, 1]);
       expect(plan.voxelSizeMm).toEqual(previous.volume.nativeVoxelSizeMm);
       expect(plan.boundsMm).toEqual(base.boundsMm);
@@ -1382,7 +1141,7 @@ describe('SVR reconstruction workspace', () => {
   });
 
   it.each([0, 256])(
-    'admits 702 acquired source frames without reserving an entire new image cache (%i MiB already resident)',
+    'admits 702 acquired source frames at the requested spacing (%i MiB already resident)',
     async (cachedMiB) => {
       const comparisonData = data('patient-a', 3);
       mocks.cacheInfo.mockReturnValue({
@@ -1421,21 +1180,19 @@ describe('SVR reconstruction workspace', () => {
       await openSourceDetails();
 
       await waitFor(() => {
-        expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/(?:[1-4]\d\d|50\d|51[0-2]) MiB/);
+        expect(screen.getByText('Conservative peak').parentElement).toHaveTextContent(/\d+ MiB/);
       });
 
       expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
       expect(screen.getByText('Requested voxel spacing').parentElement).toHaveTextContent('1.00 mm');
+      // The output-grid cap, not resident memory, sets the effective spacing; both cache states agree.
       expect(screen.getByText('Effective voxel spacing').parentElement).not.toHaveTextContent('1.00 mm');
-      const adjusted = screen.queryByText(/automatically adjusted to stay within the 512 mib memory budget/i);
-      if (cachedMiB) expect(adjusted).toBeInTheDocument();
-      else expect(adjusted).not.toBeInTheDocument();
+      expect(screen.queryByText(/memory budget/i)).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
 
       const effectiveParams = mocks.run.mock.calls[0]?.[1].params;
-      // Admission includes the bounded native-plane cache and upload transients
-      // alongside decoded frames, the solver, and incoming CPU/GPU labels.
-      expect(effectiveParams.targetVoxelSizeMm).toBe(cachedMiB ? 1.19 : 1);
+      // Resident cache and native-plane owners are reported, never used to coarsen the requested spacing.
+      expect(effectiveParams.targetVoxelSizeMm).toBe(1);
       expect(mocks.run.mock.calls[0]?.[1].identity).toBe(identity(comparisonData));
     },
   );
@@ -1613,56 +1370,6 @@ describe('SVR reconstruction workspace', () => {
     });
   });
 
-  it('automatically admits recoverable output quality without changing the requested manual settings', async () => {
-    mocks.manifests.mockImplementation(async (seriesUid: string) => {
-      const source = manifest(seriesUid);
-      return {
-        ...source,
-        frames: source.frames.map((frame) => ({ ...frame, rows: 1024, columns: 1024 })),
-      };
-    });
-    render(<Svr3DView data={data('patient-a')} />);
-
-    await waitFor(() => {
-      expect(screen.getAllByRole('button', { name: /reconstruct volume/i })[0]).toBeEnabled();
-    });
-
-    openReconstructionSettings();
-    fireEvent.change(screen.getByLabelText(/max volume dim/i), { target: { value: '384' } });
-
-    await waitFor(() => {
-      expect(screen.getByText(/automatically adjusted to stay within the 512 mib memory budget/i)).toBeInTheDocument();
-    });
-
-    expect(screen.getByLabelText(/voxel size/i)).toHaveValue(1);
-    expect(screen.getByLabelText(/max volume dim/i)).toHaveValue(384);
-    expect(screen.queryByText(/exceeds the safe browser-memory budget/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeEnabled();
-
-    fireEvent.click(screen.getByRole('button', { name: /reconstruct volume/i }));
-
-    expect(mocks.run).toHaveBeenCalledOnce();
-    expect(mocks.run.mock.calls[0]?.[1].params.targetVoxelSizeMm).toBeGreaterThan(1);
-    expect(mocks.run.mock.calls[0]?.[1].params.maxVolumeDim).toBe(384);
-  });
-
-  it('still rejects reconstruction when the independently resident decoded cache cannot fit at any quality', async () => {
-    mocks.cacheInfo.mockReturnValue({
-      cacheSizeInBytes: 513 * 1024 * 1024,
-      maximumSizeInBytes: 768 * 1024 * 1024,
-    });
-
-    render(<Svr3DView data={data('patient-a')} />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText(/exceeds the safe browser-memory budget/i).length).toBeGreaterThan(0);
-    });
-
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
-    expect(screen.queryByText(/automatically adjusted/i)).not.toBeInTheDocument();
-    expect(mocks.run).not.toHaveBeenCalled();
-  });
-
   it('does not reject a physically small scan solely because its maximum dimension is high', async () => {
     render(<Svr3DView data={data('patient-a')} />);
 
@@ -1713,27 +1420,5 @@ describe('SVR reconstruction workspace', () => {
     expect(maxVolumeDimension).toHaveValue(64);
     fireEvent.change(maxVolumeDimension, { target: { value: '1024' } });
     expect(maxVolumeDimension).toHaveValue(384);
-  });
-
-  it('counts the retained prior reconstruction before admitting another same-patient run', async () => {
-    const original = data('patient-a');
-    const previous = acceptedResult();
-    // Model a legitimately large previous typed array without making this UI
-    // regression itself reserve hundreds of MiB in every parallel test run.
-    Object.defineProperty(previous.volume.data, 'byteLength', { value: 512 * 1024 * 1024 });
-    mocks.hook.status = 'ready';
-    mocks.hook.result = previous;
-    mocks.hook.resultIdentity = identity(original);
-
-    render(<Svr3DView data={original} />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText(/clear the previous reconstruction/i).length).toBeGreaterThan(0);
-    });
-    expect(screen.getByRole('status')).toHaveTextContent('Next reconstruction:');
-    expect(screen.getByTestId('accepted-svr-volume')).toBeInTheDocument();
-    openSources();
-    expect(screen.getByRole('button', { name: /reconstruct volume/i })).toBeDisabled();
-    expect(mocks.run).not.toHaveBeenCalled();
   });
 });

@@ -4,17 +4,12 @@ import type { Locator, Page } from '@playwright/test';
 import { createSyntheticSvrDicomFiles } from '../svrSyntheticDicom';
 import { attachReceipt, capture, savedVolumeSelections as savedVolumeSelection } from './evidence';
 import type { DicomInstance, StoredVolumeSegmentationRow, VolumeSegmentationChunk } from '../../src/db/schema';
-import { createSyntheticCustomModel } from '../helpers/customTumorModel';
 import { createHash } from 'node:crypto';
 import { DEFAULT_PANEL_SETTINGS } from '../../src/utils/constants';
-import { CUSTOM_MODEL_INIT_TIMEOUT_MS } from '../../src/utils/segmentation/onnx/customModelWorker';
 
 declare global {
   interface Window {
     replayWorkerStarts: number;
-    customInferenceStarted: boolean;
-    customInferenceAction?: () => void;
-    customInferenceActionAt: number;
     finishPanelWriteAudit: () => { writeStores: string[][]; sourceCatalogReads: number };
     alignmentRequests: {
       type: string;
@@ -234,8 +229,18 @@ async function metadataSnapshot(page: Page) {
 }
 
 async function openSelectionAndVerifyPixels(page: Page) {
-  await page.getByRole('button', { name: 'Select tissue', exact: true }).click();
+  await page.getByRole('button', { name: '3D + slices', exact: true }).click();
   await expectGrayscalePixels(page.getByRole('application', { name: /^Axial reconstructed slice/ }));
+}
+/** The workspace's layout toggle shares the visible name "3D" with the top-level view tab. */
+const workspace = (target: Page) => target.getByRole('region', { name: 'Tumor selection workspace' });
+/** Auto-fill starts after every stroke when a native source exists; stop it so synthetic edits stay exact and quick. */
+async function stopAutoFill(page: Page) {
+  try {
+    await page.getByRole('button', { name: 'Stop', exact: true }).click({ timeout: 1_000 });
+  } catch {
+    // No proposer for this source: nothing was started.
+  }
 }
 
 async function expectGrayscalePixels(canvas: Locator) {
@@ -377,7 +382,7 @@ test('upgrades a legacy database for physical viewing and preserves original byt
   await capture(page, info, 'legacy-metadata-focus');
   await page.getByRole('button', { name: 'Hide reconstruction sources and controls' }).click();
   await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Tumor selection workspace' })).toBeVisible();
   const upgraded = await metadataSnapshot(page);
   await openSelectionAndVerifyPixels(page);
   await capture(page, info, 'legacy-metadata-selection');
@@ -434,7 +439,7 @@ test('upgrades a legacy database for physical viewing and preserves original byt
     expect(await savedVolumeSelection(restored)).toEqual(selections);
     await restored.getByRole('button', { name: '3D', exact: true }).click();
     await restored.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
-    await expect(restored.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+    await expect(restored.getByRole('region', { name: 'Tumor selection workspace' })).toBeVisible();
     await openSelectionAndVerifyPixels(restored);
     await capture(restored, info, 'legacy-metadata-restored-selection');
   } finally {
@@ -471,25 +476,25 @@ test('keeps exact source-bound selections through unrelated import, legacy recov
   const openVolume = async (target: Page) => {
     await target.getByRole('button', { name: '3D', exact: true }).click();
     await target.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
-    await expect(target.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+    await expect(target.getByRole('region', { name: 'Tumor selection workspace' })).toBeVisible();
   };
   await openVolume(page);
   await openSelectionAndVerifyPixels(page);
-  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
-  const mark = async (target: Page, kind: 'Add' | 'Remove', x: number) => {
+  const mark = async (target: Page, kind: 'Add' | 'Erase', x: number) => {
     await target.getByRole('button', { name: kind, exact: true }).click();
     const canvas = target.getByRole('application', { name: /^Axial reconstructed slice/ });
     const box = (await canvas.boundingBox())!;
     await canvas.click({ position: { x: box.width * x, y: box.height * 0.5 } });
+    await stopAutoFill(target);
   };
   await mark(page, 'Add', 0.5);
   await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
-  await mark(page, 'Remove', 0.65);
+  await mark(page, 'Erase', 0.65);
   await expect
     .poll(async () => (await savedVolumeSelection(page))[0]?.seeds?.background.length ?? 0)
     .toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
-  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.reviewState).toBe('reviewed');
+  await workspace(page).getByRole('button', { name: '3D', exact: true }).click();
+  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.reviewState).toBe('draft');
   const reviewed = (await savedVolumeSelection(page))[0]!;
   const original = await metadataSnapshot(page);
 
@@ -599,20 +604,19 @@ test('keeps exact source-bound selections through unrelated import, legacy recov
   expect(imported.revision).toBeGreaterThan(original.revision);
   expect(imported.token).toBe(original.token);
   await openVolume(page);
-  await expect(page.getByText(/Reviewed selection ·/)).toBeVisible();
-  await page.getByRole('button', { name: 'Edit selection', exact: true }).click();
+  await expect(page.getByText(/Tumor ·/)).toBeVisible();
+  await page.getByRole('button', { name: '3D + slices', exact: true }).click();
   await expectGrayscalePixels(page.getByRole('application', { name: /^Axial reconstructed slice/ }));
-  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
   expect(await savedVolumeSelection(page)).toEqual([legacy]);
   await capture(page, info, 'durable-grid-recovered-desktop');
   await mark(page, 'Add', 0.4);
   await expect.poll(async () => (await savedVolumeSelection(page)).length).toBe(2);
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await workspace(page).getByRole('button', { name: '3D', exact: true }).click();
   await expect
     .poll(
       async () => (await savedVolumeSelection(page)).find((row) => row.volumeKey === reviewed.volumeKey)?.reviewState,
     )
-    .toBe('reviewed');
+    .toBe('draft');
   const edited = await savedVolumeSelection(page);
   const canonical = edited.find((row) => row.volumeKey === reviewed.volumeKey)!;
   expect(canonical.selectedCount).toBeGreaterThan(reviewed.selectedCount);
@@ -646,10 +650,10 @@ test('keeps exact source-bound selections through unrelated import, legacy recov
     expect(restoredSnapshot.token).not.toBe(imported.token);
     expect(await savedVolumeSelection(restored)).toEqual(edited);
     await openVolume(restored);
-    await expect(restored.getByText(/Reviewed selection ·/)).toBeVisible();
-    await restored.getByRole('button', { name: 'Edit selection', exact: true }).click();
+    await expect(restored.getByText(/Tumor ·/)).toBeVisible();
+    await restored.getByRole('button', { name: '3D + slices', exact: true }).click();
     await capture(restored, info, 'durable-grid-restored-desktop');
-    await restored.getByRole('button', { name: 'Clear selection' }).click();
+    await restored.getByRole('button', { name: 'Clear tumor selection' }).click();
     await expect
       .poll(
         async () =>
@@ -661,7 +665,7 @@ test('keeps exact source-bound selections through unrelated import, legacy recov
     expect(cleared.find((row) => row.volumeKey === canonical.volumeKey)?.seeds).toBeUndefined();
     await restored.reload();
     await openVolume(restored);
-    await expect(restored.getByRole('button', { name: 'Select tissue', exact: true })).toBeEnabled();
+    await expect(restored.getByRole('button', { name: '3D + slices', exact: true })).toBeEnabled();
     expect(await savedVolumeSelection(restored)).toEqual(cleared);
     await openSelectionAndVerifyPixels(restored);
     await capture(restored, info, 'durable-grid-cleared-reopened');
@@ -715,136 +719,6 @@ test('backup controls show per-file limits and a reachable direct-save action', 
     errors,
     scope:
       'Normal production backup dialog with an imported synthetic examination. Static desktop/mobile controls; not a file-picker, throughput, or large-restore proof.',
-  });
-});
-
-test('normal custom-model controls save a real draft, cancel and replace active workers, and reopen unchanged', async ({
-  page,
-}, info) => {
-  const errors: string[] = [],
-    workers: { url: string; closed: boolean }[] = [];
-  page.on('pageerror', (error) => errors.push(error.message));
-  page.on('worker', (worker) => {
-    if (!/customModel\.worker/.test(worker.url())) return;
-    const record = { url: worker.url(), closed: false };
-    workers.push(record);
-    worker.on('close', () => {
-      record.closed = true;
-    });
-  });
-  await page.addInitScript(() => {
-    const NativeWorker = window.Worker;
-    window.Worker = class extends NativeWorker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        super(url, options);
-        if (String(url).includes('customModel.worker'))
-          this.addEventListener('message', (event) => {
-            if (event.data?.type === 'inference') {
-              window.customInferenceStarted = true;
-              window.customInferenceAction?.();
-            }
-          });
-      }
-    };
-  });
-  await importComparisonExaminations(
-    page,
-    null,
-    [{ studyDate: '20370101', studyUid: '1.2.826.0.1.3680043.10.543.20370101.1' }],
-    true,
-  );
-  const openVolume = async () => {
-    await page.getByRole('button', { name: '3D', exact: true }).click();
-    await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
-    await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
-  };
-  await openVolume();
-  await page.getByRole('button', { name: 'Show 3D settings', exact: true }).click();
-  const custom = page.locator('details').filter({ has: page.locator('summary', { hasText: /^Custom model$/ }) });
-  await custom.locator('summary').first().click();
-  const files = await createSyntheticCustomModel('small');
-  await custom.locator('input[type=file]').setInputFiles(
-    await Promise.all(
-      files.map(async (file) => ({
-        name: file.name,
-        mimeType: file.type,
-        buffer: Buffer.from(await file.arrayBuffer()),
-      })),
-    ),
-  );
-  await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
-  const start = async (onInference?: string) => {
-    await page.evaluate((action) => {
-      window.customInferenceStarted = false;
-      window.customInferenceAction = action
-        ? () => {
-            const buttons = [...document.querySelectorAll('button')].filter(
-              (button) => button.textContent?.trim() === action,
-            );
-            if (buttons.length !== 1 || buttons[0]!.disabled)
-              throw new Error(`Inference action unavailable: ${action}`);
-            window.customInferenceActionAt = performance.now();
-            buttons[0]!.click();
-          }
-        : undefined;
-    }, onInference);
-    // Exercise keyboard activation without waiting for two GPU animation frames
-    // between the completed draft and the next operation.
-    await custom.getByRole('button', { name: 'Suggest with model' }).press('Enter');
-    // Initialization has its own product deadline. Observe the worker signal
-    // independently of software-rendered animation frames.
-    await page.waitForFunction(() => window.customInferenceStarted, undefined, {
-      timeout: CUSTOM_MODEL_INIT_TIMEOUT_MS,
-      polling: 100,
-    });
-  };
-  await start();
-  await expect(page.getByRole('status').filter({ hasText: /Segmentation complete.*runtime released/ })).toBeVisible();
-  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
-  const draft = await savedVolumeSelection(page);
-  expect(draft[0]!.modelKey).toBe('brats-tumor-v1');
-  expect(draft[0]!.reviewState).toBe('draft');
-  await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
-
-  // Use the real inference-start event, not an artificially slow model, to
-  // exercise both ordinary actions before a valid result can finish.
-  await start('Cancel model suggestion');
-  await expect(custom.getByRole('button', { name: 'Suggest with model' })).toBeEnabled();
-  await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
-  const cancelToReadyMs = await page.evaluate(() => performance.now() - window.customInferenceActionAt);
-  await expect(
-    page.getByRole('status').filter({ hasText: /Model suggestion canceled.*worker was stopped/ }),
-  ).toBeInViewport();
-  expect(await savedVolumeSelection(page)).toEqual(draft);
-  await capture(page, info, 'custom-model-canceled-desktop');
-
-  // The ordinary reconstruction action must also retire custom inference before
-  // admitting another source image, not wait for its React busy-state effect.
-  // Trigger its real button at inference start: a fast model can otherwise
-  // finish legitimately between the two Playwright clicks before replacement.
-  await page.getByRole('button', { name: 'Show reconstruction sources and controls' }).click();
-  await start('Open 3D volume');
-  await expect.poll(() => workers.every((worker) => worker.closed)).toBe(true);
-  await expect(page.getByRole('button', { name: 'Show reconstruction sources and controls' })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
-  expect(await savedVolumeSelection(page)).toEqual(draft);
-  await page.reload();
-  await openVolume();
-  await expect.poll(async () => (await savedVolumeSelection(page))[0]?.labelsSha256).toBe(draft[0]!.labelsSha256);
-  expect(errors).toEqual([]);
-  expect(workers.length).toBeGreaterThanOrEqual(3);
-  await attachReceipt(info, 'custom-model-workflow-receipt', {
-    ...(await (await page.request.get('/browser-build.json')).json()),
-    browser: page.context().browser()!.version(),
-    draft,
-    reopened: await savedVolumeSelection(page),
-    cancelToReadyMs,
-    actionInput:
-      'Cancel and reconstruction buttons are invoked at real inference start; not trusted-pointer latency evidence.',
-    workers,
-    errors,
-    scope:
-      'Normal production UI, synthetic native DICOM and real synthetic ONNX graphs. Draft persistence, explicit cancel, ordinary reconstruction replacement, worker retirement and reload. No anatomical accuracy claim.',
   });
 });
 

@@ -4,18 +4,9 @@ import { Crosshair, Maximize2, Minimize2, Minus, Plus, Redo2, Trash2, Undo2 } fr
 import type { SvrLabelVolume, SvrRoiPlane, SvrSelectionPlane, SvrVolume } from '../types/svr';
 import { useSvrSelection } from '../hooks/useSvrSelection';
 import { useSvrImaging } from './svrImagingContext';
-import { REGION_DETAIL_SPACING_MM } from '../utils/svr/refineRegion';
-import { volumeVoxelToPatient } from '../utils/svr/volumeGeometry';
-import {
-  defaultVolumeWindow,
-  hasNativeDetail,
-  volumeDisplayRange,
-  volumeSamplingLabel,
-} from '../utils/svr/volumeDisplay';
 import { physicalBrushIndices, SLICE_AXES, type SelectionPatch } from '../utils/segmentation/selectionEditing';
-import { voxelIndex, type VoxelPoint } from '../utils/segmentation/voxelGeometry';
+import type { VoxelPoint } from '../utils/segmentation/voxelGeometry';
 import { clamp } from '../utils/math';
-import { SelectionMemoryDetails } from './SelectionMemoryDetails';
 
 type Tool = 'navigate' | 'include' | 'exclude';
 type StrokeScope = {
@@ -537,177 +528,6 @@ function SelectionSlice(props: SliceProps) {
   );
 }
 
-function SelectionNativeDetail({
-  disabled,
-  hasSelection,
-  running,
-  onRefine,
-}: {
-  disabled: boolean;
-  hasSelection: boolean;
-  running: boolean;
-  onRefine?: () => void;
-}) {
-  const { volume, labels, busy } = useSvrImaging();
-  if (!volume?.nativeVoxelSizeMm || hasNativeDetail(volume)) return null;
-  const unavailable = disabled || busy || running || !labels || !onRefine;
-  return (
-    <div className="svr-selection-native-detail">
-      <div>
-        <span className="svr-selection-sampling">{volumeSamplingLabel(volume)}</span>
-        <span>
-          {hasSelection
-            ? 'Loads original MRI samples, not inferred enhancement.'
-            : 'Select a region to load its original detail.'}
-        </span>
-      </div>
-      {hasSelection ? (
-        <button
-          type="button"
-          disabled={unavailable}
-          onClick={() => {
-            if (!unavailable) onRefine?.();
-          }}
-          title={
-            onRefine
-              ? 'Load the selected region at the original stored sample spacing, without averaging or inverse reconstruction. Your selection transfers as a draft for review.'
-              : 'Original-detail loading is unavailable in this view.'
-          }
-        >
-          Use original detail
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function SelectionDisplayControls({
-  disabled,
-  hasSelection,
-  running,
-  cursor,
-  windowRange,
-  setWindowRange,
-  cutaway,
-  setCutaway,
-  zoom,
-  setZoom,
-  onRefine,
-}: {
-  disabled: boolean;
-  hasSelection: boolean;
-  running: boolean;
-  cursor: VoxelPoint;
-  windowRange: [number, number];
-  setWindowRange: (range: [number, number]) => void;
-  cutaway: boolean;
-  setCutaway: (enabled: boolean) => void;
-  zoom: number;
-  setZoom: (zoom: number) => void;
-  onRefine?: () => void;
-}) {
-  const { volume } = useSvrImaging();
-  if (!volume) return null;
-  const windowWidth = windowRange[1] - windowRange[0];
-  const windowLevel = (windowRange[0] + windowRange[1]) / 2;
-  const [intensityLow, intensityHigh] = volumeDisplayRange(volume);
-  const intensitySpan = intensityHigh - intensityLow;
-  const crosshairIndex = voxelIndex(cursor, volume.dims);
-  const crosshairSupported =
-    (!volume.observedSupport || Boolean(volume.observedSupport[crosshairIndex])) &&
-    Number.isFinite(volume.data[crosshairIndex]);
-  const patientPosition = volumeVoxelToPatient(volume, [cursor.x, cursor.y, cursor.z]).map((value) => value.toFixed(2));
-  return (
-    <details className="svr-selection-display-controls">
-      <summary>Slice settings</summary>
-      <p>This is an editable selection, not automatic tumor detection.</p>
-      <div>
-        <div className="svr-selection-zoom" role="group" aria-label="Slice zoom">
-          <button
-            type="button"
-            aria-label="Zoom out slice views"
-            disabled={zoom <= 1}
-            onClick={() => setZoom(Math.max(1, zoom - 0.5))}
-          >
-            −
-          </button>
-          <span>{zoom.toFixed(1)}×</span>
-          <button
-            type="button"
-            aria-label="Zoom in slice views"
-            disabled={zoom >= 4}
-            onClick={() => setZoom(Math.min(4, zoom + 0.5))}
-          >
-            +
-          </button>
-        </div>
-        <label>
-          Window{' '}
-          <input
-            aria-label="MRI window width"
-            type="range"
-            min={intensitySpan * 0.005}
-            max={intensitySpan * 2}
-            step={intensitySpan * 0.0025}
-            value={windowWidth}
-            onChange={(event) => {
-              const width = Number(event.currentTarget.value);
-              setWindowRange([windowLevel - width / 2, windowLevel + width / 2]);
-            }}
-          />
-        </label>
-        <label>
-          Level{' '}
-          <input
-            aria-label="MRI window level"
-            type="range"
-            min={intensityLow}
-            max={intensityHigh}
-            step={intensitySpan * 0.0025}
-            value={windowLevel}
-            onChange={(event) => {
-              const level = Number(event.currentTarget.value);
-              setWindowRange([level - windowWidth / 2, level + windowWidth / 2]);
-            }}
-          />
-        </label>
-        <button type="button" onClick={() => setWindowRange(defaultVolumeWindow(volume))}>
-          Reset contrast
-        </button>
-        <button
-          type="button"
-          aria-pressed={cutaway}
-          onClick={() => setCutaway(!cutaway)}
-          title="Cut the volume grid at the current axial crosshair. This section is interpolated from the volume, not an original DICOM image."
-        >
-          Interpolated cutaway
-        </button>
-        {onRefine && !volume.nativeVoxelSizeMm ? (
-          <button
-            type="button"
-            disabled={
-              disabled || !hasSelection || running || Math.max(...volume.voxelSizeMm) <= REGION_DETAIL_SPACING_MM * 1.05
-            }
-            onClick={onRefine}
-            title="Request a 0.50 mm grid within the browser memory limit. Reconstruct from acquired MRI and transfer your selection as a draft for review."
-          >
-            Refine region · {REGION_DETAIL_SPACING_MM.toFixed(2)} mm
-          </button>
-        ) : null}
-        <span>
-          Shared window / level ·{' '}
-          {!volume.nativeVoxelSizeMm || hasNativeDetail(volume) ? `${volumeSamplingLabel(volume)} · ` : ''}
-          source values unchanged
-        </span>
-      </div>
-      <div role="status" aria-label="Crosshair position" aria-live="off">
-        {crosshairSupported ? 'Acquired support' : 'No acquired support'} · Patient position: (
-        {patientPosition.join(', ')}) mm
-      </div>
-    </details>
-  );
-}
-
 function SelectionBrushControls({
   tool,
   onToolChange,
@@ -723,12 +543,12 @@ function SelectionBrushControls({
 }) {
   return (
     <>
-      <div className="svr-selection-tool-group" role="group" aria-label="Selection tools">
+      <div className="svr-selection-tool-group" role="group" aria-label="Brush tools">
         {(
           [
-            ['navigate', 'Browse', Crosshair, 'Move through the reconstruction without changing the selection.'],
-            ['include', 'Add', Plus, 'Paint tissue to keep. Auto-fill must preserve these inside marks.'],
-            ['exclude', 'Remove', Minus, 'Paint tissue to exclude. Auto-fill must preserve these outside marks.'],
+            ['navigate', 'Move', Crosshair, 'Move the crosshair through the slices without painting.'],
+            ['include', 'Add', Plus, 'Paint tumor. Auto-fill grows the boundary from what you paint.'],
+            ['exclude', 'Erase', Minus, 'Paint tissue that is not tumor.'],
           ] as const
         ).map(([mode, label, Icon, hint]) => (
           <button
@@ -748,7 +568,7 @@ function SelectionBrushControls({
         <label className="svr-selection-brush">
           Brush{' '}
           <input
-            aria-label="Selection brush radius in millimeters"
+            aria-label="Brush radius in millimeters"
             type="range"
             min={0.5}
             max={8}
@@ -777,8 +597,8 @@ function SelectionHistoryControls({
     <div className="svr-selection-history">
       <button
         type="button"
-        aria-label="Undo selection edit"
-        title="Undo selection edit (⌘Z)"
+        aria-label="Undo"
+        title="Undo (⌘Z)"
         disabled={disabled || !selection.canUndo}
         onClick={() => selection.travel('undo')}
       >
@@ -786,8 +606,8 @@ function SelectionHistoryControls({
       </button>
       <button
         type="button"
-        aria-label="Redo selection edit"
-        title="Redo selection edit (⇧⌘Z)"
+        aria-label="Redo"
+        title="Redo (⇧⌘Z)"
         disabled={disabled || !selection.canRedo}
         onClick={() => selection.travel('redo')}
       >
@@ -796,8 +616,8 @@ function SelectionHistoryControls({
       <button
         type="button"
         className="svr-selection-clear"
-        aria-label="Clear selection"
-        title="Clear selection (undoable)"
+        aria-label="Clear tumor selection"
+        title="Clear (undoable)"
         disabled={disabled || (!hasSelection && !selection.marks.size)}
         onClick={selection.clear}
       >
@@ -807,6 +627,11 @@ function SelectionHistoryControls({
   );
 }
 
+/**
+ * One workspace: the 3D volume, optionally beside its three slice views. Painting
+ * in a slice marks tumor; auto-fill grows the boundary after each stroke whenever an
+ * original source grid is available. Labels stay drafts; there is no review step.
+ */
 export function SvrSegmentationEditor({
   onChange,
   disabled = false,
@@ -819,10 +644,6 @@ export function SvrSegmentationEditor({
   cursor,
   setCursor,
   windowRange,
-  setWindowRange,
-  cutaway,
-  setCutaway,
-  onShow3D,
   selectionNotice,
   children,
 }: {
@@ -837,33 +658,21 @@ export function SvrSegmentationEditor({
   cursor: VoxelPoint;
   setCursor: (point: VoxelPoint) => void;
   windowRange: [number, number];
-  setWindowRange: (range: [number, number]) => void;
-  cutaway: boolean;
-  setCutaway: (enabled: boolean) => void;
-  onShow3D?: () => void;
   selectionNotice?: ReactNode;
-  children: ReactNode | ((selectionRunning: boolean) => ReactNode);
+  children: ReactNode;
 }) {
-  const { volume, labels = null, proposeSelection, refineRegion, operations } = useSvrImaging();
+  const { volume, labels = null, proposeSelection, operations } = useSvrImaging();
   if (!volume) throw new Error('Reconstruct a volume before editing a selection.');
   const [tool, setTool] = useState<Tool>('navigate');
-  const [autoFillPreference, setAutoFill] = useState(true);
-  const autoFill = autoFillPreference && Boolean(proposeSelection);
   const [radiusMm, setRadiusMm] = useState(2);
   const [zoom, setZoom] = useState(1);
   const [expanded, setExpanded] = useState<SvrRoiPlane | 'volume' | null>('volume');
   const workspaceRef = useRef<HTMLElement>(null);
   const hasSelection = selectedVolumeMl > 0;
-  const reviewed = labels?.reviewState === 'reviewed';
-  const editing = expanded !== 'volume';
-  const selection = useSvrSelection(volume, labels, onChange, editing && !disabled && autoFill, proposeSelection);
+  const showSlices = expanded !== 'volume';
+  const autoFill = Boolean(proposeSelection) && !disabled;
+  const selection = useSvrSelection(volume, labels, onChange, autoFill, proposeSelection);
   const { getRetainedBytes, prepareHeavyOperation } = selection;
-  const refineSelection = refineRegion
-    ? () => {
-        const snapshot = selection.borrowLabels();
-        if (snapshot) refineRegion(snapshot);
-      }
-    : undefined;
   useLayoutEffect(
     () =>
       operations.register('editor', (kind) => {
@@ -880,40 +689,27 @@ export function SvrSegmentationEditor({
       }),
     [operations, getRetainedBytes, prepareHeavyOperation, volume],
   );
-  const show3D = () => {
-    setTool('navigate');
-    setExpanded('volume');
-    onShow3D?.();
-    workspaceRef.current?.querySelector<HTMLButtonElement>('.svr-selection-workflow-action')?.focus();
+  const showView = (view: SvrRoiPlane | 'volume' | null) => {
+    setExpanded(view);
+    if (view === 'volume') setTool('navigate');
+    else if (tool === 'navigate' && !disabled) setTool('include');
   };
-  const editSelection = () => {
-    setExpanded(null);
-    setTool(disabled ? 'navigate' : 'include');
-    onVisualizationModeChange('overlay');
-  };
-  const stopAutoFill = () => {
-    selection.cancel();
-    setAutoFill(false);
-  };
-  const expand = (view: SvrRoiPlane | 'volume') => {
-    if (view === 'volume') {
-      if (editing) show3D();
-      else editSelection();
-    } else setExpanded((current) => (current === view ? null : view));
-  };
+  const expand = (view: SvrRoiPlane | 'volume') =>
+    showView(view === 'volume' ? (expanded === 'volume' ? null : 'volume') : expanded === view ? null : view);
+  const tumorOnly = visualizationMode === 'tumor';
   return (
     <section
       ref={workspaceRef}
       className="svr-selection-workbench"
-      aria-label="Region selection workspace"
-      data-editing={editing}
+      aria-label="Tumor selection workspace"
+      data-editing={showSlices}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           event.preventDefault();
           event.stopPropagation();
-          if (selection.status.running) stopAutoFill();
-          else if (expanded === null) show3D();
-          else if (expanded !== 'volume') setExpanded(null);
+          if (selection.status.running) selection.cancel();
+          else if (expanded === null) showView('volume');
+          else if (expanded !== 'volume') showView(null);
         } else if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
           return;
         } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z' && !disabled) {
@@ -929,190 +725,120 @@ export function SvrSegmentationEditor({
     >
       <div className="svr-selection-toolbar">
         <div className="svr-selection-title-row">
-          <h2>{editing ? 'Select tissue' : '3D volume'}</h2>
-          <span className="svr-selection-review-state" data-reviewed={reviewed}>
-            {reviewed
-              ? `Reviewed selection · ${selectedVolumeMl.toFixed(2)} mL`
-              : hasSelection
-                ? 'Draft · review the boundaries'
-                : 'No tissue selected'}
-          </span>
-          {hasSelection ? (
-            <div className="svr-selection-view-modes" role="group" aria-label="Region visualization">
-              {(
-                [
-                  ['anatomy', 'Anatomy'],
-                  ['overlay', 'Overlay'],
-                  ['tumor', 'Selection only'],
-                ] as const
-              ).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  type="button"
-                  aria-pressed={visualizationMode === mode}
-                  onClick={() => onVisualizationModeChange(mode)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <button
-            type="button"
-            className="svr-selection-workflow-action"
-            disabled={editing && !disabled && selection.status.running}
-            onClick={() => {
-              if (!editing) editSelection();
-              else {
-                if (!disabled) selection.accept();
-                show3D();
-              }
-            }}
-          >
-            {editing
-              ? disabled
-                ? 'Back to 3D'
-                : 'Done'
-              : disabled
-                ? 'View slices'
-                : hasSelection
-                  ? 'Edit selection'
-                  : 'Select tissue'}
-          </button>
-        </div>
-        {editing || selection.status.running ? (
-          <div className="svr-selection-actions">
-            {editing ? (
-              <>
-                <SelectionBrushControls
-                  tool={tool}
-                  onToolChange={(nextTool) => {
-                    setTool(nextTool);
-                    if (nextTool !== 'navigate') onVisualizationModeChange('overlay');
-                  }}
-                  radiusMm={radiusMm}
-                  onRadiusChange={setRadiusMm}
-                  disabled={disabled}
-                />
-                <SelectionHistoryControls selection={selection} disabled={disabled} hasSelection={hasSelection} />
-              </>
-            ) : null}
-            <div className="svr-selection-commit-actions">
-              {editing ? (
-                <label
-                  className="svr-selection-autofill"
-                  title={
-                    proposeSelection
-                      ? 'Fill nearby tissue after a brush stroke, keeping every Add and Remove mark. Turn off to edit only what you paint.'
-                      : 'Auto-fill requires an original native source grid. Brush-only editing is available.'
-                  }
-                >
-                  <input
-                    type="checkbox"
-                    checked={autoFill}
-                    disabled={disabled || !proposeSelection}
-                    onChange={(event) => {
-                      const enabled = event.currentTarget.checked;
-                      if (disabled || !proposeSelection) return;
-                      setAutoFill(enabled);
-                      if (!enabled) selection.cancel();
-                      else if (selection.included > 0 && !reviewed) void selection.grow();
-                    }}
-                  />
-                  Auto-fill
-                </label>
-              ) : null}
-              {selection.status.running ? (
-                <button type="button" onClick={stopAutoFill}>
-                  Stop
-                </button>
-              ) : editing && selection.status.error && selection.included > 0 && autoFill ? (
-                <button type="button" disabled={disabled} onClick={() => void selection.grow()}>
-                  Retry boundary
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-        <div className="svr-selection-guidance" role="status" aria-live="polite">
-          {disabled
-            ? (disabledReason ?? 'Editing is temporarily unavailable.')
-            : selection.status.running
-              ? `Auto-filling boundaries${selection.status.progress ? ` · ${Math.round(selection.status.progress * 100)}%` : '…'}`
-              : !editing
-                ? reviewed
-                  ? 'Selection confirmed. Edit it at any time.'
-                  : hasSelection
-                    ? 'Draft selection. Review all three planes before confirming.'
-                    : 'Browse the MRI in 3D, or select tissue to inspect a region.'
-                : autoFill
-                  ? 'Add tissue to keep; remove tissue to exclude. Auto-fill follows your brush. Review all three planes, then choose Done.'
-                  : !proposeSelection
-                    ? 'Brush-only editing. Auto-fill requires an original native source grid, which this reconstruction does not provide. Your marks can still be saved and reviewed.'
-                    : 'Brush-only editing. Only the tissue you paint changes. Review all three planes, then choose Done.'}
-        </div>
-        {editing ? (
-          <SelectionNativeDetail
-            disabled={disabled}
-            hasSelection={hasSelection}
-            running={selection.status.running}
-            onRefine={refineSelection}
-          />
-        ) : null}
-        {storageError ? (
-          <div className="svr-selection-warning" role="alert">
-            {storageError === 'load'
-              ? 'Could not restore the saved selection. Editing is paused to protect it.'
-              : storageError === 'conflict'
-                ? 'Saved data changed since this view was opened. Your unsaved edits remain visible here; reloading discards them and loads the saved version.'
-                : 'Could not save this selection. Keep this view open; your current edits remain in memory.'}{' '}
-            <button type="button" onClick={retryStorage}>
-              {storageError === 'conflict'
-                ? 'Discard edits and reload'
-                : `Retry ${storageError === 'load' ? 'loading' : 'saving'}`}
+          <div className="svr-selection-view-modes" role="group" aria-label="Workspace layout">
+            <button type="button" aria-pressed={!showSlices} onClick={() => showView('volume')}>
+              3D
+            </button>
+            <button type="button" aria-pressed={showSlices} onClick={() => showView(null)}>
+              3D + slices
             </button>
           </div>
-        ) : null}
-        {selectionNotice}
-        {editing ? (
-          <SelectionDisplayControls
-            disabled={disabled}
-            hasSelection={hasSelection}
-            running={selection.status.running}
-            cursor={cursor}
-            windowRange={windowRange}
-            setWindowRange={setWindowRange}
-            cutaway={cutaway}
-            setCutaway={setCutaway}
-            zoom={zoom}
-            setZoom={setZoom}
-            onRefine={refineSelection}
-          />
-        ) : null}
-        {selection.status.error ? (
-          <div className="svr-selection-warning" role="alert">
-            {selection.status.error}
-            {selection.status.memoryError ? <SelectionMemoryDetails error={selection.status.memoryError} /> : null}
+          {showSlices ? (
+            <>
+              <SelectionBrushControls
+                tool={tool}
+                onToolChange={setTool}
+                radiusMm={radiusMm}
+                onRadiusChange={setRadiusMm}
+                disabled={disabled}
+              />
+              <div className="svr-selection-zoom" role="group" aria-label="Slice zoom">
+                <button
+                  type="button"
+                  aria-label="Zoom out slice views"
+                  disabled={zoom <= 1}
+                  onClick={() => setZoom(Math.max(1, zoom - 0.5))}
+                >
+                  −
+                </button>
+                <span>{zoom.toFixed(1)}×</span>
+                <button
+                  type="button"
+                  aria-label="Zoom in slice views"
+                  disabled={zoom >= 4}
+                  onClick={() => setZoom(Math.min(4, zoom + 0.5))}
+                >
+                  +
+                </button>
+              </div>
+            </>
+          ) : null}
+          <SelectionHistoryControls selection={selection} disabled={disabled} hasSelection={hasSelection} />
+          <div className="svr-selection-commit-actions">
+            {selection.status.running ? (
+              <>
+                <span role="status" aria-live="polite">
+                  Auto-filling
+                  {selection.status.progress ? ` · ${Math.round(selection.status.progress * 100)}%` : '…'}
+                </span>
+                <button type="button" onClick={selection.cancel}>
+                  Stop
+                </button>
+              </>
+            ) : selection.status.error && selection.included > 0 && autoFill ? (
+              <button type="button" disabled={disabled} onClick={() => void selection.grow()}>
+                Retry auto-fill
+              </button>
+            ) : null}
+            {hasSelection ? (
+              <>
+                <span className="svr-selection-review-state">Tumor · {selectedVolumeMl.toFixed(2)} mL</span>
+                <button
+                  type="button"
+                  aria-pressed={tumorOnly}
+                  onClick={() => onVisualizationModeChange(tumorOnly ? 'overlay' : 'tumor')}
+                  title="Hide everything except the selected tumor in 3D"
+                >
+                  Tumor only
+                </button>
+              </>
+            ) : null}
           </div>
-        ) : null}
-        {selection.status.boundaryCount ? (
-          <div className="svr-selection-warning" role="status">
-            The initial prediction reached the edge of the analyzed region. Check the retained selection’s extent before
-            confirming.
-          </div>
-        ) : null}
-        {labels?.contextLimited ? (
-          <div className="svr-selection-warning" role="status">
-            This selection was suggested from a limited source region. Check its extent before confirming.
-          </div>
-        ) : null}
-        {labels?.clippedNativeVoxels ? (
-          <div className="svr-selection-warning" role="status">
-            Only part of the predicted tissue is retained in this selection. The prediction extended beyond its viewing
-            region or included unavailable samples. Enlarge or clear the focus region in Sources, reconstruct, then
-            suggest the boundary again to review its full extent.
-          </div>
-        ) : null}
+        </div>
+        {/* Notices float over the lower-right of the view so the toolbar keeps one fixed height. */}
+        <div className="svr-selection-notices">
+          {disabled && disabledReason ? (
+            <div className="svr-selection-guidance" role="status" aria-live="polite">
+              {disabledReason}
+            </div>
+          ) : null}
+          {storageError ? (
+            <div className="svr-selection-warning" role="alert">
+              {storageError === 'load'
+                ? 'Could not restore the saved selection. Editing is paused to protect it.'
+                : storageError === 'conflict'
+                  ? 'Saved data changed since this view was opened. Your unsaved edits remain visible here; reloading discards them and loads the saved selection.'
+                  : 'Could not save this selection. Keep this view open; your current edits remain in memory.'}{' '}
+              <button type="button" onClick={retryStorage}>
+                {storageError === 'conflict'
+                  ? 'Discard edits and reload'
+                  : `Retry ${storageError === 'load' ? 'loading' : 'saving'}`}
+              </button>
+            </div>
+          ) : null}
+          {selectionNotice}
+          {selection.status.error ? (
+            <div className="svr-selection-warning" role="alert">
+              {selection.status.error}
+            </div>
+          ) : null}
+          {selection.status.boundaryCount ? (
+            <div className="svr-selection-warning" role="status">
+              Auto-fill reached the edge of the analyzed region. Check the selection’s extent.
+            </div>
+          ) : null}
+          {labels?.contextLimited ? (
+            <div className="svr-selection-warning" role="status">
+              This selection was suggested from a limited source region. Check its extent.
+            </div>
+          ) : null}
+          {labels?.clippedNativeVoxels ? (
+            <div className="svr-selection-warning" role="status">
+              Only part of the predicted tissue is retained in this selection. Enlarge or clear the focus region in
+              Sources, reconstruct, then paint again to review its full extent.
+            </div>
+          ) : null}
+        </div>
       </div>
       <div className="svr-selection-grid" data-expanded={expanded ?? undefined}>
         {PLANES.filter((plane) => expanded === null || expanded === plane).map((plane) => (
@@ -1126,7 +852,7 @@ export function SvrSegmentationEditor({
             radiusMm={radiusMm}
             zoom={zoom}
             disabled={disabled}
-            showMask={visualizationMode !== 'anatomy'}
+            showMask
             windowRange={windowRange}
             expanded={expanded === plane}
             onExpand={() => expand(plane)}
@@ -1134,26 +860,13 @@ export function SvrSegmentationEditor({
             onStroke={selection.stroke}
           />
         ))}
-        <section
-          className="svr-selection-pane svr-selection-volume"
-          data-view="volume"
-          aria-label="Three-dimensional selection preview"
-        >
+        <section className="svr-selection-pane svr-selection-volume" data-view="volume" aria-label="3D volume">
           <header className="svr-selection-pane-heading">
-            <span>3D preview</span>
+            <span>3D</span>
             <div className="svr-selection-pane-actions">
-              <span>
-                {reviewed
-                  ? 'Reviewed selection'
-                  : hasSelection
-                    ? 'Unreviewed selection'
-                    : volume.nativeVoxelSizeMm
-                      ? 'Original-source anatomy'
-                      : 'Reconstructed anatomy'}
-              </span>
               <button
                 type="button"
-                aria-label={expanded === 'volume' ? 'Show all views' : 'Expand 3D view'}
+                aria-label={expanded === 'volume' ? 'Show slices beside the 3D view' : 'Expand 3D view'}
                 onClick={() => expand('volume')}
               >
                 {expanded === 'volume' ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
@@ -1161,7 +874,7 @@ export function SvrSegmentationEditor({
             </div>
           </header>
           <div className="svr-selection-volume-content">
-            {typeof children === 'function' ? children(selection.status.running) : children}
+            {children}
           </div>
         </section>
       </div>

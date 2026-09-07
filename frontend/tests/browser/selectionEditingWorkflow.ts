@@ -167,21 +167,26 @@ export async function measureSelectionEditing(page: Page, info: TestInfo) {
   const openVolume = async () => {
     await page.getByRole('button', { name: '3D', exact: true }).click();
     await page.getByRole('button', { name: 'Open 3D volume', exact: true }).click();
-    await expect(page.getByRole('region', { name: 'Region selection workspace' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Tumor selection workspace' })).toBeVisible();
   };
   await openVolume();
-  await page.getByRole('button', { name: 'Select tissue', exact: true }).click();
-  await page.getByRole('checkbox', { name: 'Auto-fill' }).uncheck();
-  await expect(page.getByRole('slider', { name: 'Selection brush radius in millimeters' })).toHaveValue('2');
+  await page.getByRole('button', { name: '3D + slices', exact: true }).click();
+  await expect(page.getByRole('slider', { name: 'Brush radius in millimeters' })).toHaveValue('2');
   const canvas = page.getByRole('application', { name: /axial reconstructed slice/i });
   const box = (await canvas.boundingBox())!;
-  const gesture = async (index: number, kind: 'Add' | 'Remove') => {
+  const gesture = async (index: number, kind: 'Add' | 'Erase') => {
     await page.getByRole('button', { name: kind, exact: true }).click();
     const y = box.y + box.height * (0.43 + index * 0.015);
     await page.mouse.move(box.x + box.width * 0.4, y);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.6, y, { steps: 40 });
     await page.mouse.up();
+    // Auto-fill starts after every stroke when a native source exists; stop it so the measured work is the brush edit.
+    try {
+      await page.getByRole('button', { name: 'Stop', exact: true }).click({ timeout: 1_000 });
+    } catch {
+      // No proposer for this source: nothing was started.
+    }
   };
   await gesture(0, 'Add');
   await expect.poll(async () => (await savedVolumeSelections(page))[0]?.selectedCount ?? 0).toBeGreaterThan(0);
@@ -197,7 +202,7 @@ export async function measureSelectionEditing(page: Page, info: TestInfo) {
   let previous = initial;
   for (let i = 1; i <= 5; i++) {
     await page.evaluate((bytes) => window.selectionEditingAudit.start(bytes), initial.labelBytes);
-    const kind = i === 4 ? 'Remove' : 'Add';
+    const kind = i === 4 ? 'Erase' : 'Add';
     await gesture(i === 4 ? 2 : i, kind);
     const work = await settle();
     const saved = (await savedVolumeSelections(page))[0]!;
@@ -210,7 +215,7 @@ export async function measureSelectionEditing(page: Page, info: TestInfo) {
     ['Redo', final],
   ] as const) {
     await page.evaluate((bytes) => window.selectionEditingAudit.start(bytes), initial.labelBytes);
-    await page.getByRole('button', { name: `${operation} selection edit`, exact: true }).click();
+    await page.getByRole('button', { name: operation, exact: true }).click();
     const work = await settle();
     const saved = (await savedVolumeSelections(page))[0]!;
     expect(saved).toEqual(expected);
@@ -227,13 +232,15 @@ export async function measureSelectionEditing(page: Page, info: TestInfo) {
       ).join(''),
     };
   });
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
-  await expect.poll(async () => (await savedVolumeSelections(page))[0]?.reviewState).toBe('reviewed');
+  await page
+    .getByRole('region', { name: 'Tumor selection workspace' })
+    .getByRole('button', { name: '3D', exact: true })
+    .click();
   const reviewed = (await savedVolumeSelections(page))[0]!;
-  expect(reviewed).toEqual({ ...final, reviewState: 'reviewed' });
+  expect(reviewed).toEqual(final);
   await page.reload();
   await openVolume();
-  await expect(page.getByRole('button', { name: 'Edit selection', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '3D + slices', exact: true })).toBeEnabled();
   const reopened = (await savedVolumeSelections(page))[0]!;
   expect(reopened).toEqual(reviewed);
   await page.getByRole('button', { name: 'Application menu' }).click();

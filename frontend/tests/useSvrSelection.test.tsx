@@ -7,7 +7,6 @@ import { SELECTION_LABEL_META } from '../src/utils/segmentation/selectionEditing
 import type { SelectionProposer, SelectionProposalResult } from '../src/utils/segmentation/selectionProposal';
 import {
   estimateInteractiveSelectionMemory,
-  InteractiveSelectionMemoryError,
 } from '../src/utils/segmentation/interactiveAdmission';
 import * as seedConnectedSelection from '../src/utils/segmentation/seedConnectedSelection';
 import * as svrUtils from '../src/utils/svr/svrUtils';
@@ -37,7 +36,7 @@ function memoryRejection(source: SvrVolume, literalMarkCount = 1) {
     frameCount: source.dims[2],
     ...counts,
   });
-  return new InteractiveSelectionMemoryError(estimate, 1024 * 1024 * 1024, counts);
+  return new Error(`This boundary suggestion is estimated to need ${Math.ceil(estimate.totalBytes / (1024 * 1024))} MiB at peak.`);
 }
 function setup(
   source = volume(),
@@ -164,8 +163,7 @@ describe('learned selection proposals share the existing editing authority', () 
     const background = marked.seeds!.background.slice();
     const retainedBytes = result.current.selection.retainedBytes;
     await act(async () => result.current.selection.grow());
-    expect(result.current.selection.status).toEqual({ running: false, error: error.message, memoryError: error });
-    expect(result.current.selection.status.memoryError).toBe(error);
+    expect(result.current.selection.status).toEqual({ running: false, error: error.message });
     expect(result.current.labels).toBe(marked);
     expect(result.current.labels!.data).toBe(marked.data);
     expect(result.current.labels!.seeds).toBe(marked.seeds);
@@ -186,7 +184,6 @@ describe('learned selection proposals share the existing editing authority', () 
     expect(result.current.labels).toEqual(insideOnly);
     expect(result.current.selection.marks).toEqual(new Map([[30, 1]]));
     expect(result.current.selection.canRedo).toBe(true);
-    expect(result.current.selection.status.memoryError).toBeUndefined();
     act(() => result.current.selection.travel('redo'));
     expect(result.current.labels).toEqual(marked);
     expect(result.current.labels!.seeds).toBe(marked.seeds);
@@ -211,7 +208,6 @@ describe('learned selection proposals share the existing editing authority', () 
     act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
     const marked = result.current.labels!;
     await act(async () => result.current.selection.grow());
-    expect(result.current.selection.status.memoryError).toBe(error);
     let pending!: Promise<void>;
     act(() => {
       pending = result.current.selection.grow();
@@ -227,7 +223,6 @@ describe('learned selection proposals share the existing editing authority', () 
       await pending;
     });
     expect(result.current.selection.status).toEqual({ running: false, boundaryCount: 3, contextLimited: true });
-    expect(result.current.selection.status.memoryError).toBeUndefined();
     expect(result.current.labels!.data[30]).toBe(1);
     expect(result.current.labels!.data[31]).toBe(1);
     expect(result.current.labels!.seeds).toBe(marked.seeds);
@@ -245,7 +240,6 @@ describe('learned selection proposals share the existing editing authority', () 
       act(() => result.current.selection.stroke(Uint32Array.of(30), 'include', { plane: 'axial', slice: 0 }));
       const marked = result.current.labels;
       await act(async () => result.current.selection.grow());
-      expect(result.current.selection.status.memoryError).toBe(error);
       act(() =>
         result.current.selection.stroke(Uint32Array.of(31), 'include', {
           plane: 'axial',
@@ -255,7 +249,6 @@ describe('learned selection proposals share the existing editing authority', () 
       expect(result.current.selection.status.error).toMatch(
         reason === 'unsupported' ? /no acquired MRI tissue/ : /stroke plane does not match/,
       );
-      expect(result.current.selection.status.memoryError).toBeUndefined();
       expect(result.current.selection.status.running).toBe(false);
       expect(result.current.labels).toBe(marked);
       expect(result.current.selection.marks).toEqual(new Map([[30, 1]]));
@@ -300,7 +293,6 @@ describe('learned selection proposals share the existing editing authority', () 
       });
       expect(result.current.labels).toBe(current);
       expect(result.current.selection.status).toBe(status);
-      expect(result.current.selection.status.memoryError).toBeUndefined();
       expect(result.current.selection.status.error).toBeUndefined();
       if (action !== 'unmount') expect(result.current.selection.status.running).toBe(false);
     },

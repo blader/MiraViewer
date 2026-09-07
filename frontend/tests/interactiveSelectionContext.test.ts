@@ -6,6 +6,7 @@ import { voxelIndex } from '../src/utils/segmentation/voxelGeometry';
 import {
   cropInteractiveSelectionContext,
   planInteractiveSelectionContext,
+  sameInteractiveSelectionGrid,
 } from '../src/utils/svr/interactiveSelectionContext';
 import type { NativeSourceGrid } from '../src/utils/svr/nativeSourceContext';
 import { physicalVolumeBounds, volumeVoxelToPatient } from '../src/utils/svr/volumeGeometry';
@@ -332,5 +333,49 @@ describe('exact interactive context extraction', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('sticky interactive context grid', () => {
+  it('keeps a preferred field that still holds every mark, and re-plans when it cannot', () => {
+    const source = grid(),
+      editing = cropped(source);
+    const first = planInteractiveSelectionContext(editing, source, seeds(editing));
+    const nearby: SvrSelectionSeeds = {
+      ...seeds(editing),
+      foreground: Uint32Array.of(at(editing, [4, 5, 6]), at(editing, [5, 6, 6])),
+    };
+    const sticky = planInteractiveSelectionContext(editing, source, nearby, first.grid);
+    expect(sticky.grid).toEqual(first.grid);
+    expect(sticky.loaderRoi).toEqual(first.loaderRoi);
+    expect(sticky.width).toBe(first.width);
+    expect(sticky.frameCount).toBe(first.frameCount);
+    expect(sticky.literalMarkCount).toBe(2);
+    // A preferred field that no longer contains the marks is ignored, not stretched.
+    const small = planInteractiveSelectionContext(editing, source, seeds(editing), {
+      ...first.grid,
+      dims: [8, 8, first.grid.dims[2]],
+    });
+    expect(small.grid).toEqual(first.grid);
+    // A preferred field off the source lattice or at another pitch is ignored.
+    const offLattice = planInteractiveSelectionContext(editing, source, seeds(editing), {
+      ...first.grid,
+      originMm: [first.grid.originMm[0] + 0.25, first.grid.originMm[1], first.grid.originMm[2]],
+    });
+    expect(offLattice.grid).toEqual(first.grid);
+    const otherPitch = planInteractiveSelectionContext(editing, source, seeds(editing), {
+      ...first.grid,
+      voxelSizeMm: [1, 1, 1],
+    });
+    expect(otherPitch.grid).toEqual(first.grid);
+  });
+
+  it('compares context grids by lattice, extent and origin', () => {
+    const base = grid([10, 12, 14]);
+    expect(sameInteractiveSelectionGrid(base, { ...base, originMm: [1e-9, 0, 0] })).toBe(true);
+    expect(sameInteractiveSelectionGrid(base, { ...base, dims: [10, 12, 15] })).toBe(false);
+    expect(sameInteractiveSelectionGrid(base, { ...base, originMm: [0.5, 0, 0] })).toBe(false);
+    expect(sameInteractiveSelectionGrid(base, { ...base, voxelSizeMm: [0.5, 0.5, 2] })).toBe(false);
+    expect(sameInteractiveSelectionGrid(base, { ...base, direction: [0, 1, 0, 1, 0, 0, 0, 0, 1] })).toBe(false);
   });
 });

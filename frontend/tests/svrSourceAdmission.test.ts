@@ -9,7 +9,6 @@ import * as computeCore from '../src/utils/svr/svrComputeCore';
 import { estimateSvrSourceMemory } from '../src/utils/svr/sourceMemory';
 import { createNativeSourceContext } from '../src/utils/svr/nativeSourceContext';
 import { nativePlaneMemoryBytes, nativeVolumeFingerprint, retainedSvrVolumeBytes } from '../src/utils/svr/nativeVolume';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 import { deferred } from './helpers/deferred';
 
 const cornerstone = vi.hoisted(() => ({
@@ -592,7 +591,7 @@ describe('SVR canonical source admission and acquired support', () => {
   });
 
   // This full-size assembly checks memory/source ownership, not a five-second latency budget on a shared test host.
-  it('loads context beside the actual default overview only within its explicit combined native-source budget', async () => {
+  it('loads context beside the full default native volume and honors only an explicit native-source budget', async () => {
     cornerstone.getCacheInfo.mockReturnValue({ cacheSizeInBytes: 0, maximumSizeInBytes: 256 * 1024 * 1024 });
     const pixels = Int16Array.from({ length: 512 * 512 }, (_, index) => (index % 32000) - 16000);
     const original = await seedSeries({
@@ -605,7 +604,7 @@ describe('SVR canonical source admission and acquired support', () => {
       acquisitionMetadata: { mrAcquisitionType: '3D' },
     });
     const accepted = await reconstruct([original]);
-    expect(accepted.volume.dims).toEqual([256, 512, 221]);
+    expect(accepted.volume.dims).toEqual([512, 512, 221]);
     const originalData = accepted.volume.data;
     const originalSample = originalData[50];
     const nativeSource = await getSeriesFrameManifest(original.seriesUid);
@@ -625,12 +624,8 @@ describe('SVR canonical source admission and acquired support', () => {
     };
     const ordinary = createNativeSourceContext(options);
     const plan = ordinary.plan(roi, options);
-    expect(plan.budgetBytes).toBe(SVR_MEMORY_BUDGET_BYTES);
-    expect(plan.totalBytes).toBeGreaterThan(SVR_MEMORY_BUDGET_BYTES);
+    expect(plan.budgetBytes).toBeUndefined();
     cornerstone.loadImage.mockClear();
-    await expect(ordinary.load(roi, options)).rejects.toThrow(/memory budget/);
-    expect(cornerstone.loadImage).not.toHaveBeenCalled();
-
     await expect(ordinary.load(roi, { ...options, budgetBytes: plan.totalBytes - 1 })).rejects.toThrow(/memory budget/);
     expect(cornerstone.loadImage).not.toHaveBeenCalled();
 
@@ -688,25 +683,6 @@ describe('SVR canonical source admission and acquired support', () => {
       expect(cornerstone.loadImage).not.toHaveBeenCalled();
     },
   );
-
-  it('rejects an over-budget native-pitch regional source stack before any image decode or solver allocation', async () => {
-    const large = { count: 60, rows: 1024, columns: 1024, pixels: Int16Array.of(1) };
-    const axial = await seedSeries({ ...large, seriesUid: 'large-regional-axial' });
-    const coronal = await seedSeries({ ...large, seriesUid: 'large-regional-coronal', orientation: 'coronal' });
-    const compute = vi.spyOn(computeCore, 'computeSvrFromLoadedSlices');
-    await expect(
-      reconstructVolumeMultiPlane({
-        selectedSeries: [axial, coronal],
-        svrParams: {
-          ...params,
-          roi: { mode: 'cube', sourcePlane: 'axial', boundsMm: { min: [0, -1023, 0], max: [1023, 1023, 1023] } },
-        },
-      }),
-    ).rejects.toThrow(/source inputs.*budget before decoding/);
-    expect(cornerstone.loadImage).not.toHaveBeenCalled();
-    expect(cornerstone.loadAndCacheImage).not.toHaveBeenCalled();
-    expect(compute).not.toHaveBeenCalled();
-  });
 
   it('uses the same native-pitch source-copy estimate for UI planning and the decoded worker payload', async () => {
     const axial = await seedSeries({ seriesUid: 'memory-axial', count: 4, rows: 12, columns: 12 });

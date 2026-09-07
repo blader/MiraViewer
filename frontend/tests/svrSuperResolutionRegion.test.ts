@@ -6,10 +6,8 @@ import {
   cropEnhancementSource,
   enhancementContextFits,
   enhancementSelectionRoi,
-  enhancementWorkingBytes,
 } from '../src/utils/svr/superResolutionRegion';
 import { MAX_SR_OUTPUT_VOXELS } from '../src/utils/svr/superResolutionTypes';
-import { SVR_MEMORY_BUDGET_BYTES } from '../src/utils/svr/svrMemoryPlan';
 
 type Triple = [number, number, number];
 function volume(dims: Triple = [48, 48, 48]): SvrVolume {
@@ -221,16 +219,12 @@ describe('native MRI context for learned enhancement', () => {
   });
 
   it.each([NaN, Infinity, -1, 0, 1.5])('rejects unsafe source count %s in admission', (count) => {
-    expect(enhancementWorkingBytes(count)).toBe(Infinity);
     expect(() => assertEnhancementFits(count)).toThrow(/valid source size/i);
   });
 
-  it('accounts for retained owners and never enlarges the output cap', () => {
+  it('caps 2× output at the supported texture range without any resident-memory ceiling', () => {
     expect(() => assertEnhancementFits(MAX_SR_OUTPUT_VOXELS / 8)).not.toThrow();
     expect(() => assertEnhancementFits(MAX_SR_OUTPUT_VOXELS / 8 + 1)).toThrow(/too large/i);
-    expect(() => assertEnhancementFits(1, SVR_MEMORY_BUDGET_BYTES)).toThrow(/no room for even a small enhancement/i);
-    expect(() => assertEnhancementFits(1, NaN)).toThrow(/retained-memory estimate/i);
-    expect(() => assertEnhancementFits(1, -1)).toThrow(/retained-memory estimate/i);
   });
 
   it('honors pre-cancellation without changing source samples', async () => {
